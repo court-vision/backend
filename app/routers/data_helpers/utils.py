@@ -1,5 +1,8 @@
-from datetime import datetime
 from functools import cached_property
+from datetime import datetime
+import requests
+from .models import LeagueInfo, ValidateLeagueResp
+from .constants import ESPN_FANTASY_ENDPOINT
 
 POSITION_MAP = {
     0: 'PG',
@@ -236,3 +239,26 @@ def json_parsing(obj, key):
 
     results = extract(obj, arr, key)
     return results[0] if results else results
+
+
+async def check_league(req: LeagueInfo):
+    params = {
+        'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
+    }
+
+    endpoint = ESPN_FANTASY_ENDPOINT.format(req.year, req.league_id)
+
+    try:
+        response = requests.get(endpoint, params=params)
+        response.raise_for_status()
+        data = response.json()
+        teams = [team['name'] for team in data['teams']]
+        return ValidateLeagueResp(valid=True, message="Team found") if req.team_name in teams else ValidateLeagueResp(valid=False, message="Team not found")
+    except requests.exceptions.HTTPError as e:
+        return ValidateLeagueResp(valid=False, message=f"Invalid league information {e}")
+    
+def get_roster(team_name, teams):
+        
+        for team in teams:
+            if team_name.strip() == team['name']:
+                return team['roster']['entries']
