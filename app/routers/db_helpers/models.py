@@ -21,7 +21,7 @@ class UserUpdateReq(BaseModel):
 #                          ------- Outgoing -------                           #
 
 class UserCreateResp(BaseModel):
-    access_token: str
+    access_token: str | None
     already_exists: bool
 
 class UserLoginResp(BaseModel):

@@ -1,26 +1,21 @@
 from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp
-from .db_helpers.utils import conn, get_cursor, hash_password, check_password
+from .db_helpers.utils import conn, get_cursor, hash_password, check_password, create_access_token, get_current_user
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS
 from .data_helpers.utils import check_league
+from datetime import datetime, timedelta
+from passlib.context import CryptContext
 from fastapi import APIRouter, Depends
-from fastapi_jwt_auth import AuthJWT
-from pydantic import BaseModel
-from datetime import timedelta
 import json
 
 
 router = APIRouter()
 
-class Settings(BaseModel):
-	authjwt_secret_key: str = 'hehehe'
-
-@AuthJWT.load_config
-def get_config():
-	return Settings()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ----------------------------------- User Authentication ----------------------------------- #
 
 @router.post('/users/create')
-async def create_user(user: UserCreateReq, Authorize: AuthJWT = Depends()):
+async def create_user(user: UserCreateReq):
 	email = user.email
 	password = user.password
 	
@@ -36,18 +31,18 @@ async def create_user(user: UserCreateReq, Authorize: AuthJWT = Depends()):
 			user_id = cur.fetchone()[0]
 			conn.commit()
 
-			access_token = Authorize.create_access_token(subject=user_id, expires_time=timedelta(days=5), user_claims={'email': email})
+			access_token = create_access_token({"uid": user_id, "email": email, "exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
 		
 	return UserCreateResp(access_token=access_token, already_exists=False)
 
 
 @router.post('/users/login')
-async def login_user(user: UserLoginReq, Authorize: AuthJWT = Depends()):
+async def login_user(user: UserLoginReq):
 	email = user.email
 	password = user.password
 	
 	with get_cursor() as cur:
-		cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
+		cur.execute("SELECT user_id, password FROM users WHERE email = %s LIMIT 1", (email,))
 		user_data = cur.fetchone()
 
 		if not user_data or not check_password(password, user_data[1]):
@@ -55,16 +50,19 @@ async def login_user(user: UserLoginReq, Authorize: AuthJWT = Depends()):
 			
 		user_id = user_data[0]
 
-		access_token = Authorize.create_access_token(subject=user_id, expires_time=timedelta(days=5), user_claims={'email': email})
+		access_token = create_access_token({"uid": user_id, "email": email})
 
 	return UserLoginResp(access_token=access_token, success=True)
+
+@router.get('/users/me')
+def get_me(current_user: dict = Depends(get_current_user)):
+	return current_user
 
 # ------------------------------------ Team Management -------------------------------------- #
 
 @router.get('/teams')
-def get_teams(Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def get_teams(current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	with get_cursor() as cur:
 		cur.execute("SELECT team_id, team_info FROM teams WHERE user_id = %s", (user_id,))
@@ -78,9 +76,8 @@ def get_teams(Authorize: AuthJWT = Depends()):
 	return TeamGetResp(teams=teams)
 
 @router.post('/teams/add')
-def add_team(team_info: TeamAddReq, Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def add_team(team_info: TeamAddReq, current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	league_info = team_info.league_info
 	team_identifier = str(league_info.league_id) + league_info.team_name
@@ -102,9 +99,8 @@ def add_team(team_info: TeamAddReq, Authorize: AuthJWT = Depends()):
 	return TeamAddResp(team_id=team_id, already_exists=False)
 
 @router.post('/teams/remove')
-def remove_team(team_info: TeamRemoveReq, Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def remove_team(team_info: TeamRemoveReq, current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	team_id = team_info.team_id
 
@@ -115,9 +111,8 @@ def remove_team(team_info: TeamRemoveReq, Authorize: AuthJWT = Depends()):
 	return TeamRemoveResp(success=True)
 
 @router.post('/teams/update')
-def update_team(team_info: TeamUpdateReq, Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def update_team(team_info: TeamUpdateReq, current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	league_info = team_info.league_info
 
@@ -130,9 +125,8 @@ def update_team(team_info: TeamUpdateReq, Authorize: AuthJWT = Depends()):
 # ------------------------------------ User Management -------------------------------------- #
 
 @router.post('/users/delete')
-def delete_user(Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def delete_user(current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	with get_cursor() as cur:
 		cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
@@ -142,9 +136,8 @@ def delete_user(Authorize: AuthJWT = Depends()):
 	return UserDeleteResp(success=True)
 
 @router.post('/users/update')
-def update_user(user_info: UserUpdateReq, Authorize: AuthJWT = Depends()):
-	Authorize.jwt_required()
-	user_id = Authorize.get_jwt_subject()
+def update_user(user_info: UserUpdateReq, current_user: dict = Depends(get_current_user)):
+	user_id = current_user.get("uid")
 
 	email = user_info.email
 	password = user_info.password

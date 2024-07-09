@@ -1,6 +1,6 @@
 from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLeagueResp
 from .data_helpers.utils import Player, check_league, get_roster
-from .data_helpers.constants import ESPN_FANTASY_ENDPOINT
+from .constants import ESPN_FANTASY_ENDPOINT
 from fastapi import APIRouter
 import requests
 import json

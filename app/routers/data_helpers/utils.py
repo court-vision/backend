@@ -2,7 +2,7 @@ from functools import cached_property
 from datetime import datetime
 import requests
 from .models import LeagueInfo, ValidateLeagueResp
-from .constants import ESPN_FANTASY_ENDPOINT
+from ..constants import ESPN_FANTASY_ENDPOINT
 
 POSITION_MAP = {
     0: 'PG',
@@ -241,7 +241,7 @@ def json_parsing(obj, key):
     return results[0] if results else results
 
 
-async def check_league(req: LeagueInfo):
+def check_league(req: LeagueInfo):
     params = {
         'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
     }
