@@ -1,5 +1,6 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
 from fastapi.security import OAuth2PasswordBearer
+from .models import LeagueInfo
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
 from contextlib import contextmanager
@@ -7,6 +8,7 @@ from jose import jwt, JWTError
 from typing import Optional
 import psycopg2
 import bcrypt
+import json
 
 # ---------------------- User Authentication ---------------------- #
 
@@ -68,3 +70,17 @@ def check_password(password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 # --------------------------- Testing ----------------------------- #
+# ------------------------ Miscellaneous -------------------------- #
+
+def serialize_league_info(league_info: LeagueInfo) -> dict:
+    return json.dumps({
+        "league_id": league_info.league_id,
+        "espn_s2": league_info.espn_s2,
+        "swid": league_info.swid,
+        "team_name": league_info.team_name,
+        "year": league_info.year
+    })
+
+def deserialize_league_info(league_info: str) -> LeagueInfo:
+    data = json.loads(league_info)
+    return LeagueInfo(league_id=data['league_id'], espn_s2=data['espn_s2'], swid=data['swid'], team_name=data['team_name'], year=data['year'])

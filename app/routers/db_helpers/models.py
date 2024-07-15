@@ -38,8 +38,8 @@ class UserUpdateResp(BaseModel):
 
 class LeagueInfo(BaseModel):
     league_id: int
-    espn_s2: Optional[str]
-    swid: Optional[str]
+    espn_s2: str | None = ""
+    swid: str | None = ""
     team_name: str
     year: int
 
@@ -61,7 +61,7 @@ class TeamGetResp(BaseModel):
     teams: list[dict]
 
 class TeamAddResp(BaseModel):
-    team_id: int
+    team_id: int | None
     already_exists: bool
 
 class TeamRemoveResp(BaseModel):
@@ -69,3 +69,26 @@ class TeamRemoveResp(BaseModel):
 
 class TeamUpdateResp(BaseModel):
     success: bool
+
+# ------------------------------ Lineup Models ------------------------------ #
+
+#                          ------- Incoming -------                           #
+class GenerateLineupReq(BaseModel):
+    selected_team: int
+    threshold: str
+    week: str
+
+
+#                          ------- Outgoing -------                           #
+
+class GenerateLineupResp(BaseModel):
+    league_id: int
+    espn_s2: str
+    swid: str
+    team_name: str
+    year: int
+    threshold: float
+    week: str
+
+class GetLineupsResp(BaseModel):
+    lineups: list[dict]

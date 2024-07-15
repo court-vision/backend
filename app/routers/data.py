@@ -70,7 +70,7 @@ async def get_team_data(req: TeamDataReq):
 
 # Returns important data for free agents in a league
 @router.post("/get_freeagent_data")
-def get_free_agents(req: TeamDataReq):
+async def get_free_agents(req: TeamDataReq):
 
     params = {
         'view': 'kona_player_info',
@@ -80,9 +80,9 @@ def get_free_agents(req: TeamDataReq):
     filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":req.fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
     headers = {'x-fantasy-filter': json.dumps(filters)}
 
-    endpoint = ESPN_FANTASY_ENDPOINT.format(req.year, req.league_id)
+    endpoint = ESPN_FANTASY_ENDPOINT.format(req.league_info.year, req.league_info.league_id)
     data = requests.get(endpoint, params=params, headers=headers).json()
-    players = [Player(player, req.year) for player in data['players']]
+    players = [Player(player, req.league_info.year) for player in data['players']]
 
     team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
     pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
