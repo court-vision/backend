@@ -1,6 +1,6 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
 from fastapi.security import OAuth2PasswordBearer
-from .models import LeagueInfo
+from .models import LeagueInfo, LineupInfo
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
 from contextlib import contextmanager
@@ -84,3 +84,29 @@ def serialize_league_info(league_info: LeagueInfo) -> dict:
 def deserialize_league_info(league_info: str) -> LeagueInfo:
     data = json.loads(league_info)
     return LeagueInfo(league_id=data['league_id'], espn_s2=data['espn_s2'], swid=data['swid'], team_name=data['team_name'], year=data['year'])
+
+def serialize_lineup_info(lineup_info: LineupInfo) -> str:
+    return json.dumps({
+        "timestamp": lineup_info.Timestamp,
+        "improvement": lineup_info.Improvement,
+        "lineup": [{
+            "day": gene.Day,
+            "additions": [{
+                "name": player.Name,
+                "avg_points": player.AvgPoints,
+                "team": player.Team
+            } for player in gene.Additions],
+            "removals": [{
+                "name": player.Name,
+                "avg_points": player.AvgPoints,
+                "team": player.Team
+            } for player in gene.Removals],
+            "roster": {
+                player: {
+                    "name": gene.Roster[player].Name,
+                    "avg_points": gene.Roster[player].AvgPoints,
+                    "team": gene.Roster[player].Team
+                } for player in gene.Roster
+            }
+        } for gene in lineup_info.Lineup]
+    })

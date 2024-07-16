@@ -72,11 +72,34 @@ class TeamUpdateResp(BaseModel):
 
 # ------------------------------ Lineup Models ------------------------------ #
 
+#                          ------ Sub-Models ------                           #
+
+class SlimPlayer(BaseModel):
+    Name: str
+    AvgPoints: float
+    Team: str
+
+class SlimGene(BaseModel):
+    Day: int
+    Additions: list[SlimPlayer]
+    Removals: list[SlimPlayer]
+    Roster: dict[str, SlimPlayer]
+
+class LineupInfo(BaseModel):
+    Lineup: list[SlimGene]
+    Improvement: int
+    Timestamp: str
+
 #                          ------- Incoming -------                           #
+
 class GenerateLineupReq(BaseModel):
     selected_team: int
     threshold: str
     week: str
+
+class SaveLineupReq(BaseModel):
+    selected_team: int
+    lineup_info: LineupInfo
 
 
 #                          ------- Outgoing -------                           #
@@ -92,3 +115,6 @@ class GenerateLineupResp(BaseModel):
 
 class GetLineupsResp(BaseModel):
     lineups: list[dict]
+
+class SaveLineupResp(BaseModel):
+    success: bool
