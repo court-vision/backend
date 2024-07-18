@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from jose import jwt, JWTError
 from typing import Optional
 import psycopg2
+import hashlib
 import bcrypt
 import json
 
@@ -61,7 +62,7 @@ def get_cursor():
     finally:
         cur.close()
 
-# -------------------------- Encryption --------------------------- #
+# --------------------- Encryption/Validation --------------------- #
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -69,8 +70,11 @@ def hash_password(password: str) -> str:
 def check_password(password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
 
+def generate_lineup_hash(lineup_info: LineupInfo) -> str:
+    return hashlib.md5(serialize_lineup_info(lineup_info).encode('utf-8')).hexdigest()
+
 # --------------------------- Testing ----------------------------- #
-# ------------------------ Miscellaneous -------------------------- #
+# ------------------------ Serialization -------------------------- #
 
 def serialize_league_info(league_info: LeagueInfo) -> dict:
     return json.dumps({
@@ -110,3 +114,4 @@ def serialize_lineup_info(lineup_info: LineupInfo) -> str:
             }
         } for gene in lineup_info.Lineup]
     })
+

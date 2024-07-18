@@ -118,3 +118,4 @@ class GetLineupsResp(BaseModel):
 
 class SaveLineupResp(BaseModel):
     success: bool
+    already_exists: bool

@@ -1,5 +1,5 @@
 from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
@@ -220,12 +220,23 @@ async def get_lineups(team_id: int, current_user: dict = Depends(get_current_use
 async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_current_user)):
 	user_id = current_user.get("uid")
 
-	try :
+	try:
 		with get_cursor() as cur:
-			cur.execute("INSERT INTO lineups (user_id, team_id, lineup_info) VALUES (%s, %s, %s)", (user_id, req.selected_team, serialize_lineup_info(req.lineup_info)))
-			conn.commit()
-	except Exception as _:
-		return SaveLineupResp(success=False)
+			# Check if the lineup already exists
+			lineup_hash = generate_lineup_hash(req.lineup_info)
 
-	return {"success": True}
+			cur.execute("SELECT lineup_hash FROM teams INNER JOIN lineups ON teams.team_id = lineups.team_id WHERE teams.user_id = %s AND lineup_hash = %s", (user_id, lineup_hash))
+			already_exists = bool(cur.fetchone())
+			if already_exists:
+				return SaveLineupResp(success=False, already_exists=True)
+
+			# Else, save the lineup
+			cur.execute("INSERT INTO lineups (team_id, lineup_info, lineup_hash) VALUES (%s, %s, %s)", (req.selected_team, serialize_lineup_info(req.lineup_info), lineup_hash))
+			conn.commit()
+
+	except Exception as _:
+		return SaveLineupResp(success=False, already_exists=False)
+
+	return SaveLineupResp(success=True, already_exists=False)
+
 # ----------------------------------- Squeel Workbench -------------------------------------- #
