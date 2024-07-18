@@ -1,5 +1,5 @@
-from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash
+from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, LineupInfo, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
@@ -207,14 +207,17 @@ def generate_lineup(req: GenerateLineupReq, current_user: dict = Depends(get_cur
 	return resp.json()
 
 @router.get('/lineups')
-async def get_lineups(team_id: int, current_user: dict = Depends(get_current_user)):
+async def get_lineups(selected_team: int, current_user: dict = Depends(get_current_user)):
 	user_id = current_user.get("uid")
 
 	with get_cursor() as cur:
-		cur.execute("SELECT lineup_info FROM lineups WHERE user_id=%s AND team_id=%s", (user_id, team_id))
+		cur.execute("SELECT lineup_id, lineup_info FROM teams INNER JOIN lineups ON teams.team_id = lineups.team_id WHERE teams.user_id = %s AND teams.team_id = %s", (user_id, selected_team))
 		lineups = cur.fetchall()
+
+		if not lineups:
+			return GetLineupsResp(lineups=None, no_lineups=True)
 	
-	return lineups
+	return GetLineupsResp(lineups=deserialize_lineups(lineups), no_lineups=False)
 
 @router.put('/lineups/save')
 async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_current_user)):
@@ -225,7 +228,7 @@ async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_curre
 			# Check if the lineup already exists
 			lineup_hash = generate_lineup_hash(req.lineup_info)
 
-			cur.execute("SELECT lineup_hash FROM teams INNER JOIN lineups ON teams.team_id = lineups.team_id WHERE teams.user_id = %s AND lineup_hash = %s", (user_id, lineup_hash))
+			cur.execute("SELECT * FROM teams INNER JOIN lineups ON teams.team_id = lineups.team_id WHERE teams.user_id = %s AND lineup_hash = %s", (user_id, lineup_hash))
 			already_exists = bool(cur.fetchone())
 			if already_exists:
 				return SaveLineupResp(success=False, already_exists=True)

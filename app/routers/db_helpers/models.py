@@ -89,6 +89,7 @@ class LineupInfo(BaseModel):
     Lineup: list[SlimGene]
     Improvement: int
     Timestamp: str
+    Id: int | None = None
 
 #                          ------- Incoming -------                           #
 
@@ -114,7 +115,8 @@ class GenerateLineupResp(BaseModel):
     week: str
 
 class GetLineupsResp(BaseModel):
-    lineups: list[dict]
+    lineups: list[LineupInfo] | None
+    no_lineups: bool
 
 class SaveLineupResp(BaseModel):
     success: bool

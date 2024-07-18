@@ -1,6 +1,6 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
 from fastapi.security import OAuth2PasswordBearer
-from .models import LeagueInfo, LineupInfo
+from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
 from contextlib import contextmanager
@@ -91,27 +91,41 @@ def deserialize_league_info(league_info: str) -> LeagueInfo:
 
 def serialize_lineup_info(lineup_info: LineupInfo) -> str:
     return json.dumps({
-        "timestamp": lineup_info.Timestamp,
-        "improvement": lineup_info.Improvement,
-        "lineup": [{
-            "day": gene.Day,
-            "additions": [{
-                "name": player.Name,
-                "avg_points": player.AvgPoints,
-                "team": player.Team
+        "Timestamp": lineup_info.Timestamp,
+        "Improvement": lineup_info.Improvement,
+        "Lineup": [{
+            "Day": gene.Day,
+            "Additions": [{
+                "Name": player.Name,
+                "AvgPoints": player.AvgPoints,
+                "Team": player.Team
             } for player in gene.Additions],
-            "removals": [{
-                "name": player.Name,
-                "avg_points": player.AvgPoints,
-                "team": player.Team
+            "Removals": [{
+                "Name": player.Name,
+                "AvgPoints": player.AvgPoints,
+                "Team": player.Team
             } for player in gene.Removals],
-            "roster": {
+            "Roster": {
                 player: {
-                    "name": gene.Roster[player].Name,
-                    "avg_points": gene.Roster[player].AvgPoints,
-                    "team": gene.Roster[player].Team
+                    "Name": gene.Roster[player].Name,
+                    "AvgPoints": gene.Roster[player].AvgPoints,
+                    "Team": gene.Roster[player].Team
                 } for player in gene.Roster
             }
         } for gene in lineup_info.Lineup]
     })
 
+def deserialize_lineups(lineups: list[tuple]) -> list[LineupInfo]:
+    return [LineupInfo(
+        Id=lineup[0],
+        Timestamp=lineup[1]['Timestamp'],
+        Improvement=lineup[1]['Improvement'],
+        Lineup=[
+            SlimGene(
+            Day=gene['Day'],
+            Additions=[SlimPlayer(**player) for player in gene['Additions']],
+            Removals=[SlimPlayer(**player) for player in gene['Removals']],
+            Roster={pos: SlimPlayer(**player) for pos, player in gene['Roster'].items()}
+        ) for gene in lineup[1]['Lineup']]
+    ) for lineup in lineups]
+        
