@@ -89,6 +89,8 @@ class LineupInfo(BaseModel):
     Lineup: list[SlimGene]
     Improvement: int
     Timestamp: str
+    Week: str
+    Threshold: float
     Id: int | None = None
 
 #                          ------- Incoming -------                           #
@@ -121,3 +123,6 @@ class GetLineupsResp(BaseModel):
 class SaveLineupResp(BaseModel):
     success: bool
     already_exists: bool
+
+class DeleteLineupResp(BaseModel):
+    success: bool

@@ -1,4 +1,4 @@
-from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, LineupInfo, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp
+from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT
 from .data_helpers.utils import check_league
@@ -241,5 +241,17 @@ async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_curre
 		return SaveLineupResp(success=False, already_exists=False)
 
 	return SaveLineupResp(success=True, already_exists=False)
+
+@router.delete('/lineups/remove')
+async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current_user)):
+
+	with get_cursor() as cur:
+		cur.execute("DELETE FROM lineups WHERE lineup_id = %s RETURNING lineup_hash", (lineup_id,))
+		lineup_hash = cur.fetchone()[0]
+		if not lineup_hash:
+			return DeleteLineupResp(success=False)
+		conn.commit()
+
+	return DeleteLineupResp(success=True)
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #

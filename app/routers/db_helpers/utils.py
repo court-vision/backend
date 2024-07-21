@@ -93,6 +93,8 @@ def serialize_lineup_info(lineup_info: LineupInfo) -> str:
     return json.dumps({
         "Timestamp": lineup_info.Timestamp,
         "Improvement": lineup_info.Improvement,
+        "Week": lineup_info.Week,
+        "Threshold": lineup_info.Threshold,
         "Lineup": [{
             "Day": gene.Day,
             "Additions": [{
@@ -120,6 +122,8 @@ def deserialize_lineups(lineups: list[tuple]) -> list[LineupInfo]:
         Id=lineup[0],
         Timestamp=lineup[1]['Timestamp'],
         Improvement=lineup[1]['Improvement'],
+        Week=lineup[1]['Week'],
+        Threshold=lineup[1]['Threshold'],
         Lineup=[
             SlimGene(
             Day=gene['Day'],
