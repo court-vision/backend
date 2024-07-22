@@ -7,9 +7,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./app /app
 
-EXPOSE 8000
+EXPOSE 80
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV JWT_SECRET_KEY=REDACTED
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
 
 # Build command: docker build -t fbball-server .
-# Run command: docker run -p 8080:8080 fbball-server
+# Run command: docker run -p 8080:8000 fbball-server

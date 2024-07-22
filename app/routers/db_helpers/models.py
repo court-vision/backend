@@ -18,11 +18,21 @@ class UserUpdateReq(BaseModel):
     email: Optional[str]
     password: Optional[str]
 
+class VerifyEmailReq(BaseModel):
+    email: str
+    password: str
+
+class CheckCodeReq(BaseModel):
+    email: str
+    code: str
+
 #                          ------- Outgoing -------                           #
 
 class UserCreateResp(BaseModel):
     access_token: str | None
     already_exists: bool
+    success: bool
+    valid: bool
 
 class UserLoginResp(BaseModel):
     access_token: str

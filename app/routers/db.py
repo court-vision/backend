@@ -1,5 +1,5 @@
-from .db_helpers.models import UserCreateReq, UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups
+from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from contextlib import contextmanager
 import psycopg2
 import requests
+import time
 
 
 router = APIRouter()
@@ -21,7 +22,7 @@ def connect_to_db() -> psycopg2.connect:
         password="REDACTED",
         host="cv-db.postgres.database.azure.com",
         port="5432",
-        database="cv-db"
+        database="cv-db-dev"
     )
     return conn
 
@@ -38,27 +39,70 @@ conn = connect_to_db()
 
 
 # ----------------------------------- User Authentication ----------------------------------- #
+verifications = {}
 
-@router.post('/users/create')
-async def create_user(user: UserCreateReq):
-	email = user.email
-	password = user.password
+@router.post('/users/verify/send-email')
+async def verify_email(req: VerifyEmailReq):
+	email = req.email
+	hashed_password = hash_password(req.password)
+
+	# Check if the a code has already been generated for the email and is still valid
+	if email in verifications:
+		if time.time() - verifications[email]["timestamp"] < 300:
+			return {"success": True, "already_in_use": True}
+
+	# Check if the email is already in use
+	with get_cursor() as cur:
+		cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
+		already_exists = bool(cur.fetchone())
+		if already_exists:
+			return {"success": False, "already_in_use": True}
+	
+	code = generate_verification_code()
+	verifications[email] = {"code": code, "timestamp": time.time(), "hashed_password": hashed_password}
+
+	# Send the verification email
+	res = send_verification_email(email, code)
+	if res.get("success"):
+		return {"success": True, "already_in_use": False}
+	else:
+		return {"success": False, "already_in_use": False}
+
+@router.post('/users/verify/check-code')
+async def check_verification_code(req: CheckCodeReq):
+	email = req.email
+	code = req.code
+
+	print(email, code)
+
+	if email not in verifications:
+		return {"success": False, "valid": False}
+	
+	if verifications[email]["code"] != code or time.time() - verifications[email]["timestamp"] > 300:
+		return {"success": True, "valid": False}
+	
+
+	hashed_password = verifications[email]["hashed_password"]
+	resp = create_user(email, hashed_password)
+	del verifications[email]
+	return resp
+
+def create_user(email: str, hashed_password: str):
 	
 	with get_cursor() as cur:
 			cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
 			already_exists = bool(cur.fetchone())
 			
 			if already_exists:
-					return UserCreateResp(access_token=None, already_exists=True)
+					return UserCreateResp(access_token=None, already_exists=True, success=True, valid=True)
 			
-			hashed_password = hash_password(password)
 			cur.execute("INSERT INTO users (email, password) VALUES (%s, %s) RETURNING user_id", (email, hashed_password))
 			user_id = cur.fetchone()[0]
 			conn.commit()
 
 			access_token = create_access_token({"uid": user_id, "email": email, "exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
 		
-	return UserCreateResp(access_token=access_token, already_exists=False)
+	return UserCreateResp(access_token=access_token, already_exists=False, success=True, valid=True)
 
 
 @router.post('/users/login')
