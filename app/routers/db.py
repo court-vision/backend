@@ -76,6 +76,7 @@ async def check_verification_code(req: CheckCodeReq):
 	print(email, code)
 
 	if email not in verifications:
+		print("Email not in verifications")
 		return {"success": False, "valid": False}
 	
 	if verifications[email]["code"] != code or time.time() - verifications[email]["timestamp"] > 300:

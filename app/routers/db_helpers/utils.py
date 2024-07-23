@@ -3,6 +3,8 @@ from fastapi.security import OAuth2PasswordBearer
 from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
+from sendgrid.helpers.mail import Mail
+from sendgrid import SendGridAPIClient
 from contextlib import contextmanager
 from jose import jwt, JWTError
 from typing import Optional
@@ -10,8 +12,8 @@ import psycopg2
 import hashlib
 import random
 import bcrypt
-import boto3
 import json
+import os
 
 # ---------------------- User Authentication ---------------------- #
 
@@ -23,24 +25,16 @@ def generate_verification_code() -> str:
 
 # Send the verification email
 def send_verification_email(to_email: str, code: str) -> dict:
-	ses_client = boto3.client('ses', region_name='us-east-2')
+	message = Mail(
+		from_email='Court Vision <mail@courtvision.dev>',
+		to_emails=to_email,
+		subject='Email Verification',
+		html_content=f'<strong>Please verify your email by entering the following code: {code}</strong>')
 	try:
-		ses_client.send_email(
-			Source='Court Vision <mail@courtvision.dev>',
-			Destination={
-				'ToAddresses': [to_email],
-			},
-			Message={
-				'Subject': {					
-					'Data': 'Email Verification',
-				},
-				'Body': {
-					'Text': {
-						'Data': 'Please verify your email by entering the following code: ' + code,
-					}
-				}				
-			}
-		)
+		sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
+		response = sg.send(message)
+		print(response.status_code)
+
 		return {"success": True}
 	except Exception as e:
 		return {"success": False, "error": str(e)}
