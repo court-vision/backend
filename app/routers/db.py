@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from contextlib import contextmanager
 import psycopg2
 import requests
+import httpx
 import time
 
 
@@ -194,6 +195,19 @@ async def update_team(team_info: TeamUpdateReq, current_user: dict = Depends(get
 		conn.commit()
 
 	return TeamUpdateResp(success=True)
+
+@router.get('/teams/view')
+async def view_team(team_id: int, current_user: dict = Depends(get_current_user)):
+	#TODO: Fetch the roster data from the ESPN API, maybe save it to the database, no don't do that, rosters can change
+
+	with get_cursor() as cur:
+		cur.execute("SELECT team_info FROM teams WHERE team_id = %s", (team_id,))
+		team_info = cur.fetchone()[0]
+
+	async with httpx.AsyncClient() as client:
+		resp = await client.post("http://127.0.0.1:8000/data/get_roster_data", json={"league_info": team_info, "fa_count": 0})
+	
+	return resp.json()
 
 # ------------------------------------ User Management -------------------------------------- #
 
