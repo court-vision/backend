@@ -74,8 +74,6 @@ def connect_to_db() -> psycopg2.connect:
 	)
 	return conn
 
-conn = connect_to_db()
-
 
 # Get the cursor for the database and close it when done
 @contextmanager

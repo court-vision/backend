@@ -1,6 +1,6 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -10,6 +10,7 @@ import psycopg2
 import requests
 import httpx
 import time
+import os
 
 
 router = APIRouter()
@@ -18,14 +19,15 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Connect to the PostgreSQL database
 def connect_to_db() -> psycopg2.connect:
-    conn = psycopg2.connect(
-        user="jameslk3",
-        password="REDACTED",
-        host="cv-db.postgres.database.azure.com",
-        port="5432",
-        database="cv-db-dev"
-    )
-    return conn
+
+	conn = psycopg2.connect(
+		user=DB_CREDENTIALS["user"],
+		password=DB_CREDENTIALS["password"],
+		host=DB_CREDENTIALS["host"],
+		port=DB_CREDENTIALS["port"],
+		database=DB_CREDENTIALS["database"]
+		)
+	return conn
 
 # Get the cursor for the database and close it when done
 @contextmanager
@@ -40,27 +42,32 @@ conn = connect_to_db()
 
 
 # ----------------------------------- User Authentication ----------------------------------- #
-verifications = {}
 
 @router.post('/users/verify/send-email')
 async def verify_email(req: VerifyEmailReq):
 	email = req.email
 	hashed_password = hash_password(req.password)
 
-	# Check if the a code has already been generated for the email and is still valid
-	if email in verifications:
-		if time.time() - verifications[email]["timestamp"] < 300:
-			return {"success": True, "already_in_use": True}
-
 	# Check if the email is already in use
 	with get_cursor() as cur:
+		cur.execute("SELECT timestamp FROM verifications WHERE email = %s LIMIT 1", (email,))
+		verification_data = cur.fetchone()
+		if verification_data:
+			if time.time() - verification_data[0] < 300:
+				return {"success": True, "already_in_use": True}
+			else:
+				cur.execute("DELETE FROM verifications WHERE email = %s", (email,))
+				conn.commit()
+
 		cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
 		already_exists = bool(cur.fetchone())
 		if already_exists:
 			return {"success": False, "already_in_use": True}
 	
-	code = generate_verification_code()
-	verifications[email] = {"code": code, "timestamp": time.time(), "hashed_password": hashed_password}
+		# Generate the verification code
+		code = generate_verification_code()
+		cur.execute("INSERT INTO verifications (email, access_code, hashed_password, timestamp) VALUES (%s, %s, %s, %s)", (email, code, hashed_password, int(time.time())))
+		conn.commit()
 
 	# Send the verification email
 	res = send_verification_email(email, code)
@@ -76,17 +83,21 @@ async def check_verification_code(req: CheckCodeReq):
 
 	print(email, code)
 
-	if email not in verifications:
-		print("Email not in verifications")
-		return {"success": False, "valid": False}
-	
-	if verifications[email]["code"] != code or time.time() - verifications[email]["timestamp"] > 300:
-		return {"success": True, "valid": False}
-	
+	with get_cursor() as cur:
+		cur.execute("SELECT access_code, hashed_password, timestamp FROM verifications WHERE email = %s LIMIT 1", (email,))
+		verification_data = cur.fetchone()
+		if not verification_data:
+			return {"success": False, "valid": False}
+		
+		access_code, hashed_password, timestamp = verification_data
+		if access_code != code or time.time() - timestamp > 300:
+			return {"success": True, "valid": False}
+		
+		# Delete the verification data
+		cur.execute("DELETE FROM verifications WHERE email = %s", (email,))
+		conn.commit()
 
-	hashed_password = verifications[email]["hashed_password"]
 	resp = create_user(email, hashed_password)
-	del verifications[email]
 	return resp
 
 def create_user(email: str, hashed_password: str):
@@ -117,7 +128,7 @@ async def login_user(user: UserLoginReq):
 		user_data = cur.fetchone()
 
 		if not user_data or not check_password(password, user_data[1]):
-			return UserLoginResp(access_token=None, success=False)
+			return UserLoginResp(access_token="", success=False)
 			
 		user_id = user_data[0]
 
@@ -205,7 +216,7 @@ async def view_team(team_id: int, current_user: dict = Depends(get_current_user)
 		team_info = cur.fetchone()[0]
 
 	async with httpx.AsyncClient() as client:
-		resp = await client.post("http://127.0.0.1:8000/data/get_roster_data", json={"league_info": team_info, "fa_count": 0})
+		resp = await client.post("https://cv-backend-su3d2jcjkq-uc.a.run.app/data/get_roster_data", json={"league_info": team_info, "fa_count": 0})
 	
 	return resp.json()
 

@@ -246,6 +246,9 @@ def check_league(req: LeagueInfo):
         'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
     }
 
+    print(req.year, req.league_id, req.team_name)
+
+
     endpoint = ESPN_FANTASY_ENDPOINT.format(req.year, req.league_id)
 
     try:

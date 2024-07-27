@@ -2,4 +2,4 @@
 .vscode
 not_secrets.txt
 **/__pycache__/*
-sendgrid.env
+secrets.env

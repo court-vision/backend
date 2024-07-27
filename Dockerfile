@@ -9,9 +9,6 @@ COPY ./app /app
 
 EXPOSE 8080
 
-ENV JWT_SECRET_KEY='REDACTEDretailrow'
-ENV SENDGRID_API_KEY='REDACTED'
-
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
 
 # Build command: docker build -t fbball-server .
