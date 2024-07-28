@@ -52,21 +52,26 @@ async def verify_email(req: VerifyEmailReq):
 	with get_cursor() as cur:
 		cur.execute("SELECT timestamp FROM verifications WHERE email = %s LIMIT 1", (email,))
 		verification_data = cur.fetchone()
+		
 		if verification_data:
 			if time.time() - verification_data[0] < 300:
 				return {"success": True, "already_in_use": True}
 			else:
-				cur.execute("DELETE FROM verifications WHERE email = %s", (email,))
+				cur.execute("DELETE FROM verifications WHERE email = %s AND type = 'email'", (email,))
 				conn.commit()
 
 		cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
-		already_exists = bool(cur.fetchone())
+		data = cur.fetchone()
+		print(data)
+		already_exists = bool(data)
+
 		if already_exists:
+			print("Already exists in users")
 			return {"success": False, "already_in_use": True}
 	
 		# Generate the verification code
 		code = generate_verification_code()
-		cur.execute("INSERT INTO verifications (email, access_code, hashed_password, timestamp) VALUES (%s, %s, %s, %s)", (email, code, hashed_password, int(time.time())))
+		cur.execute("INSERT INTO verifications (email, code, hashed_password, timestamp, type) VALUES (%s, %s, %s, %s, %s)", (email, code, hashed_password, int(time.time()), "email"))
 		conn.commit()
 
 	# Send the verification email
@@ -84,7 +89,7 @@ async def check_verification_code(req: CheckCodeReq):
 	print(email, code)
 
 	with get_cursor() as cur:
-		cur.execute("SELECT access_code, hashed_password, timestamp FROM verifications WHERE email = %s LIMIT 1", (email,))
+		cur.execute("SELECT code, hashed_password, timestamp FROM verifications WHERE email = %s LIMIT 1", (email,))
 		verification_data = cur.fetchone()
 		if not verification_data:
 			return {"success": False, "valid": False}
