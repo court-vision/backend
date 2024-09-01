@@ -18,6 +18,9 @@ class UserUpdateReq(BaseModel):
     email: Optional[str]
     password: Optional[str]
 
+class UserDeleteReq(BaseModel):
+    password: str
+
 class VerifyEmailReq(BaseModel):
     email: str
     password: str
