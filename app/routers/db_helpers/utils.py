@@ -104,6 +104,7 @@ def serialize_league_info(league_info: LeagueInfo) -> dict:
 		"espn_s2": league_info.espn_s2,
 		"swid": league_info.swid,
 		"team_name": league_info.team_name,
+		"league_name": league_info.league_name if league_info.league_name else "N/A",
 		"year": league_info.year
 	})
 

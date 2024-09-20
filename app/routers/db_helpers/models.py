@@ -54,6 +54,7 @@ class LeagueInfo(BaseModel):
     espn_s2: str | None = ""
     swid: str | None = ""
     team_name: str
+    league_name: str | None = "N/A"
     year: int
 
 #                          ------- Incoming -------                           #

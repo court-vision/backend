@@ -179,6 +179,7 @@ async def add_team(team_info: TeamAddReq, current_user: dict = Depends(get_curre
 		if already_exists:
 			return TeamAddResp(team_id=None, already_exists=True)
 		
+		# Handle private league info
 		cur.execute("INSERT INTO teams (user_id, team_identifier, team_info) VALUES (%s, %s, %s) RETURNING team_id", (user_id, team_identifier, serialize_league_info(league_info)))
 		team_id = cur.fetchone()[0]
 		conn.commit()

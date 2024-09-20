@@ -49,8 +49,13 @@ async def get_team_data(req: TeamDataReq):
             'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
         }
     
+    cookies = {
+        'espn_s2': req.league_info.espn_s2,
+        'SWID': req.league_info.swid
+    }
+    
     endpoint = ESPN_FANTASY_ENDPOINT.format(req.league_info.year, req.league_info.league_id)
-    data = requests.get(endpoint, params=params).json()
+    data = requests.get(endpoint, params=params, cookies=cookies).json()
     roster = get_roster(req.league_info.team_name, data['teams'])
     players = [Player(player, req.league_info.year) for player in roster]
 
