@@ -222,7 +222,7 @@ async def view_team(team_id: int, current_user: dict = Depends(get_current_user)
 		team_info = cur.fetchone()[0]
 
 	async with httpx.AsyncClient() as client:
-		resp = await client.post("https://cv-backend-su3d2jcjkq-uc.a.run.app/data/get_roster_data", json={"league_info": team_info, "fa_count": 0})
+		resp = await client.post("http://127.0.0.1:8000/data/get_roster_data", json={"league_info": team_info, "fa_count": 0})
 	
 	return resp.json()
 

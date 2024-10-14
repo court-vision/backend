@@ -246,13 +246,13 @@ def check_league(req: LeagueInfo):
         'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
     }
 
-    print(req.year, req.league_id, req.team_name)
+    print(req.year, req.league_id, req.team_name, req.espn_s2, req.swid)
 
 
     endpoint = ESPN_FANTASY_ENDPOINT.format(req.year, req.league_id)
 
     try:
-        response = requests.get(endpoint, params=params)
+        response = requests.get(endpoint, params=params, cookies={'espn_s2': req.espn_s2, 'SWID': req.swid})
         response.raise_for_status()
         data = response.json()
         teams = [team['name'] for team in data['teams']]
