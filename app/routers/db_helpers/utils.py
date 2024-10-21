@@ -70,7 +70,7 @@ def connect_to_db() -> psycopg2.connect:
 		password="REDACTED",
 		host="cv-db.postgres.database.azure.com",
 		port="5432",
-		database="cv-db-dev"
+		database="cv-db"
 	)
 	return conn
 
