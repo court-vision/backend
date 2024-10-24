@@ -1,5 +1,5 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
@@ -12,6 +12,7 @@ import requests
 import asyncio
 import httpx
 import time
+import json
 import os
 
 
@@ -351,14 +352,13 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: Backgro
 
 # Async trigger
 async def trigger_ETL_update_fpts(cron_token: str):
-	async with httpx.AsyncClient() as client:
-		client.post(f"{SELF_ENDPOINT}/db/etl/update-fpts", json={"cron_token": cron_token})
+	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
 
 # Route to handle the actual ETL process
-@router.post('/etl/update-fpts')
 async def update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
 	if cron_token != CRON_TOKEN:
+		print("Invalid token")
 		return
 	game_date, game_ids = get_game_ids()
 
@@ -376,7 +376,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 			conn.commit()
 		
 		# Sleep for a bit so we don't get rate limited
-		time.sleep(10)
+		await asyncio.sleep(10)
 	
 	# Now update the total data in the database
 	with get_cursor() as cur:
@@ -392,18 +392,15 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 
 	# Now select the updated data using the view
 	with get_cursor() as cur:
-		cur.execute('SELECT * FROM player_standings ORDER BY rank LIMIT 10')
+		cur.execute('SELECT * FROM player_standings ORDER BY rank')
 		data = cur.fetchall()
 	
-	# deserialized_data = deserialize_fpts_data(data)
-	# return ETLUpdateFPTSResp(success=True, data=deserialized_data)
-
 	# Post the data back to the frontend server
 	headers = {
 		"Authorization": f"Bearer {CRON_TOKEN}"
 	}
-	data_json = json.dumps(data)
+	data_json = serialize_fpts_data(data)
 	async with httpx.AsyncClient() as client:
-		await client.put(f"{FRONTEND_API_ENDPOINT}/data/etl/update-fpts", headers=headers, data={"data": data_json})
+		await client.put(f"{FRONTEND_API_ENDPOINT}/data/etl/update-fpts", headers=headers, json={"data": data_json})
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #

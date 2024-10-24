@@ -14,6 +14,7 @@ import psycopg2
 import hashlib
 import random
 import bcrypt
+import pytz
 import json
 import os
 
@@ -158,6 +159,14 @@ def deserialize_lineups(lineups: list[tuple]) -> list[LineupInfo]:
 		) for gene in lineup[1]['Lineup']]
 	) for lineup in lineups]
 
+def serialize_fpts_data(data: list[tuple]) -> str:
+	return json.dumps([{
+		"rank": player[0],
+		"player_id": player[1],
+		"player_name": player[2],
+		"total_points": float(player[3]),
+		"avg_points": round(float(player[4]), 1)
+	} for player in data])
 
 # ------------------------ ETL Helpers ------------------------ #
 
@@ -178,7 +187,8 @@ def calculate_fantasy_points(stats: pd.DataFrame) -> float:
 
 # Get all the game IDs for the (previous) day
 def get_game_ids() -> list[datetime, list[str]]:
-	yesterday = datetime.now() - timedelta(days=1)
+	central_tz = pytz.timezone('US/Central')
+	yesterday = datetime.now(central_tz) - timedelta(days=1)
 	date_str = yesterday.strftime("%m-%d-%Y")
 	date = datetime.strptime(date_str, "%m-%d-%Y")
 
