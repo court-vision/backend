@@ -1,0 +1,1934 @@
+[
+  {
+    "rank": 1,
+    "player_id": 1628369,
+    "player_name": "Jayson Tatum",
+    "total_points": 84.0,
+    "avg_points": 84.0
+  },
+  {
+    "rank": 2,
+    "player_id": 1630163,
+    "player_name": "LaMelo Ball",
+    "total_points": 72.0,
+    "avg_points": 72.0
+  },
+  {
+    "rank": 3,
+    "player_id": 203076,
+    "player_name": "Anthony Davis",
+    "total_points": 72.0,
+    "avg_points": 72.0
+  },
+  {
+    "rank": 4,
+    "player_id": 1630578,
+    "player_name": "Alperen Sengun",
+    "total_points": 66.0,
+    "avg_points": 66.0
+  },
+  {
+    "rank": 5,
+    "player_id": 1630560,
+    "player_name": "Cam Thomas",
+    "total_points": 63.0,
+    "avg_points": 63.0
+  },
+  {
+    "rank": 6,
+    "player_id": 1630596,
+    "player_name": "Evan Mobley",
+    "total_points": 63.0,
+    "avg_points": 63.0
+  },
+  {
+    "rank": 7,
+    "player_id": 1631094,
+    "player_name": "Paolo Banchero",
+    "total_points": 61.0,
+    "avg_points": 61.0
+  },
+  {
+    "rank": 8,
+    "player_id": 1629027,
+    "player_name": "Trae Young",
+    "total_points": 59.0,
+    "avg_points": 59.0
+  },
+  {
+    "rank": 9,
+    "player_id": 1630168,
+    "player_name": "Onyeka Okongwu",
+    "total_points": 56.0,
+    "avg_points": 56.0
+  },
+  {
+    "rank": 10,
+    "player_id": 1631117,
+    "player_name": "Walker Kessler",
+    "total_points": 56.0,
+    "avg_points": 56.0
+  },
+  {
+    "rank": 11,
+    "player_id": 1627742,
+    "player_name": "Brandon Ingram",
+    "total_points": 56.0,
+    "avg_points": 56.0
+  },
+  {
+    "rank": 12,
+    "player_id": 1630532,
+    "player_name": "Franz Wagner",
+    "total_points": 54.0,
+    "avg_points": 54.0
+  },
+  {
+    "rank": 13,
+    "player_id": 1627783,
+    "player_name": "Pascal Siakam",
+    "total_points": 54.0,
+    "avg_points": 54.0
+  },
+  {
+    "rank": 14,
+    "player_id": 201939,
+    "player_name": "Stephen Curry",
+    "total_points": 51.0,
+    "avg_points": 51.0
+  },
+  {
+    "rank": 15,
+    "player_id": 1628374,
+    "player_name": "Lauri Markkanen",
+    "total_points": 50.0,
+    "avg_points": 50.0
+  },
+  {
+    "rank": 16,
+    "player_id": 203081,
+    "player_name": "Damian Lillard",
+    "total_points": 49.0,
+    "avg_points": 49.0
+  },
+  {
+    "rank": 17,
+    "player_id": 203507,
+    "player_name": "Giannis Antetokounmpo",
+    "total_points": 49.0,
+    "avg_points": 49.0
+  },
+  {
+    "rank": 18,
+    "player_id": 1628401,
+    "player_name": "Derrick White",
+    "total_points": 48.0,
+    "avg_points": 48.0
+  },
+  {
+    "rank": 19,
+    "player_id": 1630595,
+    "player_name": "Cade Cunningham",
+    "total_points": 48.0,
+    "avg_points": 48.0
+  },
+  {
+    "rank": 20,
+    "player_id": 1626167,
+    "player_name": "Myles Turner",
+    "total_points": 48.0,
+    "avg_points": 48.0
+  },
+  {
+    "rank": 21,
+    "player_id": 203468,
+    "player_name": "CJ McCollum",
+    "total_points": 47.0,
+    "avg_points": 47.0
+  },
+  {
+    "rank": 22,
+    "player_id": 1629630,
+    "player_name": "Ja Morant",
+    "total_points": 46.0,
+    "avg_points": 46.0
+  },
+  {
+    "rank": 23,
+    "player_id": 1630700,
+    "player_name": "Dyson Daniels",
+    "total_points": 45.0,
+    "avg_points": 45.0
+  },
+  {
+    "rank": 24,
+    "player_id": 1628386,
+    "player_name": "Jarrett Allen",
+    "total_points": 43.0,
+    "avg_points": 43.0
+  },
+  {
+    "rank": 25,
+    "player_id": 201950,
+    "player_name": "Jrue Holiday",
+    "total_points": 43.0,
+    "avg_points": 43.0
+  },
+  {
+    "rank": 26,
+    "player_id": 1626145,
+    "player_name": "Tyus Jones",
+    "total_points": 42.0,
+    "avg_points": 42.0
+  },
+  {
+    "rank": 27,
+    "player_id": 1630217,
+    "player_name": "Desmond Bane",
+    "total_points": 42.0,
+    "avg_points": 42.0
+  },
+  {
+    "rank": 28,
+    "player_id": 201572,
+    "player_name": "Brook Lopez",
+    "total_points": 41.0,
+    "avg_points": 41.0
+  },
+  {
+    "rank": 29,
+    "player_id": 1628378,
+    "player_name": "Donovan Mitchell",
+    "total_points": 41.0,
+    "avg_points": 41.0
+  },
+  {
+    "rank": 30,
+    "player_id": 1630583,
+    "player_name": "Santi Aldama",
+    "total_points": 41.0,
+    "avg_points": 41.0
+  },
+  {
+    "rank": 31,
+    "player_id": 203078,
+    "player_name": "Bradley Beal",
+    "total_points": 40.0,
+    "avg_points": 40.0
+  },
+  {
+    "rank": 32,
+    "player_id": 1629660,
+    "player_name": "Ty Jerome",
+    "total_points": 39.0,
+    "avg_points": 39.0
+  },
+  {
+    "rank": 33,
+    "player_id": 203914,
+    "player_name": "Gary Harris",
+    "total_points": 38.0,
+    "avg_points": 38.0
+  },
+  {
+    "rank": 34,
+    "player_id": 201935,
+    "player_name": "James Harden",
+    "total_points": 37.0,
+    "avg_points": 37.0
+  },
+  {
+    "rank": 35,
+    "player_id": 1629060,
+    "player_name": "Rui Hachimura",
+    "total_points": 37.0,
+    "avg_points": 37.0
+  },
+  {
+    "rank": 36,
+    "player_id": 1630169,
+    "player_name": "Tyrese Haliburton",
+    "total_points": 37.0,
+    "avg_points": 37.0
+  },
+  {
+    "rank": 37,
+    "player_id": 1642274,
+    "player_name": "Yves Missi",
+    "total_points": 37.0,
+    "avg_points": 37.0
+  },
+  {
+    "rank": 38,
+    "player_id": 202696,
+    "player_name": "Nikola Vu\u010devi\u0107",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 39,
+    "player_id": 1627741,
+    "player_name": "Buddy Hield",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 40,
+    "player_id": 1627747,
+    "player_name": "Caris LeVert",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 41,
+    "player_id": 1627749,
+    "player_name": "Dejounte Murray",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 42,
+    "player_id": 1627752,
+    "player_name": "Taurean Prince",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 43,
+    "player_id": 201143,
+    "player_name": "Al Horford",
+    "total_points": 36.0,
+    "avg_points": 36.0
+  },
+  {
+    "rank": 44,
+    "player_id": 203903,
+    "player_name": "Jordan Clarkson",
+    "total_points": 35.0,
+    "avg_points": 35.0
+  },
+  {
+    "rank": 45,
+    "player_id": 1626164,
+    "player_name": "Devin Booker",
+    "total_points": 35.0,
+    "avg_points": 35.0
+  },
+  {
+    "rank": 46,
+    "player_id": 1627759,
+    "player_name": "Jaylen Brown",
+    "total_points": 35.0,
+    "avg_points": 35.0
+  },
+  {
+    "rank": 47,
+    "player_id": 1626171,
+    "player_name": "Bobby Portis",
+    "total_points": 34.0,
+    "avg_points": 34.0
+  },
+  {
+    "rank": 48,
+    "player_id": 1630559,
+    "player_name": "Austin Reaves",
+    "total_points": 34.0,
+    "avg_points": 34.0
+  },
+  {
+    "rank": 49,
+    "player_id": 1626179,
+    "player_name": "Terry Rozier",
+    "total_points": 34.0,
+    "avg_points": 34.0
+  },
+  {
+    "rank": 50,
+    "player_id": 203497,
+    "player_name": "Rudy Gobert",
+    "total_points": 34.0,
+    "avg_points": 34.0
+  },
+  {
+    "rank": 51,
+    "player_id": 1630544,
+    "player_name": "Tre Mann",
+    "total_points": 34.0,
+    "avg_points": 34.0
+  },
+  {
+    "rank": 52,
+    "player_id": 1630178,
+    "player_name": "Tyrese Maxey",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 53,
+    "player_id": 1630590,
+    "player_name": "Scotty Pippen Jr.",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 54,
+    "player_id": 1630643,
+    "player_name": "Jay Huff",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 55,
+    "player_id": 1630540,
+    "player_name": "Miles McBride",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 56,
+    "player_id": 201142,
+    "player_name": "Kevin Durant",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 57,
+    "player_id": 1631105,
+    "player_name": "Jalen Duren",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 58,
+    "player_id": 1628464,
+    "player_name": "Daniel Theis",
+    "total_points": 33.0,
+    "avg_points": 33.0
+  },
+  {
+    "rank": 59,
+    "player_id": 204456,
+    "player_name": "T.J. McConnell",
+    "total_points": 32.0,
+    "avg_points": 32.0
+  },
+  {
+    "rank": 60,
+    "player_id": 1641707,
+    "player_name": "Taylor Hendricks",
+    "total_points": 32.0,
+    "avg_points": 32.0
+  },
+  {
+    "rank": 61,
+    "player_id": 2544,
+    "player_name": "LeBron James",
+    "total_points": 32.0,
+    "avg_points": 32.0
+  },
+  {
+    "rank": 62,
+    "player_id": 203952,
+    "player_name": "Andrew Wiggins",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 63,
+    "player_id": 1628449,
+    "player_name": "Chris Boucher",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 64,
+    "player_id": 1630166,
+    "player_name": "Deni Avdija",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 65,
+    "player_id": 200768,
+    "player_name": "Kyle Lowry",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 66,
+    "player_id": 203897,
+    "player_name": "Zach LaVine",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 67,
+    "player_id": 1628976,
+    "player_name": "Wendell Carter Jr.",
+    "total_points": 31.0,
+    "avg_points": 31.0
+  },
+  {
+    "rank": 68,
+    "player_id": 1629750,
+    "player_name": "Javonte Green",
+    "total_points": 30.0,
+    "avg_points": 30.0
+  },
+  {
+    "rank": 69,
+    "player_id": 1630224,
+    "player_name": "Jalen Green",
+    "total_points": 30.0,
+    "avg_points": 30.0
+  },
+  {
+    "rank": 70,
+    "player_id": 1627826,
+    "player_name": "Ivica Zubac",
+    "total_points": 30.0,
+    "avg_points": 30.0
+  },
+  {
+    "rank": 71,
+    "player_id": 1630162,
+    "player_name": "Anthony Edwards",
+    "total_points": 30.0,
+    "avg_points": 30.0
+  },
+  {
+    "rank": 72,
+    "player_id": 1631218,
+    "player_name": "Trayce Jackson-Davis",
+    "total_points": 30.0,
+    "avg_points": 30.0
+  },
+  {
+    "rank": 73,
+    "player_id": 1629028,
+    "player_name": "Deandre Ayton",
+    "total_points": 29.0,
+    "avg_points": 29.0
+  },
+  {
+    "rank": 74,
+    "player_id": 1629639,
+    "player_name": "Tyler Herro",
+    "total_points": 29.0,
+    "avg_points": 29.0
+  },
+  {
+    "rank": 75,
+    "player_id": 1629312,
+    "player_name": "Haywood Highsmith",
+    "total_points": 29.0,
+    "avg_points": 29.0
+  },
+  {
+    "rank": 76,
+    "player_id": 203110,
+    "player_name": "Draymond Green",
+    "total_points": 29.0,
+    "avg_points": 29.0
+  },
+  {
+    "rank": 77,
+    "player_id": 1627884,
+    "player_name": "Derrick Jones Jr.",
+    "total_points": 28.0,
+    "avg_points": 28.0
+  },
+  {
+    "rank": 78,
+    "player_id": 203924,
+    "player_name": "Jerami Grant",
+    "total_points": 28.0,
+    "avg_points": 28.0
+  },
+  {
+    "rank": 79,
+    "player_id": 1641739,
+    "player_name": "Toumani Camara",
+    "total_points": 28.0,
+    "avg_points": 28.0
+  },
+  {
+    "rank": 80,
+    "player_id": 203944,
+    "player_name": "Julius Randle",
+    "total_points": 28.0,
+    "avg_points": 28.0
+  },
+  {
+    "rank": 81,
+    "player_id": 1629001,
+    "player_name": "De'Anthony Melton",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 82,
+    "player_id": 1626157,
+    "player_name": "Karl-Anthony Towns",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 83,
+    "player_id": 1630552,
+    "player_name": "Jalen Johnson",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 84,
+    "player_id": 1631107,
+    "player_name": "Nikola Jovi\u0107",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 85,
+    "player_id": 1630188,
+    "player_name": "Jalen Smith",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 86,
+    "player_id": 1631093,
+    "player_name": "Jaden Ivey",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 87,
+    "player_id": 1641711,
+    "player_name": "Gradey Dick",
+    "total_points": 27.0,
+    "avg_points": 27.0
+  },
+  {
+    "rank": 88,
+    "player_id": 1630591,
+    "player_name": "Jalen Suggs",
+    "total_points": 26.0,
+    "avg_points": 26.0
+  },
+  {
+    "rank": 89,
+    "player_id": 1627832,
+    "player_name": "Fred VanVleet",
+    "total_points": 26.0,
+    "avg_points": 26.0
+  },
+  {
+    "rank": 90,
+    "player_id": 1627827,
+    "player_name": "Dorian Finney-Smith",
+    "total_points": 26.0,
+    "avg_points": 26.0
+  },
+  {
+    "rank": 91,
+    "player_id": 1627780,
+    "player_name": "Gary Payton II",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 92,
+    "player_id": 1629632,
+    "player_name": "Coby White",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 93,
+    "player_id": 1627824,
+    "player_name": "Guerschon Yabusele",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 94,
+    "player_id": 1628997,
+    "player_name": "Caleb Martin",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 95,
+    "player_id": 1630703,
+    "player_name": "Scoot Henderson",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 96,
+    "player_id": 1629631,
+    "player_name": "De'Andre Hunter",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 97,
+    "player_id": 1629599,
+    "player_name": "Amir Coffey",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 98,
+    "player_id": 1626166,
+    "player_name": "Cameron Payne",
+    "total_points": 25.0,
+    "avg_points": 25.0
+  },
+  {
+    "rank": 99,
+    "player_id": 1628973,
+    "player_name": "Jalen Brunson",
+    "total_points": 24.0,
+    "avg_points": 24.0
+  },
+  {
+    "rank": 100,
+    "player_id": 203501,
+    "player_name": "Tim Hardaway Jr.",
+    "total_points": 24.0,
+    "avg_points": 24.0
+  },
+  {
+    "rank": 101,
+    "player_id": 1641722,
+    "player_name": "Jordan Hawkins",
+    "total_points": 24.0,
+    "avg_points": 24.0
+  },
+  {
+    "rank": 102,
+    "player_id": 1629012,
+    "player_name": "Collin Sexton",
+    "total_points": 24.0,
+    "avg_points": 24.0
+  },
+  {
+    "rank": 103,
+    "player_id": 1629661,
+    "player_name": "Cameron Johnson",
+    "total_points": 24.0,
+    "avg_points": 24.0
+  },
+  {
+    "rank": 104,
+    "player_id": 1642347,
+    "player_name": "Jamal Shead",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 105,
+    "player_id": 1626156,
+    "player_name": "D'Angelo Russell",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 106,
+    "player_id": 203937,
+    "player_name": "Kyle Anderson",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 107,
+    "player_id": 1630541,
+    "player_name": "Moses Moody",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 108,
+    "player_id": 1631097,
+    "player_name": "Bennedict Mathurin",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 109,
+    "player_id": 1630193,
+    "player_name": "Immanuel Quickley",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 110,
+    "player_id": 1629731,
+    "player_name": "Dean Wade",
+    "total_points": 23.0,
+    "avg_points": 23.0
+  },
+  {
+    "rank": 111,
+    "player_id": 1630174,
+    "player_name": "Aaron Nesmith",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 112,
+    "player_id": 1630579,
+    "player_name": "Jericho Sims",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 113,
+    "player_id": 1628970,
+    "player_name": "Miles Bridges",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 114,
+    "player_id": 203991,
+    "player_name": "Clint Capela",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 115,
+    "player_id": 1629614,
+    "player_name": "Andrew Nembhard",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 116,
+    "player_id": 203994,
+    "player_name": "Jusuf Nurki\u0107",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 117,
+    "player_id": 1629611,
+    "player_name": "Terance Mann",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 118,
+    "player_id": 1641710,
+    "player_name": "Anthony Black",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 119,
+    "player_id": 1626181,
+    "player_name": "Norman Powell",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 120,
+    "player_id": 1630208,
+    "player_name": "Nick Richards",
+    "total_points": 22.0,
+    "avg_points": 22.0
+  },
+  {
+    "rank": 121,
+    "player_id": 1627732,
+    "player_name": "Ben Simmons",
+    "total_points": 21.0,
+    "avg_points": 21.0
+  },
+  {
+    "rank": 122,
+    "player_id": 203083,
+    "player_name": "Andre Drummond",
+    "total_points": 21.0,
+    "avg_points": 21.0
+  },
+  {
+    "rank": 123,
+    "player_id": 1629637,
+    "player_name": "Jaxson Hayes",
+    "total_points": 21.0,
+    "avg_points": 21.0
+  },
+  {
+    "rank": 124,
+    "player_id": 1630592,
+    "player_name": "Jalen Wilson",
+    "total_points": 21.0,
+    "avg_points": 21.0
+  },
+  {
+    "rank": 125,
+    "player_id": 1627739,
+    "player_name": "Kris Dunn",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 126,
+    "player_id": 1628960,
+    "player_name": "Grayson Allen",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 127,
+    "player_id": 1628969,
+    "player_name": "Mikal Bridges",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 128,
+    "player_id": 1628998,
+    "player_name": "Cody Martin",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 129,
+    "player_id": 1628404,
+    "player_name": "Josh Hart",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 130,
+    "player_id": 1626162,
+    "player_name": "Kelly Oubre Jr.",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 131,
+    "player_id": 1629638,
+    "player_name": "Nickeil Alexander-Walker",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 132,
+    "player_id": 1628978,
+    "player_name": "Donte DiVincenzo",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 133,
+    "player_id": 1629684,
+    "player_name": "Grant Williams",
+    "total_points": 20.0,
+    "avg_points": 20.0
+  },
+  {
+    "rank": 134,
+    "player_id": 1641708,
+    "player_name": "Amen Thompson",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 135,
+    "player_id": 1626192,
+    "player_name": "Pat Connaughton",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 136,
+    "player_id": 1631170,
+    "player_name": "Jaime Jaquez Jr.",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 137,
+    "player_id": 1629651,
+    "player_name": "Nic Claxton",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 138,
+    "player_id": 203471,
+    "player_name": "Dennis Schr\u00f6der",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 139,
+    "player_id": 1628418,
+    "player_name": "Thomas Bryant",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 140,
+    "player_id": 1630534,
+    "player_name": "Ochai Agbaji",
+    "total_points": 19.0,
+    "avg_points": 19.0
+  },
+  {
+    "rank": 141,
+    "player_id": 1628381,
+    "player_name": "John Collins",
+    "total_points": 18.0,
+    "avg_points": 18.0
+  },
+  {
+    "rank": 142,
+    "player_id": 1641730,
+    "player_name": "Noah Clowney",
+    "total_points": 18.0,
+    "avg_points": 18.0
+  },
+  {
+    "rank": 143,
+    "player_id": 1628436,
+    "player_name": "Luke Kornet",
+    "total_points": 18.0,
+    "avg_points": 18.0
+  },
+  {
+    "rank": 144,
+    "player_id": 203992,
+    "player_name": "Bogdan Bogdanovi\u0107",
+    "total_points": 18.0,
+    "avg_points": 18.0
+  },
+  {
+    "rank": 145,
+    "player_id": 1631217,
+    "player_name": "Moussa Diabat\u00e9",
+    "total_points": 17.0,
+    "avg_points": 17.0
+  },
+  {
+    "rank": 146,
+    "player_id": 1629014,
+    "player_name": "Anfernee Simons",
+    "total_points": 17.0,
+    "avg_points": 17.0
+  },
+  {
+    "rank": 147,
+    "player_id": 202699,
+    "player_name": "Tobias Harris",
+    "total_points": 17.0,
+    "avg_points": 17.0
+  },
+  {
+    "rank": 148,
+    "player_id": 1630573,
+    "player_name": "Sam Hauser",
+    "total_points": 17.0,
+    "avg_points": 17.0
+  },
+  {
+    "rank": 149,
+    "player_id": 1631095,
+    "player_name": "Jabari Smith Jr.",
+    "total_points": 17.0,
+    "avg_points": 17.0
+  },
+  {
+    "rank": 150,
+    "player_id": 1629675,
+    "player_name": "Naz Reid",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 151,
+    "player_id": 1630245,
+    "player_name": "Ayo Dosunmu",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 152,
+    "player_id": 1642419,
+    "player_name": "Jamison Battle",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 153,
+    "player_id": 1630526,
+    "player_name": "Jeremiah Robinson-Earl",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 154,
+    "player_id": 1626172,
+    "player_name": "Kevon Looney",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 155,
+    "player_id": 1629021,
+    "player_name": "Moritz Wagner",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 156,
+    "player_id": 1627777,
+    "player_name": "Georges Niang",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 157,
+    "player_id": 202710,
+    "player_name": "Jimmy Butler",
+    "total_points": 16.0,
+    "avg_points": 16.0
+  },
+  {
+    "rank": 158,
+    "player_id": 1627736,
+    "player_name": "Malik Beasley",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 159,
+    "player_id": 1631106,
+    "player_name": "Tari Eason",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 160,
+    "player_id": 1630581,
+    "player_name": "Josh Giddey",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 161,
+    "player_id": 1628371,
+    "player_name": "Jonathan Isaac",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 162,
+    "player_id": 1641712,
+    "player_name": "Rayan Rupert",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 163,
+    "player_id": 1629018,
+    "player_name": "Gary Trent Jr.",
+    "total_points": 15.0,
+    "avg_points": 15.0
+  },
+  {
+    "rank": 164,
+    "player_id": 1628384,
+    "player_name": "OG Anunoby",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 165,
+    "player_id": 1626220,
+    "player_name": "Royce O'Neale",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 166,
+    "player_id": 1629723,
+    "player_name": "John Konchar",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 167,
+    "player_id": 1628366,
+    "player_name": "Lonzo Ball",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 168,
+    "player_id": 1630322,
+    "player_name": "Lindy Waters III",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 169,
+    "player_id": 1630191,
+    "player_name": "Isaiah Stewart",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 170,
+    "player_id": 1630529,
+    "player_name": "Herbert Jones",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 171,
+    "player_id": 203552,
+    "player_name": "Seth Curry",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 172,
+    "player_id": 203486,
+    "player_name": "Mason Plumlee",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 173,
+    "player_id": 203935,
+    "player_name": "Marcus Smart",
+    "total_points": 14.0,
+    "avg_points": 14.0
+  },
+  {
+    "rank": 174,
+    "player_id": 1630533,
+    "player_name": "Ziaire Williams",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 175,
+    "player_id": 1630631,
+    "player_name": "Jose Alvarado",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 176,
+    "player_id": 1642261,
+    "player_name": "Dalton Knecht",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 177,
+    "player_id": 1642345,
+    "player_name": "Oso Ighodaro",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 178,
+    "player_id": 1629111,
+    "player_name": "Jock Landale",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 179,
+    "player_id": 1641842,
+    "player_name": "Ronald Holland II",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 180,
+    "player_id": 1628981,
+    "player_name": "Bruno Fernando",
+    "total_points": 13.0,
+    "avg_points": 13.0
+  },
+  {
+    "rank": 181,
+    "player_id": 1641729,
+    "player_name": "Brice Sensabaugh",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 182,
+    "player_id": 1642367,
+    "player_name": "Jonathan Mogbo",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 183,
+    "player_id": 1630567,
+    "player_name": "Scottie Barnes",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 184,
+    "player_id": 1641706,
+    "player_name": "Brandon Miller",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 185,
+    "player_id": 1630172,
+    "player_name": "Patrick Williams",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 186,
+    "player_id": 1628420,
+    "player_name": "Mont\u00e9 Morris",
+    "total_points": 12.0,
+    "avg_points": 12.0
+  },
+  {
+    "rank": 187,
+    "player_id": 1630167,
+    "player_name": "Obi Toppin",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 188,
+    "player_id": 1641718,
+    "player_name": "Keyonte George",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 189,
+    "player_id": 1629636,
+    "player_name": "Darius Garland",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 190,
+    "player_id": 1631222,
+    "player_name": "Jake LaRavia",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 191,
+    "player_id": 203484,
+    "player_name": "Kentavious Caldwell-Pope",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 192,
+    "player_id": 1630539,
+    "player_name": "Kai Jones",
+    "total_points": 11.0,
+    "avg_points": 11.0
+  },
+  {
+    "rank": 193,
+    "player_id": 202066,
+    "player_name": "Garrett Temple",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 194,
+    "player_id": 1642270,
+    "player_name": "Donovan Clingan",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 195,
+    "player_id": 1630241,
+    "player_name": "Sam Merrill",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 196,
+    "player_id": 1628389,
+    "player_name": "Bam Adebayo",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 197,
+    "player_id": 1630171,
+    "player_name": "Isaac Okoro",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 198,
+    "player_id": 1630183,
+    "player_name": "Jaden McDaniels",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 199,
+    "player_id": 1630558,
+    "player_name": "Davion Mitchell",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 200,
+    "player_id": 1642377,
+    "player_name": "Jaylen Wells",
+    "total_points": 10.0,
+    "avg_points": 10.0
+  },
+  {
+    "rank": 201,
+    "player_id": 1630214,
+    "player_name": "Xavier Tillman",
+    "total_points": 9.0,
+    "avg_points": 9.0
+  },
+  {
+    "rank": 202,
+    "player_id": 1642263,
+    "player_name": "Reed Sheppard",
+    "total_points": 9.0,
+    "avg_points": 9.0
+  },
+  {
+    "rank": 203,
+    "player_id": 1629130,
+    "player_name": "Duncan Robinson",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 204,
+    "player_id": 1641890,
+    "player_name": "Tyler Smith",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 205,
+    "player_id": 201587,
+    "player_name": "Nicolas Batum",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 206,
+    "player_id": 1641764,
+    "player_name": "Brandin Podziemski",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 207,
+    "player_id": 1630249,
+    "player_name": "V\u00edt Krej\u010d\u00ed",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 208,
+    "player_id": 1630574,
+    "player_name": "Ariel Hukporti",
+    "total_points": 8.0,
+    "avg_points": 8.0
+  },
+  {
+    "rank": 209,
+    "player_id": 1641741,
+    "player_name": "Ricky Council IV",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 210,
+    "player_id": 1630164,
+    "player_name": "James Wiseman",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 211,
+    "player_id": 1642346,
+    "player_name": "Ryan Dunn",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 212,
+    "player_id": 1641763,
+    "player_name": "Julian Phillips",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 213,
+    "player_id": 1642272,
+    "player_name": "Jared McCain",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 214,
+    "player_id": 1641796,
+    "player_name": "Pelle Larsson",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 215,
+    "player_id": 1630228,
+    "player_name": "Jonathan Kuminga",
+    "total_points": 7.0,
+    "avg_points": 7.0
+  },
+  {
+    "rank": 216,
+    "player_id": 1641767,
+    "player_name": "Ben Sheppard",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 217,
+    "player_id": 201144,
+    "player_name": "Mike Conley",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 218,
+    "player_id": 1630202,
+    "player_name": "Payton Pritchard",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 219,
+    "player_id": 1630696,
+    "player_name": "Dru Smith",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 220,
+    "player_id": 1631204,
+    "player_name": "Marcus Sasser",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 221,
+    "player_id": 1631260,
+    "player_name": "AJ Green",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 222,
+    "player_id": 203995,
+    "player_name": "Vasilije Mici\u0107",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 223,
+    "player_id": 1630231,
+    "player_name": "KJ Martin",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 224,
+    "player_id": 1630611,
+    "player_name": "Gui Santos",
+    "total_points": 6.0,
+    "avg_points": 6.0
+  },
+  {
+    "rank": 225,
+    "player_id": 1631255,
+    "player_name": "Karlo Matkovi\u0107",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 226,
+    "player_id": 1641716,
+    "player_name": "Jarace Walker",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 227,
+    "player_id": 1627751,
+    "player_name": "Jakob P\u00f6ltl",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 228,
+    "player_id": 1641854,
+    "player_name": "Craig Porter Jr.",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 229,
+    "player_id": 1630625,
+    "player_name": "Dalano Banton",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 230,
+    "player_id": 1626153,
+    "player_name": "Delon Wright",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 231,
+    "player_id": 1630537,
+    "player_name": "Chris Duarte",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 232,
+    "player_id": 1642281,
+    "player_name": "Jaylon Tyson",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 233,
+    "player_id": 1641871,
+    "player_name": "Duop Reath",
+    "total_points": 5.0,
+    "avg_points": 5.0
+  },
+  {
+    "rank": 234,
+    "player_id": 1641715,
+    "player_name": "Cam Whitmore",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 235,
+    "player_id": 1641744,
+    "player_name": "Zach Edey",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 236,
+    "player_id": 1629216,
+    "player_name": "Gabe Vincent",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 237,
+    "player_id": 1642359,
+    "player_name": "Pac\u00f4me Dadiet",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 238,
+    "player_id": 1642279,
+    "player_name": "Ulrich Chomche",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 239,
+    "player_id": 1629645,
+    "player_name": "Kevin Porter Jr.",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 240,
+    "player_id": 1631207,
+    "player_name": "Dalen Terry",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 241,
+    "player_id": 1630175,
+    "player_name": "Cole Anthony",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 242,
+    "player_id": 1642262,
+    "player_name": "Cody Williams",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 243,
+    "player_id": 1641737,
+    "player_name": "Adem Bona",
+    "total_points": 4.0,
+    "avg_points": 4.0
+  },
+  {
+    "rank": 244,
+    "player_id": 202684,
+    "player_name": "Tristan Thompson",
+    "total_points": 3.0,
+    "avg_points": 3.0
+  },
+  {
+    "rank": 245,
+    "player_id": 201988,
+    "player_name": "Patty Mills",
+    "total_points": 3.0,
+    "avg_points": 3.0
+  },
+  {
+    "rank": 246,
+    "player_id": 1631311,
+    "player_name": "Lester Quinones",
+    "total_points": 2.0,
+    "avg_points": 2.0
+  },
+  {
+    "rank": 247,
+    "player_id": 1629634,
+    "player_name": "Brandon Clarke",
+    "total_points": 2.0,
+    "avg_points": 2.0
+  },
+  {
+    "rank": 248,
+    "player_id": 1631133,
+    "player_name": "Jabari Walker",
+    "total_points": 2.0,
+    "avg_points": 2.0
+  },
+  {
+    "rank": 249,
+    "player_id": 1628415,
+    "player_name": "Dillon Brooks",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 250,
+    "player_id": 1641775,
+    "player_name": "Jordan Walsh",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 251,
+    "player_id": 1641824,
+    "player_name": "Matas Buzelis",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 252,
+    "player_id": 1631108,
+    "player_name": "Max Christie",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 253,
+    "player_id": 1642258,
+    "player_name": "Zaccharie Risacher",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 254,
+    "player_id": 201569,
+    "player_name": "Eric Gordon",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 255,
+    "player_id": 204060,
+    "player_name": "Joe Ingles",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 256,
+    "player_id": 1631216,
+    "player_name": "Caleb Houstan",
+    "total_points": 1.0,
+    "avg_points": 1.0
+  },
+  {
+    "rank": 257,
+    "player_id": 1630288,
+    "player_name": "Jeff Dowtin Jr.",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 258,
+    "player_id": 1631157,
+    "player_name": "Ryan Rollins",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 259,
+    "player_id": 1629674,
+    "player_name": "Neemias Queta",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 260,
+    "player_id": 1641748,
+    "player_name": "Andre Jackson Jr.",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 261,
+    "player_id": 1642402,
+    "player_name": "Enrique Freeman",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 262,
+    "player_id": 1642278,
+    "player_name": "Tyler Kolek",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 263,
+    "player_id": 1630699,
+    "player_name": "MarJon Beauchamp",
+    "total_points": 0.0,
+    "avg_points": 0.0
+  },
+  {
+    "rank": 264,
+    "player_id": 1642355,
+    "player_name": "Bronny James",
+    "total_points": -1.0,
+    "avg_points": -1.0
+  },
+  {
+    "rank": 265,
+    "player_id": 1629003,
+    "player_name": "Shake Milton",
+    "total_points": -1.0,
+    "avg_points": -1.0
+  },
+  {
+    "rank": 266,
+    "player_id": 1629659,
+    "player_name": "Talen Horton-Tucker",
+    "total_points": -1.0,
+    "avg_points": -1.0
+  },
+  {
+    "rank": 267,
+    "player_id": 1631210,
+    "player_name": "Jacob Toppin",
+    "total_points": -1.0,
+    "avg_points": -1.0
+  },
+  {
+    "rank": 268,
+    "player_id": 1642358,
+    "player_name": "AJ Johnson",
+    "total_points": -1.0,
+    "avg_points": -1.0
+  },
+  {
+    "rank": 269,
+    "player_id": 202709,
+    "player_name": "Cory Joseph",
+    "total_points": -2.0,
+    "avg_points": -2.0
+  },
+  {
+    "rank": 270,
+    "player_id": 1641724,
+    "player_name": "Jett Howard",
+    "total_points": -2.0,
+    "avg_points": -2.0
+  },
+  {
+    "rank": 271,
+    "player_id": 1642276,
+    "player_name": "Kel'el Ware",
+    "total_points": -2.0,
+    "avg_points": -2.0
+  },
+  {
+    "rank": 272,
+    "player_id": 1641783,
+    "player_name": "Tristan da Silva",
+    "total_points": -3.0,
+    "avg_points": -3.0
+  },
+  {
+    "rank": 273,
+    "player_id": 1629048,
+    "player_name": "Goga Bitadze",
+    "total_points": -3.0,
+    "avg_points": -3.0
+  },
+  {
+    "rank": 274,
+    "player_id": 1631200,
+    "player_name": "Kris Murray",
+    "total_points": -3.0,
+    "avg_points": -3.0
+  },
+  {
+    "rank": 275,
+    "player_id": 1631323,
+    "player_name": "Simone Fontecchio",
+    "total_points": -5.0,
+    "avg_points": -5.0
+  },
+  {
+    "rank": 276,
+    "player_id": 1641810,
+    "player_name": "Antonio Reeves",
+    "total_points": -5.0,
+    "avg_points": -5.0
+  }
+]

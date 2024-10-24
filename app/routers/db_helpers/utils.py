@@ -188,7 +188,7 @@ def calculate_fantasy_points(stats: pd.DataFrame) -> float:
 # Get all the game IDs for the (previous) day
 def get_game_ids() -> list[datetime, list[str]]:
 	central_tz = pytz.timezone('US/Central')
-	yesterday = datetime.now(central_tz) - timedelta(days=1)
+	yesterday = datetime.now(central_tz) - timedelta(days=2)
 	date_str = yesterday.strftime("%m-%d-%Y")
 	date = datetime.strptime(date_str, "%m-%d-%Y")
 

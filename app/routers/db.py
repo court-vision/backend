@@ -1,6 +1,6 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT, LOCAL_API_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -395,12 +395,13 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 		cur.execute('SELECT * FROM player_standings ORDER BY rank')
 		data = cur.fetchall()
 	
-	# Post the data back to the frontend server
-	headers = {
-		"Authorization": f"Bearer {CRON_TOKEN}"
-	}
-	data_json = serialize_fpts_data(data)
-	async with httpx.AsyncClient() as client:
-		await client.put(f"{FRONTEND_API_ENDPOINT}/data/etl/update-fpts", headers=headers, json={"data": data_json})
+	with open('file-storage/fpts_data.json', 'w') as f:
+		json.dump([{
+			"rank": player[0],
+			"player_id": player[1],
+			"player_name": player[2],
+			"total_points": float(player[3]),
+			"avg_points": round(float(player[4]), 1)
+		} for player in data], f, indent=2)
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #

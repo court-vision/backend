@@ -98,3 +98,12 @@ async def get_free_agents(req: TeamDataReq):
                                 valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
                                 injured=player.injured,
                                 ) for player in players]
+
+
+
+# Returns the most recent FPTS ETL data
+@router.get("/etl/get_fpts_data")
+async def get_fpts_data():
+    with open("file-storage/fpts_data.json", "r") as f:
+        data = json.load(f)
+    return {"data": data}
