@@ -140,3 +140,23 @@ class SaveLineupResp(BaseModel):
 
 class DeleteLineupResp(BaseModel):
     success: bool
+
+# ------------------------------- ETL Models ------------------------------- #
+
+# Can modify this later to contain the time-series data, for now just the average and total FPTS
+class FPTSPlayer(BaseModel):
+    player_id: int
+    player_name: str
+    rank: int
+    avg_fpts: float
+    total_fpts: float
+
+#                          ------- Incoming -------                           #
+
+class ETLUpdateFTPSReq(BaseModel):
+    cron_token: str
+
+#                          ------- Outgoing -------                           #
+class ETLUpdateFTPSResp(BaseModel):
+    success: bool
+    data: list[FPTSPlayer] | None

@@ -14,3 +14,4 @@ DB_CREDENTIALS = {
 	"port": os.getenv('DB_PORT'),
 	"database": os.getenv('DB_NAME')
 }
+CRON_TOKEN = os.getenv('CRON_TOKEN')

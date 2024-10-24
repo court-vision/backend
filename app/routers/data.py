@@ -98,4 +98,3 @@ async def get_free_agents(req: TeamDataReq):
                                 valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
                                 injured=player.injured,
                                 ) for player in players]
-

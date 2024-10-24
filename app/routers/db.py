@@ -1,11 +1,12 @@
-from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT
+from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from fastapi import APIRouter, Depends
 from contextlib import contextmanager
+import pandas as pd
 import psycopg2
 import requests
 import httpx
@@ -336,5 +337,53 @@ async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current
 		conn.commit()
 
 	return DeleteLineupResp(success=True)
+
+
+# ------------------------------------------ ETL -------------------------------------------- #
+
+# Route to listen for Cloud Scheduler to trigger updating the DB with new daily fantasy points, returning the updated data
+@router.post('/etl/update-fpts')
+async def update_fpts(req: ETLUpdateFTPSReq):
+	cron_token = req.cron_token
+	if cron_token != CRON_TOKEN:
+		return {"success": False, "error": "Invalid token"}
+	game_date, game_ids = get_game_ids()
+
+	# Insert the new daily data into the database
+	for game_id in game_ids:
+		print(game_id)
+		game_stats = get_game_stats(game_id)
+		if game_stats is None:
+			continue
+
+		# Update the database with the new stats
+		with get_cursor() as cur:
+			for index, row in game_stats.iterrows():
+				cur.execute('INSERT INTO daily_fantasy_points (player_id, player_name, date, fantasy_points) VALUES (%s, %s, %s, %s)', (row['PLAYER_ID'], row['PLAYER_NAME'], game_date, row['Fantasy Score']))
+			conn.commit()
+		
+		# Sleep for a bit so we don't get rate limited
+		time.sleep(10)
+	
+	# Now update the total data in the database
+	with get_cursor() as cur:
+		cur.execute('''
+    INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
+    SELECT player_id, MAX(player_name), SUM(fantasy_points), AVG(fantasy_points)
+    FROM daily_fantasy_points
+    GROUP BY player_id
+    ON CONFLICT (player_id) DO UPDATE
+    SET total_points = EXCLUDED.total_points, avg_points = EXCLUDED.avg_points, player_name = EXCLUDED.player_name
+		''')
+		conn.commit()
+
+	# Now select the updated data using the view
+	with get_cursor() as cur:
+		cur.execute('SELECT * FROM player_standings ORDER BY rank LIMIT 10')
+		data = cur.fetchall()
+	
+	# deserialized_data = deserialize_fpts_data(data)
+	# return ETLUpdateFPTSResp(success=True, data=deserialized_data)
+	return data
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #
