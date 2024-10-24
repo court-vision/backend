@@ -1,7 +1,7 @@
-from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
+from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS, PROXY_STRING
+from ..libs.nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
 from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi.security import OAuth2PasswordBearer
-from nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
 from sendgrid.helpers.mail import Mail
@@ -16,6 +16,7 @@ import random
 import bcrypt
 import pytz
 import json
+import ssl
 import os
 
 # ---------------------- User Authentication ---------------------- #
@@ -192,7 +193,9 @@ def get_game_ids() -> list[datetime, list[str]]:
 	date_str = yesterday.strftime("%m-%d-%Y")
 	date = datetime.strptime(date_str, "%m-%d-%Y")
 
-	scoreboard = scoreboardv2.ScoreboardV2(game_date=date)
+
+
+	scoreboard = scoreboardv2.ScoreboardV2(game_date=date, proxy=PROXY_STRING)
 	games = scoreboard.get_dict()['resultSets'][0]['rowSet']
 	game_ids = [game[2] for game in games]
 
@@ -209,3 +212,8 @@ def get_game_stats(game_id: str) -> pd.DataFrame:
 	stats.loc[:, "Fantasy Score"] = stats.apply(calculate_fantasy_points, axis=1)
 
 	return stats
+
+# ------------------------ Networking ------------------------ #
+
+def get_ssl_certificate() -> ssl.SSLContext:
+	ctx = ssl.create_default_context(cafile="brightdata_proxy_ca/New SSL certifcate - MUST BE USED WITH PORT 33335/BrightData SSL certificate (port 33335).crt")

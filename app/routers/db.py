@@ -1,10 +1,10 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT, LOCAL_API_ENDPOINT
+from fastapi import APIRouter, Depends, BackgroundTasks
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from fastapi import APIRouter, Depends, BackgroundTasks
 from contextlib import contextmanager
 import pandas as pd
 import psycopg2
@@ -35,11 +35,11 @@ def connect_to_db() -> psycopg2.connect:
 # Get the cursor for the database and close it when done
 @contextmanager
 def get_cursor():
-    cur = conn.cursor()
-    try:
-        yield cur
-    finally:
-        cur.close()
+		cur = conn.cursor()
+		try:
+				yield cur
+		finally:
+				cur.close()
 
 conn = connect_to_db()
 
@@ -354,54 +354,60 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: Backgro
 async def trigger_ETL_update_fpts(cron_token: str):
 	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
 
-# Route to handle the actual ETL process
+from fastapi.concurrency import run_in_threadpool
+
 async def update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
 	if cron_token != CRON_TOKEN:
 		print("Invalid token")
 		return
-	game_date, game_ids = get_game_ids()
+	game_date, game_ids = await run_in_threadpool(get_game_ids)
 
-	# Insert the new daily data into the database
 	for game_id in game_ids:
 		print(game_id)
-		game_stats = get_game_stats(game_id)
+		game_stats = await run_in_threadpool(get_game_stats, game_id)
 		if game_stats is None:
-			continue
+				continue
 
-		# Update the database with the new stats
-		with get_cursor() as cur:
-			for index, row in game_stats.iterrows():
-				cur.execute('INSERT INTO daily_fantasy_points (player_id, player_name, date, fantasy_points) VALUES (%s, %s, %s, %s)', (row['PLAYER_ID'], row['PLAYER_NAME'], game_date, row['Fantasy Score']))
-			conn.commit()
-		
-		# Sleep for a bit so we don't get rate limited
-		await asyncio.sleep(10)
-	
-	# Now update the total data in the database
+		await run_in_threadpool(insert_daily_stats, game_stats, game_date)
+
+	await run_in_threadpool(update_total_data)
+	await run_in_threadpool(save_updated_data)
+
+# Separate functions for blocking operations
+def insert_daily_stats(game_stats, game_date):
 	with get_cursor() as cur:
-		cur.execute('''
-    INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
-    SELECT player_id, MAX(player_name), SUM(fantasy_points), AVG(fantasy_points)
-    FROM daily_fantasy_points
-    GROUP BY player_id
-    ON CONFLICT (player_id) DO UPDATE
-    SET total_points = EXCLUDED.total_points, avg_points = EXCLUDED.avg_points, player_name = EXCLUDED.player_name
-		''')
+		for index, row in game_stats.iterrows():
+				cur.execute(
+						'INSERT INTO daily_fantasy_points (player_id, player_name, date, fantasy_points) VALUES (%s, %s, %s, %s)',
+						(row['PLAYER_ID'], row['PLAYER_NAME'], game_date, row['Fantasy Score'])
+				)
 		conn.commit()
 
-	# Now select the updated data using the view
+def update_total_data():
+	with get_cursor() as cur:
+		cur.execute('''
+			INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
+			SELECT player_id, MAX(player_name), SUM(fantasy_points), AVG(fantasy_points)
+			FROM daily_fantasy_points
+			GROUP BY player_id
+			ON CONFLICT (player_id) DO UPDATE
+			SET total_points = EXCLUDED.total_points, avg_points = EXCLUDED.avg_points, player_name = EXCLUDED.player_name
+			''')
+		conn.commit()
+
+def save_updated_data():
 	with get_cursor() as cur:
 		cur.execute('SELECT * FROM player_standings ORDER BY rank')
 		data = cur.fetchall()
-	
+
 	with open('file-storage/fpts_data.json', 'w') as f:
 		json.dump([{
-			"rank": player[0],
-			"player_id": player[1],
-			"player_name": player[2],
-			"total_points": float(player[3]),
-			"avg_points": round(float(player[4]), 1)
+				"rank": player[0],
+				"player_id": player[1],
+				"player_name": player[2],
+				"total_points": float(player[3]),
+				"avg_points": round(float(player[4]), 1)
 		} for player in data], f, indent=2)
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #
