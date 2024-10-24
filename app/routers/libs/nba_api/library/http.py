@@ -1,9 +1,11 @@
 import os
 import json
 import random
+import urllib3
 import requests
-
 from urllib.parse import quote_plus
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     from nba_api.library.debug.debug import DEBUG

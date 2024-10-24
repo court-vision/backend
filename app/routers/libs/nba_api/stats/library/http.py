@@ -1,5 +1,5 @@
 import json
-from nba_api.library import http
+from ...library import http
 # from nba_api.stats.library.parserv3 import (
 #     NBAStatsBoxscoreParserV3,
 #     NBAStatsBoxscoreTraditionalParserV3,

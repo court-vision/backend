@@ -2,6 +2,7 @@ from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, Team
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT, LOCAL_API_ENDPOINT
 from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi.concurrency import run_in_threadpool
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -354,8 +355,7 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: Backgro
 async def trigger_ETL_update_fpts(cron_token: str):
 	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
 
-from fastapi.concurrency import run_in_threadpool
-
+# Actual ETL process
 async def update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
 	if cron_token != CRON_TOKEN:
@@ -364,6 +364,9 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	game_date, game_ids = await run_in_threadpool(get_game_ids)
 
 	for game_id in game_ids:
+		# Sleep for a bit to avoid rate limiting
+		await asyncio.sleep(7)
+
 		print(game_id)
 		game_stats = await run_in_threadpool(get_game_stats, game_id)
 		if game_stats is None:
@@ -374,7 +377,9 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	await run_in_threadpool(update_total_data)
 	await run_in_threadpool(save_updated_data)
 
-# Separate functions for blocking operations
+	print("ETL process complete")
+
+# Function to insert into the daily_fantasy_points table
 def insert_daily_stats(game_stats, game_date):
 	with get_cursor() as cur:
 		for index, row in game_stats.iterrows():
@@ -384,6 +389,7 @@ def insert_daily_stats(game_stats, game_date):
 				)
 		conn.commit()
 
+# Function to update the player_total_points table with the recently inserted daily_fantasy_points data
 def update_total_data():
 	with get_cursor() as cur:
 		cur.execute('''
@@ -396,6 +402,7 @@ def update_total_data():
 			''')
 		conn.commit()
 
+# Function to save the updated data to a JSON file
 def save_updated_data():
 	with get_cursor() as cur:
 		cur.execute('SELECT * FROM player_standings ORDER BY rank')

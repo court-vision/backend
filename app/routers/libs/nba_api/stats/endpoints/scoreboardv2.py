@@ -1,6 +1,6 @@
-from nba_api.stats.endpoints._base import Endpoint
-from nba_api.stats.library.http import NBAStatsHTTP
-from nba_api.stats.library.parameters import DayOffset, GameDate, LeagueID
+from ._base import Endpoint
+from ..library.http import NBAStatsHTTP
+from ..library.parameters import DayOffset, GameDate, LeagueID
 
 
 class ScoreboardV2(Endpoint):

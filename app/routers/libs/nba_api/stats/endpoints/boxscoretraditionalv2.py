@@ -1,5 +1,6 @@
-from _base import Endpoint
+from ._base import Endpoint
 from ..library.http import NBAStatsHTTP
+from ..library.parameters import DayOffset, GameDate, LeagueID
 from ..library.parameters import (
     EndPeriod,
     EndRange,

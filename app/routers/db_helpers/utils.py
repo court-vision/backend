@@ -189,7 +189,7 @@ def calculate_fantasy_points(stats: pd.DataFrame) -> float:
 # Get all the game IDs for the (previous) day
 def get_game_ids() -> list[datetime, list[str]]:
 	central_tz = pytz.timezone('US/Central')
-	yesterday = datetime.now(central_tz) - timedelta(days=2)
+	yesterday = datetime.now(central_tz) - timedelta(days=1)
 	date_str = yesterday.strftime("%m-%d-%Y")
 	date = datetime.strptime(date_str, "%m-%d-%Y")
 
@@ -214,6 +214,3 @@ def get_game_stats(game_id: str) -> pd.DataFrame:
 	return stats
 
 # ------------------------ Networking ------------------------ #
-
-def get_ssl_certificate() -> ssl.SSLContext:
-	ctx = ssl.create_default_context(cafile="brightdata_proxy_ca/New SSL certifcate - MUST BE USED WITH PORT 33335/BrightData SSL certificate (port 33335).crt")
