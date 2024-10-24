@@ -1,14 +1,15 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, BackgroundTasks
 from contextlib import contextmanager
 import pandas as pd
 import psycopg2
 import requests
+import asyncio
 import httpx
 import time
 import os
@@ -341,12 +342,24 @@ async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current
 
 # ------------------------------------------ ETL -------------------------------------------- #
 
-# Route to listen for Cloud Scheduler to trigger updating the DB with new daily fantasy points, returning the updated data
+# Route to kick-off the ETL process, returning something quick to avoid timeouts on the frontend
+@router.post('/etl/start-update-fpts')
+async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: BackgroundTasks):
+	cron_token = req.cron_token
+	background_tasks.add_task(trigger_ETL_update_fpts, cron_token)
+	return {"message": "ETL process started"}
+
+# Async trigger
+async def trigger_ETL_update_fpts(cron_token: str):
+	async with httpx.AsyncClient() as client:
+		client.post(f"{SELF_ENDPOINT}/db/etl/update-fpts", json={"cron_token": cron_token})
+
+# Route to handle the actual ETL process
 @router.post('/etl/update-fpts')
 async def update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
 	if cron_token != CRON_TOKEN:
-		return {"success": False, "error": "Invalid token"}
+		return
 	game_date, game_ids = get_game_ids()
 
 	# Insert the new daily data into the database
@@ -384,6 +397,13 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	
 	# deserialized_data = deserialize_fpts_data(data)
 	# return ETLUpdateFPTSResp(success=True, data=deserialized_data)
-	return data
+
+	# Post the data back to the frontend server
+	headers = {
+		"Authorization": f"Bearer {CRON_TOKEN}"
+	}
+	data_json = json.dumps(data)
+	async with httpx.AsyncClient() as client:
+		await client.put(f"{FRONTEND_API_ENDPOINT}/data/etl/update-fpts", headers=headers, data={"data": data_json})
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #
