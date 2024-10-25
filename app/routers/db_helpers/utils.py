@@ -205,7 +205,7 @@ def get_game_ids() -> list[datetime, list[str]]:
 # Gets the stats for the players in each game
 def get_game_stats(game_id: str) -> pd.DataFrame:
 	cols_to_drop = ['COMMENT', 'TEAM_CITY', 'NICKNAME', 'START_POSITION', 'FG_PCT', 'FT_PCT', 'FG3_PCT', 'OREB', 'DREB', 'PF', 'PLUS_MINUS']
-	boxscore = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+	boxscore = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id, proxy=PROXY_STRING)
 	stats = boxscore.get_data_frames()[0]
 	stats = stats.dropna()
 	stats = stats.drop(columns=cols_to_drop)
