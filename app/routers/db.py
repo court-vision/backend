@@ -375,12 +375,11 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 		await run_in_threadpool(insert_daily_stats, game_stats, game_date)
 
 	await run_in_threadpool(update_total_data)
-	await run_in_threadpool(save_updated_data)
 
 	print("ETL process complete")
 
 # Function to insert into the daily_fantasy_points table
-def insert_daily_stats(game_stats, game_date):
+def insert_daily_stats(game_stats: pd.DataFrame, game_date: str):
 	with get_cursor() as cur:
 		for index, row in game_stats.iterrows():
 				cur.execute(
@@ -403,18 +402,15 @@ def update_total_data():
 		conn.commit()
 
 # Function to save the updated data to a JSON file
-def save_updated_data():
+@router.get("/etl/get_fpts_data")
+async def get_fpts_data(cron_token: str):
+	if not cron_token or cron_token != CRON_TOKEN:
+		return {"data": []}
+		
 	with get_cursor() as cur:
 		cur.execute('SELECT * FROM player_standings ORDER BY rank')
 		data = cur.fetchall()
 
-	with open('file-storage/fpts_data.json', 'w') as f:
-		json.dump([{
-				"rank": player[0],
-				"player_id": player[1],
-				"player_name": player[2],
-				"total_points": float(player[3]),
-				"avg_points": round(float(player[4]), 1)
-		} for player in data], f, indent=2)
+	return {"data": serialize_fpts_data(data)}
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #

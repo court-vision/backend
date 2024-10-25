@@ -1,6 +1,6 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS, PROXY_STRING
 from ..libs.nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
-from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
+from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene, FPTSPlayer
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
@@ -161,13 +161,13 @@ def deserialize_lineups(lineups: list[tuple]) -> list[LineupInfo]:
 	) for lineup in lineups]
 
 def serialize_fpts_data(data: list[tuple]) -> str:
-	return json.dumps([{
-		"rank": player[0],
-		"player_id": player[1],
-		"player_name": player[2],
-		"total_points": float(player[3]),
-		"avg_points": round(float(player[4]), 1)
-	} for player in data])
+	return [FPTSPlayer(
+		rank=player[0],
+		player_id=player[1],
+		player_name=player[2],
+		total_fpts=player[3],
+		avg_fpts=player[4]
+	) for player in data]
 
 # ------------------------ ETL Helpers ------------------------ #
 

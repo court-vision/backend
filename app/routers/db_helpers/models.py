@@ -145,11 +145,11 @@ class DeleteLineupResp(BaseModel):
 
 # Can modify this later to contain the time-series data, for now just the average and total FPTS
 class FPTSPlayer(BaseModel):
+    rank: int
     player_id: int
     player_name: str
-    rank: int
-    avg_fpts: float
     total_fpts: float
+    avg_fpts: float
 
 #                          ------- Incoming -------                           #
 
