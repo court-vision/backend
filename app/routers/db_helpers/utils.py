@@ -166,7 +166,8 @@ def serialize_fpts_data(data: list[tuple]) -> str:
 		player_id=player[1],
 		player_name=player[2],
 		total_fpts=player[3],
-		avg_fpts=player[4]
+		avg_fpts=player[4],
+		rank_change=player[5]
 	) for player in data]
 
 # ------------------------ ETL Helpers ------------------------ #

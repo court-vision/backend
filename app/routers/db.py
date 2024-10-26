@@ -435,7 +435,7 @@ async def get_fpts_data(cron_token: str):
 		return {"data": []}
 		
 	with get_cursor() as cur:
-		cur.execute('SELECT * FROM player_standings ORDER BY rank')
+		cur.execute('SELECT * FROM player_standings;')
 		data = cur.fetchall()
 
 	return {"data": serialize_fpts_data(data)}

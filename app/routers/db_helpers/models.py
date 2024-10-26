@@ -150,6 +150,7 @@ class FPTSPlayer(BaseModel):
     player_name: str
     total_fpts: float
     avg_fpts: float
+    rank_change: int | None = None
 
 #                          ------- Incoming -------                           #
 
