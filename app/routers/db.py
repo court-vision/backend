@@ -365,7 +365,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 
 	for game_id in game_ids:
 		# Sleep for a bit to avoid rate limiting
-		await asyncio.sleep(2)
+		await asyncio.sleep(1)
 
 		print(game_id)
 		game_stats = await run_in_threadpool(get_game_stats, game_id)
