@@ -374,12 +374,12 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 
 		await run_in_threadpool(insert_daily_stats, game_stats, game_date)
 
-	await run_in_threadpool(update_total_data)
+	await run_in_threadpool(update_total_data, game_date)
 
 	print("ETL process complete")
 
 # Function to insert into the daily_fantasy_points table
-def insert_daily_stats(game_stats: pd.DataFrame, game_date: str):
+def insert_daily_stats(game_stats: pd.DataFrame, game_date: datetime):
 	with get_cursor() as cur:
 		for index, row in game_stats.iterrows():
 				cur.execute(
@@ -389,8 +389,9 @@ def insert_daily_stats(game_stats: pd.DataFrame, game_date: str):
 		conn.commit()
 
 # Function to update the player_total_points table with the recently inserted daily_fantasy_points data
-def update_total_data():
+def update_total_data(game_date: datetime):
 	with get_cursor() as cur:
+		# Update the total points and average
 		cur.execute('''
 			INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
 			SELECT player_id, MAX(player_name), SUM(fantasy_points), AVG(fantasy_points)
@@ -399,17 +400,30 @@ def update_total_data():
 			ON CONFLICT (player_id) DO UPDATE
 			SET total_points = EXCLUDED.total_points,
 					avg_points = EXCLUDED.avg_points,
-					player_name = EXCLUDED.player_name;
-			
-			UPDATE player_total_points
-			SET prev_rank = rank,
-					rank = new_rank
-			FROM (
-					SELECT player_id, 
-								ROW_NUMBER() OVER (ORDER BY total_points DESC) AS new_rank
-					FROM player_total_points
-			) AS ranking
-			WHERE player_total_points.player_id = ranking.player_id;
+					player_name = EXCLUDED.player_name
+    ''')
+
+		# Step 1: Update prev_rank only for players who played on game_date
+		cur.execute('''
+				UPDATE player_total_points
+				SET prev_rank = rank
+				WHERE player_id IN (
+						SELECT player_id
+						FROM daily_fantasy_points
+						WHERE date = %s
+				);
+		''', (game_date,))
+		
+		# Step 2: Recalculate and update rank for all players based on their total_points
+		cur.execute('''
+				UPDATE player_total_points
+				SET rank = new_rank
+				FROM (
+						SELECT player_id, 
+										ROW_NUMBER() OVER (ORDER BY total_points DESC) AS new_rank
+						FROM player_total_points
+				) AS ranking
+				WHERE player_total_points.player_id = ranking.player_id;
 		''')
 
 		conn.commit()
