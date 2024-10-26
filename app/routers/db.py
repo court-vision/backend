@@ -397,8 +397,21 @@ def update_total_data():
 			FROM daily_fantasy_points
 			GROUP BY player_id
 			ON CONFLICT (player_id) DO UPDATE
-			SET total_points = EXCLUDED.total_points, avg_points = EXCLUDED.avg_points, player_name = EXCLUDED.player_name
-			''')
+			SET total_points = EXCLUDED.total_points,
+					avg_points = EXCLUDED.avg_points,
+					player_name = EXCLUDED.player_name;
+			
+			UPDATE player_total_points
+			SET prev_rank = rank,
+					rank = new_rank
+			FROM (
+					SELECT player_id, 
+								ROW_NUMBER() OVER (ORDER BY total_points DESC) AS new_rank
+					FROM player_total_points
+			) AS ranking
+			WHERE player_total_points.player_id = ranking.player_id;
+		''')
+
 		conn.commit()
 
 # Function to save the updated data to a JSON file
