@@ -394,7 +394,7 @@ def update_total_data(game_date: datetime):
 		# Update the total points and average
 		cur.execute('''
 			INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
-			SELECT player_id, MAX(player_name), SUM(fantasy_points), AVG(fantasy_points)
+			SELECT player_id, MAX(player_name), SUM(fantasy_points), ROUND(AVG(fantasy_points), 1)
 			FROM daily_fantasy_points
 			GROUP BY player_id
 			ON CONFLICT (player_id) DO UPDATE
