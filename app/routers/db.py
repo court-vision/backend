@@ -1,6 +1,6 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT, LOCAL_API_ENDPOINT
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
 from fastapi import APIRouter, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from .data_helpers.utils import check_league
@@ -431,6 +431,7 @@ def update_total_data(game_date: datetime):
 # Function to save the updated data to a JSON file
 @router.get("/etl/get_fpts_data")
 async def get_fpts_data(cron_token: str):
+	await asyncio.sleep(5)
 	if not cron_token or cron_token != CRON_TOKEN:
 		return {"data": []}
 		

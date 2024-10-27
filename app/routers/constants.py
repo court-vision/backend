@@ -6,6 +6,7 @@ FEATURES_SERVER_ENDPOINT = 'https://cv-features-443549036710.us-central1.run.app
 SELF_ENDPOINT = 'https://cv-backend-443549036710.us-central1.run.app'
 FRONTEND_API_ENDPOINT = 'https://www.courtvision.dev/api'
 LOCAL_API_ENDPOINT = 'http://localhost:3000/api'
+LOCAL_FEATURES_ENDPOINT = 'http://localhost:8080'
 
 
 # ----------------------------- Authentication ------------------------------ #

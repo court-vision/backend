@@ -85,8 +85,13 @@ async def get_free_agents(req: TeamDataReq):
     filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":req.fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
     headers = {'x-fantasy-filter': json.dumps(filters)}
 
+    cookies = {
+        'espn_s2': req.league_info.espn_s2,
+        'SWID': req.league_info.swid
+    }
+
     endpoint = ESPN_FANTASY_ENDPOINT.format(req.league_info.year, req.league_info.league_id)
-    data = requests.get(endpoint, params=params, headers=headers).json()
+    data = requests.get(endpoint, params=params, headers=headers, cookies=cookies).json()
     players = [Player(player, req.league_info.year) for player in data['players']]
 
     team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
