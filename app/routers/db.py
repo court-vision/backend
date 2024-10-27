@@ -431,7 +431,7 @@ def update_total_data(game_date: datetime):
 # Function to save the updated data to a JSON file
 @router.get("/etl/get_fpts_data")
 async def get_fpts_data(cron_token: str):
-	await asyncio.sleep(5)
+	# await asyncio.sleep(5)
 	if not cron_token or cron_token != CRON_TOKEN:
 		return {"data": []}
 		
