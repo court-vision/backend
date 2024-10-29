@@ -194,8 +194,6 @@ def get_game_ids() -> list[datetime, list[str]]:
 	date_str = yesterday.strftime("%m-%d-%Y")
 	date = datetime.strptime(date_str, "%m-%d-%Y")
 
-
-
 	scoreboard = scoreboardv2.ScoreboardV2(game_date=date, proxy=PROXY_STRING)
 	games = scoreboard.get_dict()['resultSets'][0]['rowSet']
 	game_ids = [game[2] for game in games]

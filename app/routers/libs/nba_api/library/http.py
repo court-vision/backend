@@ -108,8 +108,8 @@ class NBAHTTP:
         proxies = None
         if request_proxy:
             proxies = {
-                "http": request_proxy,
-                "https": request_proxy,
+                "http": 'http://' + request_proxy,
+                "https": 'https://' + request_proxy,
             }
 
         url = None
