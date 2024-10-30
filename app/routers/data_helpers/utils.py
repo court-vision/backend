@@ -246,17 +246,26 @@ def check_league(req: LeagueInfo):
         'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
     }
 
-    print(req.year, req.league_id, req.team_name, req.espn_s2, req.swid)
 
+    # Clean the input just in case it is what is making mobile requests fail
+    req.year = int(req.year)
+    req.league_id = int(req.league_id)
+    req.team_name = req.team_name.strip(" \t\n\r")
+    req.espn_s2 = req.espn_s2.strip(" \t\n\r")
+    req.swid = req.swid.strip(" \t\n\r")
+    
+    print(req.year, req.league_id, req.team_name, req.espn_s2, req.swid)
+    print(len(req.espn_s2), len(req.swid))
 
     endpoint = ESPN_FANTASY_ENDPOINT.format(req.year, req.league_id)
+    print(endpoint)
 
     try:
         response = requests.get(endpoint, params=params, cookies={'espn_s2': req.espn_s2, 'SWID': req.swid})
         response.raise_for_status()
         data = response.json()
         teams = [team['name'] for team in data['teams']]
-        return ValidateLeagueResp(valid=True, message="Team found") if req.team_name in teams else ValidateLeagueResp(valid=False, message="Team not found")
+        return ValidateLeagueResp(valid=True, message="Team found") if req.team_name in teams else ValidateLeagueResp(valid=False, message="Team not found in valid league")
     except requests.exceptions.HTTPError as e:
         return ValidateLeagueResp(valid=False, message=f"Invalid league information {e}")
     
