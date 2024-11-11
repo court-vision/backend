@@ -10,11 +10,8 @@ from contextlib import contextmanager
 import pandas as pd
 import psycopg2
 import requests
-import asyncio
 import httpx
 import time
-import json
-import os
 
 
 router = APIRouter()
@@ -46,6 +43,8 @@ conn = connect_to_db()
 
 
 # ----------------------------------- User Authentication ----------------------------------- #
+
+
 
 @router.post('/users/verify/send-email')
 async def verify_email(req: VerifyEmailReq):
@@ -145,9 +144,9 @@ async def login_user(user: UserLoginReq):
 
 	return UserLoginResp(access_token=access_token, success=True)
 
-@router.get('/users/me')
-async def get_me(current_user: dict = Depends(get_current_user)):
-	return current_user
+@router.get('/users/verify/auth-check')
+async def auth_check(current_user: dict = Depends(get_current_user)):
+	return {"success": True}
 
 # ------------------------------------ Team Management -------------------------------------- #
 

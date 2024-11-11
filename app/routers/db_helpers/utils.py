@@ -78,16 +78,6 @@ def connect_to_db() -> psycopg2.connect:
 	)
 	return conn
 
-
-# Get the cursor for the database and close it when done
-@contextmanager
-def get_cursor():
-	cur = conn.cursor()
-	try:
-		yield cur
-	finally:
-		cur.close()
-
 # --------------------- Encryption/Validation --------------------- #
 
 def hash_password(password: str) -> str:
