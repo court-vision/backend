@@ -27,7 +27,7 @@ def connect_to_db() -> psycopg2.connect:
 		host=DB_CREDENTIALS["host"],
 		port=DB_CREDENTIALS["port"],
 		database=DB_CREDENTIALS["database"]
-		)
+	)
 	return conn
 
 # Get the cursor for the database and close it when done
@@ -379,7 +379,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 # Function to insert into the daily_fantasy_points table
 def insert_daily_stats(game_stats: pd.DataFrame, game_date: datetime):
 	with get_cursor() as cur:
-		for index, row in game_stats.iterrows():
+		for _, row in game_stats.iterrows():
 				cur.execute(
 						'INSERT INTO daily_fantasy_points (player_id, player_name, date, fantasy_points) VALUES (%s, %s, %s, %s)',
 						(row['PLAYER_ID'], row['PLAYER_NAME'], game_date, row['Fantasy Score'])
