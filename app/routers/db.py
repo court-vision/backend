@@ -1,5 +1,5 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, get_game_ids, get_game_stats, serialize_fpts_data
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, serialize_fpts_data, fetch_nba_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
 from fastapi import APIRouter, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
@@ -360,71 +360,8 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	if cron_token != CRON_TOKEN:
 		print("Invalid token")
 		return
-	game_date, game_ids = await run_in_threadpool(get_game_ids)
+	
 
-	for game_id in game_ids:
-		# Sleep for a bit to avoid rate limiting
-
-		print(game_id)
-		game_stats = await run_in_threadpool(get_game_stats, game_id)
-		if game_stats is None:
-				continue
-
-		await run_in_threadpool(insert_daily_stats, game_stats, game_date)
-
-	await run_in_threadpool(update_total_data, game_date)
-
-	print("ETL process complete")
-
-# Function to insert into the daily_fantasy_points table
-def insert_daily_stats(game_stats: pd.DataFrame, game_date: datetime):
-	with get_cursor() as cur:
-		for _, row in game_stats.iterrows():
-				cur.execute(
-						'INSERT INTO daily_fantasy_points (player_id, player_name, date, fantasy_points) VALUES (%s, %s, %s, %s)',
-						(row['PLAYER_ID'], row['PLAYER_NAME'], game_date, row['Fantasy Score'])
-				)
-		conn.commit()
-
-# Function to update the player_total_points table with the recently inserted daily_fantasy_points data
-def update_total_data(game_date: datetime):
-	with get_cursor() as cur:
-		# Update the total points and average
-		cur.execute('''
-			INSERT INTO player_total_points (player_id, player_name, total_points, avg_points)
-			SELECT player_id, MAX(player_name), SUM(fantasy_points), ROUND(AVG(fantasy_points), 1)
-			FROM daily_fantasy_points
-			GROUP BY player_id
-			ON CONFLICT (player_id) DO UPDATE
-			SET total_points = EXCLUDED.total_points,
-					avg_points = EXCLUDED.avg_points,
-					player_name = EXCLUDED.player_name
-    ''')
-
-		# Step 1: Update prev_rank only for players who played on game_date
-		cur.execute('''
-				UPDATE player_total_points
-				SET prev_rank = rank
-				WHERE player_id IN (
-						SELECT player_id
-						FROM daily_fantasy_points
-						WHERE date = %s
-				);
-		''', (game_date,))
-		
-		# Step 2: Recalculate and update rank for all players based on their total_points
-		cur.execute('''
-				UPDATE player_total_points
-				SET rank = new_rank
-				FROM (
-						SELECT player_id, 
-										ROW_NUMBER() OVER (ORDER BY total_points DESC) AS new_rank
-						FROM player_total_points
-				) AS ranking
-				WHERE player_total_points.player_id = ranking.player_id;
-		''')
-
-		conn.commit()
 
 # Function to save the updated data to a JSON file
 @router.get("/etl/get_fpts_data")
