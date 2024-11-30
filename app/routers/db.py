@@ -7,10 +7,11 @@ from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from contextlib import contextmanager
-import pandas as pd
+import psycopg2.extras
 import psycopg2
 import requests
 import httpx
+import pytz
 import time
 
 
@@ -361,6 +362,86 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 		print("Invalid token")
 		return
 	
+	central_tz = pytz.timezone('US/Central')
+	yesterday = datetime.now(central_tz) - timedelta(days=1)
+	date_str = yesterday.strftime("%Y-%m-%d")
+	date = datetime.strptime(date_str, "%Y-%m-%d")
+	
+	# Fetch the data from the NBA API
+	new_data = fetch_nba_data()
+	
+	# Restructure the data from the DB
+	with get_cursor() as cur:
+		cur.execute('SELECT * FROM total_stats;')
+		data = cur.fetchall()
+	old_data = restructure_data(data)
+	
+	# Get the players to update
+	players_to_update, id_map = get_players_to_update(old_data, new_data)
+
+	# Create and insert the daily entries
+	daily_entries = create_daily_entries(players_to_update, old_data, date)
+	with get_cursor() as cur:
+		query = '''
+			INSERT INTO daily_stats (
+				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min
+			) VALUES %s
+			'''
+		psycopg2.extras.execute_values(cur, query, daily_entries)
+		conn.commit()
+	
+	# Create and insert the total entries
+	total_entries = create_total_entries(new_data, old_data, id_map, date)
+	with get_cursor() as cur:
+		query = '''
+    INSERT INTO total_stats (
+        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp
+    ) VALUES %s
+    ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        team = EXCLUDED.team,
+        date = EXCLUDED.date,
+        fpts = EXCLUDED.fpts,
+        pts = EXCLUDED.pts,
+        reb = EXCLUDED.reb,
+        ast = EXCLUDED.ast,
+        stl = EXCLUDED.stl,
+        blk = EXCLUDED.blk,
+        tov = EXCLUDED.tov,
+        fgm = EXCLUDED.fgm,
+        fga = EXCLUDED.fga,
+        fg3m = EXCLUDED.fg3m,
+        fg3a = EXCLUDED.fg3a,
+        ftm = EXCLUDED.ftm,
+        fta = EXCLUDED.fta,
+        min = EXCLUDED.min,
+        gp = EXCLUDED.gp
+    '''
+		psycopg2.extras.execute_values(cur, query, total_entries)
+
+		# Update the current rank to the previous rank, only for players who played on the date
+		cur.execute('''
+			UPDATE total_stats
+			SET p_rank = c_rank
+			WHERE id IN (
+				SELECT id
+				FROM total_stats
+				WHERE date = %s
+			);
+			''', (date,))
+
+		# Recalculate the rank for all players
+		cur.execute('''
+			UPDATE total_stats
+			SET c_rank = new_rank
+			FROM (
+				SELECT id, ROW_NUMBER() OVER (ORDER BY fpts DESC) as new_rank
+				FROM total_stats
+			) AS subquery
+			WHERE total_stats.id = subquery.id;
+			''')
+	
+	conn.commit()
 
 
 # Function to save the updated data to a JSON file

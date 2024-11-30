@@ -1,5 +1,5 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS, PROXY_STRING
-from ..libs.nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
+from ..libs.nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2, leagueleaders
 from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene, FPTSPlayer
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
@@ -242,31 +242,33 @@ def fetch_nba_data() -> dict:
 
 # Takes in the raw data from the database and returns a restrucuted dict that looks the same as the NBA API data
 def restructure_data(data: list[tuple]) -> dict:
-	return {
-		player[0]: {
+	old_dict = {}
+	for player in data:
+		old_dict[player[0]] = {
 			'id': player[0],
 			'name': player[1],
 			'team': player[2],
 			'date': player[3],
-			'min': player[4],
-			'fpts': player[5],
-			'pts': player[6],
-			'reb': player[7],
-			'ast': player[8],
-			'stl': player[9],
-			'blk': player[10],
-			'tov': player[11],
-			'fgm': player[12],
-			'fga': player[13],
-			'fg3m': player[14],
-			'fg3a': player[15],
-			'ftm': player[16],
-			'fta': player[17],
+			'fpts': player[4],
+			'pts': player[5],
+			'reb': player[6],
+			'ast': player[7],
+			'stl': player[8],
+			'blk': player[9],
+			'tov': player[10],
+			'fgm': player[11],
+			'fga': player[12],
+			'fg3m': player[13],
+			'fg3a': player[14],
+			'ftm': player[15],
+			'fta': player[16],
+			'min': player[17],
 			'gp': player[18],
 			'c_rank': player[19],
 			'p_rank': player[20]
-		} for player in data
-	}
+		}
+		
+	return old_dict
 
 
 # Compare the data from the NBA API and the database to find the players who played
@@ -359,7 +361,7 @@ def create_total_entries(updated_dict: dict, old_dict: dict, id_map: set, today:
 			calculate_fantasy_points(d),
 			d['pts'], d['reb'], d['ast'], d['stl'], d['blk'],
 			d['tov'], d['fgm'], d['fga'], d['fg3m'], d['fg3a'],
-			d['ftm'], d['fta'], d['min'], d['gp'], 0, 0
+			d['ftm'], d['fta'], d['min'], d['gp']
 		)
 		for id, d in updated_dict.items()
 	]
