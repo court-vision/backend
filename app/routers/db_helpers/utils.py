@@ -176,32 +176,6 @@ def calculate_fantasy_points(stats):
 	return points_score + rebounds_score + assists_score + stocks_score + turnovers_score + three_pointers_score + fg_eff_score + ft_eff_score
 
 
-# Get all the game IDs for the (previous) day
-def get_game_ids() -> list[datetime, list[str]]:
-	central_tz = pytz.timezone('US/Central')
-	yesterday = datetime.now(central_tz) - timedelta(days=1)
-	date_str = yesterday.strftime("%m-%d-%Y")
-	date = datetime.strptime(date_str, "%m-%d-%Y")
-
-	scoreboard = scoreboardv2.ScoreboardV2(game_date=date, proxy=PROXY_STRING)
-	games = scoreboard.get_dict()['resultSets'][0]['rowSet']
-	game_ids = [game[2] for game in games]
-
-	return date, game_ids
-
-
-# Gets the stats for the players in each game
-def get_game_stats(game_id: str) -> pd.DataFrame:
-	cols_to_drop = ['COMMENT', 'TEAM_CITY', 'NICKNAME', 'START_POSITION', 'FG_PCT', 'FT_PCT', 'FG3_PCT', 'OREB', 'DREB', 'PF', 'PLUS_MINUS']
-	boxscore = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id, proxy=PROXY_STRING)
-	stats = boxscore.get_data_frames()[0]
-	stats = stats.dropna()
-	stats = stats.drop(columns=cols_to_drop)
-	stats.loc[:, "Fantasy Score"] = stats.apply(calculate_fantasy_points, axis=1)
-
-	return stats
-
-
 # Fetches and restructures the data from the NBA API
 def fetch_nba_data() -> dict:
 	leaders = leagueleaders.LeagueLeaders(
@@ -212,7 +186,6 @@ def fetch_nba_data() -> dict:
 	updated = leaders.get_normalized_dict()['LeagueLeaders']
 
 	# Create a new dictionary with the id as the key and also filter out the columns
-	COLS_TO_KEEP = ['id', 'name', 'team', 'date', 'min', 'fpts', 'pts', 'reb', 'ast', 'stl', 'blk', 'tov', 'fgm', 'fga', 'fg3m', 'fg3a', 'ftm', 'fta', 'gp']
 	updated_dict = {}
 	for player in updated:
 		updated_dict[player['PLAYER_ID']] = {
@@ -267,7 +240,7 @@ def restructure_data(data: list[tuple]) -> dict:
 			'c_rank': player[19],
 			'p_rank': player[20]
 		}
-		
+
 	return old_dict
 
 
