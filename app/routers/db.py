@@ -445,7 +445,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	print("ETL process completed")
 
 
-# Function to save the updated data to a JSON file
+# Queries the view to get the data for the frontend
 @router.get("/etl/get_fpts_data")
 async def get_fpts_data(cron_token: str):
 	# await asyncio.sleep(5)
@@ -453,7 +453,7 @@ async def get_fpts_data(cron_token: str):
 		return {"data": []}
 		
 	with get_cursor() as cur:
-		cur.execute('SELECT * FROM player_standings;')
+		cur.execute('SELECT * FROM standings;')
 		data = cur.fetchall()
 
 	return {"data": serialize_fpts_data(data)}
