@@ -377,7 +377,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	old_data = restructure_data(data)
 	
 	# Get the players to update
-	players_to_update, id_map = get_players_to_update(old_data, new_data)
+	players_to_update, id_map = get_players_to_update(new_data, old_data)
 
 	# Create and insert the daily entries
 	daily_entries = create_daily_entries(players_to_update, old_data, date)
@@ -442,6 +442,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 			''')
 	
 	conn.commit()
+	print("ETL process completed")
 
 
 # Function to save the updated data to a JSON file
