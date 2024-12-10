@@ -419,7 +419,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
     '''
 		psycopg2.extras.execute_values(cur, query, total_entries)
 
-		# Update the current rank to the previous rank, only for players who played on the date
+		# Update the previous rank, only for players who played on the date
 		cur.execute('''
 			UPDATE total_stats
 			SET p_rank = c_rank
