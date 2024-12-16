@@ -2,11 +2,11 @@ from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, Team
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, serialize_fpts_data, fetch_nba_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries
 from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
 from fastapi import APIRouter, Depends, BackgroundTasks
-from fastapi.concurrency import run_in_threadpool
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from contextlib import contextmanager
+from psycopg2 import OperationalError
 import psycopg2.extras
 import psycopg2
 import requests
@@ -19,28 +19,47 @@ router = APIRouter()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Connect to the PostgreSQL database
-def connect_to_db() -> psycopg2.connect:
 
-	conn = psycopg2.connect(
-		user=DB_CREDENTIALS["user"],
-		password=DB_CREDENTIALS["password"],
-		host=DB_CREDENTIALS["host"],
-		port=DB_CREDENTIALS["port"],
-		database=DB_CREDENTIALS["database"]
-	)
+# Function to connect to the PostgreSQL database
+def connect_to_db() -> psycopg2.extensions.connection:
+	try:
+		conn = psycopg2.connect(
+			user=DB_CREDENTIALS['user'],
+			password=DB_CREDENTIALS['password'],
+			host=DB_CREDENTIALS['host'],
+			port=DB_CREDENTIALS['port'],
+			database=DB_CREDENTIALS['database']
+		)
+		return conn
+	except OperationalError as e:
+		print(f"Database error: {e}")
+		raise
+
+# Maintain a global connection object
+conn = None
+
+def get_connection():
+	global conn
+	if conn is None or conn.closed:
+		conn = connect_to_db()
 	return conn
 
-# Get the cursor for the database and close it when done
+# Get a cursor from the connection
 @contextmanager
 def get_cursor():
-		cur = conn.cursor()
-		try:
-				yield cur
-		finally:
-				cur.close()
+  conn = get_connection()  # Ensure the connection is active
+  cur = conn.cursor()
+  try:
+    yield cur
+  except psycopg2.Error as e:
+    print(f"Database error: {e}")
+    conn.rollback()  # Rollback if there's an error
+    raise
+  else:
+    conn.commit()  # Commit changes if no error
+  finally:
+    cur.close()
 
-conn = connect_to_db()
 
 
 # ----------------------------------- User Authentication ----------------------------------- #
