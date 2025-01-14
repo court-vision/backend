@@ -28,3 +28,24 @@ class PlayerResp(BaseModel):
     team: str
     valid_positions: list[str]
     injured: bool
+
+# ------------------------------- ETL Models ------------------------------- #
+
+# Can modify this later to contain the time-series data, for now just the average and total FPTS
+class FPTSPlayer(BaseModel):
+    rank: int
+    player_id: int
+    player_name: str
+    total_fpts: float
+    avg_fpts: float
+    rank_change: int | None = None
+
+#                          ------- Incoming -------                           #
+
+class ETLUpdateFTPSReq(BaseModel):
+    cron_token: str
+
+#                          ------- Outgoing -------                           #
+class ETLUpdateFTPSResp(BaseModel):
+    success: bool
+    data: list[FPTSPlayer] | None

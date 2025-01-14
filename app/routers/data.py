@@ -1,8 +1,12 @@
-from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLeagueResp
-from .data_helpers.utils import Player, check_league, get_roster
-from .constants import ESPN_FANTASY_ENDPOINT
-from fastapi import APIRouter
+from .data_helpers.utils import Player, check_league, create_rostered_entries, get_roster, fetch_nba_fpts_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries, create_daily_entries, create_total_entries, serialize_fpts_data
+from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLeagueResp, ETLUpdateFTPSReq
+from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN
+from fastapi import APIRouter, BackgroundTasks
+from datetime import datetime, timedelta
+from .db import get_cursor, commit_connection
+import psycopg2.extras
 import requests
+import pytz
 import json
 
 
@@ -33,6 +37,7 @@ origins = [
 async def root():
     return {"message": "Hello World"}
 
+# --------------------------------------------------- ESPN League Data -----------------------------------------------------
 
 # Checks if the league and team are valid
 @router.post("/validate_league")
@@ -105,10 +110,152 @@ async def get_free_agents(req: TeamDataReq):
                         ) for player in players]
 
 
+# ---------------------------------------------------- ETL Processes -------------------------------------------------------
 
-# Returns the most recent FPTS ETL data
+# Route to kick-off the ETL process, returning something quick to avoid timeouts on the frontend
+@router.post('/etl/start-update-fpts')
+async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: BackgroundTasks):
+	cron_token = req.cron_token
+	background_tasks.add_task(trigger_ETL_update_fpts, cron_token)
+	return {"message": "ETL process started"}
+
+# Async trigger
+async def trigger_ETL_update_fpts(cron_token: str):
+	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
+
+# Actual ETL process
+async def update_fpts(req: ETLUpdateFTPSReq):
+	cron_token = req.cron_token
+	if cron_token != CRON_TOKEN:
+		print("Invalid token")
+		return
+	
+	central_tz = pytz.timezone('US/Central')
+	yesterday = datetime.now(central_tz) - timedelta(days=1)
+	date_str = yesterday.strftime("%Y-%m-%d")
+	date = datetime.strptime(date_str, "%Y-%m-%d")
+	
+	# Fetch the data from the NBA API
+	new_data = fetch_nba_fpts_data()
+	
+	# Restructure the data from the DB
+	with get_cursor() as cur:
+		cur.execute('SELECT * FROM total_stats;')
+		data = cur.fetchall()
+	old_data = restructure_data(data)
+	
+	# Get the players to update
+	players_to_update, id_map = get_players_to_update(new_data, old_data)
+
+	# Create and insert the daily entries
+	daily_entries = create_daily_entries(players_to_update, old_data, date)
+	with get_cursor() as cur:
+		query = '''
+			INSERT INTO daily_stats (
+				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min
+			) VALUES %s
+			'''
+		psycopg2.extras.execute_values(cur, query, daily_entries)
+		commit_connection()
+	
+	# Create and insert the total entries
+	total_entries = create_total_entries(new_data, old_data, id_map, date)
+	with get_cursor() as cur:
+		query = '''
+    INSERT INTO total_stats (
+        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp
+    ) VALUES %s
+    ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        team = EXCLUDED.team,
+        date = EXCLUDED.date,
+        fpts = EXCLUDED.fpts,
+        pts = EXCLUDED.pts,
+        reb = EXCLUDED.reb,
+        ast = EXCLUDED.ast,
+        stl = EXCLUDED.stl,
+        blk = EXCLUDED.blk,
+        tov = EXCLUDED.tov,
+        fgm = EXCLUDED.fgm,
+        fga = EXCLUDED.fga,
+        fg3m = EXCLUDED.fg3m,
+        fg3a = EXCLUDED.fg3a,
+        ftm = EXCLUDED.ftm,
+        fta = EXCLUDED.fta,
+        min = EXCLUDED.min,
+        gp = EXCLUDED.gp
+    '''
+		psycopg2.extras.execute_values(cur, query, total_entries)
+
+		# Update the previous rank, only for players who played on the date
+		cur.execute('''
+			UPDATE total_stats
+			SET p_rank = c_rank
+			WHERE id IN (
+				SELECT id
+				FROM total_stats
+				WHERE date = %s
+			);
+			''', (date,))
+
+		# Recalculate the rank for all players
+		cur.execute('''
+			UPDATE total_stats
+			SET c_rank = new_rank
+			FROM (
+				SELECT id, ROW_NUMBER() OVER (ORDER BY fpts DESC) as new_rank
+				FROM total_stats
+			) AS subquery
+			WHERE total_stats.id = subquery.id;
+			''')
+	
+	commit_connection()
+	print("ETL process completed")
+
+
+# Queries the view to get the data for the frontend
 @router.get("/etl/get_fpts_data")
-async def get_fpts_data():
-    with open("file-storage/fpts_data.json", "r") as f:
-        data = json.load(f)
-    return {"data": data}
+async def get_fpts_data(cron_token: str):
+	if not cron_token or cron_token != CRON_TOKEN:
+		return {"data": []}
+		
+	with get_cursor() as cur:
+		cur.execute('SELECT * FROM standings;')
+		data = cur.fetchall()
+
+	return {"data": serialize_fpts_data(data)}
+
+
+# Route to trigger the ETL process for freeagent rostered percentages
+@router.post('/etl/start-update-rostered')
+async def start_ETL_update_rostered(req: ETLUpdateFTPSReq, background_tasks: BackgroundTasks):
+	cron_token = req.cron_token
+	background_tasks.add_task(trigger_ETL_update_rostered, cron_token)
+	return {"message": "ETL process started"}
+
+# Async trigger
+async def trigger_ETL_update_rostered(cron_token: str):
+	await update_rostered(ETLUpdateFTPSReq(cron_token=cron_token))
+
+# Actual ETL process
+async def update_rostered(req: ETLUpdateFTPSReq):
+	cron_token = req.cron_token
+	if cron_token != CRON_TOKEN:
+		print("Invalid token")
+		return
+	
+	# Fetch the nba player data and clean it
+	cleaned_data = fetch_nba_fpts_data()
+	
+    # Create the entries for the rostered percentages
+	entries = create_rostered_entries(cleaned_data)
+	
+    # Insert the entries into the DB
+	query = '''
+        INSERT INTO freeagents (espn_id, name, team, date, rostered_pct) VALUES %s
+    '''
+	with get_cursor() as cur:
+		psycopg2.extras.execute_values(cur, query, entries)
+		commit_connection()
+	
+	print("ETL process completed")

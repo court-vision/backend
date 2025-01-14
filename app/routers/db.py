@@ -1,17 +1,16 @@
-from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq, ETLUpdateFTPSReq, ETLUpdateFTPSResp
-from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email, serialize_fpts_data, fetch_nba_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT, CRON_TOKEN, FRONTEND_API_ENDPOINT
-from fastapi import APIRouter, Depends, BackgroundTasks
+from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq
+from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
+from fastapi import APIRouter, Depends
 from contextlib import contextmanager
 from psycopg2 import OperationalError
 import psycopg2.extras
 import psycopg2
 import requests
 import httpx
-import pytz
 import time
 
 
@@ -19,6 +18,8 @@ router = APIRouter()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
+# ----------------------------------------------- Database Connection ----------------------------------------------- #
 
 # Function to connect to the PostgreSQL database
 def connect_to_db() -> psycopg2.extensions.connection:
@@ -28,7 +29,7 @@ def connect_to_db() -> psycopg2.extensions.connection:
 			password=DB_CREDENTIALS['password'],
 			host=DB_CREDENTIALS['host'],
 			port=DB_CREDENTIALS['port'],
-			database=DB_CREDENTIALS['database']
+			dbname=DB_CREDENTIALS['dbname']
 		)
 		return conn
 	except OperationalError as e:
@@ -38,7 +39,7 @@ def connect_to_db() -> psycopg2.extensions.connection:
 # Maintain a global connection object
 conn = None
 
-def get_connection():
+def get_connection() -> psycopg2.extensions.connection:
 	global conn
 	if conn is None or conn.closed:
 		conn = connect_to_db()
@@ -60,11 +61,14 @@ def get_cursor():
   finally:
     cur.close()
 
+# Commit the connection
+def commit_connection() -> None:
+	global conn
+	if conn is not None:
+		conn.commit()
 
 
 # ----------------------------------- User Authentication ----------------------------------- #
-
-
 
 @router.post('/users/verify/send-email')
 async def verify_email(req: VerifyEmailReq):
@@ -362,119 +366,5 @@ async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current
 
 
 # ------------------------------------------ ETL -------------------------------------------- #
-
-# Route to kick-off the ETL process, returning something quick to avoid timeouts on the frontend
-@router.post('/etl/start-update-fpts')
-async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: BackgroundTasks):
-	cron_token = req.cron_token
-	background_tasks.add_task(trigger_ETL_update_fpts, cron_token)
-	return {"message": "ETL process started"}
-
-# Async trigger
-async def trigger_ETL_update_fpts(cron_token: str):
-	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
-
-# Actual ETL process
-async def update_fpts(req: ETLUpdateFTPSReq):
-	cron_token = req.cron_token
-	if cron_token != CRON_TOKEN:
-		print("Invalid token")
-		return
-	
-	central_tz = pytz.timezone('US/Central')
-	yesterday = datetime.now(central_tz) - timedelta(days=1)
-	date_str = yesterday.strftime("%Y-%m-%d")
-	date = datetime.strptime(date_str, "%Y-%m-%d")
-	
-	# Fetch the data from the NBA API
-	new_data = fetch_nba_data()
-	
-	# Restructure the data from the DB
-	with get_cursor() as cur:
-		cur.execute('SELECT * FROM total_stats;')
-		data = cur.fetchall()
-	old_data = restructure_data(data)
-	
-	# Get the players to update
-	players_to_update, id_map = get_players_to_update(new_data, old_data)
-
-	# Create and insert the daily entries
-	daily_entries = create_daily_entries(players_to_update, old_data, date)
-	with get_cursor() as cur:
-		query = '''
-			INSERT INTO daily_stats (
-				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min
-			) VALUES %s
-			'''
-		psycopg2.extras.execute_values(cur, query, daily_entries)
-		conn.commit()
-	
-	# Create and insert the total entries
-	total_entries = create_total_entries(new_data, old_data, id_map, date)
-	with get_cursor() as cur:
-		query = '''
-    INSERT INTO total_stats (
-        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp
-    ) VALUES %s
-    ON CONFLICT (id) DO UPDATE SET
-        name = EXCLUDED.name,
-        team = EXCLUDED.team,
-        date = EXCLUDED.date,
-        fpts = EXCLUDED.fpts,
-        pts = EXCLUDED.pts,
-        reb = EXCLUDED.reb,
-        ast = EXCLUDED.ast,
-        stl = EXCLUDED.stl,
-        blk = EXCLUDED.blk,
-        tov = EXCLUDED.tov,
-        fgm = EXCLUDED.fgm,
-        fga = EXCLUDED.fga,
-        fg3m = EXCLUDED.fg3m,
-        fg3a = EXCLUDED.fg3a,
-        ftm = EXCLUDED.ftm,
-        fta = EXCLUDED.fta,
-        min = EXCLUDED.min,
-        gp = EXCLUDED.gp
-    '''
-		psycopg2.extras.execute_values(cur, query, total_entries)
-
-		# Update the previous rank, only for players who played on the date
-		cur.execute('''
-			UPDATE total_stats
-			SET p_rank = c_rank
-			WHERE id IN (
-				SELECT id
-				FROM total_stats
-				WHERE date = %s
-			);
-			''', (date,))
-
-		# Recalculate the rank for all players
-		cur.execute('''
-			UPDATE total_stats
-			SET c_rank = new_rank
-			FROM (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY fpts DESC) as new_rank
-				FROM total_stats
-			) AS subquery
-			WHERE total_stats.id = subquery.id;
-			''')
-	
-	conn.commit()
-	print("ETL process completed")
-
-
-# Queries the view to get the data for the frontend
-@router.get("/etl/get_fpts_data")
-async def get_fpts_data(cron_token: str):
-	# await asyncio.sleep(5)
-	if not cron_token or cron_token != CRON_TOKEN:
-		return {"data": []}
-		
-	with get_cursor() as cur:
-		cur.execute('SELECT * FROM standings;')
-		data = cur.fetchall()
-
-	return {"data": serialize_fpts_data(data)}
 
 # ----------------------------------- Squeel Workbench -------------------------------------- #
