@@ -482,10 +482,10 @@ def fetch_espn_rostered_data(league_id: int, year: int) -> dict:
     data = data['players']
     data = [x.get('player', x) for x in data]
 
-    cleaned_data = {}
+    cleaned_data = []
     for player in data:
         if player:
-            if 0.33 <= player["ownership"]["percentOwned"] <= 0.85:
+            if 0.33 <= player["ownership"]["percentOwned"] <= 85:
                 cleaned_data.append({
                       'espnId': player['id'],
                       'fullName': player['fullName'],

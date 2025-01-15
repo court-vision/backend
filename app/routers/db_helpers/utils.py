@@ -1,5 +1,5 @@
 from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS, PROXY_STRING
-from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene, FPTSPlayer
+from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta

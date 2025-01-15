@@ -29,7 +29,7 @@ def connect_to_db() -> psycopg2.extensions.connection:
 			password=DB_CREDENTIALS['password'],
 			host=DB_CREDENTIALS['host'],
 			port=DB_CREDENTIALS['port'],
-			dbname=DB_CREDENTIALS['dbname']
+			dbname=DB_CREDENTIALS['database']
 		)
 		return conn
 	except OperationalError as e:

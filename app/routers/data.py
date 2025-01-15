@@ -1,6 +1,6 @@
-from .data_helpers.utils import Player, check_league, create_rostered_entries, get_roster, fetch_nba_fpts_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries, create_daily_entries, create_total_entries, serialize_fpts_data
+from .data_helpers.utils import Player, check_league, create_rostered_entries, get_roster, fetch_nba_fpts_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries, create_daily_entries, create_total_entries, serialize_fpts_data, fetch_espn_rostered_data
 from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLeagueResp, ETLUpdateFTPSReq
-from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN
+from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN, LEAGUE_ID
 from fastapi import APIRouter, BackgroundTasks
 from datetime import datetime, timedelta
 from .db import get_cursor, commit_connection
@@ -245,9 +245,9 @@ async def update_rostered(req: ETLUpdateFTPSReq):
 		return
 	
 	# Fetch the nba player data and clean it
-	cleaned_data = fetch_nba_fpts_data()
+	cleaned_data = fetch_espn_rostered_data(int(LEAGUE_ID), 2025)
 	
-    # Create the entries for the rostered percentages
+  # Create the entries for the rostered percentages
 	entries = create_rostered_entries(cleaned_data)
 	
     # Insert the entries into the DB

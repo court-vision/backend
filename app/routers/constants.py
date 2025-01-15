@@ -36,3 +36,6 @@ PROXY_STRING = f"{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 # 	"http": f"http://brd.superproxy.io:22225?auth={PROXY_TOKEN}",
 # 	"https": f"http://brd.superproxy.io:22225?auth={PROXY_TOKEN}"
 # }
+
+# ----------------------------- League Information ----------------------------- #
+LEAGUE_ID = os.getenv('DEV_LEAGUE_ID')
