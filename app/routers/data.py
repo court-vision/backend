@@ -1,4 +1,4 @@
-from .data_helpers.utils import Player, check_league, create_rostered_entries, get_roster, fetch_nba_fpts_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries, create_daily_entries, create_total_entries, serialize_fpts_data, fetch_espn_rostered_data
+from .data_helpers.utils import Player, check_league, create_rostered_entries, get_roster, fetch_nba_fpts_data, restructure_data, get_players_to_update, create_daily_entries, create_total_entries, serialize_fpts_data, fetch_espn_rostered_data
 from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLeagueResp, ETLUpdateFTPSReq
 from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN, LEAGUE_ID
 from fastapi import APIRouter, BackgroundTasks
@@ -118,11 +118,9 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: Backgro
 	cron_token = req.cron_token
 	background_tasks.add_task(trigger_ETL_update_fpts, cron_token)
 	return {"message": "ETL process started"}
-
 # Async trigger
 async def trigger_ETL_update_fpts(cron_token: str):
 	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
-
 # Actual ETL process
 async def update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
@@ -135,24 +133,27 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	date_str = yesterday.strftime("%Y-%m-%d")
 	date = datetime.strptime(date_str, "%Y-%m-%d")
 	
+	# Get the rostered percentages from ESPN
+	rostered_data = fetch_espn_rostered_data(int(LEAGUE_ID), 2025, True)
+
 	# Fetch the data from the NBA API
-	new_data = fetch_nba_fpts_data()
+	new_data = fetch_nba_fpts_data(rostered_data)
 	
 	# Restructure the data from the DB
 	with get_cursor() as cur:
 		cur.execute('SELECT * FROM total_stats;')
 		data = cur.fetchall()
 	old_data = restructure_data(data)
-	
+
 	# Get the players to update
-	players_to_update, id_map = get_players_to_update(new_data, old_data)
+	players_to_update, id_map = get_players_to_update(new_data, old_data, rostered_data)
 
 	# Create and insert the daily entries
-	daily_entries = create_daily_entries(players_to_update, old_data, date)
+	daily_entries = create_daily_entries(players_to_update, old_data, date, rostered_data)
 	with get_cursor() as cur:
 		query = '''
 			INSERT INTO daily_stats (
-				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min
+				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, rost_pct
 			) VALUES %s
 			'''
 		psycopg2.extras.execute_values(cur, query, daily_entries)
@@ -163,7 +164,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	with get_cursor() as cur:
 		query = '''
     INSERT INTO total_stats (
-        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp
+        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp, rost_pct
     ) VALUES %s
     ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -183,7 +184,8 @@ async def update_fpts(req: ETLUpdateFTPSReq):
         ftm = EXCLUDED.ftm,
         fta = EXCLUDED.fta,
         min = EXCLUDED.min,
-        gp = EXCLUDED.gp
+        gp = EXCLUDED.gp,
+				rost_pct = EXCLUDED.rost_pct;
     '''
 		psycopg2.extras.execute_values(cur, query, total_entries)
 
@@ -232,11 +234,9 @@ async def start_ETL_update_rostered(req: ETLUpdateFTPSReq, background_tasks: Bac
 	cron_token = req.cron_token
 	background_tasks.add_task(trigger_ETL_update_rostered, cron_token)
 	return {"message": "ETL process started"}
-
 # Async trigger
 async def trigger_ETL_update_rostered(cron_token: str):
 	await update_rostered(ETLUpdateFTPSReq(cron_token=cron_token))
-
 # Actual ETL process
 async def update_rostered(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token

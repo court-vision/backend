@@ -296,7 +296,7 @@ def calculate_fantasy_points(stats):
 
 
 # Fetches and restructures the data from the NBA API
-def fetch_nba_fpts_data() -> dict:
+def fetch_nba_fpts_data(rostered_data: dict) -> dict:
 	leaders = leagueleaders.LeagueLeaders(
 		season='2024-25',
 		per_mode48='Totals',
@@ -326,7 +326,8 @@ def fetch_nba_fpts_data() -> dict:
 		'fg3a': player['FG3A'],
 		'ftm': player['FTM'],
 		'fta': player['FTA'],
-		'gp': player['GP']
+		'gp': player['GP'],
+		'rost_pct': rostered_data.get(player['PLAYER'], 0)
 		}
 	
 	return updated_dict
@@ -401,6 +402,7 @@ def create_daily_entry(old, new):
 				 new['ftm'] - old['ftm'],
 				 new['fta'] - old['fta'],
 				 new['min'] - old['min'],
+				 new['rost_pct']
 	)
 
 
@@ -424,11 +426,12 @@ def create_single_daily_entry(new):
 					new['ftm'],
 					new['fta'],
 					new['min'],
+					new['rost_pct']
 	)
 
 
 # Creates the formatted entries for insertion into daily_stats
-def create_daily_entries(had_game: list[dict], old_dict: dict, date: datetime) -> list[tuple]:
+def create_daily_entries(had_game: list[dict], old_dict: dict, date: datetime, rostered_data: dict) -> list[tuple]:
 	entries = []
 
 	for d in had_game:
@@ -453,7 +456,7 @@ def create_total_entries(updated_dict: dict, old_dict: dict, id_map: set, today:
 			calculate_fantasy_points(d),
 			d['pts'], d['reb'], d['ast'], d['stl'], d['blk'],
 			d['tov'], d['fgm'], d['fga'], d['fg3m'], d['fg3a'],
-			d['ftm'], d['fta'], d['min'], d['gp']
+			d['ftm'], d['fta'], d['min'], d['gp'], d['rost_pct']
 		)
 		for id, d in updated_dict.items()
 	]
@@ -469,13 +472,13 @@ def serialize_fpts_data(data: list[tuple]) -> str:
 		rank_change=player[5]
 	) for player in data]
 
-def fetch_espn_rostered_data(league_id: int, year: int) -> dict:
+def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:
     params = {
         'view': 'kona_player_info',
         'scoringPeriodId': 0,
     }
     endpoint = ESPN_FANTASY_ENDPOINT.format(year, league_id)
-    filters = {"players":{"filterSlotIds":{"value":[]},"limit": 400, "sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":2,"sortAsc":True,"value":"STANDARD"}}}
+    filters = {"players":{"filterSlotIds":{"value":[]},"limit": 750, "sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":2,"sortAsc":True,"value":"STANDARD"}}}
     headers = {'x-fantasy-filter': json.dumps(filters)}
 
     data = requests.get(endpoint, params=params, headers=headers).json()
@@ -483,16 +486,22 @@ def fetch_espn_rostered_data(league_id: int, year: int) -> dict:
     data = [x.get('player', x) for x in data]
 
     cleaned_data = []
-    for player in data:
-        if player:
-            if 0.33 <= player["ownership"]["percentOwned"] <= 85:
-                cleaned_data.append({
-                      'espnId': player['id'],
-                      'fullName': player['fullName'],
-                      'team': PRO_TEAM_MAP[player['proTeamId']],
-                      'rosteredPct': player['ownership']['percentOwned'],
-                })
-    
+
+    # When inserting into the freeagents, we only want players with ownership between 0.33 and 85
+    if not for_stats:
+        for player in data:
+            if player:
+                if 0.33 <= player["ownership"]["percentOwned"] <= 85:
+                    cleaned_data.append({
+                        'espnId': player['id'],
+                        'fullName': player['fullName'],
+                        'team': PRO_TEAM_MAP[player['proTeamId']],
+                        'rosteredPct': player['ownership']['percentOwned'],
+                    })
+    # When getting the data to incorporate into the daily stats, we want all players and mapping from full name to data
+    else:
+        cleaned_data = {player['fullName']: player['ownership']['percentOwned'] for player in data if player}
+
     return cleaned_data
 
 # Create the entries for the database
