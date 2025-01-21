@@ -146,10 +146,10 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	old_data = restructure_data(data)
 
 	# Get the players to update
-	players_to_update, id_map = get_players_to_update(new_data, old_data, rostered_data)
+	players_to_update, id_map = get_players_to_update(new_data, old_data)
 
 	# Create and insert the daily entries
-	daily_entries = create_daily_entries(players_to_update, old_data, date, rostered_data)
+	daily_entries = create_daily_entries(players_to_update, old_data, date)
 	with get_cursor() as cur:
 		query = '''
 			INSERT INTO daily_stats (

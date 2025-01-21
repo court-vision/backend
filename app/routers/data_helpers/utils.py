@@ -3,6 +3,7 @@ from .models import LeagueInfo, ValidateLeagueResp, FPTSPlayer
 from ..constants import ESPN_FANTASY_ENDPOINT
 from functools import cached_property
 from datetime import datetime
+import unicodedata
 import requests
 import json
 import pytz
@@ -185,7 +186,6 @@ class Player(object):
 
 
         # add available stats
-
         player = data['playerPoolEntry']['player'] if 'playerPoolEntry' in data else data['player']
         self.injuryStatus = player.get('injuryStatus', self.injuryStatus)
         self.injured = player.get('injured', False)
@@ -294,6 +294,9 @@ def calculate_fantasy_points(stats):
 	ft_eff_score = stats['ftm'] - stats['fta']
 	return points_score + rebounds_score + assists_score + stocks_score + turnovers_score + three_pointers_score + fg_eff_score + ft_eff_score
 
+# Removes diacritics from a string
+def remove_diacritics(s: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 # Fetches and restructures the data from the NBA API
 def fetch_nba_fpts_data(rostered_data: dict) -> dict:
@@ -327,7 +330,7 @@ def fetch_nba_fpts_data(rostered_data: dict) -> dict:
 		'ftm': player['FTM'],
 		'fta': player['FTA'],
 		'gp': player['GP'],
-		'rost_pct': rostered_data.get(player['PLAYER'], 0)
+		'rost_pct': rostered_data.get(remove_diacritics(player['PLAYER']), 0)
 		}
 	
 	return updated_dict
@@ -431,7 +434,7 @@ def create_single_daily_entry(new):
 
 
 # Creates the formatted entries for insertion into daily_stats
-def create_daily_entries(had_game: list[dict], old_dict: dict, date: datetime, rostered_data: dict) -> list[tuple]:
+def create_daily_entries(had_game: list[dict], old_dict: dict, date: datetime) -> list[tuple]:
 	entries = []
 
 	for d in had_game:

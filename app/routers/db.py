@@ -241,7 +241,7 @@ async def update_team(team_info: TeamUpdateReq, current_user: dict = Depends(get
 	return TeamUpdateResp(success=True)
 
 @router.get('/teams/view')
-async def view_team(team_id: int, current_user: dict = Depends(get_current_user)):
+async def view_team(team_id: int):
 	#TODO: Fetch the roster data from the ESPN API, maybe save it to the database, no don't do that, rosters can change
 
 	with get_cursor() as cur:
