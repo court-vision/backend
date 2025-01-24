@@ -134,7 +134,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 	date = datetime.strptime(date_str, "%Y-%m-%d")
 	
 	# Get the rostered percentages from ESPN
-	rostered_data = fetch_espn_rostered_data(int(LEAGUE_ID), 2025, True)
+	rostered_data = fetch_espn_rostered_data(int(LEAGUE_ID), 2025, for_stats=True)
 
 	# Fetch the data from the NBA API
 	new_data = fetch_nba_fpts_data(rostered_data)
