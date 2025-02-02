@@ -48,18 +48,19 @@ def get_connection() -> psycopg2.extensions.connection:
 # Get a cursor from the connection
 @contextmanager
 def get_cursor():
-  conn = get_connection()  # Ensure the connection is active
-  cur = conn.cursor()
-  try:
-    yield cur
-  except psycopg2.Error as e:
-    print(f"Database error: {e}")
-    conn.rollback()  # Rollback if there's an error
-    raise
-  else:
-    conn.commit()  # Commit changes if no error
-  finally:
-    cur.close()
+	conn = get_connection()  # Ensure the connection is active
+	cur = conn.cursor()
+	try:
+		yield cur
+	except psycopg2.Error as e:
+		print(f"Database error: {e}")
+		if conn:
+			conn.rollback()  # Rollback if there's an error
+		raise
+	else:
+		conn.commit()  # Commit changes if no error
+	finally:
+		cur.close()
 
 # Commit the connection
 def commit_connection() -> None:
