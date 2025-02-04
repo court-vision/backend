@@ -3,7 +3,7 @@ from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLe
 from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN, LEAGUE_ID
 from fastapi import APIRouter, BackgroundTasks
 from datetime import datetime, timedelta
-from .db import get_cursor, commit_connection
+from .db import get_cursor
 import psycopg2.extras
 import requests
 import pytz
@@ -157,7 +157,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 			) VALUES %s
 			'''
 		psycopg2.extras.execute_values(cur, query, daily_entries)
-		commit_connection()
+		print("Inserted new daily entries")
 	
 	# Create and insert the total entries
 	total_entries = create_total_entries(new_data, old_data, id_map, date)
@@ -188,6 +188,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 				rost_pct = EXCLUDED.rost_pct;
     '''
 		psycopg2.extras.execute_values(cur, query, total_entries)
+		print("Inserted new total entries")
 
 		# Update the previous rank, only for players who played on the date
 		cur.execute('''
@@ -210,8 +211,8 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 			) AS subquery
 			WHERE total_stats.id = subquery.id;
 			''')
+		print("Updated ranks")
 	
-	commit_connection()
 	print("ETL process completed")
 
 
@@ -256,6 +257,5 @@ async def update_rostered(req: ETLUpdateFTPSReq):
     '''
 	with get_cursor() as cur:
 		psycopg2.extras.execute_values(cur, query, entries)
-		commit_connection()
 	
 	print("ETL process completed")

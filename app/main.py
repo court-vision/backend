@@ -1,8 +1,9 @@
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
+from routers.db import lifespan
 from routers import data, db
+from fastapi import FastAPI
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 origins = [
 	"http://localhost:3000", # Frontend

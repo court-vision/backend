@@ -1,14 +1,13 @@
 from .db_helpers.models import UserCreateResp, UserLoginReq, UserLoginResp, TeamGetResp, TeamAddReq, TeamAddResp, TeamRemoveReq, TeamRemoveResp, TeamUpdateReq, TeamUpdateResp, UserUpdateReq, UserUpdateResp, UserDeleteResp, GenerateLineupReq, GenerateLineupResp, SaveLineupReq, SaveLineupResp, GetLineupsResp, DeleteLineupResp, VerifyEmailReq, CheckCodeReq, UserDeleteReq
 from .db_helpers.utils import hash_password, check_password, create_access_token, get_current_user, serialize_league_info, serialize_lineup_info, generate_lineup_hash, deserialize_lineups, generate_verification_code, send_verification_email
-from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, DB_CREDENTIALS, SELF_ENDPOINT
+from .constants import ACCESS_TOKEN_EXPIRE_DAYS, FEATURES_SERVER_ENDPOINT, SELF_ENDPOINT, DB_CREDENTIALS
 from .data_helpers.utils import check_league
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from fastapi import APIRouter, Depends
 from contextlib import contextmanager
-from psycopg2 import OperationalError
-import psycopg2.extras
-import psycopg2
+from fastapi import FastAPI
+from psycopg2 import pool
 import requests
 import httpx
 import time
@@ -18,56 +17,36 @@ router = APIRouter()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+db_pool = None
 
-# ----------------------------------------------- Database Connection ----------------------------------------------- #
+async def lifespan(app: FastAPI):
+	global db_pool
+	db_pool = pool.SimpleConnectionPool(
+		minconn=1,
+		maxconn=10,
+		**DB_CREDENTIALS
+	)
+	if db_pool:
+		print('Connection pool created successfully')
+	yield
+	if db_pool:
+		db_pool.closeall()
+		print('Connection pool closed successfully')
 
-# Function to connect to the PostgreSQL database
-def connect_to_db() -> psycopg2.extensions.connection:
-	try:
-		conn = psycopg2.connect(
-			user=DB_CREDENTIALS['user'],
-			password=DB_CREDENTIALS['password'],
-			host=DB_CREDENTIALS['host'],
-			port=DB_CREDENTIALS['port'],
-			dbname=DB_CREDENTIALS['database']
-		)
-		return conn
-	except OperationalError as e:
-		print(f"Database error: {e}")
-		raise
-
-# Maintain a global connection object
-conn = None
-
-def get_connection() -> psycopg2.extensions.connection:
-	global conn
-	if conn is None or conn.closed:
-		conn = connect_to_db()
-	return conn
-
-# Get a cursor from the connection
 @contextmanager
 def get_cursor():
-	conn = get_connection()  # Ensure the connection is active
+	global db_pool
+	conn = db_pool.getconn()
 	cur = conn.cursor()
 	try:
 		yield cur
-	except psycopg2.Error as e:
-		print(f"Database error: {e}")
-		if conn:
-			conn.rollback()  # Rollback if there's an error
-		raise
-	else:
-		conn.commit()  # Commit changes if no error
+		conn.commit()
+	except Exception as e:
+		conn.rollback()
+		raise e
 	finally:
 		cur.close()
-
-# Commit the connection
-def commit_connection() -> None:
-	global conn
-	if conn is not None:
-		conn.commit()
-
+		db_pool.putconn(conn)
 
 # ----------------------------------- User Authentication ----------------------------------- #
 
@@ -86,7 +65,6 @@ async def verify_email(req: VerifyEmailReq):
 				return {"success": True, "already_in_use": True}
 			else:
 				cur.execute("DELETE FROM verifications WHERE email = %s AND type = 'email'", (email,))
-				conn.commit()
 
 		cur.execute("SELECT * FROM users WHERE email = %s LIMIT 1", (email,))
 		data = cur.fetchone()
@@ -100,7 +78,7 @@ async def verify_email(req: VerifyEmailReq):
 		# Generate the verification code
 		code = generate_verification_code()
 		cur.execute("INSERT INTO verifications (email, code, hashed_password, timestamp, type) VALUES (%s, %s, %s, %s, %s)", (email, code, hashed_password, int(time.time()), "email"))
-		conn.commit()
+		
 
 	# Send the verification email
 	res = send_verification_email(email, code)
@@ -128,7 +106,7 @@ async def check_verification_code(req: CheckCodeReq):
 		
 		# Delete the verification data
 		cur.execute("DELETE FROM verifications WHERE email = %s", (email,))
-		conn.commit()
+		
 
 	resp = create_user(email, hashed_password)
 	return resp
@@ -144,7 +122,7 @@ def create_user(email: str, hashed_password: str):
 			
 			cur.execute("INSERT INTO users (email, password) VALUES (%s, %s) RETURNING user_id", (email, hashed_password))
 			user_id = cur.fetchone()[0]
-			conn.commit()
+			
 
 			access_token = create_access_token({"uid": user_id, "email": email, "exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
 		
@@ -210,7 +188,7 @@ async def add_team(team_info: TeamAddReq, current_user: dict = Depends(get_curre
 		# Handle private league info
 		cur.execute("INSERT INTO teams (user_id, team_identifier, team_info) VALUES (%s, %s, %s) RETURNING team_id", (user_id, team_identifier, serialize_league_info(league_info)))
 		team_id = cur.fetchone()[0]
-		conn.commit()
+		
 
 	return TeamAddResp(team_id=team_id, already_exists=False)
 
@@ -222,7 +200,7 @@ async def remove_team(team_info: TeamRemoveReq, current_user: dict = Depends(get
 
 	with get_cursor() as cur:
 		cur.execute("DELETE FROM teams WHERE user_id = %s AND team_id = %s", (user_id, team_id))
-		conn.commit()
+		
 	
 	return TeamRemoveResp(success=True)
 
@@ -237,7 +215,7 @@ async def update_team(team_info: TeamUpdateReq, current_user: dict = Depends(get
 
 	with get_cursor() as cur:
 		cur.execute("UPDATE teams SET team_info = %s WHERE user_id = %s AND team_id = %s", (serialize_league_info(league_info), user_id, team_info.team_id))
-		conn.commit()
+		
 
 	return TeamUpdateResp(success=True)
 
@@ -270,7 +248,7 @@ async def delete_user(user: UserDeleteReq, current_user: dict = Depends(get_curr
 
 		cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
 		cur.execute("DELETE FROM teams WHERE user_id = %s", (user_id,))
-		conn.commit()
+		
 
 	return UserDeleteResp(success=True)
 
@@ -287,7 +265,7 @@ async def update_user(user_info: UserUpdateReq, current_user: dict = Depends(get
 		if password:
 			hashed_password = hash_password(password)
 			cur.execute("UPDATE users SET password = %s WHERE user_id = %s", (hashed_password, user_id))
-		conn.commit()
+		
 	
 	return UserUpdateResp(success=True)
 
@@ -346,7 +324,7 @@ async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_curre
 
 			# Else, save the lineup
 			cur.execute("INSERT INTO lineups (team_id, lineup_info, lineup_hash) VALUES (%s, %s, %s)", (req.selected_team, serialize_lineup_info(req.lineup_info), lineup_hash))
-			conn.commit()
+			
 
 	except Exception as _:
 		return SaveLineupResp(success=False, already_exists=False)
@@ -361,7 +339,7 @@ async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current
 		lineup_hash = cur.fetchone()[0]
 		if not lineup_hash:
 			return DeleteLineupResp(success=False)
-		conn.commit()
+		
 
 	return DeleteLineupResp(success=True)
 
