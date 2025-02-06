@@ -42,7 +42,8 @@ def get_cursor():
 		yield cur
 		conn.commit()
 	except Exception as e:
-		conn.rollback()
+		if conn.closed == 0:
+			conn.rollback()
 		raise e
 	finally:
 		cur.close()
