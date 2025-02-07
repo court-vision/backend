@@ -1,6 +1,6 @@
 from ..libs.nba_api.stats.endpoints import leagueleaders
 from .models import LeagueInfo, ValidateLeagueResp, FPTSPlayer
-from ..constants import ESPN_FANTASY_ENDPOINT
+from ..constants import ESPN_FANTASY_ENDPOINT, PROXY_STRING
 from functools import cached_property
 from datetime import datetime
 import unicodedata
@@ -303,7 +303,8 @@ def fetch_nba_fpts_data(rostered_data: dict) -> dict:
 	leaders = leagueleaders.LeagueLeaders(
 		season='2024-25',
 		per_mode48='Totals',
-		stat_category_abbreviation='PTS'
+		stat_category_abbreviation='PTS',
+        proxy=PROXY_STRING
 	)
 	updated = leaders.get_normalized_dict()['LeagueLeaders']
 

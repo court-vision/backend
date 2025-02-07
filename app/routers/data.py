@@ -114,15 +114,7 @@ async def get_free_agents(req: TeamDataReq):
 
 # Route to kick-off the ETL process, returning something quick to avoid timeouts on the frontend
 @router.post('/etl/start-update-fpts')
-async def start_ETL_update_fpts(req: ETLUpdateFTPSReq, background_tasks: BackgroundTasks):
-	cron_token = req.cron_token
-	background_tasks.add_task(trigger_ETL_update_fpts, cron_token)
-	return {"message": "ETL process started"}
-# Async trigger
-async def trigger_ETL_update_fpts(cron_token: str):
-	await update_fpts(ETLUpdateFTPSReq(cron_token=cron_token))
-# Actual ETL process
-async def update_fpts(req: ETLUpdateFTPSReq):
+async def start_ETL_update_fpts(req: ETLUpdateFTPSReq):
 	cron_token = req.cron_token
 	if cron_token != CRON_TOKEN:
 		print("Invalid token")
@@ -147,6 +139,7 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 
 	# Get the players to update
 	players_to_update, id_map = get_players_to_update(new_data, old_data)
+	print(len(players_to_update), "players to update")
 
 	# Create and insert the daily entries
 	daily_entries = create_daily_entries(players_to_update, old_data, date)
@@ -214,6 +207,8 @@ async def update_fpts(req: ETLUpdateFTPSReq):
 		print("Updated ranks")
 	
 	print("ETL process completed")
+
+	return {"message": "ETL process completed"}
 
 
 # Queries the view to get the data for the frontend
