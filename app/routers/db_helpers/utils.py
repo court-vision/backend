@@ -1,4 +1,4 @@
-from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS, PROXY_STRING
+from ..constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
 from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
@@ -11,7 +11,6 @@ import psycopg2
 import hashlib
 import random
 import bcrypt
-import pytz
 import json
 import os
 

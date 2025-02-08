@@ -149,7 +149,7 @@ class NBAHTTP:
                 url=base_url,
                 params=parameters,
                 headers=request_headers,
-                proxies=proxies,
+                # proxies=proxies,
                 timeout=timeout,
                 verify=False,
             )
