@@ -17,7 +17,11 @@ router = APIRouter()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-db_pool = None
+db_pool = pool.SimpleConnectionPool(
+		minconn=1,
+		maxconn=10,
+		**DB_CREDENTIALS
+	)
 
 async def lifespan(app: FastAPI):
 	global db_pool
