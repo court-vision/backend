@@ -7,7 +7,6 @@ from sendgrid.helpers.mail import Mail
 from sendgrid import SendGridAPIClient
 from jose import jwt, JWTError
 from typing import Optional
-import psycopg2
 import hashlib
 import random
 import bcrypt
@@ -24,18 +23,34 @@ def generate_verification_code() -> str:
 
 # Send the verification email
 def send_verification_email(to_email: str, code: str) -> dict:
+	sendgrid_api_key = os.environ.get('SENDGRID_API_KEY')
+	development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
+	
+	if not sendgrid_api_key:
+		if development_mode:
+			print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
+			return {"success": True}
+		else:
+			print("SENDGRID_API_KEY environment variable not set")
+			return {"success": False, "error": "Email service not configured"}
+	
 	message = Mail(
 		from_email='Court Vision <mail@courtvision.dev>',
 		to_emails=to_email,
 		subject='Email Verification',
 		html_content=f'<strong>Please verify your email by entering the following code: {code}</strong>')
 	try:
-		sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
+		sg = SendGridAPIClient(sendgrid_api_key)
 		response = sg.send(message)
-		print(response.status_code)
+		print(f"SendGrid response status: {response.status_code}")
 
-		return {"success": True}
+		if response.status_code in [200, 201, 202]:
+			return {"success": True}
+		else:
+			print(f"SendGrid error: {response.status_code} - {response.body}")
+			return {"success": False, "error": f"SendGrid API error: {response.status_code}"}
 	except Exception as e:
+		print(f"SendGrid exception: {e}")
 		return {"success": False, "error": str(e)}
 
 # Create access token for a user
@@ -61,17 +76,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
 # ---------------------- Database Connection ---------------------- #
 
-
-# Connect to the PostgreSQL database
-def connect_to_db() -> psycopg2.connect:
-	conn = psycopg2.connect(
-		user="jameslk3",
-		password="REDACTED",
-		host="cv-db.postgres.database.azure.com",
-		port="5432",
-		database="cv-db"
-	)
-	return conn
+# Database connection is now handled by Peewee models
+# No need for direct psycopg2 connections
 
 # --------------------- Encryption/Validation --------------------- #
 

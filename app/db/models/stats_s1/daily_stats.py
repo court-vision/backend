@@ -6,9 +6,9 @@ from peewee import (
     SmallIntegerField,
     DecimalField,
 )
-from backend.app.db.base import db
+from app.db.base import BaseModel
 
-class DailyStats(Model):
+class DailyStats(BaseModel):
     id = IntegerField(primary_key=True)
     name = CharField(max_length=50)
     team = CharField(max_length=3)
@@ -33,7 +33,6 @@ class DailyStats(Model):
     rost_pct = DecimalField(max_digits=7, decimal_places=4, null=True)
 
     class Meta:
-        database = db
         table_name = "daily_stats"
         schema = "stats_s1"
         indexes = (

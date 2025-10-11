@@ -3,8 +3,7 @@ from .data_helpers.models import LeagueInfo, TeamDataReq, PlayerResp, ValidateLe
 from .constants import ESPN_FANTASY_ENDPOINT, CRON_TOKEN, LEAGUE_ID
 from fastapi import APIRouter, BackgroundTasks
 from datetime import datetime, timedelta
-from .db import get_cursor
-import psycopg2.extras
+from app.db.models import TotalStats, DailyStats, FreeAgent, Standing
 import requests
 import pytz
 import json
@@ -43,8 +42,6 @@ async def root():
 @router.post("/validate_league")
 async def validate_league(req: LeagueInfo) -> ValidateLeagueResp:
     return check_league(req)
-
-
 
 # Returns important data for players on a team
 @router.post("/get_roster_data")
@@ -132,10 +129,8 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq):
 	new_data = fetch_nba_fpts_data(rostered_data)
 	
 	# Restructure the data from the DB
-	with get_cursor() as cur:
-		cur.execute('SELECT * FROM total_stats;')
-		data = cur.fetchall()
-	old_data = restructure_data(data)
+	data = list(TotalStats.select().dicts())
+	old_data = restructure_data([tuple(row.values()) for row in data])
 
 	# Get the players to update
 	players_to_update, id_map = get_players_to_update(new_data, old_data)
@@ -143,68 +138,43 @@ async def start_ETL_update_fpts(req: ETLUpdateFTPSReq):
 
 	# Create and insert the daily entries
 	daily_entries = create_daily_entries(players_to_update, old_data, date)
-	with get_cursor() as cur:
-		query = '''
-			INSERT INTO daily_stats (
-				id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, rost_pct
-			) VALUES %s
-			'''
-		psycopg2.extras.execute_values(cur, query, daily_entries)
-		print("Inserted new daily entries")
+	
+	# Use Peewee bulk insert
+	DailyStats.insert_many([
+		{
+			'id': entry[0], 'name': entry[1], 'team': entry[2], 'date': entry[3],
+			'fpts': entry[4], 'pts': entry[5], 'reb': entry[6], 'ast': entry[7],
+			'stl': entry[8], 'blk': entry[9], 'tov': entry[10], 'fgm': entry[11],
+			'fga': entry[12], 'fg3m': entry[13], 'fg3a': entry[14], 'ftm': entry[15],
+			'fta': entry[16], 'min': entry[17], 'rost_pct': entry[18]
+		}
+		for entry in daily_entries
+	]).execute()
+	print("Inserted new daily entries")
 	
 	# Create and insert the total entries
 	total_entries = create_total_entries(new_data, old_data, id_map, date)
-	with get_cursor() as cur:
-		query = '''
-    INSERT INTO total_stats (
-        id, name, team, date, fpts, pts, reb, ast, stl, blk, tov, fgm, fga, fg3m, fg3a, ftm, fta, min, gp, rost_pct
-    ) VALUES %s
-    ON CONFLICT (id) DO UPDATE SET
-        name = EXCLUDED.name,
-        team = EXCLUDED.team,
-        date = EXCLUDED.date,
-        fpts = EXCLUDED.fpts,
-        pts = EXCLUDED.pts,
-        reb = EXCLUDED.reb,
-        ast = EXCLUDED.ast,
-        stl = EXCLUDED.stl,
-        blk = EXCLUDED.blk,
-        tov = EXCLUDED.tov,
-        fgm = EXCLUDED.fgm,
-        fga = EXCLUDED.fga,
-        fg3m = EXCLUDED.fg3m,
-        fg3a = EXCLUDED.fg3a,
-        ftm = EXCLUDED.ftm,
-        fta = EXCLUDED.fta,
-        min = EXCLUDED.min,
-        gp = EXCLUDED.gp,
-				rost_pct = EXCLUDED.rost_pct;
-    '''
-		psycopg2.extras.execute_values(cur, query, total_entries)
-		print("Inserted new total entries")
+	
+	# Use Peewee bulk upsert
+	for entry in total_entries:
+		TotalStats.replace(
+			id=entry[0], name=entry[1], team=entry[2], date=entry[3],
+			fpts=entry[4], pts=entry[5], reb=entry[6], ast=entry[7],
+			stl=entry[8], blk=entry[9], tov=entry[10], fgm=entry[11],
+			fga=entry[12], fg3m=entry[13], fg3a=entry[14], ftm=entry[15],
+			fta=entry[16], min=entry[17], gp=entry[18], rost_pct=entry[19]
+		).execute()
+	print("Inserted new total entries")
 
-		# Update the previous rank, only for players who played on the date
-		cur.execute('''
-			UPDATE total_stats
-			SET p_rank = c_rank
-			WHERE id IN (
-				SELECT id
-				FROM total_stats
-				WHERE date = %s
-			);
-			''', (date,))
+	# Update the previous rank, only for players who played on the date
+	players_who_played = TotalStats.select(TotalStats.id).where(TotalStats.date == date)
+	TotalStats.update(p_rank=TotalStats.c_rank).where(TotalStats.id.in_(players_who_played)).execute()
 
-		# Recalculate the rank for all players
-		cur.execute('''
-			UPDATE total_stats
-			SET c_rank = new_rank
-			FROM (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY fpts DESC) as new_rank
-				FROM total_stats
-			) AS subquery
-			WHERE total_stats.id = subquery.id;
-			''')
-		print("Updated ranks")
+	# Recalculate the rank for all players - this is complex in Peewee, so we'll do it manually
+	all_players = list(TotalStats.select().order_by(TotalStats.fpts.desc()))
+	for i, player in enumerate(all_players):
+		TotalStats.update(c_rank=i+1).where(TotalStats.id == player.id).execute()
+	print("Updated ranks")
 	
 	print("ETL process completed")
 
@@ -217,11 +187,10 @@ async def get_fpts_data(cron_token: str):
 	if not cron_token or cron_token != CRON_TOKEN:
 		return {"data": []}
 		
-	with get_cursor() as cur:
-		cur.execute('SELECT * FROM standings;')
-		data = cur.fetchall()
+	data = list(Standing.select().dicts())
+	data_tuples = [tuple(row.values()) for row in data]
 
-	return {"data": serialize_fpts_data(data)}
+	return {"data": serialize_fpts_data(data_tuples)}
 
 
 # Route to trigger the ETL process for freeagent rostered percentages
@@ -246,11 +215,13 @@ async def update_rostered(req: ETLUpdateFTPSReq):
   # Create the entries for the rostered percentages
 	entries = create_rostered_entries(cleaned_data)
 	
-    # Insert the entries into the DB
-	query = '''
-        INSERT INTO freeagents (espn_id, name, team, date, rostered_pct) VALUES %s
-    '''
-	with get_cursor() as cur:
-		psycopg2.extras.execute_values(cur, query, entries)
+    # Insert the entries into the DB using Peewee
+	FreeAgent.insert_many([
+		{
+			'espn_id': entry[0], 'name': entry[1], 'team': entry[2], 
+			'date': entry[3], 'rostered_pct': entry[4]
+		}
+		for entry in entries
+	]).execute()
 	
 	print("ETL process completed")
