@@ -22,8 +22,8 @@ class UserDeleteReq(BaseRequest):
     password: str
 
 class VerifyEmailReq(BaseRequest):
-    email: str  # Temporarily using str instead of EmailStr for debugging
-    password: str  # Temporarily removing length validation for debugging
+    email: str
+    password: str
 
 class CheckCodeReq(BaseRequest):
     email: EmailStr

@@ -3,9 +3,8 @@ from .models import LeagueInfo, LineupInfo, SlimPlayer, SlimGene
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
-from sendgrid.helpers.mail import Mail
-from sendgrid import SendGridAPIClient
 from jose import jwt, JWTError
+from mailersend import MailerSendClient, EmailBuilder
 from typing import Optional
 import hashlib
 import random
@@ -23,35 +22,33 @@ def generate_verification_code() -> str:
 
 # Send the verification email
 def send_verification_email(to_email: str, code: str) -> dict:
-	sendgrid_api_key = os.environ.get('SENDGRID_API_KEY')
+	mailersend_api_key = os.environ.get('MAILERSEND_API_TOKEN')
 	development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
 	
-	if not sendgrid_api_key:
+	if not mailersend_api_key:
 		if development_mode:
 			print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
 			return {"success": True}
 		else:
 			print("SENDGRID_API_KEY environment variable not set")
 			return {"success": False, "error": "Email service not configured"}
-	
-	message = Mail(
-		from_email='Court Vision <mail@courtvision.dev>',
-		to_emails=to_email,
-		subject='Email Verification',
-		html_content=f'<strong>Please verify your email by entering the following code: {code}</strong>')
-	try:
-		sg = SendGridAPIClient(sendgrid_api_key)
-		response = sg.send(message)
-		print(f"SendGrid response status: {response.status_code}")
 
-		if response.status_code in [200, 201, 202]:
-			return {"success": True}
-		else:
-			print(f"SendGrid error: {response.status_code} - {response.body}")
-			return {"success": False, "error": f"SendGrid API error: {response.status_code}"}
+	ms = MailerSendClient(api_key=mailersend_api_key)
+	email = (EmailBuilder()
+		.from_email("mail@courtvision.dev", "Court Vision")
+		.to(to_email, to_email)
+		.subject("Email Verification")
+		.html(f"<strong>Please verify your email by entering the following code: {code}</strong>")
+		.build()
+	)
+
+	try:
+		response = ms.emails.send(email)
+		return {"success": True, "email_id": response.data.id}
 	except Exception as e:
-		print(f"SendGrid exception: {e}")
+		print(f"Mailersend API exception: {e}")
 		return {"success": False, "error": str(e)}
+
 
 # Create access token for a user
 def create_access_token(data: dict) -> str:
