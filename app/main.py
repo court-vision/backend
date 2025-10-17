@@ -1,10 +1,7 @@
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from app.routers import data, db
-from app.routers.base_models import error_response, ApiStatus
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, APIRouter
+from app.core.middleware import setup_middleware
 from app.db.base import init_db, close_db
+from app.api.v1.internal import auth, users, teams, lineups, espn, admin
 
 async def lifespan(app: FastAPI):
     # Initialize database
@@ -13,44 +10,21 @@ async def lifespan(app: FastAPI):
     # Close database connection
     close_db()
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="Court Vision API", version="1.0.0", lifespan=lifespan)
 
-# Global exception handler for validation errors
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-	print(f"Validation error on {request.url}: {exc.errors()}")
-	return JSONResponse(
-		status_code=422,
-		content=error_response(
-			message="Request validation failed",
-			status=ApiStatus.VALIDATION_ERROR,
-			error_code="VALIDATION_ERROR",
-			data={"errors": exc.errors()}
-		)
-	)
+setup_middleware(app)
 
-origins = [
-	"http://localhost:3000", # Frontend
-	"http://localhost:8080", # Features server
-	"https://www.courtvisionaries.live", # Production
-	"https://www.courtvisionaries.live", # Production
-	"https://courtvisionaries.live", # Production
-	"https://courtvisionaries.live", # Production
-	"https://www.courtvision.dev", # Production
-	"https://courtvision.dev" # Production
-]
+# API v1 Internal routes
+api_v1_internal = APIRouter(prefix="/v1/internal")
+api_v1_internal.include_router(auth.router)
+api_v1_internal.include_router(users.router)
+api_v1_internal.include_router(teams.router)
+api_v1_internal.include_router(lineups.router)
+api_v1_internal.include_router(espn.router)
+api_v1_internal.include_router(admin.router)
 
-app.add_middleware(
-	CORSMiddleware,
-	allow_origins=origins,
-	allow_credentials=True,
-	allow_methods=["*"],
-	allow_headers=["*"],
-)
-
-app.include_router(data.router, prefix='/data', tags=['data'])
-app.include_router(db.router, prefix='/db', tags=['db'])
+app.include_router(api_v1_internal)
 
 @app.get("/")
 async def root():
-		return {"message": "Hello World"}
+    return {"message": "Hello World"}

@@ -1,0 +1,21 @@
+from pydantic import BaseModel
+from typing import Optional
+from .common import BaseRequest, BaseResponse
+from .team import LeagueInfo
+
+# ------------------------------- ESPN Data Models ------------------------------- #
+
+class PlayerResp(BaseModel):
+    name: str
+    avg_points: float
+    team: str
+    valid_positions: list[str]
+    injured: bool
+
+class TeamDataReq(BaseRequest):
+    league_info: LeagueInfo
+    fa_count: int
+
+class ValidateLeagueResp(BaseResponse):
+    valid: bool
+    message: str
