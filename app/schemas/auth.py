@@ -31,3 +31,8 @@ class CheckCodeResp(BaseResponse):
 class UserLoginResp(BaseResponse):
     """User login response with authentication data"""
     data: Optional[AuthResponse] = None
+
+class AuthCheckResp(BaseResponse):
+    """Authentication check response"""
+    expired: bool = False
+    data: Optional[AuthResponse] = None
