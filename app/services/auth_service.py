@@ -4,8 +4,7 @@ from app.core.security import (
     hash_password, check_password, create_access_token, 
     send_verification_email, generate_verification_code
 )
-from app.schemas.auth import VerifyEmailResp, CheckCodeResp, UserLoginResp
-from app.schemas.user import UserCreateResp
+from app.schemas.auth import VerifyEmailResp, CheckCodeResp, UserLoginResp, AuthCheckResp
 from app.schemas.common import ApiStatus, AuthResponse, VerificationResponse
 from app.db.models import User, Verification
 from app.utils.constants import ACCESS_TOKEN_EXPIRE_DAYS, VERIFICATION_EMAIL_EXPIRE_SECONDS
@@ -202,5 +201,34 @@ class AuthService:
             return UserLoginResp(
                 status=ApiStatus.SERVER_ERROR,
                 message="Internal server error during login",
+                error_code="INTERNAL_ERROR"
+            )
+
+    @staticmethod
+    async def auth_check(current_user: dict) -> AuthCheckResp:
+        try:
+            # Check if the token is expired
+            if datetime.now() - datetime.fromtimestamp(current_user.get("exp")) > timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS):
+                return AuthCheckResp(
+                    status=ApiStatus.SUCCESS,
+                    message="Token expired",
+                    error_code="TOKEN_EXPIRED"
+                )
+            return AuthCheckResp(
+                status=ApiStatus.SUCCESS,
+                message="Token is valid",
+                error_code="TOKEN_VALID",
+                data=AuthResponse(
+                    access_token=current_user.get("access_token"),
+                    user_id=current_user.get("uid"),
+                    email=current_user.get("email"),
+                    expires_at=(datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)).isoformat()
+                )
+            )
+        except Exception as e:
+            print(f"Error in auth_check: {e}")
+            return AuthCheckResp(
+                status=ApiStatus.SERVER_ERROR,
+                message="Internal server error during authentication check",
                 error_code="INTERNAL_ERROR"
             )

@@ -1,6 +1,5 @@
 from peewee import (
-    Model,
-    IntegerField,
+    AutoField,
     CharField,
     TextField,
     ForeignKeyField,
@@ -10,7 +9,7 @@ from app.db.models.usr.users import User
 
 
 class Team(BaseModel):
-    team_id = IntegerField(primary_key=True)
+    team_id = AutoField(primary_key=True)
     user_id = ForeignKeyField(User, backref='teams', on_delete='CASCADE')
     team_identifier = CharField(max_length=255, unique=True)
     team_info = TextField()  # JSON string

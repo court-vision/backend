@@ -2,10 +2,11 @@ from functools import cached_property
 from datetime import datetime
 import requests
 import json
-from app.schemas.espn import ValidateLeagueResp, PlayerResp
-from app.utils.constants import ESPN_FANTASY_ENDPOINT, PROXY_STRING, LEAGUE_ID
+from app.schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo
+from app.utils.constants import ESPN_FANTASY_ENDPOINT
 from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, json_parsing, remove_diacritics
 from app.libs.nba_api.stats.endpoints import leagueleaders
+from app.schemas.common import ApiStatus
 
 class Player(object):
     '''Player are part of team'''
@@ -48,7 +49,7 @@ class Player(object):
 class EspnService:
     
     @staticmethod
-    def check_league(league_info):
+    def check_league(league_info: LeagueInfo) -> ValidateLeagueResp:
         params = {
             'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
         }
@@ -59,21 +60,21 @@ class EspnService:
         league_info.team_name = league_info.team_name.strip(" \t\n\r")
         league_info.espn_s2 = league_info.espn_s2.strip(" \t\n\r")
         league_info.swid = league_info.swid.strip(" \t\n\r")
-        
-        print(league_info.year, league_info.league_id, league_info.team_name, league_info.espn_s2, league_info.swid)
-        print(len(league_info.espn_s2), len(league_info.swid))
+        # print(league_info.year, league_info.league_id, league_info.team_name, league_info.espn_s2, league_info.swid)
+        # print(len(league_info.espn_s2), len(league_info.swid))
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        print(endpoint)
+        # print(endpoint)
 
         try:
             response = requests.get(endpoint, params=params, cookies={'espn_s2': league_info.espn_s2, 'SWID': league_info.swid})
             response.raise_for_status()
             data = response.json()
             teams = [team['name'] for team in data['teams']]
-            return ValidateLeagueResp(valid=True, message="Team found") if league_info.team_name in teams else ValidateLeagueResp(valid=False, message="Team not found in valid league")
+            # print(teams)
+            return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found") if league_info.team_name in teams else ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=False, message="Team not found in valid league")
         except requests.exceptions.HTTPError as e:
-            return ValidateLeagueResp(valid=False, message=f"Invalid league information {e}")
+            return ValidateLeagueResp(status=ApiStatus.ERROR, valid=False, message=f"Invalid league information {e}")
 
     @staticmethod
     def get_roster(team_name, teams):

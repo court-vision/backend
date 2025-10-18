@@ -1,5 +1,4 @@
 from peewee import (
-    Model,
     AutoField,
     CharField,
     DateTimeField,
@@ -8,7 +7,7 @@ from app.db.base import BaseModel
 
 
 class User(BaseModel):
-    user_id = AutoField()
+    user_id = AutoField(primary_key=True)
     email = CharField(max_length=255, unique=True)
     password = CharField(max_length=255)  # hashed password
     created_at = DateTimeField(default=None, null=True)

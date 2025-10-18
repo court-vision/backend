@@ -1,9 +1,7 @@
-from typing import Optional
 from app.schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp
-from app.schemas.espn import ValidateLeagueResp
 from app.db.models import Team
 from app.services.espn_service import EspnService
-from app.utils.espn_helpers import json_parsing
+from app.schemas.common import ApiStatus
 import json
 
 class TeamService:
@@ -40,7 +38,7 @@ class TeamService:
         team_identifier = str(league_info.league_id) + league_info.team_name
 
         if not EspnService.check_league(league_info).valid:
-            return TeamAddResp(team_id=None, already_exists=False)
+            return TeamAddResp(status=ApiStatus.ERROR, message="Invalid league information", team_id=None, already_exists=False)
         
         try:
             team_exists = Team.select().where(
@@ -48,7 +46,7 @@ class TeamService:
             ).exists()
             
             if team_exists:
-                return TeamAddResp(team_id=None, already_exists=True)
+                return TeamAddResp(status=ApiStatus.SUCCESS, message="Team already exists", team_id=None, already_exists=True)
             
             # Create new team
             team = Team.create(
@@ -57,11 +55,11 @@ class TeamService:
                 team_info=TeamService.serialize_league_info(league_info)
             )
 
-            return TeamAddResp(team_id=team.team_id, already_exists=False)
+            return TeamAddResp(status=ApiStatus.SUCCESS, message="Team added successfully", team_id=team.team_id, already_exists=False)
             
         except Exception as e:
             print(f"Error in add_team: {e}")
-            return TeamAddResp(team_id=None, already_exists=False)
+            return TeamAddResp(status=ApiStatus.ERROR, message="Internal server error", team_id=None, already_exists=False)
 
     @staticmethod
     async def remove_team(user_id: int, team_id: int) -> TeamRemoveResp:
