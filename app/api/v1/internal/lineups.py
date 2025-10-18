@@ -40,10 +40,10 @@ def generate_lineup(req: GenerateLineupReq, current_user: dict = Depends(get_cur
         print(f"Error in generate_lineup: {e}")
         return {"error": "Failed to generate lineup"}
 
-@router.get('/', response_model=GetLineupsResp)
-async def get_lineups(selected_team: int, current_user: dict = Depends(get_current_user)):
+@router.get('', response_model=GetLineupsResp)
+async def get_lineups(team_id: int, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("uid")
-    return await LineupService.get_lineups(user_id, selected_team)
+    return await LineupService.get_lineups(user_id, team_id)
 
 @router.put('/save', response_model=SaveLineupResp)
 async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_current_user)):

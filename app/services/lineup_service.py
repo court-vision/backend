@@ -1,9 +1,9 @@
 import hashlib
 from typing import Optional
-from app.schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp
+from app.schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp, LineupInfo
+from app.schemas.common import ApiStatus
 from app.db.models import Lineup, Team
 import json
-
 class LineupService:
     
     @staticmethod
@@ -59,27 +59,26 @@ class LineupService:
         ) for lineup in lineups]
 
     @staticmethod
-    async def get_lineups(user_id: int, selected_team: int) -> GetLineupsResp:
+    async def get_lineups(user_id: int, team_id: int) -> GetLineupsResp:
         try:
             # Join teams and lineups tables
             lineups_query = (Lineup
                 .select(Lineup.lineup_id, Lineup.lineup_info)
                 .join(Team, on=(Lineup.team_id == Team.team_id))
-                .where((Team.user_id == user_id) & (Team.team_id == selected_team)))
+                .where((Team.user_id == user_id) & (Team.team_id == team_id)))
             
             lineups = list(lineups_query)
 
             if not lineups:
-                return GetLineupsResp(lineups=None, no_lineups=True)
+                return GetLineupsResp(status=ApiStatus.SUCCESS, message="No lineups found", data=None)
             
-            # Convert to the format expected by deserialize_lineups
             lineup_data = [(lineup.lineup_id, lineup.lineup_info) for lineup in lineups]
         
-            return GetLineupsResp(lineups=LineupService.deserialize_lineups(lineup_data), no_lineups=False)
+            return GetLineupsResp(status=ApiStatus.SUCCESS, message="Lineups fetched successfully", data=LineupService.deserialize_lineups(lineup_data))
             
         except Exception as e:
             print(f"Error in get_lineups: {e}")
-            return GetLineupsResp(lineups=None, no_lineups=True)
+            return GetLineupsResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
     async def save_lineup(user_id: int, selected_team: int, lineup_info) -> SaveLineupResp:

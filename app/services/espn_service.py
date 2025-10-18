@@ -3,8 +3,7 @@ import requests
 import json
 from app.schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from app.utils.constants import ESPN_FANTASY_ENDPOINT
-from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, json_parsing, remove_diacritics
-from app.libs.nba_api.stats.endpoints import leagueleaders
+from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, json_parsing
 from app.schemas.common import ApiStatus
 
 class Player(object):
