@@ -1,9 +1,11 @@
 from pydantic import BaseModel
 from typing import Optional
-from .common import BaseRequest, BaseResponse
-from .team import LeagueInfo
+from .common import BaseRequest, BaseResponse, LeagueInfo
 
 # ------------------------------- ESPN Data Models ------------------------------- #
+
+class ValidateLeagueReq(BaseRequest):
+    league_info: LeagueInfo
 
 class PlayerResp(BaseModel):
     name: str

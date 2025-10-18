@@ -118,33 +118,43 @@ class EspnService:
             return TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
-    async def get_free_agents(league_info, fa_count: int):
-        params = {
-            'view': 'kona_player_info',
-            'scoringPeriodId': 0,
-        }
+    async def get_free_agents(league_info: LeagueInfo, fa_count: int) -> TeamDataResp:
+        try:
+            params = {
+                'view': 'kona_player_info',
+                'scoringPeriodId': 0,
+            }
 
-        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
-        headers = {'x-fantasy-filter': json.dumps(filters)}
+            filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
+            headers = {'x-fantasy-filter': json.dumps(filters)}
 
-        cookies = {
-            'espn_s2': league_info.espn_s2,
-            'SWID': league_info.swid
-        }
+            cookies = {
+                'espn_s2': league_info.espn_s2,
+                'SWID': league_info.swid
+            }
 
-        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = requests.get(endpoint, params=params, headers=headers, cookies=cookies).json()
-        players = [Player(player, league_info.year) for player in data['players']]
+            endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+            data = requests.get(endpoint, params=params, headers=headers, cookies=cookies).json()
+            players = [Player(player, league_info.year) for player in data['players']]
 
-        team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
-        pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
+            team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+            pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
 
-        return [PlayerResp(name=player.name,
+            return TeamDataResp(
+                status=ApiStatus.SUCCESS,
+                message="Free agents fetched successfully",
+                data=[PlayerResp(
+                        name=player.name,
                         avg_points=player.avg_points,
                         team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
                         valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
                         injured=player.injured,
-                        ) for player in players]
+                    ) for player in players
+                ]
+            )
+        except Exception as e:
+            print(f"Error in get_free_agents: {e}")
+            return TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
     def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:
