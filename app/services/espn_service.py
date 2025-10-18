@@ -1,8 +1,7 @@
-from functools import cached_property
 from datetime import datetime
 import requests
 import json
-from app.schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo
+from app.schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from app.utils.constants import ESPN_FANTASY_ENDPOINT
 from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, json_parsing, remove_diacritics
 from app.libs.nba_api.stats.endpoints import leagueleaders
@@ -83,30 +82,40 @@ class EspnService:
                 return team['roster']['entries']
 
     @staticmethod
-    async def get_team_data(league_info, fa_count: int = 0):
-        params = {
-                'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
+    async def get_team_data(league_info: LeagueInfo, fa_count: int = 0) -> TeamDataResp:
+        try:
+            params = {
+                    'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
+                }
+            
+            cookies = {
+                'espn_s2': league_info.espn_s2,
+                'SWID': league_info.swid
             }
-        
-        cookies = {
-            'espn_s2': league_info.espn_s2,
-            'SWID': league_info.swid
-        }
-        
-        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = requests.get(endpoint, params=params, cookies=cookies).json()
-        roster = EspnService.get_roster(league_info.team_name, data['teams'])
-        players = [Player(player, league_info.year) for player in roster]
+            
+            endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+            data = requests.get(endpoint, params=params, cookies=cookies).json()
+            roster = EspnService.get_roster(league_info.team_name, data['teams'])
+            players = [Player(player, league_info.year) for player in roster]
 
-        team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
-        pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
+            team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+            pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
 
-        return [PlayerResp(name=player.name,
-                                avg_points=player.avg_points,
-                                team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
-                                valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
-                                injured=player.injured,
-                                ) for player in players]
+            return TeamDataResp(
+                status=ApiStatus.SUCCESS, 
+                message="Team data fetched successfully",
+                data=[
+                    PlayerResp(name=player.name,
+                        avg_points=player.avg_points,
+                        team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
+                        valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
+                        injured=player.injured,
+                    ) for player in players
+                ]
+            )
+        except Exception as e:
+            print(f"Error in get_team_data: {e}")
+            return TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
     async def get_free_agents(league_info, fa_count: int):

@@ -38,7 +38,7 @@ def init_db():
         DailyStats, TotalStats, FreeAgent, Standing
     ], safe=True)
     
-    print("Database initialized successfully")
+    # print("Database initialized successfully")
 
 # Function to close database connection
 def close_db():

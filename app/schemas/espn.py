@@ -19,3 +19,6 @@ class TeamDataReq(BaseRequest):
 class ValidateLeagueResp(BaseResponse):
     valid: bool
     message: str
+
+class TeamDataResp(BaseResponse):
+    data: Optional[list[PlayerResp]] = None

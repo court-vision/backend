@@ -70,6 +70,14 @@ def error_response(
 
 # ------------------------------- Specific Response Models ------------------------------- #
 
+class LeagueInfo(BaseModel):
+    league_id: int = Field(ge=1, description="League ID must be positive")
+    espn_s2: str | None = ""
+    swid: str | None = ""
+    team_name: str = Field(min_length=1, description="Team name cannot be empty")
+    league_name: str | None = "N/A"
+    year: int = Field(ge=2020, le=2030, description="Year must be between 2020 and 2030")
+
 class AuthResponse(BaseModel):
     """Base authentication response model"""
     access_token: Optional[str] = None
@@ -94,11 +102,7 @@ class UserResponse(BaseModel):
 class TeamResponse(BaseModel):
     """Team data response model"""
     team_id: int
-    team_name: str
-    league_id: int
-    league_name: str
-    year: int
-    created_at: Optional[str] = None
+    league_info: LeagueInfo
 
 class LineupResponse(BaseModel):
     """Lineup data response model"""
