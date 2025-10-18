@@ -10,10 +10,11 @@ LOCAL_FEATURES_ENDPOINT = 'http://localhost:8080'
 
 
 # ----------------------------- Authentication ------------------------------ #
-SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+SECRET_KEY = os.getenv('JWT_SECRET_KEY') or 'secret-key-here-change-in-production'
 ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRE_DAYS = 5
 CRON_TOKEN = os.getenv('CRON_TOKEN')
+VERIFICATION_EMAIL_EXPIRE_SECONDS = 300
 
 
 # ----------------------------- Database Connection ----------------------------- #

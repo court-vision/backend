@@ -8,7 +8,7 @@ from app.schemas.auth import VerifyEmailResp, CheckCodeResp, UserLoginResp
 from app.schemas.user import UserCreateResp
 from app.schemas.common import ApiStatus, AuthResponse, VerificationResponse
 from app.db.models import User, Verification
-from app.utils.constants import ACCESS_TOKEN_EXPIRE_DAYS
+from app.utils.constants import ACCESS_TOKEN_EXPIRE_DAYS, VERIFICATION_EMAIL_EXPIRE_SECONDS
 import time
 
 class AuthService:
@@ -30,14 +30,14 @@ class AuthService:
             verification_data = Verification.select().where(Verification.email == email).first()
             
             if verification_data:
-                if time.time() - verification_data.timestamp < 300:
+                if time.time() - verification_data.timestamp < VERIFICATION_EMAIL_EXPIRE_SECONDS:
                     return VerifyEmailResp(
                         status=ApiStatus.SUCCESS,
                         message="Verification email already sent recently",
                         data=VerificationResponse(
                             verification_sent=True,
                             email=email,
-                            expires_in_seconds=300 - int(time.time() - verification_data.timestamp)
+                            expires_in_seconds=VERIFICATION_EMAIL_EXPIRE_SECONDS - int(time.time() - verification_data.timestamp)
                         )
                     )
                 else:
@@ -104,28 +104,38 @@ class AuthService:
                     error_code="VERIFICATION_NOT_FOUND"
                 )
             
-            if verification_data.code != code or time.time() - verification_data.timestamp > 300:
+            # Check if the verification code has expired
+            if time.time() - verification_data.timestamp > VERIFICATION_EMAIL_EXPIRE_SECONDS:
+                # If so, delete the verification data and return an error
+                verification_data.delete_instance()
                 return CheckCodeResp(
-                    status=ApiStatus.ERROR,
-                    message="Invalid or expired verification code",
+                    status=ApiStatus.AUTHENTICATION_ERROR,
+                    message="Verification code expired",
+                    error_code="VERIFICATION_CODE_EXPIRED"
+                )
+                
+            # Check if the verification code is correct
+            if verification_data.code != code:
+                # If so, delete the verification data and return an error
+                verification_data.delete_instance() # We don't need to check the password again
+                return CheckCodeResp(
+                    status=ApiStatus.AUTHENTICATION_ERROR,
+                    message="Invalid verification code",
                     error_code="INVALID_VERIFICATION_CODE"
                 )
             
-            # Delete the verification data
-            verification_data.delete_instance()
-            
+            # Create the user
             resp = AuthService.create_user(email, verification_data.hashed_password)
-            if resp.success:
+            if resp.access_token:
+                # At this point, we are safe to delete the verification
+                verification_data.delete_instance()
                 return CheckCodeResp(
                     status=ApiStatus.SUCCESS,
                     message="Account created successfully",
-                    data=AuthResponse(
-                        access_token=resp.access_token,
-                        email=email,
-                        expires_at=(datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)).isoformat()
-                    )
+                    data=resp
                 )
             else:
+                # Return an error
                 return CheckCodeResp(
                     status=ApiStatus.SERVER_ERROR,
                     message="Failed to create account",
@@ -141,12 +151,12 @@ class AuthService:
             )
 
     @staticmethod
-    def create_user(email: str, hashed_password: str) -> UserCreateResp:
+    def create_user(email: str, hashed_password: str) -> AuthResponse:
         try:
             user_exists = User.select().where(User.email == email).exists()
             
             if user_exists:
-                return UserCreateResp(access_token=None, already_exists=True, success=True, valid=True)
+                return AuthResponse(access_token=None, user_id=None, email=None, expires_at=None)
             
             user = User.create(
                 email=email,
@@ -156,11 +166,11 @@ class AuthService:
             
             access_token = create_access_token({"uid": user.user_id, "email": email, "exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
             
-            return UserCreateResp(access_token=access_token, already_exists=False, success=True, valid=True)
+            return AuthResponse(access_token=access_token, user_id=user.user_id, email=email, expires_at=(datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)).isoformat())
             
         except Exception as e:
             print(f"Error in create_user: {e}")
-            return UserCreateResp(access_token=None, already_exists=False, success=False, valid=False)
+            return AuthResponse(access_token=None, user_id=None, email=None, expires_at=None)
 
     @staticmethod
     async def login_user(email: str, password: str) -> UserLoginResp:
