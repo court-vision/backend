@@ -1,10 +1,61 @@
 import hashlib
-from typing import Optional
-from app.schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp, LineupInfo
+import requests
+from app.services.espn_service import EspnService
+from app.services.team_service import TeamService
+from app.schemas.espn import PlayerResp, TeamDataResp
+from app.schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp,GenerateLineupResp
 from app.schemas.common import ApiStatus
 from app.db.models import Lineup, Team
+from app.utils.constants import LOCAL_FEATURES_ENDPOINT, NUM_FREE_AGENTS
 import json
+
 class LineupService:
+
+    @staticmethod
+    async def generate_lineup(user_id: int, team_id: int, threshold: float, week: int):
+        try:
+            # Get the league info
+            league_info = Team.select(Team.league_info).where(Team.user_id == user_id).where(Team.team_id == team_id).get().league_info
+            if not league_info:
+                return GenerateLineupResp(status=ApiStatus.ERROR, message="League info not found", data=None)
+            
+            # Get the roster and free agent data
+            team_data_resp: TeamDataResp = await EspnService.get_team_data(TeamService.deserialize_league_info(json.loads(league_info)))
+            free_agent_data_resp: TeamDataResp = await EspnService.get_free_agents(TeamService.deserialize_league_info(json.loads(league_info)), NUM_FREE_AGENTS)
+            if team_data_resp.status != ApiStatus.SUCCESS or free_agent_data_resp.status != ApiStatus.SUCCESS:
+                return GenerateLineupResp(status=ApiStatus.ERROR, message="Failed to fetch roster or free agent data", data=None)
+
+            roster_data: list[PlayerResp] = team_data_resp.data
+            free_agent_data: list[PlayerResp] = free_agent_data_resp.data
+            
+            # Call Go server to generate the lineup
+            lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v3(roster_data, free_agent_data, threshold, week)
+            
+            return lineup_resp
+            
+        except Exception as e:
+            print(f"Error in generate_lineup: {e}")
+            return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
+
+    @staticmethod
+    async def generate_lineup_v3(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], threshold: float, week: int) -> GenerateLineupResp:
+        try:
+            # Make HTTP request to Go server to generate the lineup
+            response = requests.post(f"{LOCAL_FEATURES_ENDPOINT}/generate-lineup", json={
+                "roster_data": [player.model_dump() for player in roster_data],
+                "free_agent_data": [player.model_dump() for player in free_agent_data],
+                "threshold": threshold,
+                "week": week
+            })
+            if response.status_code != 200:
+                return GenerateLineupResp(status=ApiStatus.ERROR, message="Failed to generate lineup", data=None)
+            
+             # We'll define a structure for the response once we have the Go server working
+            return GenerateLineupResp(status=ApiStatus.SUCCESS, message="Lineup generated successfully", data=response.json())
+
+        except Exception as e:
+            print(f"Error in generate_lineup_v3: {e}")
+            return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
     
     @staticmethod
     def serialize_lineup_info(lineup_info) -> str:

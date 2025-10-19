@@ -40,3 +40,6 @@ PROXY_STRING = f"{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # ----------------------------- League Information ----------------------------- #
 LEAGUE_ID = os.getenv('DEV_LEAGUE_ID')
+
+# ----------------------------- Lineup Generation ----------------------------- #
+NUM_FREE_AGENTS = 100

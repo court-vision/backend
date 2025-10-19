@@ -1,44 +1,14 @@
 from fastapi import APIRouter, Depends
 from app.services.lineup_service import LineupService
-from app.schemas.lineup import GenerateLineupReq, SaveLineupReq, GetLineupsResp, SaveLineupResp, DeleteLineupResp
-from app.schemas.common import success_response
+from app.schemas.lineup import GenerateLineupReq, SaveLineupReq, GetLineupsResp, SaveLineupResp, DeleteLineupResp, GenerateLineupResp
 from app.core.security import get_current_user
-from app.utils.constants import FEATURES_SERVER_ENDPOINT
-from app.db.models import Team
-import requests
 
 router = APIRouter(prefix="/lineups", tags=["lineup management"])
 
-@router.post('/generate')
-def generate_lineup(req: GenerateLineupReq, current_user: dict = Depends(get_current_user)):
+@router.post('/generate', response_model=GenerateLineupResp)
+async def generate_lineup(req: GenerateLineupReq, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("uid")
-
-    try:
-        team = Team.select().where(
-            (Team.user_id == user_id) & (Team.team_id == req.selected_team)
-        ).first()
-        
-        if not team:
-            return {"error": "Team not found"}
-        
-        endpoint = FEATURES_SERVER_ENDPOINT + "/generate-lineup"
-
-        body = {
-            "league_id": team.team_info['league_id'], 
-            "team_name": team.team_info['team_name'], 
-            "espn_s2": team.team_info['espn_s2'], 
-            "swid": team.team_info['swid'], 
-            "year": team.team_info['year'],
-            "threshold": req.threshold,
-            "week": req.week
-        }
-        
-        resp = requests.post(endpoint, json=body)
-        return resp.json()
-        
-    except Exception as e:
-        print(f"Error in generate_lineup: {e}")
-        return {"error": "Failed to generate lineup"}
+    return await LineupService.generate_lineup(user_id, req.team_id, req.threshold, req.week)
 
 @router.get('', response_model=GetLineupsResp)
 async def get_lineups(team_id: int, current_user: dict = Depends(get_current_user)):

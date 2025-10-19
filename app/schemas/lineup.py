@@ -28,12 +28,12 @@ class LineupInfo(BaseModel):
 #                          ------- Incoming -------                           #
 
 class GenerateLineupReq(BaseRequest):
-    selected_team: int = Field(ge=1, description="Team ID must be positive")
-    threshold: str = Field(pattern=r'^0\.\d+$', description="Threshold must be a decimal between 0 and 1")
-    week: str = Field(min_length=1, description="Week cannot be empty")
+    team_id: int = Field(ge=1, description="Team ID must be positive")
+    threshold: float = Field(ge=0, description="Threshold must be non-negative")
+    week: int = Field(ge=1, le=20, description="Week must be between 1 and 20")
 
 class SaveLineupReq(BaseRequest):
-    selected_team: int = Field(ge=1, description="Team ID must be positive")
+    team_id: int = Field(ge=1, description="Team ID must be positive")
     lineup_info: LineupInfo
 
 #                          ------- Outgoing -------                           #
