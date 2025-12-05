@@ -3,7 +3,7 @@ import requests
 import json
 from app.schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from app.utils.constants import ESPN_FANTASY_ENDPOINT
-from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, json_parsing
+from app.utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, json_parsing
 from app.schemas.common import ApiStatus
 
 class Player(object):
@@ -21,6 +21,9 @@ class Player(object):
         self.posRank = json_parsing(data, 'positionalRanking')
         self.stats = {}
         self.schedule = {}
+        self.news = {}
+        expected_return_date = json_parsing(data, 'expectedReturnDate')
+        self.expected_return_date = datetime(*expected_return_date).date() if expected_return_date else None
 
         if pro_team_schedule:
             pro_team_id = json_parsing(data, 'proTeamId')
@@ -30,19 +33,35 @@ class Player(object):
                 team = game['awayProTeamId'] if game['awayProTeamId'] != pro_team_id else game['homeProTeamId']
                 self.schedule[key] = { 'team': PRO_TEAM_MAP[team], 'date': datetime.fromtimestamp(game['date']/1000.0) }
 
-        # add available stats
         player = data['playerPoolEntry']['player'] if 'playerPoolEntry' in data else data['player']
         self.injuryStatus = player.get('injuryStatus', self.injuryStatus)
         self.injured = player.get('injured', False)
 
-        # Stats processing logic would go here...
-        self.total_points = 0
-        self.avg_points = 0
-        self.projected_total_points = 0
-        self.projected_avg_points = 0
+        for split in  player.get('stats', []):
+            if split['seasonId'] == year:
+                id = self._stat_id_pretty(split['id'], split['scoringPeriodId'])
+                applied_total = split.get('appliedTotal', 0)
+                applied_avg =  round(split.get('appliedAverage', 0), 2)
+                game = self.schedule.get(id, {})
+                self.stats[id] = dict(applied_total=applied_total, applied_avg=applied_avg, team=game.get('team', None), date=game.get('date', None))
+                if split.get('stats'):
+                    if 'averageStats' in split.keys():
+                        self.stats[id]['avg'] = {STATS_MAP.get(i, i): split['averageStats'][i] for i in split['averageStats'].keys() if STATS_MAP.get(i) != ''}
+                        self.stats[id]['total'] = {STATS_MAP.get(i, i): split['stats'][i] for i in split['stats'].keys() if STATS_MAP.get(i) != ''}
+                    else:
+                        self.stats[id]['avg'] = None
+                        self.stats[id]['total'] = {STATS_MAP.get(i, i): split['stats'][i] for i in split['stats'].keys() if STATS_MAP.get(i) != ''}
+        self.total_points = self.stats.get(f'{year}_total', {}).get('applied_total', 0)
+        self.avg_points = self.stats.get(f'{year}_total', {}).get('applied_avg', 0)
+        self.projected_total_points= self.stats.get(f'{year}_projected', {}).get('applied_total', 0)
+        self.projected_avg_points = self.stats.get(f'{year}_projected', {}).get('applied_avg', 0)
 
     def __repr__(self):
         return f'Player({self.name})'
+
+    def _stat_id_pretty(self, id: str, scoring_period):
+        id_type = STAT_ID_MAP.get(id[:2])
+        return f'{id[2:]}_{id_type}' if id_type else str(scoring_period)
 
 class EspnService:
     

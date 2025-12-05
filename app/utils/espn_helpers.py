@@ -33,7 +33,7 @@ POSITION_MAP = {
     'UT': 11,
     'BE': 12,
     'IR': 13,
-    'Rookie': 15
+    'Rookie': 15,
 }
 
 PRO_TEAM_MAP = {
@@ -57,8 +57,8 @@ PRO_TEAM_MAP = {
     17: 'BKN',
     18: 'NYK',
     19: 'ORL',
-    20: 'PHI',
-    21: 'PHX',
+    20: 'PHL',
+    21: 'PHO',
     22: 'POR',
     23: 'SAC',
     24: 'SAS',
@@ -78,53 +78,53 @@ STATS_MAP = {
     '4': 'OREB',
     '5': 'DREB',
     '6': 'REB',
-    '7': '7',
-    '8': '8',
+    '7': 'EJ',
+    '8': 'FF',
     '9': 'PF',
-    '10': '10',
+    '10': 'TF',
     '11': 'TO',
-    '12': '12',
+    '12': 'DQ',
     '13': 'FGM',
     '14': 'FGA',
     '15': 'FTM',
     '16': 'FTA',
-    '17': '3PTM',
-    '18': '3PTA',
+    '17': '3PM',
+    '18': '3PA',
     '19': 'FG%',
     '20': 'FT%',
     '21': '3PT%',
-    '22': '22',
-    '23': '23',
-    '24': '24',
-    '25': '25',
-    '26': '26',
-    '27': '27',
+    '22': 'AFG%',
+    '23': 'FGMI',
+    '24': 'FTMI',
+    '25': '3PMI',
+    '26': 'APG',
+    '27': 'BPG',
     '28': 'MPG',
-    '29': '29',
-    '30': '30',
-    '31': '31',
-    '32': '32',
-    '33': '33',
-    '34': '34',
-    '35': '35',
-    '36': '36',
-    '37': '37',
-    '38': '38',
-    '39': '39',
+    '29': 'PPG',
+    '30': 'RPG',
+    '31': 'SPG',
+    '32': 'TOPG',
+    '33': '3PG',
+    '34': 'PPM',
+    '35': 'A/TO',
+    '36': 'STR',
+    '37': 'DD',
+    '38': 'TD',
+    '39': 'QD',
     '40': 'MIN',
     '41': 'GS',
     '42': 'GP',
-    '43': '43',
-    '44': '44',
+    '43': 'TW',
+    '44': 'FTR',
     '45': '45',
-    }
+}
 
 STAT_ID_MAP = {
     '00': 'total',
     '10': 'projected',
     '01': 'last_7',
     '02': 'last_15',
-    '03': 'last_30'
+    '03': 'last_30',
 }
 
 ACTIVITY_MAP = {
@@ -132,15 +132,32 @@ ACTIVITY_MAP = {
     180: 'WAIVER ADDED',
     179: 'DROPPED',
     181: 'DROPPED',
+    188: 'MOVED',
     239: 'DROPPED',
     244: 'TRADED',
     'FA': 178,
     'WAIVER': 180,
-    'TRADED': 244
+    'TRADED': 244,
+}
+
+TRANSACTION_TYPES = {
+    'DRAFT',
+    'TRADE_ACCEPT',
+    'WAIVER',
+    'TRADE_VETO',
+    'FUTURE_ROSTER',
+    'ROSTER',
+    'RETRO_ROSTER',
+    'TRADE_PROPOSAL',
+    'TRADE_UPHOLD',
+    'FREEAGENT',
+    'TRADE_DECLINE',
+    'WAIVER_ERROR',
+    'TRADE_ERROR'
 }
 
 NINE_CAT_STATS = {
-    '3PTM',
+    '3PM',
     'AST',
     'BLK',
     'FG%',
@@ -148,7 +165,7 @@ NINE_CAT_STATS = {
     'PTS',
     'REB',
     'STL',
-    'TO'
+    'TO',
 }
 
 def json_parsing(obj, key):
