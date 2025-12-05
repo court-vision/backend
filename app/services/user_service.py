@@ -18,11 +18,11 @@ class UserService:
             if update_data:
                 User.update(**update_data).where(User.user_id == user_id).execute()
         
-            return UserUpdateResp(success=True)
+            return UserUpdateResp(status=ApiStatus.SUCCESS, message="User updated successfully")
             
         except Exception as e:
             print(f"Error in update_user: {e}")
-            return UserUpdateResp(success=False)
+            return UserUpdateResp(status=ApiStatus.ERROR, message="Failed to update user", error_code="INTERNAL_ERROR")
 
     @staticmethod
     async def delete_user(user_id: int, password: str) -> UserDeleteResp:
@@ -30,13 +30,13 @@ class UserService:
             user_data = User.select().where(User.user_id == user_id).first()
 
             if not user_data or not check_password(password, user_data.password):
-                return UserDeleteResp(success=False)
+                return UserDeleteResp(status=ApiStatus.ERROR, message="Failed to delete user", error_code="INVALID_CREDENTIALS")
 
             # Delete user (teams will be deleted automatically due to CASCADE)
             User.delete().where(User.user_id == user_id).execute()
 
-            return UserDeleteResp(success=True)
+            return UserDeleteResp(status=ApiStatus.SUCCESS, message="User deleted successfully")
             
         except Exception as e:
             print(f"Error in delete_user: {e}")
-            return UserDeleteResp(success=False)
+            return UserDeleteResp(status=ApiStatus.ERROR, message="Failed to delete user", error_code="INTERNAL_ERROR")

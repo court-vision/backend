@@ -143,7 +143,7 @@ class LineupService:
                 .exists())
                 
             if lineup_exists:
-                return SaveLineupResp(success=False, already_exists=True)
+                return SaveLineupResp(status=ApiStatus.ERROR, message="Lineup already exists", error_code="LINEUP_ALREADY_EXISTS")
 
             # Save the lineup
             Lineup.create(
@@ -152,22 +152,22 @@ class LineupService:
                 lineup_hash=lineup_hash
             )
 
-            return SaveLineupResp(success=True, already_exists=False)
+            return SaveLineupResp(status=ApiStatus.SUCCESS, message="Lineup saved successfully")
 
         except Exception as e:
             print(f"Error in save_lineup: {e}")
-            return SaveLineupResp(success=False, already_exists=False)
+            return SaveLineupResp(status=ApiStatus.ERROR, message="Failed to save lineup", error_code="INTERNAL_ERROR")
 
     @staticmethod
     async def remove_lineup(lineup_id: int) -> DeleteLineupResp:
         try:
             lineup = Lineup.select().where(Lineup.lineup_id == lineup_id).first()
             if not lineup:
-                return DeleteLineupResp(success=False)
+                return DeleteLineupResp(status=ApiStatus.ERROR, message="Lineup not found", error_code="LINEUP_NOT_FOUND")
             
             lineup.delete_instance()
-            return DeleteLineupResp(success=True)
+            return DeleteLineupResp(status=ApiStatus.SUCCESS, message="Lineup deleted successfully")
             
         except Exception as e:
             print(f"Error in remove_lineup: {e}")
-            return DeleteLineupResp(success=False)
+            return DeleteLineupResp(status=ApiStatus.ERROR, message="Failed to delete lineup", error_code="INTERNAL_ERROR")

@@ -5,8 +5,6 @@ from app.schemas.team import TeamAddReq, TeamRemoveReq, TeamUpdateReq, TeamGetRe
 from app.schemas.espn import TeamDataReq, TeamDataResp
 from app.schemas.common import ApiStatus
 from app.core.security import get_current_user
-from app.utils.constants import SELF_ENDPOINT
-import httpx
 
 
 router = APIRouter(prefix="/teams", tags=["team management"])

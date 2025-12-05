@@ -57,13 +57,15 @@ def verify_access_token(token: str) -> Optional[dict]:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except JWTError:
+    except JWTError as e:
+        print(f"JWT verification failed: {e}")
         return None
 
 # Get the data for the user
 def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     payload = verify_access_token(token)
     if payload is None:
+        print(f"Token validation failed - token was: {token[:20]}..." if token else "Token validation failed - no token")
         raise HTTPException(status_code=401, detail="Invalid access token")
     return payload
 
