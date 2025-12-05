@@ -12,7 +12,7 @@ class SlimPlayer(BaseModel):
     Team: str = Field(min_length=1, description="Team name cannot be empty")
 
 class SlimGene(BaseModel):
-    Day: int = Field(ge=1, le=7, description="Day must be between 1 and 7")
+    Day: int = Field(ge=0, le=6, description="Day must be between 0 and 6")
     Additions: list[SlimPlayer] = Field(default_factory=list)
     Removals: list[SlimPlayer] = Field(default_factory=list)
     Roster: dict[str, SlimPlayer] = Field(default_factory=dict)
@@ -21,8 +21,8 @@ class LineupInfo(BaseModel):
     Lineup: list[SlimGene] = Field(min_items=1, description="Lineup must have at least one gene")
     Improvement: int = Field(description="Improvement value")
     Timestamp: str = Field(description="Lineup timestamp")
-    Week: str = Field(min_length=1, description="Week cannot be empty")
-    Threshold: float = Field(ge=0, le=1, description="Threshold must be between 0 and 1")
+    Week: int = Field(ge=1, le=20, description="Week must be between 1 and 20")
+    Threshold: float = Field(ge=0, description="Threshold must be non-negative")
     Id: int | None = None
 
 #                          ------- Incoming -------                           #

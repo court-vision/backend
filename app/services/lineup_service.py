@@ -29,7 +29,7 @@ class LineupService:
             free_agent_data: list[PlayerResp] = free_agent_data_resp.data
             
             # Call Go server to generate the lineup
-            lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v3(roster_data, free_agent_data, threshold, week)
+            lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v2(roster_data, free_agent_data, threshold, week)
             
             return lineup_resp
             
@@ -38,7 +38,7 @@ class LineupService:
             return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
-    async def generate_lineup_v3(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], threshold: float, week: int) -> GenerateLineupResp:
+    async def generate_lineup_v2(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], threshold: float, week: int) -> GenerateLineupResp:
         try:
             # Make HTTP request to Go server to generate the lineup
             response = requests.post(f"{LOCAL_FEATURES_ENDPOINT}/generate-lineup", json={
@@ -50,11 +50,10 @@ class LineupService:
             if response.status_code != 200:
                 return GenerateLineupResp(status=ApiStatus.ERROR, message="Failed to generate lineup", data=None)
             
-             # We'll define a structure for the response once we have the Go server working
             return GenerateLineupResp(status=ApiStatus.SUCCESS, message="Lineup generated successfully", data=response.json())
 
         except Exception as e:
-            print(f"Error in generate_lineup_v3: {e}")
+            print(f"Error in generate_lineup_v2: {e}")
             return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
     
     @staticmethod
