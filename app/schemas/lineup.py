@@ -30,10 +30,10 @@ class LineupInfo(BaseModel):
 class GenerateLineupReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
     threshold: float = Field(ge=0, description="Threshold must be non-negative")
-    week: int = Field(ge=1, le=20, description="Week must be between 1 and 20")
+    week: int = Field(ge=1, description="Week must be positive")
 
 class SaveLineupReq(BaseRequest):
-    team_id: int = Field(ge=1, description="Team ID must be positive")
+    team_id: int = Field(ge=0, description="Team ID must be non-negative")
     lineup_info: LineupInfo
 
 #                          ------- Outgoing -------                           #

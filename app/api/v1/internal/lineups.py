@@ -18,7 +18,7 @@ async def get_lineups(team_id: int, current_user: dict = Depends(get_current_use
 @router.put('/save', response_model=SaveLineupResp)
 async def save_lineup(req: SaveLineupReq, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("uid")
-    return await LineupService.save_lineup(user_id, req.selected_team, req.lineup_info)
+    return await LineupService.save_lineup(user_id, req.team_id, req.lineup_info)
 
 @router.delete('/remove', response_model=DeleteLineupResp)
 async def remove_lineup(lineup_id: int, current_user: dict = Depends(get_current_user)):

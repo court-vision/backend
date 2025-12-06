@@ -1,5 +1,6 @@
 import hashlib
 import requests
+from app.schemas.lineup import LineupInfo, SlimGene, SlimPlayer
 from app.services.espn_service import EspnService
 from app.services.team_service import TeamService
 from app.schemas.espn import PlayerResp, TeamDataResp
@@ -12,7 +13,7 @@ import json
 class LineupService:
 
     @staticmethod
-    async def generate_lineup(user_id: int, team_id: int, threshold: float, week: int):
+    async def generate_lineup(user_id: int, team_id: int, threshold: float, week: str):
         try:
             # Get the league info
             league_info = Team.select(Team.league_info).where(Team.user_id == user_id).where(Team.team_id == team_id).get().league_info
@@ -91,22 +92,29 @@ class LineupService:
 
     @staticmethod
     def deserialize_lineups(lineups: list[tuple]):
-        from app.schemas.lineup import LineupInfo, SlimGene, SlimPlayer
         
-        return [LineupInfo(
-            Id=lineup[0],
-            Timestamp=lineup[1]['Timestamp'],
-            Improvement=lineup[1]['Improvement'],
-            Week=lineup[1]['Week'],
-            Threshold=lineup[1]['Threshold'],
-            Lineup=[
-                SlimGene(
-                Day=gene['Day'],
-                Additions=[SlimPlayer(**player) for player in gene['Additions']],
-                Removals=[SlimPlayer(**player) for player in gene['Removals']],
-                Roster={pos: SlimPlayer(**player) for pos, player in gene['Roster'].items()}
-            ) for gene in lineup[1]['Lineup']]
-        ) for lineup in lineups]
+        result = []
+        for lineup in lineups:
+            lineup_id = lineup[0]
+            # Parse JSON string if needed
+            lineup_data = lineup[1] if isinstance(lineup[1], dict) else json.loads(lineup[1])
+            
+            result.append(LineupInfo(
+                Id=lineup_id,
+                Timestamp=lineup_data['Timestamp'],
+                Improvement=lineup_data['Improvement'],
+                Week=lineup_data['Week'],
+                Threshold=lineup_data['Threshold'],
+                Lineup=[
+                    SlimGene(
+                        Day=gene['Day'],
+                        Additions=[SlimPlayer(**player) for player in gene['Additions']],
+                        Removals=[SlimPlayer(**player) for player in gene['Removals']],
+                        Roster={pos: SlimPlayer(**player) for pos, player in gene['Roster'].items()}
+                    ) for gene in lineup_data['Lineup']
+                ]
+            ))
+        return result
 
     @staticmethod
     async def get_lineups(user_id: int, team_id: int) -> GetLineupsResp:
@@ -123,6 +131,8 @@ class LineupService:
                 return GetLineupsResp(status=ApiStatus.SUCCESS, message="No lineups found", data=None)
             
             lineup_data = [(lineup.lineup_id, lineup.lineup_info) for lineup in lineups]
+
+            print(lineup_data)
         
             return GetLineupsResp(status=ApiStatus.SUCCESS, message="Lineups fetched successfully", data=LineupService.deserialize_lineups(lineup_data))
             

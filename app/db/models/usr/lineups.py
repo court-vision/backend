@@ -1,6 +1,6 @@
 from peewee import (
     Model,
-    IntegerField,
+    AutoField,
     CharField,
     TextField,
     ForeignKeyField,
@@ -10,7 +10,7 @@ from app.db.models.usr.teams import Team
 
 
 class Lineup(BaseModel):
-    lineup_id = IntegerField(primary_key=True)
+    lineup_id = AutoField(primary_key=True)
     team_id = ForeignKeyField(Team, backref='lineups', on_delete='CASCADE')
     lineup_info = TextField()  # JSON string
     lineup_hash = CharField(max_length=32, unique=True)
