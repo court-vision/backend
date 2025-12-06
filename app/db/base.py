@@ -1,23 +1,18 @@
 from playhouse.pool import PooledPostgresqlDatabase
+from playhouse.db_url import parse
 from peewee import Model
 import os
 
 # Get database credentials from environment variables
-DB_HOST = os.getenv('DB_HOST', 'caboose.proxy.rlwy.net')
-DB_PORT = int(os.getenv('DB_PORT', 33942))
-DB_NAME = os.getenv('DB_NAME', 'railway')
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'rtVSWuhkROFxOpegJuElubldctbpXmBT')
+DATABASE_URL = os.getenv('DATABASE_URL')
+parsed_url = parse(DATABASE_URL)
+db_name = parsed_url.pop('database')
 
 db = PooledPostgresqlDatabase(
-    DB_NAME,
-    user=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=DB_PORT,
+    db_name,
     max_connections=20,
     stale_timeout=300,
-    timeout=10,
+    **parsed_url
 )
 
 class BaseModel(Model):
