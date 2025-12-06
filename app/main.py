@@ -1,7 +1,9 @@
 from fastapi import FastAPI, APIRouter
 from app.core.middleware import setup_middleware
+from app.core.db_middleware import DatabaseMiddleware
 from app.db.base import init_db, close_db
 from app.api.v1.internal import auth, users, teams, lineups, espn, admin
+from app.api.v1.public import standings
 
 async def lifespan(app: FastAPI):
     # Initialize database
@@ -12,7 +14,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Court Vision API", version="1.0.0", lifespan=lifespan)
 
+app.add_middleware(DatabaseMiddleware)
 setup_middleware(app)
+
+# API v1 Public routes
+api_v1_public = APIRouter(prefix="/v1")
+api_v1_public.include_router(standings.router)
+
+app.include_router(api_v1_public)
 
 # API v1 Internal routes
 api_v1_internal = APIRouter(prefix="/v1/internal")

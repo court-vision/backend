@@ -41,7 +41,7 @@ def send_verification_email(to_email: str, code: str) -> dict:
 
     try:
         response = ms.emails.send(email)
-        return {"success": True, "email_id": response.data.id}
+        return {"success": True, "email_id": response.data}
     except Exception as e:
         print(f"Mailersend API exception: {e}")
         return {"success": False, "error": str(e)}
