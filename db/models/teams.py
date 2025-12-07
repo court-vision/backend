@@ -5,7 +5,7 @@ from peewee import (
     ForeignKeyField,
 )
 from db.base import BaseModel
-from db.models.usr.users import User
+from db.models.users import User
 
 
 class Team(BaseModel):

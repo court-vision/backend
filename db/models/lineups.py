@@ -6,7 +6,7 @@ from peewee import (
     ForeignKeyField,
 )
 from db.base import BaseModel
-from db.models.usr.teams import Team
+from db.models.teams import Team
 
 
 class Lineup(BaseModel):
