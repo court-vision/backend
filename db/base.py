@@ -25,12 +25,11 @@ def init_db():
     db.connect()
     
     # Import all models to register them
-    from .models import User, Verification, Team, Lineup, DailyStats, TotalStats, FreeAgent, Standing
+    from .models import User, Verification, Team, Lineup
     
     # Create tables if they don't exist
     db.create_tables([
         User, Verification, Team, Lineup,
-        DailyStats, TotalStats, FreeAgent, Standing
     ], safe=True)
     
     # print("Database initialized successfully")

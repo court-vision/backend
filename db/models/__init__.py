@@ -5,10 +5,6 @@ from .teams import Team
 from .lineups import Lineup
 
 __all__ = [
-    'DailyStats',
-    'TotalStats', 
-    'FreeAgent',
-    'Standing',
     'User',
     'Verification',
     'Team',
