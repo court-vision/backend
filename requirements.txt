@@ -16,7 +16,7 @@ mailersend==2.0.0
 numpy==2.3.4
 passlib==1.7.4
 peewee==3.18.2
-psycopg2-binary==2.9.11
+psycopg2==2.9.11
 pyasn1==0.6.1
 pydantic==2.12.3
 pydantic_core==2.41.4
@@ -30,4 +30,4 @@ starlette==0.48.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.5.0
-uvicorn==0.37.0
+uvicorn==0.38.0
