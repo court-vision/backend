@@ -2,11 +2,7 @@ import os
 
 # ------------------------------- Routes ------------------------------- #
 ESPN_FANTASY_ENDPOINT = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/segments/0/leagues/{}'
-FEATURES_SERVER_ENDPOINT = 'https://cv-features-443549036710.us-central1.run.app'
-SELF_ENDPOINT = 'https://cv-backend-production.up.railway.app'
-FRONTEND_API_ENDPOINT = 'https://www.courtvision.dev/api'
-LOCAL_API_ENDPOINT = 'http://localhost:3000/api'
-LOCAL_FEATURES_ENDPOINT = 'http://localhost:8080'
+FEATURES_SERVER_ENDPOINT = os.getenv('FEATURES_SERVER_ENDPOINT')
 
 
 # ----------------------------- Authentication ------------------------------ #

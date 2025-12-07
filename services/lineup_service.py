@@ -7,7 +7,7 @@ from schemas.espn import PlayerResp, TeamDataResp
 from schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp,GenerateLineupResp
 from schemas.common import ApiStatus
 from db.models import Lineup, Team
-from utils.constants import LOCAL_FEATURES_ENDPOINT, NUM_FREE_AGENTS
+from utils.constants import FEATURES_SERVER_ENDPOINT, NUM_FREE_AGENTS
 import json
 
 class LineupService:
@@ -42,7 +42,7 @@ class LineupService:
     async def generate_lineup_v2(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], threshold: float, week: int) -> GenerateLineupResp:
         try:
             # Make HTTP request to Go server to generate the lineup
-            response = requests.post(f"{LOCAL_FEATURES_ENDPOINT}/generate-lineup", json={
+            response = requests.post(f"{FEATURES_SERVER_ENDPOINT}/generate-lineup", json={
                 "roster_data": [player.model_dump() for player in roster_data],
                 "free_agent_data": [player.model_dump() for player in free_agent_data],
                 "threshold": threshold,
