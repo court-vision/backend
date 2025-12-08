@@ -56,7 +56,7 @@ class AuthService:
             code = generate_verification_code()
             
             # Send the verification email FIRST before creating the database record
-            res = send_verification_email(email, code)
+            res = await send_verification_email(email, code)
             if not res.get("success"):
                 print(f"Error in verify_email 1: {res.get('error')}")
                 return VerifyEmailResp(

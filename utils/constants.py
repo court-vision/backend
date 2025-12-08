@@ -2,7 +2,7 @@ import os
 
 # ------------------------------- Routes ------------------------------- #
 ESPN_FANTASY_ENDPOINT = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/segments/0/leagues/{}'
-FEATURES_SERVER_ENDPOINT = os.getenv('FEATURES_SERVER_ENDPOINT')
+FEATURES_SERVER_ENDPOINT = os.getenv('FEATURES_SERVER_ENDPOINT', 'http://localhost:8080')
 
 
 # ----------------------------- Authentication ------------------------------ #
