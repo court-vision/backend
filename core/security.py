@@ -30,7 +30,7 @@ def _send_verification_email_sync(to_email: str, code: str) -> dict:
             "html": f"<strong>Please verify your email by entering the following code: {code}</strong>. This code will expire in 5 minutes."
         }
         response = resend.Emails.send(params)
-        return {"success": True, "email_id": response.id}
+        return {"success": True, "email_id": response['id']}
     except Exception as e:
         print(f"Resend API exception: {e}")
         return {"success": False, "error": str(e)}
