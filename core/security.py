@@ -3,11 +3,13 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi import HTTPException, Depends
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
-from mailersend import MailerSendClient, EmailBuilder
 from typing import Optional
 import random
 import bcrypt
 import os
+import resend
+
+resend.api_key = os.environ.get('RESEND_API_KEY')
 
 # ---------------------- User Authentication ---------------------- #
 
@@ -19,31 +21,27 @@ def generate_verification_code() -> str:
 
 # Send the verification email
 def send_verification_email(to_email: str, code: str) -> dict:
-    mailersend_api_key = os.environ.get('MAILERSEND_API_TOKEN')
     development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
     
-    if not mailersend_api_key:
-        print("SENDGRID_API_KEY environment variable not set")
+    if not resend.api_key:
+        print("RESEND_API_KEY environment variable not set or is empty")
         return {"success": False, "error": "Email service not configured"}
         
     if development_mode:
         print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
         return {"success": True}
-
-    ms = MailerSendClient(api_key=mailersend_api_key)
-    email = (EmailBuilder()
-        .from_email("mail@courtvision.dev", "Court Vision")
-        .to(to_email, to_email)
-        .subject("Email Verification")
-        .html(f"<strong>Please verify your email by entering the following code: {code}</strong>. This code will expire in 5 minutes.")
-        .build()
-    )
-
+    
     try:
-        response = ms.emails.send(email)
-        return {"success": True, "email_id": response.data}
+        params: resend.Emails.SendParams = {
+            "from": "mail@courtvision.dev",
+            "to": [to_email],
+            "subject": "Email Verification",
+            "html": f"<strong>Please verify your email by entering the following code: {code}</strong>. This code will expire in 5 minutes."
+        }
+        response = resend.Emails.send(params)
+        return {"success": True, "email_id": response.id}
     except Exception as e:
-        print(f"Mailersend API exception: {e}")
+        print(f"Resend API exception: {e}")
         return {"success": False, "error": str(e)}
 
 # Create access token for a user
