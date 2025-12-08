@@ -35,7 +35,7 @@ def send_verification_email(to_email: str, code: str) -> dict:
         .from_email("mail@courtvision.dev", "Court Vision")
         .to(to_email, to_email)
         .subject("Email Verification")
-        .html(f"<strong>Please verify your email by entering the following code: {code}</strong>")
+        .html(f"<strong>Please verify your email by entering the following code: {code}</strong>. This code will expire in 5 minutes.")
         .build()
     )
 
