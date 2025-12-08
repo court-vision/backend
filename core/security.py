@@ -39,13 +39,13 @@ def _send_verification_email_sync(to_email: str, code: str) -> dict:
 async def send_verification_email(to_email: str, code: str) -> dict:
     development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
     
-    if not resend.api_key:
-        print("RESEND_API_KEY environment variable not set or is empty")
-        return {"success": False, "error": "Email service not configured"}
-        
     if development_mode:
         print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
         return {"success": True}
+    
+    if not resend.api_key:
+        print("RESEND_API_KEY environment variable not set or is empty")
+        return {"success": False, "error": "Email service not configured"}
     
     return await asyncio.to_thread(_send_verification_email_sync, to_email, code)
 
