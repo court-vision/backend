@@ -1,3 +1,4 @@
+from typing import Optional
 from schemas.player import PlayerStatsResp, PlayerStats, AvgStats, GameLog
 from schemas.common import ApiStatus
 from db.models.stats.daily_player_stats import DailyPlayerStats
@@ -7,15 +8,32 @@ from peewee import fn
 class PlayerService:
 
     @staticmethod
-    async def get_player_stats(player_id: int) -> PlayerStatsResp:
+    async def get_player_stats(
+        player_id: Optional[int] = None,
+        name: Optional[str] = None,
+        team: Optional[str] = None
+    ) -> PlayerStatsResp:
         try:
+            # Build query based on provided parameters
+            query = DailyPlayerStats.select()
+            
+            if player_id is not None:
+                # Lookup by player ID (used for standings)
+                query = query.where(DailyPlayerStats.id == player_id)
+            elif name is not None:
+                # Lookup by name (and optionally team) - used for roster
+                query = query.where(DailyPlayerStats.name == name)
+                if team is not None:
+                    query = query.where(DailyPlayerStats.team == team)
+            else:
+                return PlayerStatsResp(
+                    status=ApiStatus.ERROR,
+                    message="Must provide either player_id or name",
+                    data=None
+                )
+            
             # Get all game logs for the player, ordered by date
-            game_logs_query = (
-                DailyPlayerStats
-                .select()
-                .where(DailyPlayerStats.id == player_id)
-                .order_by(DailyPlayerStats.date.asc())
-            )
+            game_logs_query = query.order_by(DailyPlayerStats.date.asc())
 
             game_logs_list = list(game_logs_query)
 
@@ -69,8 +87,11 @@ class PlayerService:
                 for g in game_logs_list
             ]
 
+            # Use the ID from the game log if we looked up by name
+            resolved_player_id = player_id if player_id is not None else latest_game.id
+
             player_stats = PlayerStats(
-                id=player_id,
+                id=resolved_player_id,
                 name=player_name,
                 team=player_team,
                 games_played=games_played,
