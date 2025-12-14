@@ -8,6 +8,7 @@ class ValidateLeagueReq(BaseRequest):
     league_info: LeagueInfo
 
 class PlayerResp(BaseModel):
+    player_id: int
     name: str
     avg_points: float
     team: str

@@ -123,7 +123,9 @@ class EspnService:
                 status=ApiStatus.SUCCESS, 
                 message="Team data fetched successfully",
                 data=[
-                    PlayerResp(name=player.name,
+                    PlayerResp(
+                        player_id=player.playerId,
+                        name=player.name,
                         avg_points=player.avg_points,
                         team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
                         valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
@@ -162,6 +164,7 @@ class EspnService:
                 status=ApiStatus.SUCCESS,
                 message="Free agents fetched successfully",
                 data=[PlayerResp(
+                        player_id=player.playerId,
                         name=player.name,
                         avg_points=player.avg_points,
                         team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
