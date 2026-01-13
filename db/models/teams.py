@@ -11,7 +11,7 @@ from db.models.users import User
 class Team(BaseModel):
     team_id = AutoField(primary_key=True)
     user_id = ForeignKeyField(User, backref='teams', on_delete='CASCADE')
-    team_identifier = CharField(max_length=255, unique=True)
+    team_identifier = CharField(max_length=255)
     league_info = TextField()  # JSON string
 
     class Meta:
