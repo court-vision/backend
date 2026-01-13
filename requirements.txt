@@ -19,6 +19,7 @@ psycopg2==2.9.11
 pyasn1==0.6.1
 pydantic==2.12.3
 pydantic_core==2.41.4
+PyJWT[crypto]==2.8.0
 python-jose==3.5.0
 pytz==2025.2
 requests==2.32.5

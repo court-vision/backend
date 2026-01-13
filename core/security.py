@@ -1,9 +1,13 @@
-from utils.constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
-from fastapi.security import OAuth2PasswordBearer
-from fastapi import HTTPException, Depends
-from datetime import datetime, timedelta
-from jose import jwt, JWTError
-from typing import Optional
+"""
+Security utilities module.
+
+MIGRATION NOTE: JWT authentication has been migrated to Clerk.
+See core/clerk_auth.py for the new authentication system.
+
+This file retains helper functions (password hashing, email sending)
+that may still be used by other parts of the application.
+"""
+
 import asyncio
 import random
 import bcrypt
@@ -12,16 +16,51 @@ import resend
 
 resend.api_key = os.environ.get('RESEND_API_KEY')
 
-# ---------------------- User Authentication ---------------------- #
+# ---------------------- DEPRECATED: Custom JWT Auth ---------------------- #
+# The following JWT-based authentication code has been replaced by Clerk.
+# See core/clerk_auth.py for the new implementation.
+#
+# from utils.constants import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
+# from fastapi.security import OAuth2PasswordBearer
+# from fastapi import HTTPException, Depends
+# from datetime import datetime, timedelta
+# from jose import jwt, JWTError
+# from typing import Optional
+#
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+#
+# def create_access_token(data: dict) -> str:
+#     to_encode = data.copy()
+#     to_encode.update({"exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
+#     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+#
+# def verify_access_token(token: str) -> Optional[dict]:
+#     try:
+#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+#         return payload
+#     except JWTError as e:
+#         print(f"JWT verification failed: {e}")
+#         return None
+#
+# def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+#     payload = verify_access_token(token)
+#     if payload is None:
+#         print(f"Token validation failed - token was: {token[:20]}..." if token else "Token validation failed - no token")
+#         raise HTTPException(status_code=401, detail="Invalid access token")
+#     return payload
+# ---------------------- END DEPRECATED ---------------------- #
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Generate a verification code
+# --------------------- Email Utilities --------------------- #
+# These may still be used for non-auth emails (notifications, etc.)
+
 def generate_verification_code() -> str:
+    """Generate a 6-digit verification code."""
     return '{:06d}'.format(random.randint(0, 999999))
 
-# Synchronous helper for sending email (runs in thread pool)
+
 def _send_verification_email_sync(to_email: str, code: str) -> dict:
+    """Synchronous helper for sending email (runs in thread pool)."""
     try:
         params: resend.Emails.SendParams = {
             "from": "mail@courtvision.dev",
@@ -35,47 +74,30 @@ def _send_verification_email_sync(to_email: str, code: str) -> dict:
         print(f"Resend API exception: {e}")
         return {"success": False, "error": str(e)}
 
-# Send the verification email (async, runs blocking I/O in thread pool)
+
 async def send_verification_email(to_email: str, code: str) -> dict:
+    """Send the verification email (async, runs blocking I/O in thread pool)."""
     development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
-    
+
     if development_mode:
         print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
         return {"success": True}
-    
+
     if not resend.api_key:
         print("RESEND_API_KEY environment variable not set or is empty")
         return {"success": False, "error": "Email service not configured"}
-    
+
     return await asyncio.to_thread(_send_verification_email_sync, to_email, code)
 
-# Create access token for a user
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    to_encode.update({"exp": datetime.now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# Verify the access token
-def verify_access_token(token: str) -> Optional[dict]:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError as e:
-        print(f"JWT verification failed: {e}")
-        return None
-
-# Get the data for the user
-def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
-    payload = verify_access_token(token)
-    if payload is None:
-        print(f"Token validation failed - token was: {token[:20]}..." if token else "Token validation failed - no token")
-        raise HTTPException(status_code=401, detail="Invalid access token")
-    return payload
-
-# --------------------- Encryption/Validation --------------------- #
+# --------------------- Password Utilities --------------------- #
+# These may still be used for legacy password verification
 
 def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
+
 def check_password(password: str, hashed_password: str) -> bool:
+    """Verify a password against a bcrypt hash."""
     return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
