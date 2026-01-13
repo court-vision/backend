@@ -17,6 +17,9 @@ from typing import Optional
 # Format: https://<your-clerk-frontend-api>.clerk.accounts.dev/.well-known/jwks.json
 CLERK_JWKS_URL = os.environ.get('CLERK_JWKS_URL')
 
+# Clerk Secret Key - required for fetching user details from Clerk's API
+CLERK_SECRET_KEY = os.environ.get('CLERK_SECRET_KEY')
+
 security = HTTPBearer()
 
 
@@ -75,6 +78,62 @@ def get_public_key_for_token(token: str):
     raise HTTPException(status_code=401, detail="Unable to find appropriate signing key")
 
 
+def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
+    """
+    Fetch user details from Clerk's Backend API.
+
+    This is used to get user information (like email) that isn't included
+    in the JWT by default.
+
+    Args:
+        clerk_user_id: The Clerk user ID (e.g., 'user_xxx')
+
+    Returns:
+        dict with user details including email, or None if fetch fails
+    """
+    if not CLERK_SECRET_KEY:
+        print("Warning: CLERK_SECRET_KEY not configured, cannot fetch user details")
+        return None
+
+    try:
+        response = requests.get(
+            f"https://api.clerk.com/v1/users/{clerk_user_id}",
+            headers={
+                "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        user_data = response.json()
+
+        # Extract primary email from Clerk's response
+        email = None
+        email_addresses = user_data.get('email_addresses', [])
+
+        # Find the primary email
+        primary_email_id = user_data.get('primary_email_address_id')
+        for email_obj in email_addresses:
+            if email_obj.get('id') == primary_email_id:
+                email = email_obj.get('email_address')
+                break
+
+        # Fallback to first email if no primary
+        if not email and email_addresses:
+            email = email_addresses[0].get('email_address')
+
+        return {
+            "clerk_user_id": user_data.get('id'),
+            "email": email,
+            "first_name": user_data.get('first_name'),
+            "last_name": user_data.get('last_name'),
+        }
+
+    except requests.RequestException as e:
+        print(f"Failed to fetch user from Clerk API: {e}")
+        return None
+
+
 def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """
     Verify a Clerk JWT token and return the payload.
@@ -102,10 +161,18 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             }
         )
 
-        # Extract and normalize user info from Clerk token
+        clerk_user_id = payload.get("sub")
+        email = payload.get("email")  # May be None if not in JWT claims
+
+        # If email not in JWT, fetch from Clerk's API
+        if not email and clerk_user_id:
+            clerk_user = fetch_clerk_user(clerk_user_id)
+            if clerk_user:
+                email = clerk_user.get("email")
+
         return {
-            "clerk_user_id": payload.get("sub"),  # Clerk user ID
-            "email": payload.get("email"),
+            "clerk_user_id": clerk_user_id,
+            "email": email,
             "exp": payload.get("exp"),
             "iat": payload.get("iat"),
         }
