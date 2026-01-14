@@ -389,11 +389,8 @@ class EspnService:
                             elif stat_id.startswith('10'):  # Projected
                                 projected_points = round(stat_split.get('appliedTotal', 0), 2)
                     
-
                     # Calculate games remaining for this player using schedule service
                     games_remaining = get_remaining_games(team_abbrev)
-                            
-                    print(f"Player: {name}, Avg Points: {avg_points}, Projected Points: {projected_points}, Games Remaining: {games_remaining}")
 
                     # Only add to projection if not on IR
                     if lineup_slot not in ('IR', ''):
