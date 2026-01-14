@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Optional
 import requests
 import json
 from schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
@@ -7,7 +6,7 @@ from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPl
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, AVG_WINDOW_MAP, json_parsing
 from schemas.common import ApiStatus
-from services.schedule_service import get_remaining_games
+from services.schedule_service import get_remaining_games, get_matchup_dates
 
 class Player(object):
     '''Player are part of team'''
@@ -236,14 +235,14 @@ class EspnService:
             response.raise_for_status()
             data = response.json()
 
-            # Get current matchup period and scoring period
+            # Get current matchup period from ESPN
             status = data.get('status', {})
             current_matchup_period = status.get('currentMatchupPeriod', 1)
 
-            # Get schedule settings for matchup period dates
-            settings = data.get('settings', {})
-            schedule_settings = settings.get('scheduleSettings', {})
-            matchup_periods = schedule_settings.get('matchupPeriods', {})
+            # Get matchup dates from schedule service
+            matchup_dates = get_matchup_dates(current_matchup_period)
+            matchup_start_date = matchup_dates[0] if matchup_dates else None
+            matchup_end_date = matchup_dates[1] if matchup_dates else None
 
             # Find our team
             teams = data.get('teams', [])
@@ -301,29 +300,6 @@ class EspnService:
                     message="Opponent team not found",
                     data=None
                 )
-
-            # Get pro team schedule for games remaining calculation
-            pro_team_schedule = data.get('settings', {}).get('proTeams', [])
-            pro_schedule_map = {}
-            for pro_team in pro_team_schedule:
-                pro_team_id = pro_team.get('id')
-                pro_schedule_map[pro_team_id] = pro_team.get('proGamesByScoringPeriod', {})
-
-            # Get matchup period dates
-            matchup_period_scoring_periods = matchup_periods.get(str(current_matchup_period), [])
-            matchup_start = None
-            matchup_end = None
-            if matchup_period_scoring_periods:
-                matchup_start = min(matchup_period_scoring_periods)
-                matchup_end = max(matchup_period_scoring_periods)
-
-            # Get current scoring period to calculate remaining games
-            current_scoring_period = status.get('currentScoringPeriod', matchup_start or 1)
-
-            # Calculate remaining scoring periods in this matchup
-            remaining_periods = []
-            if matchup_period_scoring_periods:
-                remaining_periods = [p for p in matchup_period_scoring_periods if p >= current_scoring_period]
 
             # Extract current scores
             home_data = current_matchup.get('home', {})
@@ -431,8 +407,8 @@ class EspnService:
             # Build response
             matchup_data = MatchupData(
                 matchup_period=current_matchup_period,
-                matchup_period_start=str(matchup_start) if matchup_start else "",
-                matchup_period_end=str(matchup_end) if matchup_end else "",
+                matchup_period_start=matchup_start_date.isoformat() if matchup_start_date else "",
+                matchup_period_end=matchup_end_date.isoformat() if matchup_end_date else "",
                 your_team=MatchupTeamResp(
                     team_name=our_team.get('name', 'Your Team'),
                     team_id=our_team_id,

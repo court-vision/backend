@@ -191,3 +191,35 @@ def get_remaining_games_for_matchup(
     current_day_index = (current_date - start_date).days
     remaining = sum(1 for day in team_games.keys() if int(day) >= current_day_index)
     return remaining
+
+
+def get_matchup_dates(matchup_number: int) -> Optional[tuple[date, date]]:
+    """
+    Get the start and end dates for a specific matchup.
+
+    Args:
+        matchup_number: The matchup number (1-20 for 2025-26 season).
+
+    Returns:
+        Tuple of (start_date, end_date) or None if matchup not found.
+    """
+    matchup = get_matchup_by_number(matchup_number)
+    if not matchup:
+        return None
+    return (matchup["start_date"], matchup["end_date"])
+
+
+def get_current_matchup_dates(current_date: Optional[date] = None) -> Optional[tuple[date, date]]:
+    """
+    Get the start and end dates for the current matchup.
+
+    Args:
+        current_date: The date to check. Defaults to today.
+
+    Returns:
+        Tuple of (start_date, end_date) or None if no current matchup.
+    """
+    matchup = get_current_matchup(current_date)
+    if not matchup:
+        return None
+    return (matchup["start_date"], matchup["end_date"])
