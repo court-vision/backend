@@ -127,6 +127,14 @@ STAT_ID_MAP = {
     '03': 'last_30',
 }
 
+# Maps user-friendly window names to ESPN stat ID prefixes
+AVG_WINDOW_MAP = {
+    "season": "total",       # Maps to STAT_ID_MAP '00'
+    "last_7": "last_7",      # Maps to STAT_ID_MAP '01'
+    "last_14": "last_15",    # ESPN uses 15-day window, maps to '02'
+    "last_30": "last_30",    # Maps to STAT_ID_MAP '03'
+}
+
 ACTIVITY_MAP = {
     178: 'FA ADDED',
     180: 'WAIVER ADDED',
