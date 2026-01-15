@@ -1,4 +1,5 @@
 from typing import Optional
+from datetime import date, timedelta
 from schemas.player import PlayerStatsResp, PlayerStats, AvgStats, GameLog
 from schemas.common import ApiStatus
 from db.models.stats.daily_player_stats import DailyPlayerStats
@@ -112,4 +113,74 @@ class PlayerService:
                 message="Internal server error",
                 data=None
             )
+
+    @staticmethod
+    def get_last_n_day_avg(player_id: int, days: int = 7) -> Optional[float]:
+        """
+        Get average fantasy points over the last N days for a player.
+
+        Args:
+            player_id: The player's ID.
+            days: Number of days to look back (default 7).
+
+        Returns:
+            Average fantasy points per game, or None if no games found.
+        """
+        cutoff_date = date.today() - timedelta(days=days)
+
+        query = DailyPlayerStats.select().where(
+            (DailyPlayerStats.id == player_id) &
+            (DailyPlayerStats.date >= cutoff_date)
+        )
+
+        games = list(query)
+        if not games:
+            return None
+
+        total_fpts = sum(g.fpts for g in games)
+        return round(total_fpts / len(games), 1)
+
+    @staticmethod
+    def get_last_n_day_avg_batch(
+        espn_ids: list[int],
+        days: int = 7
+    ) -> dict[int, Optional[float]]:
+        """
+        Get last N day averages for multiple players efficiently.
+
+        Args:
+            espn_ids: List of ESPN player IDs.
+            days: Number of days to look back (default 7).
+
+        Returns:
+            Dict mapping espn_id to their average fantasy points (or None).
+        """
+        if not espn_ids:
+            return {}
+
+        cutoff_date = date.today() - timedelta(days=days)
+
+        # Query all games for all players in one query using ESPN ID
+        query = DailyPlayerStats.select().where(
+            (DailyPlayerStats.espn_id.in_(espn_ids)) &
+            (DailyPlayerStats.date >= cutoff_date)
+        )
+
+        # Group games by ESPN ID
+        player_games: dict[int, list] = {eid: [] for eid in espn_ids}
+        for game in query:
+            if game.espn_id in player_games:
+                player_games[game.espn_id].append(game)
+
+        # Calculate averages
+        result = {}
+        for espn_id in espn_ids:
+            games = player_games[espn_id]
+            if games:
+                total_fpts = sum(g.fpts for g in games)
+                result[espn_id] = round(total_fpts / len(games), 1)
+            else:
+                result[espn_id] = None
+
+        return result
 

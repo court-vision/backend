@@ -223,3 +223,112 @@ def get_current_matchup_dates(current_date: Optional[date] = None) -> Optional[t
     if not matchup:
         return None
     return (matchup["start_date"], matchup["end_date"])
+
+
+def get_remaining_game_days(team_abbrev: str, current_date: Optional[date] = None) -> list[int]:
+    """
+    Get the list of remaining game day indices for a team in the current matchup.
+
+    Args:
+        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
+        current_date: The date to calculate from. Defaults to today.
+
+    Returns:
+        List of day indices (0-indexed) for remaining games.
+    """
+    if current_date is None:
+        current_date = date.today()
+
+    matchup = get_current_matchup(current_date)
+    if not matchup:
+        return []
+
+    current_day_index = matchup["current_day_index"]
+    team_games = matchup["games"].get(team_abbrev, {})
+
+    return sorted([int(day) for day in team_games.keys() if int(day) >= current_day_index])
+
+
+def _find_b2b_pairs(game_days: list[int]) -> list[tuple[int, int]]:
+    """
+    Find consecutive day pairs (back-to-backs) in a list of game days.
+
+    Args:
+        game_days: Sorted list of day indices when team plays.
+
+    Returns:
+        List of (day1, day2) tuples representing back-to-back games.
+    """
+    b2b_pairs = []
+    for i in range(len(game_days) - 1):
+        if game_days[i + 1] - game_days[i] == 1:
+            b2b_pairs.append((game_days[i], game_days[i + 1]))
+    return b2b_pairs
+
+
+def has_remaining_b2b(team_abbrev: str, current_date: Optional[date] = None) -> bool:
+    """
+    Check if a team has any remaining back-to-back games in the current matchup.
+
+    Args:
+        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
+        current_date: The date to check from. Defaults to today.
+
+    Returns:
+        True if the team has at least one remaining B2B sequence, False otherwise.
+    """
+    remaining_days = get_remaining_game_days(team_abbrev, current_date)
+    b2b_pairs = _find_b2b_pairs(remaining_days)
+    return len(b2b_pairs) > 0
+
+
+def get_b2b_game_count(team_abbrev: str, current_date: Optional[date] = None) -> int:
+    """
+    Count how many remaining games are part of back-to-back sequences.
+
+    A B2B means 2 consecutive days with games. This returns the count of individual
+    game days that are part of remaining B2B sequences.
+
+    Args:
+        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
+        current_date: The date to calculate from. Defaults to today.
+
+    Returns:
+        Number of game days that are part of remaining B2B sequences.
+        Example: If team has B2B on days 3-4 and 6-7, returns 4.
+    """
+    remaining_days = get_remaining_game_days(team_abbrev, current_date)
+    b2b_pairs = _find_b2b_pairs(remaining_days)
+
+    # Collect unique days that are part of B2Bs
+    b2b_days = set()
+    for day1, day2 in b2b_pairs:
+        b2b_days.add(day1)
+        b2b_days.add(day2)
+
+    return len(b2b_days)
+
+
+def get_teams_with_b2b(current_date: Optional[date] = None) -> list[str]:
+    """
+    Get list of team abbreviations with remaining B2B games in the current matchup.
+
+    Args:
+        current_date: The date to check from. Defaults to today.
+
+    Returns:
+        List of team abbreviations that have at least one remaining B2B.
+    """
+    if current_date is None:
+        current_date = date.today()
+
+    matchup = get_current_matchup(current_date)
+    if not matchup:
+        return []
+
+    teams_with_b2b = []
+    for team_abbrev in matchup["games"].keys():
+        if has_remaining_b2b(team_abbrev, current_date):
+            teams_with_b2b.append(team_abbrev)
+
+    return sorted(teams_with_b2b)

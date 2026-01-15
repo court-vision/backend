@@ -9,6 +9,7 @@ from db.base import BaseModel
 
 class DailyPlayerStats(BaseModel):
     id = IntegerField()
+    espn_id = IntegerField(null=True, default=None)
     name = CharField(max_length=50)
     team = CharField(max_length=3)
     date = DateField()
