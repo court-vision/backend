@@ -3,7 +3,7 @@ from core.middleware import setup_middleware
 from core.db_middleware import DatabaseMiddleware
 from db.base import init_db, close_db
 from api.v1.internal import auth, users, teams, lineups, espn, matchups
-from api.v1.public import standings, players
+from api.v1.public import rankings, players
 
 async def lifespan(app: FastAPI):
     # Initialize database
@@ -19,7 +19,7 @@ setup_middleware(app)
 
 # API v1 Public routes
 api_v1_public = APIRouter(prefix="/v1")
-api_v1_public.include_router(standings.router)
+api_v1_public.include_router(rankings.router)
 api_v1_public.include_router(players.router)
 
 app.include_router(api_v1_public)

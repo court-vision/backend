@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from .common import BaseResponse
 from typing import List, Optional
 
-class StandingsPlayer(BaseModel):
+class RankingsPlayer(BaseModel):
     id: int
     rank: int
     player_name: str
@@ -11,6 +11,5 @@ class StandingsPlayer(BaseModel):
     avg_fpts: float
     rank_change: int = 0
 
-class StandingsResp(BaseResponse):
-    data: List[StandingsPlayer]
-
+class RankingsResp(BaseResponse):
+    data: List[RankingsPlayer]

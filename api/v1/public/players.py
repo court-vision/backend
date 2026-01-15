@@ -8,7 +8,7 @@ router = APIRouter(prefix="/players", tags=["players"])
 
 @router.get('/stats', response_model=PlayerStatsResp)
 async def get_player_stats_by_query(
-    player_id: Optional[int] = Query(None, description="NBA player ID (used for standings)"),
+    player_id: Optional[int] = Query(None, description="NBA player ID (used for rankings)"),
     name: Optional[str] = Query(None, description="Player name (used for roster lookup)"),
     team: Optional[str] = Query(None, description="Player team abbreviation (used with name)")
 ) -> PlayerStatsResp:

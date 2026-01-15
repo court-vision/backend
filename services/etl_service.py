@@ -6,7 +6,8 @@ from utils.etl_helpers import (
 )
 from utils.espn_helpers import remove_diacritics
 from services.espn_service import EspnService
-from db.models import TotalStats, DailyStats, FreeAgent, Standing
+from db.models import TotalStats, DailyStats, FreeAgent
+from db.models.stats.rankings import Rankings
 from libs.nba_api.stats.endpoints import leagueleaders
 from schemas.etl import FPTSPlayer
 import pytz
@@ -150,7 +151,7 @@ class ETLService:
         if not cron_token or cron_token != CRON_TOKEN:
             return {"data": []}
             
-        data = list(Standing.select().dicts())
+        data = list(Rankings.select().dicts())
         data_tuples = [tuple(row.values()) for row in data]
 
         return {"data": ETLService.serialize_fpts_data(data_tuples)}

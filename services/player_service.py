@@ -18,7 +18,7 @@ class PlayerService:
             query = DailyPlayerStats.select()
             
             if player_id is not None:
-                # Lookup by player ID (used for standings)
+                # Lookup by player ID (used for rankings)
                 query = query.where(DailyPlayerStats.id == player_id)
             elif name is not None:
                 # Lookup by name (and optionally team) - used for roster

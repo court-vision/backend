@@ -2,7 +2,7 @@ from peewee import IntegerField, CharField, DecimalField, SmallIntegerField
 from db.base import BaseModel
 
 
-class Standings(BaseModel):
+class Rankings(BaseModel):
     id = IntegerField()
     curr_rank = SmallIntegerField()
     name = CharField(max_length=50)
@@ -15,4 +15,3 @@ class Standings(BaseModel):
         schema = 'stats_s2'
         table_name = 'standings'
         primary_key = False
-
