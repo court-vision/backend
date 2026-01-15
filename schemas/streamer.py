@@ -11,7 +11,7 @@ class StreamerPlayerResp(BaseModel):
     valid_positions: list[str]
 
     # Performance metrics
-    avg_points_last_7: Optional[float] = None
+    avg_points_last_n: Optional[float] = None
     avg_points_season: float
 
     # Schedule metrics
@@ -32,6 +32,7 @@ class StreamerData(BaseModel):
     """Complete streamer search results."""
     matchup_number: int
     current_day_index: int
+    avg_days: int
     teams_with_b2b: list[str]
     streamers: list[StreamerPlayerResp]
 
@@ -49,6 +50,12 @@ class StreamerReq(BaseRequest):
         default=None,
         ge=0,
         description="Day index within the matchup (0-indexed). If None, uses current day."
+    )
+    avg_days: int = Field(
+        default=7,
+        ge=3,
+        le=30,
+        description="Number of days to use for rolling average calculation"
     )
 
 

@@ -68,7 +68,8 @@ class StreamerService:
         fa_count: int = 50,
         exclude_injured: bool = True,
         b2b_only: bool = False,
-        day: Optional[int] = None
+        day: Optional[int] = None,
+        avg_days: int = 7
     ) -> StreamerResp:
         """
         Find and rank the best streaming candidates from free agents.
@@ -79,6 +80,7 @@ class StreamerService:
             exclude_injured: Whether to exclude injured players (default True).
             b2b_only: Only show players on teams with remaining B2Bs (default False).
             day: Day index within the matchup (0-indexed). If None, uses current day.
+            avg_days: Number of days for rolling average calculation (default 7).
 
         Returns:
             StreamerResp with ranked list of streaming candidates.
@@ -130,8 +132,8 @@ class StreamerService:
             # Get player IDs for batch query
             player_ids = [fa.player_id for fa in free_agents]
 
-            # Fetch last 7-day averages from our database
-            last_7_avgs = PlayerService.get_last_n_day_avg_batch(player_ids, days=7)
+            # Fetch last n-day averages from our database
+            last_n_avgs = PlayerService.get_last_n_day_avg_batch(player_ids, days=avg_days)
 
             # Build streamer list
             streamers: list[StreamerPlayerResp] = []
@@ -157,14 +159,14 @@ class StreamerService:
                 if games_remaining == 0:
                     continue
 
-                # Get last 7-day average from our database
-                avg_points_last_7 = last_7_avgs.get(fa.player_id)
+                # Get last n-day average from our database
+                avg_points_last_n = last_n_avgs.get(fa.player_id)
 
                 # Calculate streamer score
                 streamer_score = StreamerService._calculate_streamer_score(
                     has_b2b=team_has_b2b,
                     games_remaining=games_remaining,
-                    avg_points_last_7=avg_points_last_7,
+                    avg_points_last_7=avg_points_last_n,
                     b2b_game_count=b2b_game_count
                 )
 
@@ -173,7 +175,7 @@ class StreamerService:
                     name=fa.name,
                     team=team,
                     valid_positions=fa.valid_positions,
-                    avg_points_last_7=avg_points_last_7,
+                    avg_points_last_n=avg_points_last_n,
                     avg_points_season=fa.avg_points,
                     games_remaining=games_remaining,
                     has_b2b=team_has_b2b,
@@ -193,6 +195,7 @@ class StreamerService:
                 data=StreamerData(
                     matchup_number=matchup_number,
                     current_day_index=current_day_index,
+                    avg_days=avg_days,
                     teams_with_b2b=teams_with_b2b,
                     streamers=streamers
                 )
