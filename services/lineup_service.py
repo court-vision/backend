@@ -131,8 +131,6 @@ class LineupService:
                 return GetLineupsResp(status=ApiStatus.SUCCESS, message="No lineups found", data=None)
             
             lineup_data = [(lineup.lineup_id, lineup.lineup_info) for lineup in lineups]
-
-            print(lineup_data)
         
             return GetLineupsResp(status=ApiStatus.SUCCESS, message="Lineups fetched successfully", data=LineupService.deserialize_lineups(lineup_data))
             
