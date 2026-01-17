@@ -61,6 +61,19 @@ class PlayerService:
             total_tov = sum(g.tov for g in game_logs_list)
             total_min = sum(g.min for g in game_logs_list)
 
+            # Calculate shooting totals for percentages
+            total_fgm = sum(g.fgm for g in game_logs_list)
+            total_fga = sum(g.fga for g in game_logs_list)
+            total_fg3m = sum(g.fg3m for g in game_logs_list)
+            total_fg3a = sum(g.fg3a for g in game_logs_list)
+            total_ftm = sum(g.ftm for g in game_logs_list)
+            total_fta = sum(g.fta for g in game_logs_list)
+
+            # Calculate shooting percentages (handle division by zero)
+            avg_fg_pct = round((total_fgm / total_fga) * 100, 1) if total_fga > 0 else 0.0
+            avg_fg3_pct = round((total_fg3m / total_fg3a) * 100, 1) if total_fg3a > 0 else 0.0
+            avg_ft_pct = round((total_ftm / total_fta) * 100, 1) if total_fta > 0 else 0.0
+
             avg_stats = AvgStats(
                 avg_fpts=round(total_fpts / games_played, 1),
                 avg_points=round(total_pts / games_played, 1),
@@ -70,6 +83,9 @@ class PlayerService:
                 avg_blocks=round(total_blk / games_played, 1),
                 avg_turnovers=round(total_tov / games_played, 1),
                 avg_minutes=round(total_min / games_played, 1),
+                avg_fg_pct=avg_fg_pct,
+                avg_fg3_pct=avg_fg3_pct,
+                avg_ft_pct=avg_ft_pct,
             )
 
             # Build game logs
@@ -84,6 +100,12 @@ class PlayerService:
                     blk=g.blk,
                     tov=g.tov,
                     min=g.min,
+                    fgm=g.fgm,
+                    fga=g.fga,
+                    fg3m=g.fg3m,
+                    fg3a=g.fg3a,
+                    ftm=g.ftm,
+                    fta=g.fta,
                 )
                 for g in game_logs_list
             ]

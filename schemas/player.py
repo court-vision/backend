@@ -13,6 +13,12 @@ class GameLog(BaseModel):
     blk: int
     tov: int
     min: int
+    fgm: int
+    fga: int
+    fg3m: int
+    fg3a: int
+    ftm: int
+    fta: int
 
 
 class AvgStats(BaseModel):
@@ -24,6 +30,9 @@ class AvgStats(BaseModel):
     avg_blocks: float
     avg_turnovers: float
     avg_minutes: float
+    avg_fg_pct: float
+    avg_fg3_pct: float
+    avg_ft_pct: float
 
 
 class PlayerStats(BaseModel):
