@@ -2,7 +2,7 @@ from fastapi import FastAPI, APIRouter
 from core.middleware import setup_middleware
 from core.db_middleware import DatabaseMiddleware
 from db.base import init_db, close_db
-from api.v1.internal import auth, users, teams, lineups, espn, matchups, streamers
+from api.v1.internal import auth, users, teams, lineups, espn, matchups, streamers, pipelines
 from api.v1.public import rankings, players
 
 async def lifespan(app: FastAPI):
@@ -33,6 +33,7 @@ api_v1_internal.include_router(lineups.router)
 api_v1_internal.include_router(espn.router)
 api_v1_internal.include_router(matchups.router)
 api_v1_internal.include_router(streamers.router)
+api_v1_internal.include_router(pipelines.router)
 
 app.include_router(api_v1_internal)
 
