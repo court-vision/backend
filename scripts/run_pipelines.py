@@ -29,13 +29,14 @@ import pytz
 from db.base import init_db, close_db
 from services.pipeline_service import PipelineService
 from schemas.common import ApiStatus
+from schemas.pipeline import PipelineResult
 
 
-def print_result(name: str, result) -> None:
+def print_result(name: str, result: PipelineResult) -> None:
     """Print pipeline result in a readable format."""
     status_icon = "✓" if result.status == ApiStatus.SUCCESS else "✗"
     print(f"\n{status_icon} {name}")
-    print(f"  Status: {result.status.value}")
+    print(f"  Status: {result.status}")
     print(f"  Message: {result.message}")
     if result.records_processed is not None:
         print(f"  Records: {result.records_processed}")

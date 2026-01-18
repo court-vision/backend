@@ -286,7 +286,7 @@ class PipelineService:
             db_gp_map = {record.id: record.gp for record in latest_records}
 
             # Find players who played (GP changed)
-            entries = []
+            entries = {}
             for player in api_data:
                 player_id = player["PLAYER_ID"]
                 current_gp = player["GP"]
@@ -315,8 +315,8 @@ class PipelineService:
                 }
                 fpts = _calculate_fantasy_points(player_stats)
 
-                entries.append(
-                    {
+                if player_id not in entries or current_gp > entries[player_id]['gp']:
+                    entries[player_id] = {
                         "id": player_id,
                         "name": player_name,
                         "team": player["TEAM"],
@@ -327,10 +327,9 @@ class PipelineService:
                         "rost_pct": rost_pct,
                         **player_stats,
                     }
-                )
-
+            
             if entries:
-                CumulativePlayerStats.insert_many(entries).execute()
+                CumulativePlayerStats.insert_many(list(entries.values())).execute()
                 records_processed = len(entries)
                 print(f"Inserted {records_processed} cumulative stat entries")
 
