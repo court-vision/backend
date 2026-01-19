@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime, date
+import pytz
 from typing import Optional
 from pathlib import Path
 
@@ -111,8 +112,9 @@ def get_remaining_games(team_abbrev: str, current_date: Optional[date] = None) -
     Returns:
         Number of remaining games in the current matchup.
     """
+    central_tz = pytz.timezone("US/Central")
     if current_date is None:
-        current_date = date.today()
+        current_date = datetime.now(central_tz).date()
 
     matchup = get_current_matchup(current_date)
     if not matchup:
@@ -165,8 +167,9 @@ def get_remaining_games_for_matchup(
         Number of remaining games. Returns total games if matchup hasn't started,
         0 if matchup has ended, otherwise games remaining from current day.
     """
+    central_tz = pytz.timezone("US/Central")
     if current_date is None:
-        current_date = date.today()
+        current_date = datetime.now(central_tz).date()
 
     matchup = get_matchup_by_number(matchup_number)
     if not matchup:
