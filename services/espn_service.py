@@ -368,8 +368,8 @@ class EspnService:
                     # Calculate games remaining for this player using schedule service
                     games_remaining = get_remaining_games(team_abbrev)
 
-                    # Only add to projection if not on IR
-                    if lineup_slot not in ('IR', ''):
+                    # Only add to projection if not on IR and not injured
+                    if lineup_slot not in ('IR', '') and not injured:
                         projected_total += avg_points * games_remaining
 
                     players.append(MatchupPlayerResp(
