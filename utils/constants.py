@@ -24,11 +24,12 @@ DB_CREDENTIALS = {
 
 
 # ----------------------------- Networking ----------------------------- #
-PROXY_USERNAME = os.getenv('PROXY_USERNAME')
-PROXY_PASSWORD = os.getenv('PROXY_PASSWORD')
-PROXY_HOST = os.getenv('PROXY_HOST')
-PROXY_PORT = os.getenv('PROXY_PORT')
-PROXY_STRING = f"{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+SCRAPER_API_KEY = os.getenv('SCRAPER_API_KEY')
+# PROXY_USERNAME = os.getenv('PROXY_USERNAME')
+# PROXY_PASSWORD = os.getenv('PROXY_PASSWORD')
+# PROXY_HOST = os.getenv('PROXY_HOST')
+# PROXY_PORT = os.getenv('PROXY_PORT')
+# PROXY_STRING = f"{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 # PROXIES = {
 # 	"http": f"http://brd.superproxy.io:22225?auth={PROXY_TOKEN}",
 # 	"https": f"http://brd.superproxy.io:22225?auth={PROXY_TOKEN}"

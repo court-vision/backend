@@ -21,7 +21,6 @@ class ETLService:
             season='2024-25',
             per_mode48='Totals',
             stat_category_abbreviation='PTS',
-            proxy=PROXY_STRING
         )
         updated = leaders.get_normalized_dict()['LeagueLeaders']
 
