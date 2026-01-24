@@ -54,3 +54,27 @@ class MatchupReq(BaseRequest):
 class MatchupResp(BaseResponse):
     """Response containing matchup data"""
     data: Optional[MatchupData] = None
+
+
+# ------------------------------- Daily Score History Models ------------------------------- #
+
+class DailyScorePoint(BaseModel):
+    """Single day's score snapshot for chart visualization"""
+    date: str                              # ISO date string
+    day_of_matchup: int                    # 0-indexed day within matchup
+    your_score: float
+    opponent_score: float
+
+
+class MatchupScoreHistory(BaseModel):
+    """Historical score data for a matchup period"""
+    team_id: int
+    team_name: str
+    opponent_team_name: str
+    matchup_period: int
+    history: list[DailyScorePoint]
+
+
+class MatchupScoreHistoryResp(BaseResponse):
+    """Response containing matchup score history"""
+    data: Optional[MatchupScoreHistory] = None

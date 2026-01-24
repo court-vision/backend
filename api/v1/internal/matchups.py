@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from services.user_sync_service import UserSyncService
-from schemas.matchup import MatchupReq, MatchupResp
+from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp
 from core.clerk_auth import get_current_user
 
 
@@ -55,3 +55,21 @@ async def get_matchup_by_team(
         team_id,
         avg_window
     )
+
+
+@router.get('/history/{team_id}', response_model=MatchupScoreHistoryResp)
+async def get_matchup_score_history(
+    team_id: int,
+    matchup_period: int | None = Query(
+        default=None,
+        description="Specific matchup period (week number). If omitted, returns the latest."
+    ),
+    _: dict = Depends(get_current_user)
+) -> MatchupScoreHistoryResp:
+    """
+    Get daily score history for a team's matchup period.
+
+    Returns historical daily snapshots of both teams' scores for charting
+    the score progression over time.
+    """
+    return await MatchupService.get_score_history(team_id, matchup_period)
