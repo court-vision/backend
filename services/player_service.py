@@ -10,6 +10,7 @@ class PlayerService:
 
     @staticmethod
     async def get_player_stats(
+        espn_id: Optional[int] = None,
         player_id: Optional[int] = None,
         name: Optional[str] = None,
         team: Optional[str] = None
@@ -17,8 +18,9 @@ class PlayerService:
         try:
             # Build query based on provided parameters
             query = DailyPlayerStats.select()
-            
-            if player_id is not None:
+            if espn_id is not None:
+                query = query.where(DailyPlayerStats.espn_id == espn_id)
+            elif player_id is not None:
                 # Lookup by player ID (used for rankings)
                 query = query.where(DailyPlayerStats.id == player_id)
             elif name is not None:
