@@ -1,9 +1,17 @@
+import unicodedata
 from typing import Optional
 from datetime import date, timedelta
 from schemas.player import PlayerStatsResp, PlayerStats, AvgStats, GameLog
 from schemas.common import ApiStatus
 from db.models.stats.daily_player_stats import DailyPlayerStats
 from peewee import fn
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize a name by removing diacritics and converting to lowercase."""
+    normalized = unicodedata.normalize("NFD", name)
+    ascii_name = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+    return ascii_name.lower().strip()
 
 
 class PlayerService:
@@ -24,8 +32,9 @@ class PlayerService:
                 # Lookup by player ID (used for rankings)
                 query = query.where(DailyPlayerStats.id == player_id)
             elif name is not None:
-                # Lookup by name (and optionally team) - used for roster
-                query = query.where(DailyPlayerStats.name == name)
+                # Lookup by normalized name (and optionally team) - used for public queries
+                normalized_name = _normalize_name(name)
+                query = query.where(DailyPlayerStats.name_normalized == normalized_name)
                 if team is not None:
                     query = query.where(DailyPlayerStats.team == team)
             else:

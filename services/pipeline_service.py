@@ -208,6 +208,7 @@ class PipelineService:
                     id=int(row["PLAYER_ID"]),
                     espn_id=espn_id,
                     name=player_name,
+                    name_normalized=normalized_name,
                     team=row["TEAM_ABBREVIATION"],
                     date=game_date,
                     fpts=fpts,

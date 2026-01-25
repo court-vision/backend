@@ -11,6 +11,7 @@ class DailyPlayerStats(BaseModel):
     id = IntegerField()
     espn_id = IntegerField(null=True, default=None)
     name = CharField(max_length=50)
+    name_normalized = CharField(max_length=50, null=True, default=None)
     team = CharField(max_length=3)
     date = DateField()
 
