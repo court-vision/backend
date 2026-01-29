@@ -31,11 +31,30 @@ def init_db():
     from .models.stats.daily_matchup_score import DailyMatchupScore
     from .models.pipeline_run import PipelineRun
 
+    # Import new normalized NBA schema models
+    from .models.nba import (
+        Player,
+        NBATeam,
+        PlayerGameStats,
+        PlayerSeasonStats,
+        PlayerOwnership,
+    )
+
     # Create tables if they don't exist
+    # Note: Order matters for foreign key dependencies
+    # 1. Dimension tables first (Player, NBATeam)
+    # 2. Fact/aggregate tables second (PlayerGameStats, PlayerSeasonStats, PlayerOwnership)
     db.create_tables([
+        # User schema tables
         User, Verification, Team, Lineup,
+        # Legacy stats_s2 schema (will be deprecated)
         DailyPlayerStats, CumulativePlayerStats, DailyMatchupScore,
+        # NBA schema - audit
         PipelineRun,
+        # NBA schema - dimension tables
+        Player, NBATeam,
+        # NBA schema - fact/aggregate tables
+        PlayerGameStats, PlayerSeasonStats, PlayerOwnership,
     ], safe=True)
 
 # Function to close database connection
