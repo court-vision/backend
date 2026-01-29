@@ -1,4 +1,8 @@
 from fastapi import FastAPI, APIRouter
+
+# Apply NBA API patch early, before any nba_api imports elsewhere
+import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
+
 from core.middleware import setup_middleware
 from core.db_middleware import DatabaseMiddleware
 from db.base import init_db, close_db
