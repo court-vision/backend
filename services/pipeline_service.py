@@ -3,11 +3,18 @@ Pipeline Service
 
 Consolidates all ETL pipeline logic for scheduled data ingestion tasks.
 Can be triggered via API endpoints or cron script.
+
+Features:
+- Structured logging with correlation IDs
+- Retry logic with exponential backoff
+- Circuit breakers for external APIs
+- Pipeline run tracking for idempotency
 """
 
 import json
 import traceback
 import unicodedata
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -15,19 +22,28 @@ import pytz
 import requests
 from peewee import fn
 
+from core.logging import get_logger
+from core.settings import settings
+from core.resilience import (
+    with_retry,
+    nba_api_circuit,
+    espn_api_circuit,
+    NetworkError,
+    RateLimitError,
+    ServerError,
+)
 from db.models.stats.daily_player_stats import DailyPlayerStats
 from db.models.stats.cumulative_player_stats import CumulativePlayerStats
 from db.models.stats.daily_matchup_score import DailyMatchupScore
+from db.models.pipeline_run import PipelineRun
 from db.models.teams import Team
 from services.schedule_service import get_matchup_dates
 from schemas.pipeline import PipelineResult
 from schemas.common import ApiStatus
 
 
-# ESPN API Configuration
+# ESPN API Configuration (from settings)
 ESPN_FANTASY_ENDPOINT = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/segments/0/leagues/{}"
-ESPN_YEAR = 2026
-ESPN_LEAGUE_ID = 993431466
 
 
 def _normalize_name(name: str) -> str:
@@ -37,8 +53,20 @@ def _normalize_name(name: str) -> str:
     return ascii_name.lower().strip()
 
 
+@with_retry(
+    max_attempts=settings.retry_max_attempts,
+    base_delay=settings.retry_base_delay,
+    max_delay=settings.retry_max_delay,
+)
+@espn_api_circuit
 def _get_espn_player_data(year: int, league_id: int) -> dict:
-    """Fetch ESPN player data including ESPN ID and roster percentage."""
+    """
+    Fetch ESPN player data including ESPN ID and roster percentage.
+
+    Wrapped with retry logic and circuit breaker for resilience.
+    """
+    log = get_logger("espn_api")
+
     params = {"view": "kona_player_info", "scoringPeriodId": 0}
     endpoint = ESPN_FANTASY_ENDPOINT.format(year, league_id)
     filters = {
@@ -51,8 +79,31 @@ def _get_espn_player_data(year: int, league_id: int) -> dict:
     }
     headers = {"x-fantasy-filter": json.dumps(filters)}
 
-    response = requests.get(endpoint, params=params, headers=headers, timeout=30)
-    data = response.json()
+    log.debug("espn_request_start", endpoint=endpoint)
+
+    try:
+        response = requests.get(
+            endpoint,
+            params=params,
+            headers=headers,
+            timeout=settings.http_timeout
+        )
+
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 60))
+            raise RateLimitError(f"ESPN rate limited", retry_after=retry_after)
+
+        if response.status_code >= 500:
+            raise ServerError(f"ESPN server error", status_code=response.status_code)
+
+        response.raise_for_status()
+        data = response.json()
+
+    except requests.exceptions.Timeout:
+        raise NetworkError("ESPN request timed out")
+    except requests.exceptions.ConnectionError:
+        raise NetworkError("ESPN connection failed")
+
     players = data.get("players", [])
     players = [x.get("player", x) for x in players]
 
@@ -65,7 +116,86 @@ def _get_espn_player_data(year: int, league_id: int) -> dict:
                 "rost_pct": player.get("ownership", {}).get("percentOwned", 0),
             }
 
+    log.info("espn_request_complete", player_count=len(cleaned_data))
     return cleaned_data
+
+
+@with_retry(
+    max_attempts=settings.retry_max_attempts,
+    base_delay=settings.retry_base_delay,
+    max_delay=settings.retry_max_delay,
+)
+@nba_api_circuit
+def _fetch_nba_game_logs(date_str: str, season: str):
+    """
+    Fetch player game logs from NBA API.
+
+    Wrapped with retry logic and circuit breaker for resilience.
+    """
+    log = get_logger("nba_api")
+
+    from nba_api.stats.endpoints import playergamelogs
+    import pandas as pd
+
+    log.debug("nba_game_logs_start", date=date_str, season=season)
+
+    try:
+        game_logs = playergamelogs.PlayerGameLogs(
+            date_from_nullable=date_str,
+            date_to_nullable=date_str,
+            season_nullable=season,
+        )
+        stats = game_logs.player_game_logs.get_data_frame()
+
+        log.info("nba_game_logs_complete", record_count=len(stats))
+        return stats
+
+    except Exception as e:
+        # NBA API uses requests internally, so catch and re-raise as our types
+        error_str = str(e).lower()
+        if "timeout" in error_str:
+            raise NetworkError(f"NBA API timeout: {e}")
+        if "connection" in error_str:
+            raise NetworkError(f"NBA API connection error: {e}")
+        raise
+
+
+@with_retry(
+    max_attempts=settings.retry_max_attempts,
+    base_delay=settings.retry_base_delay,
+    max_delay=settings.retry_max_delay,
+)
+@nba_api_circuit
+def _fetch_nba_league_leaders():
+    """
+    Fetch league leaders from NBA API.
+
+    Wrapped with retry logic and circuit breaker for resilience.
+    """
+    log = get_logger("nba_api")
+
+    from nba_api.stats.endpoints import leagueleaders
+
+    log.debug("nba_leaders_start", season=settings.nba_season)
+
+    try:
+        leaders = leagueleaders.LeagueLeaders(
+            season=settings.nba_season,
+            per_mode48="Totals",
+            stat_category_abbreviation="PTS"
+        )
+        api_data = leaders.get_normalized_dict()["LeagueLeaders"]
+
+        log.info("nba_leaders_complete", player_count=len(api_data))
+        return api_data
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "timeout" in error_str:
+            raise NetworkError(f"NBA API timeout: {e}")
+        if "connection" in error_str:
+            raise NetworkError(f"NBA API connection error: {e}")
+        raise
 
 
 def _calculate_fantasy_points(stats: dict) -> int:
@@ -103,7 +233,6 @@ def _minutes_to_int(min_str) -> int:
 
 def _get_current_matchup_info(current_date) -> Optional[dict]:
     """Determine current matchup period and day index from schedule."""
-    # Use schedule_service pattern - iterate through matchups
     for matchup_num in range(1, 25):  # Assume max 24 matchup periods
         try:
             dates = get_matchup_dates(matchup_num)
@@ -122,20 +251,25 @@ def _get_current_matchup_info(current_date) -> Optional[dict]:
 
 
 class PipelineService:
-    """Service for running data pipelines."""
+    """Service for running data pipelines with tracking and resilience."""
 
     @staticmethod
     async def run_daily_player_stats() -> PipelineResult:
         """
         Fetch yesterday's game stats from NBA API and insert into daily_player_stats.
         """
+        log = get_logger("pipeline").bind(pipeline="daily_player_stats")
         central_tz = pytz.timezone("US/Central")
         started_at = datetime.now(central_tz)
         records_processed = 0
 
+        # Start pipeline run tracking
+        run = PipelineRun.start_run("daily_player_stats")
+        run_id = run.id
+        log = log.bind(run_id=str(run_id))
+        log.info("pipeline_started")
+
         try:
-            # Import NBA API here to avoid import issues if not installed
-            from nba_api.stats.endpoints import playergamelogs
             import pandas as pd
 
             yesterday = started_at - timedelta(days=1)
@@ -147,21 +281,18 @@ class PipelineService:
             if yesterday.month < 8:
                 season = f"{yesterday.year - 1}-{str(yesterday.year)[-2:]}"
 
-            print(f"Fetching player game logs for {date_str} (season {season})")
+            log.info("fetching_data", date=date_str, season=season)
 
-            # Fetch ESPN player data for roster percentages
-            espn_data = _get_espn_player_data(ESPN_YEAR, ESPN_LEAGUE_ID)
-            print(f"Fetched {len(espn_data)} players from ESPN")
+            # Fetch ESPN player data for roster percentages (with retries)
+            espn_data = _get_espn_player_data(settings.espn_year, settings.espn_league_id)
+            log.info("espn_data_fetched", player_count=len(espn_data))
 
-            # Fetch NBA game logs
-            game_logs = playergamelogs.PlayerGameLogs(
-                date_from_nullable=date_str,
-                date_to_nullable=date_str,
-                season_nullable=season,
-            )
-            stats = game_logs.player_game_logs.get_data_frame()
+            # Fetch NBA game logs (with retries)
+            stats = _fetch_nba_game_logs(date_str, season)
 
             if stats.empty:
+                log.info("no_games_found", date=date_str)
+                run.mark_success(records_processed=0)
                 return PipelineResult(
                     status=ApiStatus.SUCCESS,
                     message=f"No games found for {date_str}",
@@ -170,7 +301,7 @@ class PipelineService:
                     records_processed=0,
                 )
 
-            print(f"Found {len(stats)} player game logs")
+            log.info("nba_data_fetched", record_count=len(stats))
 
             # Process each player
             for _, row in stats.iterrows():
@@ -214,11 +345,20 @@ class PipelineService:
                     fpts=fpts,
                     min=minutes_int,
                     rost_pct=rost_pct,
+                    pipeline_run_id=run_id,
                     **player_stats,
                 )
                 records_processed += 1
 
             completed_at = datetime.now(central_tz)
+            run.mark_success(records_processed=records_processed)
+
+            log.info(
+                "pipeline_completed",
+                records_processed=records_processed,
+                duration_seconds=(completed_at - started_at).total_seconds(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.SUCCESS,
                 message=f"Daily player stats completed for {date_str}",
@@ -230,13 +370,22 @@ class PipelineService:
 
         except Exception as e:
             completed_at = datetime.now(central_tz)
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            run.mark_failed(error_msg)
+
+            log.error(
+                "pipeline_failed",
+                error=error_msg,
+                traceback=traceback.format_exc(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.ERROR,
                 message="Daily player stats failed",
                 started_at=started_at.isoformat(),
                 completed_at=completed_at.isoformat(),
                 duration_seconds=(completed_at - started_at).total_seconds(),
-                error=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
+                error=f"{error_msg}\n{traceback.format_exc()}",
             )
 
     @staticmethod
@@ -244,28 +393,30 @@ class PipelineService:
         """
         Update cumulative season stats and rankings for players who played.
         """
+        log = get_logger("pipeline").bind(pipeline="cumulative_player_stats")
         central_tz = pytz.timezone("US/Central")
         started_at = datetime.now(central_tz)
         records_processed = 0
 
-        try:
-            from nba_api.stats.endpoints import leagueleaders
+        # Start pipeline run tracking
+        run = PipelineRun.start_run("cumulative_player_stats")
+        run_id = run.id
+        log = log.bind(run_id=str(run_id))
+        log.info("pipeline_started")
 
+        try:
             yesterday = started_at - timedelta(days=1)
             game_date = yesterday.date()
 
-            print(f"Fetching cumulative stats for {game_date}")
+            log.info("fetching_data", date=str(game_date))
 
-            # Fetch ESPN rostered data
-            espn_data = _get_espn_player_data(ESPN_YEAR, ESPN_LEAGUE_ID)
-            print(f"Fetched {len(espn_data)} players from ESPN")
+            # Fetch ESPN rostered data (with retries)
+            espn_data = _get_espn_player_data(settings.espn_year, settings.espn_league_id)
+            log.info("espn_data_fetched", player_count=len(espn_data))
 
-            # Fetch NBA league leaders (season totals)
-            leaders = leagueleaders.LeagueLeaders(
-                season="2025-26", per_mode48="Totals", stat_category_abbreviation="PTS"
-            )
-            api_data = leaders.get_normalized_dict()["LeagueLeaders"]
-            print(f"Fetched {len(api_data)} players from NBA API")
+            # Fetch NBA league leaders (with retries)
+            api_data = _fetch_nba_league_leaders()
+            log.info("nba_data_fetched", player_count=len(api_data))
 
             # Get latest GP for each player from database
             subquery = CumulativePlayerStats.select(
@@ -326,13 +477,14 @@ class PipelineService:
                         "min": player["MIN"],
                         "gp": current_gp,
                         "rost_pct": rost_pct,
+                        "pipeline_run_id": run_id,
                         **player_stats,
                     }
-            
+
             if entries:
                 CumulativePlayerStats.insert_many(list(entries.values())).execute()
                 records_processed = len(entries)
-                print(f"Inserted {records_processed} cumulative stat entries")
+                log.info("records_inserted", count=records_processed)
 
                 # Update rankings
                 subquery = CumulativePlayerStats.select(
@@ -358,9 +510,17 @@ class PipelineService:
                         & (CumulativePlayerStats.date == player.date)
                     ).execute()
 
-                print(f"Updated ranks for {len(latest_entries)} players")
+                log.info("rankings_updated", player_count=len(latest_entries))
 
             completed_at = datetime.now(central_tz)
+            run.mark_success(records_processed=records_processed)
+
+            log.info(
+                "pipeline_completed",
+                records_processed=records_processed,
+                duration_seconds=(completed_at - started_at).total_seconds(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.SUCCESS,
                 message=f"Cumulative stats completed for {game_date}",
@@ -372,13 +532,22 @@ class PipelineService:
 
         except Exception as e:
             completed_at = datetime.now(central_tz)
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            run.mark_failed(error_msg)
+
+            log.error(
+                "pipeline_failed",
+                error=error_msg,
+                traceback=traceback.format_exc(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.ERROR,
                 message="Cumulative player stats failed",
                 started_at=started_at.isoformat(),
                 completed_at=completed_at.isoformat(),
                 duration_seconds=(completed_at - started_at).total_seconds(),
-                error=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
+                error=f"{error_msg}\n{traceback.format_exc()}",
             )
 
     @staticmethod
@@ -386,17 +555,25 @@ class PipelineService:
         """
         Fetch current matchup scores for all saved teams and record daily snapshots.
         """
+        log = get_logger("pipeline").bind(pipeline="daily_matchup_scores")
         central_tz = pytz.timezone("US/Central")
         started_at = datetime.now(central_tz)
         records_processed = 0
 
+        # Start pipeline run tracking
+        run = PipelineRun.start_run("daily_matchup_scores")
+        run_id = run.id
+        log = log.bind(run_id=str(run_id))
+        log.info("pipeline_started")
+
         try:
             today = started_at.date()
-            print(f"Processing matchup scores for {today}")
 
             # Get current matchup info
             matchup_info = _get_current_matchup_info(today)
             if not matchup_info:
+                log.info("no_active_matchup")
+                run.mark_success(records_processed=0)
                 return PipelineResult(
                     status=ApiStatus.SUCCESS,
                     message="No active matchup period",
@@ -405,13 +582,15 @@ class PipelineService:
                     records_processed=0,
                 )
 
-            print(
-                f"Matchup period: {matchup_info['matchup_number']}, day {matchup_info['day_index']}"
+            log.info(
+                "matchup_info",
+                matchup_period=matchup_info["matchup_number"],
+                day_index=matchup_info["day_index"],
             )
 
             # Get all saved teams
             teams = list(Team.select())
-            print(f"Found {len(teams)} saved teams")
+            log.info("teams_found", count=len(teams))
 
             for team in teams:
                 try:
@@ -424,7 +603,7 @@ class PipelineService:
                         team_name=team_name,
                         espn_s2=league_info.get("espn_s2", ""),
                         swid=league_info.get("swid", ""),
-                        year=league_info.get("year", ESPN_YEAR),
+                        year=league_info.get("year", settings.espn_year),
                         matchup_period=matchup_info["matchup_number"],
                     )
 
@@ -439,6 +618,7 @@ class PipelineService:
                             "day_of_matchup": matchup_info["day_index"],
                             "current_score": espn_data["current_score"],
                             "opponent_current_score": espn_data["opponent_current_score"],
+                            "pipeline_run_id": run_id,
                         }
 
                         DailyMatchupScore.insert(record).on_conflict(
@@ -452,18 +632,35 @@ class PipelineService:
                                 "opponent_current_score": record["opponent_current_score"],
                                 "team_name": record["team_name"],
                                 "opponent_team_name": record["opponent_team_name"],
+                                "pipeline_run_id": record["pipeline_run_id"],
                             },
                         ).execute()
                         records_processed += 1
-                        print(
-                            f"  {team_name}: {espn_data['current_score']} vs {espn_data['opponent_current_score']}"
+
+                        log.debug(
+                            "team_score_recorded",
+                            team=team_name,
+                            score=espn_data["current_score"],
+                            opponent_score=espn_data["opponent_current_score"],
                         )
 
                 except Exception as e:
-                    print(f"  Error processing team {team.team_id}: {e}")
+                    log.warning(
+                        "team_processing_error",
+                        team_id=team.team_id,
+                        error=str(e),
+                    )
                     continue
 
             completed_at = datetime.now(central_tz)
+            run.mark_success(records_processed=records_processed)
+
+            log.info(
+                "pipeline_completed",
+                records_processed=records_processed,
+                duration_seconds=(completed_at - started_at).total_seconds(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.SUCCESS,
                 message=f"Matchup scores completed for {today}",
@@ -475,13 +672,22 @@ class PipelineService:
 
         except Exception as e:
             completed_at = datetime.now(central_tz)
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            run.mark_failed(error_msg)
+
+            log.error(
+                "pipeline_failed",
+                error=error_msg,
+                traceback=traceback.format_exc(),
+            )
+
             return PipelineResult(
                 status=ApiStatus.ERROR,
                 message="Daily matchup scores failed",
                 started_at=started_at.isoformat(),
                 completed_at=completed_at.isoformat(),
                 duration_seconds=(completed_at - started_at).total_seconds(),
-                error=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
+                error=f"{error_msg}\n{traceback.format_exc()}",
             )
 
     @staticmethod
@@ -494,18 +700,23 @@ class PipelineService:
         matchup_period: int,
     ) -> Optional[dict]:
         """Fetch matchup data from ESPN API for a specific team."""
+        log = get_logger("espn_api")
+
         params = {"view": ["mTeam", "mMatchup", "mSchedule"]}
         cookies = {"espn_s2": espn_s2, "SWID": swid}
         endpoint = ESPN_FANTASY_ENDPOINT.format(year, league_id)
 
         try:
             response = requests.get(
-                endpoint, params=params, cookies=cookies, timeout=30
+                endpoint,
+                params=params,
+                cookies=cookies,
+                timeout=settings.http_timeout
             )
             response.raise_for_status()
             data = response.json()
         except Exception as e:
-            print(f"    ESPN API error: {e}")
+            log.warning("espn_matchup_error", error=str(e), team=team_name)
             return None
 
         # Find our team
@@ -520,7 +731,7 @@ class PipelineService:
                 break
 
         if not our_team_id:
-            print(f"    Team '{team_name}' not found")
+            log.warning("team_not_found", team=team_name)
             return None
 
         # Find current matchup
@@ -562,30 +773,32 @@ class PipelineService:
     @staticmethod
     async def run_all_pipelines() -> dict[str, PipelineResult]:
         """Run all pipelines in sequence."""
+        log = get_logger("pipeline").bind(operation="run_all")
         results = {}
 
-        print("=" * 60)
-        print("RUNNING ALL PIPELINES")
-        print("=" * 60)
+        log.info("all_pipelines_started")
 
-        print("\n[1/3] Daily Player Stats")
-        print("-" * 40)
+        log.info("running_pipeline", pipeline="daily_player_stats", step="1/3")
         results["daily_player_stats"] = await PipelineService.run_daily_player_stats()
 
-        print("\n[2/3] Cumulative Player Stats")
-        print("-" * 40)
+        log.info("running_pipeline", pipeline="cumulative_player_stats", step="2/3")
         results["cumulative_player_stats"] = (
             await PipelineService.run_cumulative_player_stats()
         )
 
-        print("\n[3/3] Daily Matchup Scores")
-        print("-" * 40)
+        log.info("running_pipeline", pipeline="daily_matchup_scores", step="3/3")
         results["daily_matchup_scores"] = (
             await PipelineService.run_daily_matchup_scores()
         )
 
-        print("\n" + "=" * 60)
-        print("ALL PIPELINES COMPLETE")
-        print("=" * 60)
+        # Summarize results
+        success_count = sum(
+            1 for r in results.values() if r.status == ApiStatus.SUCCESS
+        )
+        log.info(
+            "all_pipelines_completed",
+            success_count=success_count,
+            total_count=len(results),
+        )
 
         return results

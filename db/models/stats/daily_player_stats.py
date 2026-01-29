@@ -1,11 +1,16 @@
+from datetime import datetime
+
 from peewee import (
     IntegerField,
     CharField,
     DateField,
+    DateTimeField,
     SmallIntegerField,
     DecimalField,
+    UUIDField,
 )
 from db.base import BaseModel
+
 
 class DailyPlayerStats(BaseModel):
     id = IntegerField()
@@ -32,6 +37,11 @@ class DailyPlayerStats(BaseModel):
 
     min = IntegerField()
     rost_pct = DecimalField(max_digits=7, decimal_places=4, null=True, default=None)
+
+    # Audit columns for pipeline tracking
+    pipeline_run_id = UUIDField(null=True, index=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
 
     class Meta:
         table_name = "daily_player_stats"

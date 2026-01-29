@@ -23,20 +23,20 @@ class BaseModel(Model):
 def init_db():
     """Initialize database connection and create tables if they don't exist."""
     db.connect()
-    
+
     # Import all models to register them
     from .models import User, Verification, Team, Lineup
     from .models.stats.daily_player_stats import DailyPlayerStats
     from .models.stats.cumulative_player_stats import CumulativePlayerStats
     from .models.stats.daily_matchup_score import DailyMatchupScore
+    from .models.pipeline_run import PipelineRun
 
     # Create tables if they don't exist
     db.create_tables([
         User, Verification, Team, Lineup,
         DailyPlayerStats, CumulativePlayerStats, DailyMatchupScore,
+        PipelineRun,
     ], safe=True)
-    
-    # print("Database initialized successfully")
 
 # Function to close database connection
 def close_db():

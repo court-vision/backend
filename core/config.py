@@ -1,10 +1,11 @@
-from pydantic_settings import BaseSettings
+"""
+Legacy configuration module.
 
-class Settings(BaseSettings):
-    DATABASE_URL1: str
-    DATABASE_URL2: str
+This module is deprecated. Use core.settings instead.
+Kept for backwards compatibility with existing imports.
+"""
 
-    class Config:
-        env_file = ".env"
+# Re-export settings from the new module for backwards compatibility
+from core.settings import settings, Settings, get_settings
 
-settings = Settings(DATABASE_URL1="postgresql+asyncpg://postgres:xaxtyv-9zipbA-xosfur@db.urjytkrxhlammdtwplnv.supabase.co:5432/postgres", DATABASE_URL2="postgresql+asyncpg://postgres:rtVSWuhkROFxOpegJuElubldctbpXmBT@caboose.proxy.rlwy.net:33942/railway")
+__all__ = ["settings", "Settings", "get_settings"]

@@ -5,19 +5,39 @@ import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
 
 from core.middleware import setup_middleware
 from core.db_middleware import DatabaseMiddleware
+from core.correlation_middleware import CorrelationMiddleware
+from core.logging import setup_logging, get_logger
+from core.settings import settings
 from db.base import init_db, close_db
 from api.v1.internal import auth, users, teams, lineups, espn, matchups, streamers, pipelines
 from api.v1.public import rankings, players
 
+
 async def lifespan(app: FastAPI):
+    # Setup structured logging first
+    setup_logging(
+        log_level=settings.log_level,
+        json_format=settings.log_format == "json",
+        service_name=settings.service_name,
+    )
+    log = get_logger()
+    log.info("application_starting", service=settings.service_name)
+
     # Initialize database
     init_db()
+    log.info("database_initialized")
+
     yield
+
     # Close database connection
     close_db()
+    log.info("application_stopped")
+
 
 app = FastAPI(title="Court Vision API", version="1.0.0", lifespan=lifespan)
 
+# Add middlewares (order matters - first added = outermost)
+app.add_middleware(CorrelationMiddleware)  # Outermost: adds correlation ID
 app.add_middleware(DatabaseMiddleware)
 setup_middleware(app)
 

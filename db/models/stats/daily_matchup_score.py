@@ -1,9 +1,13 @@
+from datetime import datetime
+
 from peewee import (
     IntegerField,
     CharField,
     DateField,
+    DateTimeField,
     SmallIntegerField,
     DecimalField,
+    UUIDField,
 )
 from db.base import BaseModel
 
@@ -32,6 +36,11 @@ class DailyMatchupScore(BaseModel):
     # Scores
     current_score = DecimalField(max_digits=8, decimal_places=2)
     opponent_current_score = DecimalField(max_digits=8, decimal_places=2)
+
+    # Audit columns for pipeline tracking
+    pipeline_run_id = UUIDField(null=True, index=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
 
     class Meta:
         table_name = "daily_matchup_scores"

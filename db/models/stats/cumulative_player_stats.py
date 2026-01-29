@@ -1,5 +1,16 @@
-from peewee import IntegerField, CharField, DateField, SmallIntegerField, DecimalField
+from datetime import datetime
+
+from peewee import (
+    IntegerField,
+    CharField,
+    DateField,
+    DateTimeField,
+    SmallIntegerField,
+    DecimalField,
+    UUIDField,
+)
 from db.base import BaseModel
+
 
 class CumulativePlayerStats(BaseModel):
     id = IntegerField()
@@ -23,6 +34,11 @@ class CumulativePlayerStats(BaseModel):
     gp = SmallIntegerField()
     rank = SmallIntegerField(null=True)
     rost_pct = DecimalField(max_digits=7, decimal_places=4, null=True)
+
+    # Audit columns for pipeline tracking
+    pipeline_run_id = UUIDField(null=True, index=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
 
     class Meta:
         schema = 'stats_s2'
