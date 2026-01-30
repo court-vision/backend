@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # NBA API
     nba_season: str = "2025-26"
 
+    # BALLDONTLIE API (for injury data)
+    # Get a free key at https://app.balldontlie.io
+    balldontlie_api_key: Optional[SecretStr] = None
+
     # Resilience
     retry_max_attempts: int = 3
     retry_base_delay: float = 2.0

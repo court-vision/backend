@@ -32,7 +32,7 @@ PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     # Extended data pipelines
     "advanced_stats": AdvancedStatsPipeline,
     "game_schedule": GameSchedulePipeline,
-    "injury_report": InjuryReportPipeline,
+    # "injury_report": InjuryReportPipeline, -- requires BALLDONTLIE All-Star tier subscription
     # Reference data pipelines (run less frequently)
     "player_profiles": PlayerProfilesPipeline,
 }
