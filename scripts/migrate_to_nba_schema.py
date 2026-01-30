@@ -77,11 +77,16 @@ class MigrationRunner:
         self.log(f"Inserted {count} NBA teams")
 
     def migrate_players(self):
-        """Extract unique players from daily stats into players dimension."""
+        """Extract unique players from both daily and cumulative stats into players dimension."""
         self.log("Migrating players...")
 
-        # Get unique players from daily_player_stats
-        query = (
+        # Track unique player IDs we've seen
+        seen_player_ids = set()
+        count = 0
+
+        # 1. Get players from daily_player_stats (has espn_id)
+        self.log("  Extracting from daily_player_stats...")
+        daily_query = (
             DailyPlayerStats.select(
                 DailyPlayerStats.id,
                 DailyPlayerStats.espn_id,
@@ -92,8 +97,11 @@ class MigrationRunner:
             .order_by(DailyPlayerStats.id)
         )
 
-        count = 0
-        for row in query:
+        for row in daily_query:
+            if row.id in seen_player_ids:
+                continue
+            seen_player_ids.add(row.id)
+
             if self.dry_run:
                 count += 1
                 continue
@@ -108,8 +116,44 @@ class MigrationRunner:
             if count % 100 == 0:
                 self.log(f"  Processed {count} players...")
 
+        self.log(f"  Found {len(seen_player_ids)} players from daily stats")
+
+        # 2. Get players from cumulative_player_stats (may have players not in daily)
+        self.log("  Extracting from cumulative_player_stats...")
+        cumulative_query = (
+            CumulativePlayerStats.select(
+                CumulativePlayerStats.id,
+                CumulativePlayerStats.name,
+            )
+            .distinct()
+            .order_by(CumulativePlayerStats.id)
+        )
+
+        additional_count = 0
+        for row in cumulative_query:
+            if row.id in seen_player_ids:
+                continue
+            seen_player_ids.add(row.id)
+            additional_count += 1
+
+            if self.dry_run:
+                count += 1
+                continue
+
+            Player.upsert_player(
+                player_id=row.id,
+                name=row.name,
+                espn_id=None,  # cumulative stats don't have espn_id
+            )
+            count += 1
+
+            if count % 100 == 0:
+                self.log(f"  Processed {count} players...")
+
+        self.log(f"  Found {additional_count} additional players from cumulative stats")
+
         self.stats["players"] = count
-        self.log(f"Migrated {count} players")
+        self.log(f"Migrated {count} total unique players")
 
     def migrate_game_stats(self):
         """Migrate daily_player_stats to player_game_stats."""

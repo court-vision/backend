@@ -38,12 +38,17 @@ def init_db():
         PlayerGameStats,
         PlayerSeasonStats,
         PlayerOwnership,
+        PlayerProfile,
+        PlayerAdvancedStats,
+        Game,
+        PlayerInjury,
     )
 
     # Create tables if they don't exist
     # Note: Order matters for foreign key dependencies
     # 1. Dimension tables first (Player, NBATeam)
-    # 2. Fact/aggregate tables second (PlayerGameStats, PlayerSeasonStats, PlayerOwnership)
+    # 2. Fact/aggregate tables second
+    # 3. Extended data tables last (may reference dimension tables)
     db.create_tables([
         # User schema tables
         User, Verification, Team, Lineup,
@@ -55,6 +60,8 @@ def init_db():
         Player, NBATeam,
         # NBA schema - fact/aggregate tables
         PlayerGameStats, PlayerSeasonStats, PlayerOwnership,
+        # NBA schema - extended data tables
+        PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
     ], safe=True)
 
 # Function to close database connection
