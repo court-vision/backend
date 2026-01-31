@@ -26,6 +26,7 @@ def init_db():
 
     # Import all models to register them
     from .models import User, Verification, Team, Lineup
+    from .models.api_keys import APIKey
     from .models.stats.daily_player_stats import DailyPlayerStats
     from .models.stats.cumulative_player_stats import CumulativePlayerStats
     from .models.stats.daily_matchup_score import DailyMatchupScore
@@ -51,7 +52,7 @@ def init_db():
     # 3. Extended data tables last (may reference dimension tables)
     db.create_tables([
         # User schema tables
-        User, Verification, Team, Lineup,
+        User, Verification, Team, Lineup, APIKey,
         # Legacy stats_s2 schema (will be deprecated)
         DailyPlayerStats, CumulativePlayerStats, DailyMatchupScore,
         # NBA schema - audit

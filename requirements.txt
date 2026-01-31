@@ -59,3 +59,4 @@ tzdata==2025.3
 urllib3==2.5.0
 uvicorn==0.38.0
 yarl==1.22.0
+slowapi==0.1.9

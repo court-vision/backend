@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter
+from slowapi.errors import RateLimitExceeded
 
 # Apply NBA API patch early, before any nba_api imports elsewhere
 import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
@@ -8,9 +9,10 @@ from core.db_middleware import DatabaseMiddleware
 from core.correlation_middleware import CorrelationMiddleware
 from core.logging import setup_logging, get_logger
 from core.settings import settings
+from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db
 from api.v1.internal import auth, users, teams, lineups, espn, matchups, streamers, pipelines
-from api.v1.public import rankings, players
+from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics
 
 
 async def lifespan(app: FastAPI):
@@ -34,7 +36,26 @@ async def lifespan(app: FastAPI):
     log.info("application_stopped")
 
 
-app = FastAPI(title="Court Vision API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Court Vision API",
+    description="Fantasy basketball analytics and insights",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_tags=[
+        {"name": "Players", "description": "Player data and statistics"},
+        {"name": "Games", "description": "Game schedule and results"},
+        {"name": "Teams", "description": "Team information and schedules"},
+        {"name": "Rankings", "description": "Fantasy player rankings"},
+        {"name": "Ownership", "description": "ESPN roster ownership trends"},
+        {"name": "Analytics", "description": "Advanced analytics (API key required)"},
+    ],
+)
+
+# Add rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Add middlewares (order matters - first added = outermost)
 app.add_middleware(CorrelationMiddleware)  # Outermost: adds correlation ID
@@ -45,6 +66,10 @@ setup_middleware(app)
 api_v1_public = APIRouter(prefix="/v1")
 api_v1_public.include_router(rankings.router)
 api_v1_public.include_router(players.router)
+api_v1_public.include_router(games.router)
+api_v1_public.include_router(public_teams.router)
+api_v1_public.include_router(ownership.router)
+api_v1_public.include_router(analytics.router)
 
 app.include_router(api_v1_public)
 
