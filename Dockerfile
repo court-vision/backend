@@ -11,11 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     build-essential \
     libpq-dev \
+    libcurl4-openssl-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies to user site-packages
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --prefer-binary --user -r requirements.txt
 
 # Runtime stage - slim image without build tools
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
