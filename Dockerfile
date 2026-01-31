@@ -15,9 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies to user site-packages
+# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefer-binary --user -r requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt --target=/app/dependencies
 
 # Runtime stage - slim image without build tools
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
@@ -27,9 +27,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy only the installed packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+# Copy installed packages from builder
+COPY --from=builder /app/dependencies /app/dependencies
+ENV PYTHONPATH=/app/dependencies
+ENV PATH=/app/dependencies/bin:$PATH
 
 # Copy application code
 COPY . /app
