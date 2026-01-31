@@ -1,31 +1,38 @@
-FROM python:3.12-slim-bookworm
+# Build stage - install dependencies with build tools
+FROM --platform=linux/amd64 python:3.12-slim-bookworm AS builder
 
-# 1. Set environment variables
-# PYTHONDONTWRITEBYTECODE: Prevents Python from writing pyc files to disc
-# PYTHONUNBUFFERED: Ensures logs are flushed immediately to the stream
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# 2. Install system dependencies required for building Python packages
-# - gcc & build-essential: Required to compile psycopg2 and other C-extensions
-# - libpq-dev: Required header files for PostgreSQL (psycopg2)
+# Install system dependencies required for building Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Install Python dependencies
+# Install Python dependencies to user site-packages
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# 4. Copy application code
+# Runtime stage - slim image without build tools
+FROM --platform=linux/amd64 python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Copy only the installed packages from builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy application code
 COPY . /app
 
-# 5. Create a non-root user for security
-# Running as root is a security risk. We create a user 'appuser' and switch to it.
+# Create non-root user for security
 RUN useradd -m -u 1000 appuser
 USER appuser
 
