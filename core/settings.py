@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     clerk_jwks_url: str
     clerk_secret_key: SecretStr
 
+    # Yahoo OAuth Configuration
+    yahoo_client_id: Optional[str] = None
+    yahoo_client_secret: Optional[SecretStr] = None
+    yahoo_redirect_uri: str = "http://localhost:8000/v1/internal/yahoo/callback"
+    frontend_url: str = "http://localhost:3000"
+
     # Development mode
     development_mode: bool = False
 

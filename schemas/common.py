@@ -68,15 +68,34 @@ def error_response(
         "timestamp": timestamp
     }
 
+# ------------------------------- Fantasy Provider ------------------------------- #
+
+class FantasyProvider(str, Enum):
+    """Supported fantasy basketball providers."""
+    ESPN = "espn"
+    YAHOO = "yahoo"
+
 # ------------------------------- Specific Response Models ------------------------------- #
 
 class LeagueInfo(BaseModel):
+    # Provider field - defaults to ESPN for backward compatibility
+    provider: FantasyProvider = FantasyProvider.ESPN
+
+    # Common fields
     league_id: int = Field(ge=1, description="League ID must be positive")
-    espn_s2: str | None = ""
-    swid: str | None = ""
     team_name: str = Field(min_length=1, description="Team name cannot be empty")
     league_name: str | None = "N/A"
     year: int = Field(ge=2020, le=2030, description="Year must be between 2020 and 2030")
+
+    # ESPN-specific fields
+    espn_s2: str | None = ""
+    swid: str | None = ""
+
+    # Yahoo-specific fields
+    yahoo_access_token: str | None = None
+    yahoo_refresh_token: str | None = None
+    yahoo_token_expiry: str | None = None  # ISO datetime string
+    yahoo_team_key: str | None = None  # e.g., "428.l.12345.t.1"
 
 class AuthResponse(BaseModel):
     """Base authentication response model"""

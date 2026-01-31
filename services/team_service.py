@@ -1,7 +1,8 @@
 from schemas.team import TeamAddReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
 from db.models import Team
 from services.espn_service import EspnService
-from schemas.common import ApiStatus, LeagueInfo
+from services.yahoo_service import YahooService
+from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 import json
 
 class TeamService:
@@ -19,33 +20,63 @@ class TeamService:
             return TeamGetResp(status=ApiStatus.ERROR, message="Internal server error")
 
     @staticmethod
-    def serialize_league_info(league_info: LeagueInfo) -> dict:
-        return json.dumps({
+    def serialize_league_info(league_info: LeagueInfo) -> str:
+        """Serialize LeagueInfo to JSON string, preserving provider-specific fields."""
+        data = {
+            "provider": league_info.provider.value if hasattr(league_info.provider, 'value') else str(league_info.provider),
             "league_id": league_info.league_id,
-            "espn_s2": league_info.espn_s2,
-            "swid": league_info.swid,
             "team_name": league_info.team_name,
             "league_name": league_info.league_name if league_info.league_name else "N/A",
-            "year": league_info.year
-        })
-    
+            "year": league_info.year,
+            # ESPN-specific
+            "espn_s2": league_info.espn_s2,
+            "swid": league_info.swid,
+            # Yahoo-specific
+            "yahoo_access_token": league_info.yahoo_access_token,
+            "yahoo_refresh_token": league_info.yahoo_refresh_token,
+            "yahoo_token_expiry": league_info.yahoo_token_expiry,
+            "yahoo_team_key": league_info.yahoo_team_key,
+        }
+        return json.dumps(data)
+
     @staticmethod
     def deserialize_league_info(league_info: dict) -> LeagueInfo:
+        """Deserialize JSON dict to LeagueInfo, defaulting to ESPN for backward compatibility."""
+        # Default to ESPN for existing records without provider field
+        provider_str = league_info.get('provider', 'espn')
+        try:
+            provider = FantasyProvider(provider_str)
+        except ValueError:
+            provider = FantasyProvider.ESPN
+
         return LeagueInfo(
-            league_id=league_info.get('league_id', None),
-            espn_s2=league_info.get('espn_s2', None),
-            swid=league_info.get('swid', None),
-            team_name=league_info.get('team_name', None),
-            league_name=league_info.get('league_name', None),
-            year=league_info.get('year', None)
+            provider=provider,
+            league_id=league_info.get('league_id'),
+            team_name=league_info.get('team_name'),
+            league_name=league_info.get('league_name'),
+            year=league_info.get('year'),
+            # ESPN-specific
+            espn_s2=league_info.get('espn_s2', ''),
+            swid=league_info.get('swid', ''),
+            # Yahoo-specific
+            yahoo_access_token=league_info.get('yahoo_access_token'),
+            yahoo_refresh_token=league_info.get('yahoo_refresh_token'),
+            yahoo_token_expiry=league_info.get('yahoo_token_expiry'),
+            yahoo_team_key=league_info.get('yahoo_team_key'),
         )
 
     @staticmethod
     async def add_team(user_id: int, league_info: LeagueInfo) -> TeamAddResp:
         team_identifier = str(league_info.league_id) + league_info.team_name
 
-        if not EspnService.check_league(league_info).valid:
-            return TeamAddResp(status=ApiStatus.ERROR, message="Invalid league information", team_id=None, already_exists=False)
+        # Route validation to correct service based on provider
+        if league_info.provider == FantasyProvider.YAHOO:
+            validation_result = YahooService.check_league(league_info)
+        else:
+            validation_result = EspnService.check_league(league_info)
+
+        if not validation_result.valid:
+            return TeamAddResp(status=ApiStatus.ERROR, message=validation_result.message or "Invalid league information", team_id=None, already_exists=False)
         
         try:
             team_exists = Team.select().where(
@@ -84,8 +115,14 @@ class TeamService:
 
     @staticmethod
     async def update_team(user_id: int, team_id: int, league_info: LeagueInfo) -> TeamUpdateResp:
-        if not EspnService.check_league(league_info).valid:
-            return TeamUpdateResp(status=ApiStatus.ERROR, message="Invalid league information", data=None)
+        # Route validation to correct service based on provider
+        if league_info.provider == FantasyProvider.YAHOO:
+            validation_result = YahooService.check_league(league_info)
+        else:
+            validation_result = EspnService.check_league(league_info)
+
+        if not validation_result.valid:
+            return TeamUpdateResp(status=ApiStatus.ERROR, message=validation_result.message or "Invalid league information", data=None)
 
         try:
             Team.update(league_info=TeamService.serialize_league_info(league_info)).where(

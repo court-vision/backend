@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends
 from services.team_service import TeamService
 from services.espn_service import EspnService
+from services.yahoo_service import YahooService
 from services.user_sync_service import UserSyncService
 from schemas.team import TeamAddReq, TeamRemoveReq, TeamUpdateReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp
 from schemas.espn import TeamDataReq, TeamDataResp
-from schemas.common import ApiStatus
+from schemas.common import ApiStatus, FantasyProvider
 from core.clerk_auth import get_current_user
 
 
@@ -46,4 +47,8 @@ async def view_team(team_id: int, _: dict = Depends(get_current_user)):
         return TeamDataResp(status=ApiStatus.ERROR, message="Failed to fetch team data", data=None)
 
     league_info = team_view_resp.data.league_info
+
+    # Route to correct provider service
+    if league_info.provider == FantasyProvider.YAHOO:
+        return await YahooService.get_team_data(league_info, 0)
     return await EspnService.get_team_data(league_info, 0)

@@ -11,7 +11,7 @@ from core.logging import setup_logging, get_logger
 from core.settings import settings
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db
-from api.v1.internal import auth, users, teams, lineups, espn, matchups, streamers, pipelines
+from api.v1.internal import auth, users, teams, lineups, espn, yahoo, matchups, streamers, pipelines
 from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics
 
 
@@ -80,6 +80,7 @@ api_v1_internal.include_router(users.router)
 api_v1_internal.include_router(teams.router)
 api_v1_internal.include_router(lineups.router)
 api_v1_internal.include_router(espn.router)
+api_v1_internal.include_router(yahoo.router)
 api_v1_internal.include_router(matchups.router)
 api_v1_internal.include_router(streamers.router)
 api_v1_internal.include_router(pipelines.router)
