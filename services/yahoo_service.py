@@ -312,7 +312,14 @@ class YahooService:
                 for item in user_data:
                     if isinstance(item, dict) and "games" in item:
                         games = item["games"]
-                        for game_key, game_data in games.items():
+                        # Handle both dict and list responses from Yahoo API
+                        if isinstance(games, dict):
+                            games_iter = games.items()
+                        elif isinstance(games, list):
+                            games_iter = enumerate(games)
+                        else:
+                            continue
+                        for game_key, game_data in games_iter:
                             if game_key == "count":
                                 continue
                             if isinstance(game_data, dict) and "game" in game_data:
@@ -321,7 +328,14 @@ class YahooService:
                                 for game_item in game_info:
                                     if isinstance(game_item, dict) and "leagues" in game_item:
                                         league_list = game_item["leagues"]
-                                        for league_key, league_data in league_list.items():
+                                        # Handle both dict and list responses from Yahoo API
+                                        if isinstance(league_list, dict):
+                                            leagues_iter = league_list.items()
+                                        elif isinstance(league_list, list):
+                                            leagues_iter = enumerate(league_list)
+                                        else:
+                                            continue
+                                        for league_key, league_data in leagues_iter:
                                             if league_key == "count":
                                                 continue
                                             if isinstance(league_data, dict) and "league" in league_data:
@@ -374,7 +388,14 @@ class YahooService:
             for item in league:
                 if isinstance(item, dict) and "teams" in item:
                     teams_data = item["teams"]
-                    for team_key, team_data in teams_data.items():
+                    # Handle both dict and list responses from Yahoo API
+                    if isinstance(teams_data, dict):
+                        teams_iter = teams_data.items()
+                    elif isinstance(teams_data, list):
+                        teams_iter = enumerate(teams_data)
+                    else:
+                        continue
+                    for team_key, team_data in teams_iter:
                         if team_key == "count":
                             continue
                         if isinstance(team_data, dict) and "team" in team_data:
@@ -449,7 +470,14 @@ class YahooService:
                     roster = item["roster"]
                     players_data = roster.get("0", {}).get("players", {})
 
-                    for player_key, player_data in players_data.items():
+                    # Handle both dict and list responses from Yahoo API
+                    if isinstance(players_data, dict):
+                        players_iter = players_data.items()
+                    elif isinstance(players_data, list):
+                        players_iter = enumerate(players_data)
+                    else:
+                        continue
+                    for player_key, player_data in players_iter:
                         if player_key == "count":
                             continue
                         if isinstance(player_data, dict) and "player" in player_data:
@@ -575,7 +603,14 @@ class YahooService:
                 if isinstance(item, dict) and "players" in item:
                     players_data = item["players"]
 
-                    for player_key, player_data in players_data.items():
+                    # Handle both dict and list responses from Yahoo API
+                    if isinstance(players_data, dict):
+                        players_iter = players_data.items()
+                    elif isinstance(players_data, list):
+                        players_iter = enumerate(players_data)
+                    else:
+                        continue
+                    for player_key, player_data in players_iter:
                         if player_key == "count":
                             continue
                         if isinstance(player_data, dict) and "player" in player_data:
@@ -692,8 +727,15 @@ class YahooService:
             for item in team:
                 if isinstance(item, dict) and "matchups" in item:
                     matchups = item["matchups"]
+                    # Handle both dict and list responses from Yahoo API
+                    if isinstance(matchups, dict):
+                        matchups_iter = matchups.items()
+                    elif isinstance(matchups, list):
+                        matchups_iter = enumerate(matchups)
+                    else:
+                        continue
                     # Get the most recent/current matchup
-                    for matchup_key, matchup_data in matchups.items():
+                    for matchup_key, matchup_data in matchups_iter:
                         if matchup_key == "count":
                             continue
                         if isinstance(matchup_data, dict) and "matchup" in matchup_data:
