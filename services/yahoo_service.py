@@ -26,6 +26,7 @@ from utils.yahoo_helpers import (
     YAHOO_POSITION_MAP,
 )
 from services.schedule_service import get_remaining_games
+from services.player_service import PlayerService
 
 
 # Yahoo API endpoints
@@ -461,7 +462,8 @@ class YahooService:
             response.raise_for_status()
             data = response.json()
 
-            players = []
+            # First pass: collect player info for batch stat lookup
+            parsed_players = []
             fantasy_content = data.get("fantasy_content", {})
             team = fantasy_content.get("team", [])
 
@@ -518,19 +520,32 @@ class YahooService:
                             status = player_details.get("status", "")
                             injured = status in ("IL", "IL+", "O", "GTD", "DTD")
 
-                            # Get player points (season average)
-                            # Note: Yahoo requires separate stats call for detailed stats
-                            # For now, use 0 as placeholder - would need stats subresource
-                            avg_points = 0.0
+                            parsed_players.append({
+                                "player_id": player_id,
+                                "name": full_name,
+                                "team": team_abbrev,
+                                "valid_positions": valid_positions,
+                                "injured": injured,
+                            })
 
-                            players.append(PlayerResp(
-                                player_id=player_id,
-                                name=full_name,
-                                avg_points=avg_points,
-                                team=team_abbrev,
-                                valid_positions=valid_positions,
-                                injured=injured,
-                            ))
+            # Batch lookup stats by name from our internal database
+            player_lookups = [(p["name"], p["team"]) for p in parsed_players]
+            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+
+            # Build final player list with stats
+            players = []
+            for p in parsed_players:
+                normalized_name = p["name"].lower().strip()
+                avg_points = name_to_avg.get(normalized_name) or 0.0
+
+                players.append(PlayerResp(
+                    player_id=p["player_id"],
+                    name=p["name"],
+                    avg_points=avg_points,
+                    team=p["team"],
+                    valid_positions=p["valid_positions"],
+                    injured=p["injured"],
+                ))
 
             return TeamDataResp(
                 status=ApiStatus.SUCCESS,
@@ -595,7 +610,8 @@ class YahooService:
             response.raise_for_status()
             data = response.json()
 
-            players = []
+            # First pass: collect player info for batch stat lookup
+            parsed_players = []
             fantasy_content = data.get("fantasy_content", {})
             league = fantasy_content.get("league", [])
 
@@ -648,16 +664,32 @@ class YahooService:
                             status = player_details.get("status", "")
                             injured = status in ("IL", "IL+", "O", "GTD", "DTD")
 
-                            avg_points = 0.0
+                            parsed_players.append({
+                                "player_id": player_id,
+                                "name": full_name,
+                                "team": team_abbrev,
+                                "valid_positions": valid_positions,
+                                "injured": injured,
+                            })
 
-                            players.append(PlayerResp(
-                                player_id=player_id,
-                                name=full_name,
-                                avg_points=avg_points,
-                                team=team_abbrev,
-                                valid_positions=valid_positions,
-                                injured=injured,
-                            ))
+            # Batch lookup stats by name from our internal database
+            player_lookups = [(p["name"], p["team"]) for p in parsed_players]
+            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+
+            # Build final player list with stats
+            players = []
+            for p in parsed_players:
+                normalized_name = p["name"].lower().strip()
+                avg_points = name_to_avg.get(normalized_name) or 0.0
+
+                players.append(PlayerResp(
+                    player_id=p["player_id"],
+                    name=p["name"],
+                    avg_points=avg_points,
+                    team=p["team"],
+                    valid_positions=p["valid_positions"],
+                    injured=p["injured"],
+                ))
 
             return TeamDataResp(
                 status=ApiStatus.SUCCESS,
@@ -691,6 +723,8 @@ class YahooService:
         Returns:
             MatchupResp with current matchup data
         """
+        from services.schedule_service import get_matchup_dates
+
         try:
             access_token = YahooService._ensure_valid_token(league_info)
             team_key = league_info.yahoo_team_key
@@ -701,6 +735,8 @@ class YahooService:
                     message="No Yahoo team key provided",
                     data=None
                 )
+
+            parsed_key = parse_yahoo_team_key(team_key)
 
             # Fetch current matchup
             endpoint = f"{YAHOO_API_BASE}/team/{team_key}/matchups?format=json"
@@ -718,13 +754,18 @@ class YahooService:
             response.raise_for_status()
             data = response.json()
 
-            # Parse Yahoo matchup response
-            # This is a simplified implementation - Yahoo's matchup structure is complex
+            # Parse Yahoo matchup response to find current matchup and opponent
             fantasy_content = data.get("fantasy_content", {})
-            team = fantasy_content.get("team", [])
+            team_data = fantasy_content.get("team", [])
 
             current_matchup = None
-            for item in team:
+            matchup_week = 1
+            our_score = 0.0
+            opponent_score = 0.0
+            opponent_team_key = None
+            opponent_name = "Opponent"
+
+            for item in team_data:
                 if isinstance(item, dict) and "matchups" in item:
                     matchups = item["matchups"]
                     # Handle both dict and list responses from Yahoo API
@@ -734,12 +775,58 @@ class YahooService:
                         matchups_iter = enumerate(matchups)
                     else:
                         continue
-                    # Get the most recent/current matchup
+
+                    # Find the current/most recent matchup
                     for matchup_key, matchup_data in matchups_iter:
                         if matchup_key == "count":
                             continue
                         if isinstance(matchup_data, dict) and "matchup" in matchup_data:
-                            current_matchup = matchup_data["matchup"]
+                            matchup_info = matchup_data["matchup"]
+
+                            # Get matchup week
+                            matchup_week = int(matchup_info.get("week", 1))
+
+                            # Parse teams in matchup
+                            teams_in_matchup = matchup_info.get("0", {}).get("teams", {})
+                            if isinstance(teams_in_matchup, dict):
+                                teams_iter = teams_in_matchup.items()
+                            elif isinstance(teams_in_matchup, list):
+                                teams_iter = enumerate(teams_in_matchup)
+                            else:
+                                teams_iter = []
+
+                            for t_key, t_data in teams_iter:
+                                if t_key == "count":
+                                    continue
+                                if isinstance(t_data, dict) and "team" in t_data:
+                                    team_info = t_data["team"]
+                                    team_details = {}
+                                    team_points = 0.0
+
+                                    # Parse team details from nested structure
+                                    for t_item in team_info:
+                                        if isinstance(t_item, list):
+                                            for sub in t_item:
+                                                if isinstance(sub, dict):
+                                                    team_details.update(sub)
+                                        elif isinstance(t_item, dict):
+                                            if "team_points" in t_item:
+                                                tp = t_item["team_points"]
+                                                team_points = float(tp.get("total", 0))
+                                            else:
+                                                team_details.update(t_item)
+
+                                    t_team_key = team_details.get("team_key", "")
+                                    t_name = team_details.get("name", "Unknown")
+
+                                    if t_team_key == team_key:
+                                        our_score = team_points
+                                    else:
+                                        opponent_team_key = t_team_key
+                                        opponent_name = t_name
+                                        opponent_score = team_points
+
+                            current_matchup = matchup_info
                             break
 
             if not current_matchup:
@@ -749,37 +836,67 @@ class YahooService:
                     data=None
                 )
 
-            # Extract matchup data
-            # Yahoo matchup structure needs parsing
-            matchup_week = current_matchup.get("week", 1)
+            # Get matchup dates from schedule service
+            matchup_dates = get_matchup_dates(matchup_week)
+            matchup_start = matchup_dates[0].isoformat() if matchup_dates else ""
+            matchup_end = matchup_dates[1].isoformat() if matchup_dates else ""
 
-            # Build simplified response
-            # Full implementation would parse team rosters from matchup
+            # Fetch our team roster
+            our_roster = await YahooService._fetch_roster_for_matchup(
+                team_key, access_token, avg_window
+            )
+
+            # Fetch opponent roster if we have their team key
+            opponent_roster = []
+            if opponent_team_key:
+                opponent_roster = await YahooService._fetch_roster_for_matchup(
+                    opponent_team_key, access_token, avg_window
+                )
+
+            # Calculate projected scores
+            def calc_projected(roster: list[MatchupPlayerResp], current: float) -> float:
+                future_pts = 0.0
+                for p in roster:
+                    if p.lineup_slot not in ("IR", "IL", "IL+", "BE") and not p.injured:
+                        future_pts += p.avg_points * p.games_remaining
+                return current + future_pts
+
+            our_projected = calc_projected(our_roster, our_score)
+            opponent_projected = calc_projected(opponent_roster, opponent_score)
+
+            # Determine winner
+            if our_projected > opponent_projected:
+                projected_winner = league_info.team_name
+            elif opponent_projected > our_projected:
+                projected_winner = opponent_name
+            else:
+                projected_winner = "Tie"
+
             matchup_data = MatchupData(
-                matchup_period=int(matchup_week),
-                matchup_period_start="",
-                matchup_period_end="",
+                matchup_period=matchup_week,
+                matchup_period_start=matchup_start,
+                matchup_period_end=matchup_end,
                 your_team=MatchupTeamResp(
                     team_name=league_info.team_name,
-                    team_id=0,
-                    current_score=0.0,
-                    projected_score=0.0,
-                    roster=[]
+                    team_id=int(parsed_key.get("team_id", 0)),
+                    current_score=our_score,
+                    projected_score=round(our_projected, 2),
+                    roster=our_roster
                 ),
                 opponent_team=MatchupTeamResp(
-                    team_name="Opponent",
+                    team_name=opponent_name,
                     team_id=0,
-                    current_score=0.0,
-                    projected_score=0.0,
-                    roster=[]
+                    current_score=opponent_score,
+                    projected_score=round(opponent_projected, 2),
+                    roster=opponent_roster
                 ),
-                projected_winner="TBD",
-                projected_margin=0.0
+                projected_winner=projected_winner,
+                projected_margin=round(abs(our_projected - opponent_projected), 2)
             )
 
             return MatchupResp(
                 status=ApiStatus.SUCCESS,
-                message="Yahoo matchup data fetched (basic implementation)",
+                message="Yahoo matchup data fetched successfully",
                 data=matchup_data
             )
 
@@ -791,8 +908,147 @@ class YahooService:
             )
         except Exception as e:
             print(f"Error in Yahoo get_matchup_data: {e}")
+            import traceback
+            traceback.print_exc()
             return MatchupResp(
                 status=ApiStatus.ERROR,
                 message=f"Internal server error: {str(e)}",
                 data=None
             )
+
+    @staticmethod
+    async def _fetch_roster_for_matchup(
+        team_key: str,
+        access_token: str,
+        avg_window: str
+    ) -> list[MatchupPlayerResp]:
+        """
+        Fetch a team's roster with stats for matchup display.
+
+        Args:
+            team_key: Yahoo team key
+            access_token: Valid Yahoo access token
+            avg_window: Averaging window for stats
+
+        Returns:
+            List of MatchupPlayerResp for the team roster
+        """
+        try:
+            endpoint = f"{YAHOO_API_BASE}/team/{team_key}/roster/players?format=json"
+            headers = YahooService._get_headers(access_token)
+
+            response = requests.get(endpoint, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse roster
+            parsed_players = []
+            fantasy_content = data.get("fantasy_content", {})
+            team = fantasy_content.get("team", [])
+
+            for item in team:
+                if isinstance(item, dict) and "roster" in item:
+                    roster = item["roster"]
+                    players_data = roster.get("0", {}).get("players", {})
+
+                    if isinstance(players_data, dict):
+                        players_iter = players_data.items()
+                    elif isinstance(players_data, list):
+                        players_iter = enumerate(players_data)
+                    else:
+                        continue
+
+                    for player_key, player_data in players_iter:
+                        if player_key == "count":
+                            continue
+                        if isinstance(player_data, dict) and "player" in player_data:
+                            player_info = player_data["player"]
+                            player_details = {}
+                            eligible_positions = []
+                            selected_position = "UT"
+
+                            for player_item in player_info:
+                                if isinstance(player_item, list):
+                                    for sub_item in player_item:
+                                        if isinstance(sub_item, dict):
+                                            if "eligible_positions" in sub_item:
+                                                eligible_positions = sub_item["eligible_positions"]
+                                            elif "selected_position" in sub_item:
+                                                sp = sub_item["selected_position"]
+                                                if isinstance(sp, list) and len(sp) > 0:
+                                                    selected_position = sp[0].get("position", "UT")
+                                                elif isinstance(sp, dict):
+                                                    selected_position = sp.get("position", "UT")
+                                            else:
+                                                player_details.update(sub_item)
+                                elif isinstance(player_item, dict):
+                                    if "selected_position" in player_item:
+                                        sp = player_item["selected_position"]
+                                        if isinstance(sp, list) and len(sp) > 0:
+                                            selected_position = sp[0].get("position", "UT")
+                                        elif isinstance(sp, dict):
+                                            selected_position = sp.get("position", "UT")
+                                    else:
+                                        player_details.update(player_item)
+
+                            player_id = int(player_details.get("player_id", 0))
+                            name = player_details.get("name", {})
+                            if isinstance(name, dict):
+                                full_name = name.get("full", "Unknown")
+                            else:
+                                full_name = str(name)
+
+                            team_abbrev = normalize_team_abbr(
+                                player_details.get("editorial_team_abbr", "FA").upper()
+                            )
+
+                            # Get primary position
+                            positions = parse_yahoo_player_positions(eligible_positions)
+                            primary_pos = positions[0] if positions else "UT"
+
+                            # Normalize lineup slot
+                            lineup_slot = YAHOO_POSITION_MAP.get(selected_position, selected_position)
+
+                            status = player_details.get("status", "")
+                            injured = status in ("IL", "IL+", "O", "GTD", "DTD")
+                            injury_status = status if status else None
+
+                            parsed_players.append({
+                                "player_id": player_id,
+                                "name": full_name,
+                                "team": team_abbrev,
+                                "position": primary_pos,
+                                "lineup_slot": lineup_slot,
+                                "injured": injured,
+                                "injury_status": injury_status,
+                            })
+
+            # Batch lookup stats by name
+            player_lookups = [(p["name"], p["team"]) for p in parsed_players]
+            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+
+            # Build MatchupPlayerResp list
+            roster = []
+            for p in parsed_players:
+                normalized_name = p["name"].lower().strip()
+                avg_points = name_to_avg.get(normalized_name) or 0.0
+                games_remaining = get_remaining_games(p["team"])
+
+                roster.append(MatchupPlayerResp(
+                    player_id=p["player_id"],
+                    name=p["name"],
+                    team=p["team"],
+                    position=p["position"],
+                    lineup_slot=p["lineup_slot"],
+                    avg_points=avg_points,
+                    projected_points=round(avg_points * games_remaining, 2),
+                    games_remaining=games_remaining,
+                    injured=p["injured"],
+                    injury_status=p["injury_status"],
+                ))
+
+            return roster
+
+        except Exception as e:
+            print(f"Error fetching roster for matchup: {e}")
+            return []

@@ -7,8 +7,9 @@ from schemas.streamer import (
     StreamerPlayerResp,
     StreamerReq
 )
-from schemas.common import ApiStatus, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
+from services.yahoo_service import YahooService
 from services.player_service import PlayerService
 from services.schedule_service import (
     get_current_matchup,
@@ -118,8 +119,13 @@ class StreamerService:
             # Get teams with B2B games
             teams_with_b2b = get_teams_with_b2b(effective_date)
 
-            # Fetch free agents from ESPN
-            fa_response = await EspnService.get_free_agents(league_info, fa_count)
+            # Fetch free agents - route by provider
+            is_yahoo = league_info.provider == FantasyProvider.YAHOO
+            if is_yahoo:
+                fa_response = await YahooService.get_free_agents(league_info, fa_count)
+            else:
+                fa_response = await EspnService.get_free_agents(league_info, fa_count)
+
             if fa_response.status != ApiStatus.SUCCESS or not fa_response.data:
                 return StreamerResp(
                     status=ApiStatus.ERROR,
@@ -129,11 +135,16 @@ class StreamerService:
 
             free_agents = fa_response.data
 
-            # Get player IDs for batch query
-            player_ids = [fa.player_id for fa in free_agents]
-
             # Fetch last n-day averages from our database
-            last_n_avgs = PlayerService.get_last_n_day_avg_batch(player_ids, days=avg_days)
+            # Yahoo uses name-based lookup, ESPN uses player ID
+            if is_yahoo:
+                player_lookups = [(fa.name, fa.team) for fa in free_agents]
+                last_n_avgs_by_name = PlayerService.get_last_n_day_avg_batch_by_name(
+                    player_lookups, days=avg_days
+                )
+            else:
+                player_ids = [fa.player_id for fa in free_agents]
+                last_n_avgs = PlayerService.get_last_n_day_avg_batch(player_ids, days=avg_days)
 
             # Build streamer list
             streamers: list[StreamerPlayerResp] = []
@@ -160,7 +171,12 @@ class StreamerService:
                     continue
 
                 # Get last n-day average from our database
-                avg_points_last_n = last_n_avgs.get(fa.player_id)
+                # Yahoo uses name-based lookup, ESPN uses player ID
+                if is_yahoo:
+                    normalized_name = fa.name.lower().strip()
+                    avg_points_last_n = last_n_avgs_by_name.get(normalized_name)
+                else:
+                    avg_points_last_n = last_n_avgs.get(fa.player_id)
 
                 # Calculate streamer score
                 streamer_score = StreamerService._calculate_streamer_score(

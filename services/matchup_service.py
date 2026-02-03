@@ -1,4 +1,5 @@
 from services.espn_service import EspnService
+from services.yahoo_service import YahooService
 from services.team_service import TeamService
 from schemas.matchup import (
     MatchupResp,
@@ -6,7 +7,7 @@ from schemas.matchup import (
     MatchupScoreHistory,
     DailyScorePoint
 )
-from schemas.common import ApiStatus, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from db.models.stats.daily_matchup_score import DailyMatchupScore
 
 
@@ -28,6 +29,8 @@ class MatchupService:
         Returns:
             MatchupResp with matchup data or error
         """
+        if league_info.provider == FantasyProvider.YAHOO:
+            return await YahooService.get_matchup_data(league_info, avg_window)
         return await EspnService.get_matchup_data(league_info, avg_window)
 
     @staticmethod
@@ -59,7 +62,9 @@ class MatchupService:
 
         league_info = team_resp.data.league_info
 
-        # Fetch matchup data using the league info
+        # Fetch matchup data using the league info - route by provider
+        if league_info.provider == FantasyProvider.YAHOO:
+            return await YahooService.get_matchup_data(league_info, avg_window)
         return await EspnService.get_matchup_data(league_info, avg_window)
 
     @staticmethod

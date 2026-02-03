@@ -3,8 +3,9 @@ from typing import Optional
 from datetime import date, timedelta
 from schemas.player import PlayerStatsResp, PlayerStats, AvgStats, GameLog
 from schemas.common import ApiStatus
-from db.models.stats.daily_player_stats import DailyPlayerStats
-from peewee import fn
+from db.models.nba.players import Player
+from db.models.nba.player_game_stats import PlayerGameStats
+from core.logging import get_logger
 
 
 def _normalize_name(name: str) -> str:
@@ -23,43 +24,55 @@ class PlayerService:
         name: Optional[str] = None,
         team: Optional[str] = None
     ) -> PlayerStatsResp:
+        log = get_logger()
         try:
-            # Build query based on provided parameters
-            query = DailyPlayerStats.select()
+            # Step 1: Resolve player from the Player dimension table
+            player = None
             if espn_id is not None:
-                query = query.where(DailyPlayerStats.espn_id == espn_id)
+                player = Player.get_or_none(Player.espn_id == espn_id)
             elif player_id is not None:
-                # Lookup by player ID (used for rankings)
-                query = query.where(DailyPlayerStats.id == player_id)
+                player = Player.get_or_none(Player.id == player_id)
             elif name is not None:
-                # Lookup by normalized name (and optionally team) - used for public queries
                 normalized_name = _normalize_name(name)
-                query = query.where(DailyPlayerStats.name_normalized == normalized_name)
-                if team is not None:
-                    query = query.where(DailyPlayerStats.team == team)
+                player = Player.get_or_none(Player.name_normalized == normalized_name)
             else:
                 return PlayerStatsResp(
                     status=ApiStatus.ERROR,
                     message="Must provide either player_id or name",
                     data=None
                 )
-            
-            # Get all game logs for the player, ordered by date
-            game_logs_query = query.order_by(DailyPlayerStats.date.asc())
 
-            game_logs_list = list(game_logs_query)
-
-            if not game_logs_list:
+            if not player:
                 return PlayerStatsResp(
                     status=ApiStatus.ERROR,
                     message="Player not found",
                     data=None
                 )
 
-            # Get player info from the most recent game
+            # Step 2: Get all game logs for the player from PlayerGameStats
+            game_logs_query = (
+                PlayerGameStats.select()
+                .where(PlayerGameStats.player_id == player.id)
+                .order_by(PlayerGameStats.game_date.asc())
+            )
+
+            # If team filter is provided, apply it
+            if team is not None:
+                game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team)
+
+            game_logs_list = list(game_logs_query)
+
+            if not game_logs_list:
+                return PlayerStatsResp(
+                    status=ApiStatus.ERROR,
+                    message="No game stats found for player",
+                    data=None
+                )
+
+            # Get player info from Player dimension and most recent game
             latest_game = game_logs_list[-1]
-            player_name = latest_game.name
-            player_team = latest_game.team
+            player_name = player.name
+            player_team = latest_game.team_id
             games_played = len(game_logs_list)
 
             # Calculate averages
@@ -102,7 +115,7 @@ class PlayerService:
             # Build game logs
             game_logs = [
                 GameLog(
-                    date=str(g.date),
+                    date=str(g.game_date),
                     fpts=g.fpts,
                     pts=g.pts,
                     reb=g.reb,
@@ -121,8 +134,8 @@ class PlayerService:
                 for g in game_logs_list
             ]
 
-            # Use the ID from the game log if we looked up by name
-            resolved_player_id = player_id if player_id is not None else latest_game.id
+            # Use the player ID from the Player dimension
+            resolved_player_id = player.id
 
             player_stats = PlayerStats(
                 id=resolved_player_id,
@@ -140,7 +153,7 @@ class PlayerService:
             )
 
         except Exception as e:
-            print(f"Error in get_player_stats: {e}")
+            log.error("get_player_stats_error", error=str(e), espn_id=espn_id, player_id=player_id, name=name)
             return PlayerStatsResp(
                 status=ApiStatus.ERROR,
                 message="Internal server error",
@@ -153,7 +166,7 @@ class PlayerService:
         Get average fantasy points over the last N days for a player.
 
         Args:
-            player_id: The player's ID.
+            player_id: The player's NBA ID.
             days: Number of days to look back (default 7).
 
         Returns:
@@ -161,9 +174,9 @@ class PlayerService:
         """
         cutoff_date = date.today() - timedelta(days=days)
 
-        query = DailyPlayerStats.select().where(
-            (DailyPlayerStats.id == player_id) &
-            (DailyPlayerStats.date >= cutoff_date)
+        query = PlayerGameStats.select().where(
+            (PlayerGameStats.player_id == player_id) &
+            (PlayerGameStats.game_date >= cutoff_date)
         )
 
         games = list(query)
@@ -193,17 +206,22 @@ class PlayerService:
 
         cutoff_date = date.today() - timedelta(days=days)
 
-        # Query all games for all players in one query using ESPN ID
-        query = DailyPlayerStats.select().where(
-            (DailyPlayerStats.espn_id.in_(espn_ids)) &
-            (DailyPlayerStats.date >= cutoff_date)
+        # Query all games for all players with JOIN to Player for espn_id
+        query = (
+            PlayerGameStats.select(PlayerGameStats, Player.espn_id)
+            .join(Player, on=(PlayerGameStats.player_id == Player.id))
+            .where(
+                (Player.espn_id.in_(espn_ids)) &
+                (PlayerGameStats.game_date >= cutoff_date)
+            )
         )
 
         # Group games by ESPN ID
         player_games: dict[int, list] = {eid: [] for eid in espn_ids}
         for game in query:
-            if game.espn_id in player_games:
-                player_games[game.espn_id].append(game)
+            espn_id = game.player.espn_id
+            if espn_id in player_games:
+                player_games[espn_id].append(game)
 
         # Calculate averages
         result = {}
@@ -214,6 +232,67 @@ class PlayerService:
                 result[espn_id] = round(total_fpts / len(games), 1)
             else:
                 result[espn_id] = None
+
+        return result
+
+    @staticmethod
+    def get_last_n_day_avg_batch_by_name(
+        players: list[tuple[str, str]],
+        days: int = 7
+    ) -> dict[str, float | None]:
+        """
+        Get last N day averages for multiple players by name (for Yahoo).
+
+        Args:
+            players: List of (name, team) tuples.
+            days: Number of days to look back (default 7).
+
+        Returns:
+            Dict mapping normalized_name to their average fantasy points (or None).
+        """
+        if not players:
+            return {}
+
+        cutoff_date = date.today() - timedelta(days=days)
+
+        # Build normalized name to team mapping
+        name_team_map = {}
+        normalized_names = []
+        for name, team in players:
+            normalized = _normalize_name(name)
+            name_team_map[normalized] = team
+            normalized_names.append(normalized)
+
+        # Query all games with JOIN to Player for name_normalized
+        query = (
+            PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
+            .join(Player, on=(PlayerGameStats.player_id == Player.id))
+            .where(
+                (Player.name_normalized.in_(normalized_names)) &
+                (PlayerGameStats.game_date >= cutoff_date)
+            )
+        )
+
+        # Group games by normalized name (filtering by team for accuracy)
+        player_games: dict[str, list] = {name: [] for name in normalized_names}
+        for game in query:
+            game_name_norm = game.player.name_normalized
+            expected_team = name_team_map.get(game_name_norm)
+            # Only include if team matches (handles players with same name)
+            # team_id is the team abbreviation (FK string to NBATeam)
+            if expected_team and game.team_id == expected_team:
+                if game_name_norm in player_games:
+                    player_games[game_name_norm].append(game)
+
+        # Calculate averages
+        result = {}
+        for name in normalized_names:
+            games = player_games[name]
+            if games:
+                total_fpts = sum(g.fpts for g in games)
+                result[name] = round(total_fpts / len(games), 1)
+            else:
+                result[name] = None
 
         return result
 
