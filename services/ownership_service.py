@@ -22,33 +22,41 @@ class OwnershipService:
     @staticmethod
     async def get_trending(
         days: int = 7,
-        min_change: float = 5.0,
+        min_change: float = 3.0,
+        min_ownership: float = 3.0,
+        sort_by: str = "velocity",
         direction: str = "both",
         limit: int = 20,
     ) -> OwnershipTrendingResp:
         """
-        Get players with trending ownership.
+        Get players with trending ownership using velocity-based ranking.
+
+        Velocity measures relative change: (current - past) / past * 100
+        This surfaces breakout players better than absolute change alone.
+        Example: 5% -> 15% = +200% velocity (breakout) vs 60% -> 65% = +8% (meh)
 
         Args:
             days: Lookback period in days
-            min_change: Minimum ownership change percentage
+            min_change: Minimum ownership change in percentage points
+            min_ownership: Minimum current ownership % to filter noise (default 3%)
+            sort_by: 'velocity' (relative change) or 'change' (absolute change)
             direction: 'up', 'down', or 'both'
             limit: Maximum players per direction
 
         Returns:
-            OwnershipTrendingResp with trending players
+            OwnershipTrendingResp with trending players sorted by velocity
         """
         log = get_logger()
 
         try:
-            today = date.today()
-            past_date = today - timedelta(days=days)
+            yesterday = date.today() - timedelta(days=1)
+            past_date = yesterday - timedelta(days=days)
 
             # Get current and past ownership data
             current_data = {
                 row.player_id: float(row.rost_pct)
                 for row in PlayerOwnership.select().where(
-                    PlayerOwnership.snapshot_date == today
+                    PlayerOwnership.snapshot_date == yesterday
                 )
             }
             past_data = {
@@ -58,18 +66,34 @@ class OwnershipService:
                 )
             }
 
-            # Calculate changes
+            # Calculate changes with velocity
             changes = []
             for player_id in current_data:
                 current = current_data[player_id]
                 past = past_data.get(player_id, 0)
                 change = current - past
+
+                # Apply minimum ownership filter to reduce noise from deep roster players
+                if current < min_ownership and past < min_ownership:
+                    continue
+
+                # Calculate velocity (relative change as percentage)
+                # For rising: use past as baseline (how much did they grow from baseline)
+                # For falling: use current as baseline (how much did they shrink to)
+                if change > 0:
+                    # Rising: velocity = how much they grew relative to starting point
+                    velocity = (change / past * 100) if past > 0 else 100.0
+                else:
+                    # Falling: velocity = how much they shrank relative to peak
+                    velocity = (change / past * 100) if past > 0 else -100.0
+
                 if abs(change) >= min_change:
                     changes.append({
                         "player_id": player_id,
                         "current": current,
                         "past": past,
                         "change": change,
+                        "velocity": velocity,
                     })
 
             # Get player info for trending players
@@ -113,6 +137,7 @@ class OwnershipService:
                     current_ownership=round(c["current"], 1),
                     previous_ownership=round(c["past"], 1),
                     change=round(c["change"], 1),
+                    velocity=round(c["velocity"], 1),
                 )
 
                 if c["change"] > 0:
@@ -120,9 +145,10 @@ class OwnershipService:
                 else:
                     trending_down.append(trending_player)
 
-            # Sort and limit
-            trending_up.sort(key=lambda x: x.change, reverse=True)
-            trending_down.sort(key=lambda x: x.change)
+            # Sort by velocity (default) or absolute change
+            sort_key = "velocity" if sort_by == "velocity" else "change"
+            trending_up.sort(key=lambda x: getattr(x, sort_key), reverse=True)
+            trending_down.sort(key=lambda x: getattr(x, sort_key))
 
             trending_up = trending_up[:limit]
             trending_down = trending_down[:limit]
@@ -135,9 +161,11 @@ class OwnershipService:
 
             return OwnershipTrendingResp(
                 status=ApiStatus.SUCCESS,
-                message=f"Trending players over {days} days",
+                message=f"Trending players over {days} days (sorted by {sort_by})",
                 data=OwnershipTrendingData(
                     days=days,
+                    min_ownership=min_ownership,
+                    sort_by=sort_by,
                     trending_up=trending_up,
                     trending_down=trending_down,
                 ),

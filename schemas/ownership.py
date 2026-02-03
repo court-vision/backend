@@ -16,12 +16,17 @@ class TrendingPlayer(BaseModel):
     current_ownership: float = Field(..., description="Current ownership percentage")
     previous_ownership: float = Field(..., description="Ownership at start of period")
     change: float = Field(..., description="Change in ownership percentage points")
+    velocity: float = Field(
+        ..., description="Relative change as percentage (change / previous * 100)"
+    )
 
 
 class OwnershipTrendingData(BaseModel):
     """Response data for ownership trending."""
 
     days: int = Field(..., description="Lookback period in days")
+    min_ownership: float = Field(..., description="Minimum ownership filter applied")
+    sort_by: str = Field(..., description="Sort method used (velocity or change)")
     trending_up: list[TrendingPlayer] = Field(
         default_factory=list, description="Players with rising ownership"
     )
