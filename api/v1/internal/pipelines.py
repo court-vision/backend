@@ -282,9 +282,10 @@ async def _run_pipelines_background(job_id: str) -> None:
                 result = await run_pipeline(name)
 
                 # Convert to job result format
+                # Note: result.status is already a string due to use_enum_values=True
                 job_result = JobResultInternal(
                     pipeline_name=name,
-                    status=result.status.value,
+                    status=result.status,
                     message=result.message,
                     started_at=result.started_at,
                     completed_at=result.completed_at,
@@ -299,7 +300,7 @@ async def _run_pipelines_background(job_id: str) -> None:
                     "background_pipeline_completed",
                     job_id=job_id,
                     pipeline=name,
-                    status=result.status.value,
+                    status=result.status,
                 )
 
             except Exception as e:
