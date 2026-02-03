@@ -11,8 +11,8 @@ from core.logging import get_logger
 from pipelines.base import BasePipeline
 from pipelines.config import PipelineConfig
 from pipelines.context import PipelineContext
-from pipelines.daily_player_stats import DailyPlayerStatsPipeline
-from pipelines.cumulative_player_stats import CumulativePlayerStatsPipeline
+from pipelines.player_game_stats import PlayerGameStatsPipeline
+from pipelines.player_season_stats import PlayerSeasonStatsPipeline
 from pipelines.daily_matchup_scores import DailyMatchupScoresPipeline
 from pipelines.advanced_stats import AdvancedStatsPipeline
 from pipelines.player_profiles import PlayerProfilesPipeline
@@ -26,8 +26,8 @@ from schemas.common import ApiStatus
 # Order matters for run_all_pipelines - dependencies should come first
 PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     # Core daily pipelines
-    "daily_player_stats": DailyPlayerStatsPipeline,
-    "cumulative_player_stats": CumulativePlayerStatsPipeline,
+    "player_game_stats": PlayerGameStatsPipeline,
+    "player_season_stats": PlayerSeasonStatsPipeline,
     "daily_matchup_scores": DailyMatchupScoresPipeline,
     # Extended data pipelines
     "advanced_stats": AdvancedStatsPipeline,
@@ -43,7 +43,7 @@ def get_pipeline(name: str) -> BasePipeline:
     Get a pipeline instance by name.
 
     Args:
-        name: Pipeline name (e.g., "daily_player_stats")
+        name: Pipeline name (e.g., "player_game_stats")
 
     Returns:
         Instantiated pipeline
@@ -77,8 +77,8 @@ async def run_all_pipelines() -> dict[str, PipelineResult]:
     Run all pipelines in sequence.
 
     Pipelines are run in registration order:
-    1. daily_player_stats - Per-game box scores
-    2. cumulative_player_stats - Season totals
+    1. player_game_stats - Per-game box scores
+    2. player_season_stats - Season totals
     3. daily_matchup_scores - Fantasy matchup tracking
     4. advanced_stats - Efficiency/usage metrics
     5. game_schedule - NBA game results
@@ -125,14 +125,13 @@ __all__ = [
     "PipelineConfig",
     "PipelineContext",
     # Core pipelines
-    "DailyPlayerStatsPipeline",
-    "CumulativePlayerStatsPipeline",
+    "PlayerGameStatsPipeline",
+    "PlayerSeasonStatsPipeline",
     "DailyMatchupScoresPipeline",
     # Extended data pipelines
     "AdvancedStatsPipeline",
     "PlayerProfilesPipeline",
     "GameSchedulePipeline",
-    "InjuryReportPipeline",
     # Registry functions
     "PIPELINE_REGISTRY",
     "get_pipeline",

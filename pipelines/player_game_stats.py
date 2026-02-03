@@ -19,7 +19,7 @@ from pipelines.extractors import ESPNExtractor, NBAApiExtractor
 from pipelines.transformers import normalize_name, calculate_fantasy_points, minutes_to_int
 
 
-class DailyPlayerStatsPipeline(BasePipeline):
+class PlayerGameStatsPipeline(BasePipeline):
     """
     Fetch yesterday's game stats from NBA API and insert into player_game_stats.
 
@@ -33,8 +33,8 @@ class DailyPlayerStatsPipeline(BasePipeline):
     """
 
     config = PipelineConfig(
-        name="daily_player_stats",
-        display_name="Daily Player Stats",
+        name="player_game_stats",
+        display_name="Player Game Stats",
         description="Fetches yesterday's game stats from NBA API and ESPN ownership data",
         target_table="nba.player_game_stats",
     )

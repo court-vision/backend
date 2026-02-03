@@ -18,7 +18,7 @@ from pipelines.extractors import ESPNExtractor, NBAApiExtractor
 from pipelines.transformers import normalize_name, calculate_fantasy_points
 
 
-class CumulativePlayerStatsPipeline(BasePipeline):
+class PlayerSeasonStatsPipeline(BasePipeline):
     """
     Update cumulative season stats and rankings for players who played.
 
@@ -31,8 +31,8 @@ class CumulativePlayerStatsPipeline(BasePipeline):
     """
 
     config = PipelineConfig(
-        name="cumulative_player_stats",
-        display_name="Cumulative Player Stats",
+        name="player_season_stats",
+        display_name="Player Season Stats",
         description="Updates season totals and rankings for players who played yesterday",
         target_table="nba.player_season_stats",
         depends_on=("daily_player_stats",),
