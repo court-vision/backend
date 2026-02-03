@@ -359,5 +359,4 @@ def get_upcoming_games_on_date(date: date) -> list[dict]:
     """
     schedule = _load_schedule_v2()
     games = schedule.get(date.strftime("%m/%d/%Y"), [])
-    print(games)
     return games

@@ -30,8 +30,6 @@ class GamesService:
         try:
             games = Game.get_games_on_date(game_date)
 
-            print(game_date, games)
-
             if games:
                 game_list = [
                     GameInfo(
