@@ -49,6 +49,7 @@ async def view_team(team_id: int, _: dict = Depends(get_current_user)):
     league_info = team_view_resp.data.league_info
 
     # Route to correct provider service
+    # Pass team_id for Yahoo so tokens can be refreshed and persisted
     if league_info.provider == FantasyProvider.YAHOO:
-        return await YahooService.get_team_data(league_info, 0)
+        return await YahooService.get_team_data(league_info, 0, team_id)
     return await EspnService.get_team_data(league_info, 0)

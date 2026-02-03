@@ -70,7 +70,8 @@ class StreamerService:
         exclude_injured: bool = True,
         b2b_only: bool = False,
         day: Optional[int] = None,
-        avg_days: int = 7
+        avg_days: int = 7,
+        team_id: Optional[int] = None
     ) -> StreamerResp:
         """
         Find and rank the best streaming candidates from free agents.
@@ -120,9 +121,10 @@ class StreamerService:
             teams_with_b2b = get_teams_with_b2b(effective_date)
 
             # Fetch free agents - route by provider
+            # Pass team_id for Yahoo so tokens can be refreshed and persisted
             is_yahoo = league_info.provider == FantasyProvider.YAHOO
             if is_yahoo:
-                fa_response = await YahooService.get_free_agents(league_info, fa_count)
+                fa_response = await YahooService.get_free_agents(league_info, fa_count, team_id)
             else:
                 fa_response = await EspnService.get_free_agents(league_info, fa_count)
 

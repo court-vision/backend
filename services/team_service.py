@@ -71,7 +71,7 @@ class TeamService:
 
         # Route validation to correct service based on provider
         if league_info.provider == FantasyProvider.YAHOO:
-            validation_result = YahooService.check_league(league_info)
+            validation_result = await YahooService.check_league(league_info)
         else:
             validation_result = EspnService.check_league(league_info)
 
@@ -117,7 +117,7 @@ class TeamService:
     async def update_team(user_id: int, team_id: int, league_info: LeagueInfo) -> TeamUpdateResp:
         # Route validation to correct service based on provider
         if league_info.provider == FantasyProvider.YAHOO:
-            validation_result = YahooService.check_league(league_info)
+            validation_result = await YahooService.check_league(league_info, team_id)
         else:
             validation_result = EspnService.check_league(league_info)
 
@@ -144,7 +144,50 @@ class TeamService:
 
             # This will be passed to the ESPN service to get the roster data
             return TeamViewResp(status=ApiStatus.SUCCESS, message="Team fetched successfully", data=TeamResponse(team_id=team.team_id, league_info=TeamService.deserialize_league_info(json.loads(team.league_info))))
-            
+
         except Exception as e:
             print(f"Error in view_team: {e}")
             return TeamViewResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
+
+    @staticmethod
+    async def update_yahoo_tokens(
+        team_id: int,
+        access_token: str,
+        refresh_token: str,
+        token_expiry: str
+    ) -> bool:
+        """
+        Update only the Yahoo OAuth tokens for a team.
+
+        Used when tokens are automatically refreshed during API calls.
+
+        Args:
+            team_id: The team's ID
+            access_token: New Yahoo access token
+            refresh_token: New Yahoo refresh token
+            token_expiry: New token expiry datetime (ISO format)
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        try:
+            team = Team.select().where(Team.team_id == team_id).first()
+            if not team:
+                print(f"Team {team_id} not found for token update")
+                return False
+
+            # Deserialize, update tokens, re-serialize
+            league_info_dict = json.loads(team.league_info)
+            league_info_dict["yahoo_access_token"] = access_token
+            league_info_dict["yahoo_refresh_token"] = refresh_token
+            league_info_dict["yahoo_token_expiry"] = token_expiry
+
+            Team.update(league_info=json.dumps(league_info_dict)).where(
+                Team.team_id == team_id
+            ).execute()
+
+            return True
+
+        except Exception as e:
+            print(f"Error updating Yahoo tokens for team {team_id}: {e}")
+            return False

@@ -191,15 +191,19 @@ class YahooService:
         }
 
     @staticmethod
-    def _ensure_valid_token(league_info: LeagueInfo) -> str:
+    async def _ensure_valid_token(league_info: LeagueInfo, team_id: int | None = None) -> str:
         """
         Ensure we have a valid access token, refreshing if needed.
 
         Args:
             league_info: League info with Yahoo tokens
+            team_id: Optional team ID to persist refreshed tokens to database
 
         Returns:
             Valid access token
+
+        Raises:
+            ValueError: If no access token or refresh fails
         """
         if not league_info.yahoo_access_token:
             raise ValueError("No Yahoo access token available")
@@ -210,25 +214,46 @@ class YahooService:
             if datetime.utcnow() >= expiry - timedelta(minutes=5):
                 # Token expired or expiring soon, need to refresh
                 if league_info.yahoo_refresh_token:
-                    # Note: In a real implementation, you'd update the stored tokens
-                    # For now, we'll just use the current token and let it fail if expired
-                    pass
+                    try:
+                        new_tokens = await YahooService.refresh_access_token(
+                            league_info.yahoo_refresh_token
+                        )
+                        # Update league_info with new tokens
+                        league_info.yahoo_access_token = new_tokens["access_token"]
+                        league_info.yahoo_refresh_token = new_tokens["refresh_token"]
+                        league_info.yahoo_token_expiry = new_tokens["token_expiry"]
+
+                        # Persist to database if team_id provided
+                        if team_id is not None:
+                            from services.team_service import TeamService
+                            await TeamService.update_yahoo_tokens(
+                                team_id,
+                                new_tokens["access_token"],
+                                new_tokens["refresh_token"],
+                                new_tokens["token_expiry"]
+                            )
+                    except Exception as e:
+                        # Refresh failed - token may be revoked
+                        raise ValueError(f"Failed to refresh Yahoo token: {str(e)}")
+                else:
+                    raise ValueError("Yahoo token expired and no refresh token available")
 
         return league_info.yahoo_access_token
 
     @staticmethod
-    def check_league(league_info: LeagueInfo) -> ValidateLeagueResp:
+    async def check_league(league_info: LeagueInfo, team_id: int | None = None) -> ValidateLeagueResp:
         """
         Validate Yahoo league credentials.
 
         Args:
             league_info: League info with Yahoo credentials
+            team_id: Optional team ID to persist refreshed tokens
 
         Returns:
             ValidateLeagueResp indicating if credentials are valid
         """
         try:
-            access_token = YahooService._ensure_valid_token(league_info)
+            access_token = await YahooService._ensure_valid_token(league_info, team_id)
 
             # Try to fetch the specific team to validate access
             team_key = league_info.yahoo_team_key
@@ -424,19 +449,20 @@ class YahooService:
             return []
 
     @staticmethod
-    async def get_team_data(league_info: LeagueInfo, fa_count: int = 0) -> TeamDataResp:
+    async def get_team_data(league_info: LeagueInfo, fa_count: int = 0, team_id: int | None = None) -> TeamDataResp:
         """
         Get roster data from Yahoo API.
 
         Args:
             league_info: League info with Yahoo credentials
             fa_count: Number of free agents to fetch (unused for roster)
+            team_id: Optional team ID to persist refreshed tokens
 
         Returns:
             TeamDataResp with roster players
         """
         try:
-            access_token = YahooService._ensure_valid_token(league_info)
+            access_token = await YahooService._ensure_valid_token(league_info, team_id)
             team_key = league_info.yahoo_team_key
 
             if not team_key:
@@ -553,6 +579,13 @@ class YahooService:
                 data=players
             )
 
+        except ValueError as e:
+            # Token refresh failed - need to re-authenticate
+            return TeamDataResp(
+                status=ApiStatus.AUTHENTICATION_ERROR,
+                message="Yahoo authentication expired. Please reconnect your Yahoo account.",
+                data=None
+            )
         except requests.exceptions.HTTPError as e:
             return TeamDataResp(
                 status=ApiStatus.ERROR,
@@ -568,19 +601,20 @@ class YahooService:
             )
 
     @staticmethod
-    async def get_free_agents(league_info: LeagueInfo, fa_count: int) -> TeamDataResp:
+    async def get_free_agents(league_info: LeagueInfo, fa_count: int, team_id: int | None = None) -> TeamDataResp:
         """
         Get available free agents from Yahoo league.
 
         Args:
             league_info: League info with Yahoo credentials
             fa_count: Number of free agents to fetch
+            team_id: Optional team ID to persist refreshed tokens
 
         Returns:
             TeamDataResp with free agent players
         """
         try:
-            access_token = YahooService._ensure_valid_token(league_info)
+            access_token = await YahooService._ensure_valid_token(league_info, team_id)
             team_key = league_info.yahoo_team_key
 
             if not team_key:
@@ -697,6 +731,13 @@ class YahooService:
                 data=players
             )
 
+        except ValueError as e:
+            # Token refresh failed - need to re-authenticate
+            return TeamDataResp(
+                status=ApiStatus.AUTHENTICATION_ERROR,
+                message="Yahoo authentication expired. Please reconnect your Yahoo account.",
+                data=None
+            )
         except requests.exceptions.HTTPError as e:
             return TeamDataResp(
                 status=ApiStatus.ERROR,
@@ -712,13 +753,14 @@ class YahooService:
             )
 
     @staticmethod
-    async def get_matchup_data(league_info: LeagueInfo, avg_window: str = "season") -> MatchupResp:
+    async def get_matchup_data(league_info: LeagueInfo, avg_window: str = "season", team_id: int | None = None) -> MatchupResp:
         """
         Get current matchup data from Yahoo API.
 
         Args:
             league_info: League info with Yahoo credentials
             avg_window: Averaging window for projections
+            team_id: Optional team ID to persist refreshed tokens
 
         Returns:
             MatchupResp with current matchup data
@@ -726,7 +768,7 @@ class YahooService:
         from services.schedule_service import get_matchup_dates
 
         try:
-            access_token = YahooService._ensure_valid_token(league_info)
+            access_token = await YahooService._ensure_valid_token(league_info, team_id)
             team_key = league_info.yahoo_team_key
 
             if not team_key:
@@ -900,6 +942,13 @@ class YahooService:
                 data=matchup_data
             )
 
+        except ValueError as e:
+            # Token refresh failed - need to re-authenticate
+            return MatchupResp(
+                status=ApiStatus.AUTHENTICATION_ERROR,
+                message="Yahoo authentication expired. Please reconnect your Yahoo account.",
+                data=None
+            )
         except requests.exceptions.HTTPError as e:
             return MatchupResp(
                 status=ApiStatus.ERROR,

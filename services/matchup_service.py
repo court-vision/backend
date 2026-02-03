@@ -63,8 +63,9 @@ class MatchupService:
         league_info = team_resp.data.league_info
 
         # Fetch matchup data using the league info - route by provider
+        # Pass team_id for Yahoo so tokens can be refreshed and persisted
         if league_info.provider == FantasyProvider.YAHOO:
-            return await YahooService.get_matchup_data(league_info, avg_window)
+            return await YahooService.get_matchup_data(league_info, avg_window, team_id)
         return await EspnService.get_matchup_data(league_info, avg_window)
 
     @staticmethod

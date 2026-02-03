@@ -220,7 +220,7 @@ async def validate_yahoo_league(req: ValidateLeagueReq):
 
     Checks if the provided credentials can access the specified team.
     """
-    return YahooService.check_league(req.league_info)
+    return await YahooService.check_league(req.league_info)
 
 
 # ---------------------- Data Endpoints ---------------------- #
