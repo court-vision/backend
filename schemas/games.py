@@ -10,7 +10,7 @@ from schemas.common import BaseResponse
 class GameInfo(BaseModel):
     """Individual game information."""
 
-    game_id: str = Field(..., description="NBA game ID")
+    game_id: Optional[str] = Field(None, description="NBA game ID")
     game_date: str = Field(..., description="Date of the game (YYYY-MM-DD)")
     home_team: str = Field(..., description="Home team abbreviation")
     away_team: str = Field(..., description="Away team abbreviation")

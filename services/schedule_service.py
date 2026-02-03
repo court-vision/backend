@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Load schedule data at module level
 _SCHEDULE_DATA: dict = {}
+_SCHEDULE_DATA_V2: dict = {}
 
 def _load_schedule() -> dict:
     """Load the schedule JSON file."""
@@ -18,6 +19,15 @@ def _load_schedule() -> dict:
             _SCHEDULE_DATA = json.load(f)
     return _SCHEDULE_DATA
 
+
+def _load_schedule_v2() -> dict:
+    """Load the schedule JSON file."""
+    global _SCHEDULE_DATA_V2
+    if not _SCHEDULE_DATA_V2:
+        schedule_path = Path(__file__).parent.parent / "static" / "matchupsPerDay25-26.json"
+        with open(schedule_path, "r") as f:
+            _SCHEDULE_DATA_V2 = json.load(f)
+    return _SCHEDULE_DATA_V2
 
 def _parse_date(date_str: str) -> date:
     """Parse date string in MM/DD/YYYY format."""
@@ -335,3 +345,19 @@ def get_teams_with_b2b(current_date: Optional[date] = None) -> list[str]:
             teams_with_b2b.append(team_abbrev)
 
     return sorted(teams_with_b2b)
+
+
+def get_upcoming_games_on_date(date: date) -> list[dict]:
+    """
+    Get the upcoming games on a specific date.
+
+    Args:
+        date: The date to check.
+
+    Returns:
+        List of upcoming games on the date.
+    """
+    schedule = _load_schedule_v2()
+    games = schedule.get(date.strftime("%m/%d/%Y"), [])
+    print(games)
+    return games
