@@ -4,6 +4,7 @@ Base Pipeline
 Abstract base class for all data pipelines.
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
@@ -35,7 +36,7 @@ class BasePipeline(ABC):
                 target_table="nba.player_game_stats",
             )
 
-            async def execute(self, ctx: PipelineContext) -> None:
+            def execute(self, ctx: PipelineContext) -> None:
                 # Pipeline implementation
                 data = self.espn_extractor.get_player_data()
                 ctx.increment_records(len(data))
@@ -56,7 +57,7 @@ class BasePipeline(ABC):
             )
 
     @abstractmethod
-    async def execute(self, ctx: PipelineContext) -> None:
+    def execute(self, ctx: PipelineContext) -> None:
         """
         Execute the pipeline logic.
 
@@ -71,6 +72,25 @@ class BasePipeline(ABC):
         """
         pass
 
+    def _run_sync(self) -> PipelineResult:
+        """
+        Run the pipeline synchronously.
+
+        Contains the actual lifecycle logic. Called from run() via
+        asyncio.to_thread() to avoid blocking the event loop.
+        """
+        ctx = PipelineContext(self.config.name)
+        ctx.start_tracking()
+
+        try:
+            self.before_execute(ctx)
+            self.execute(ctx)
+            self.after_execute(ctx)
+            return ctx.mark_success()
+
+        except Exception as e:
+            return ctx.mark_failed(e)
+
     async def run(self) -> PipelineResult:
         """
         Run the pipeline with full lifecycle management.
@@ -81,28 +101,15 @@ class BasePipeline(ABC):
         3. Calls execute()
         4. Returns success or failure result
 
+        Pipeline work runs in a separate thread via asyncio.to_thread()
+        to avoid blocking the event loop (all pipeline I/O is synchronous).
+
         Returns:
             PipelineResult with status, timing, and records processed
         """
-        ctx = PipelineContext(self.config.name)
-        ctx.start_tracking()
+        return await asyncio.to_thread(self._run_sync)
 
-        try:
-            # Pre-run hook
-            await self.before_execute(ctx)
-
-            # Main execution
-            await self.execute(ctx)
-
-            # Post-run hook
-            await self.after_execute(ctx)
-
-            return ctx.mark_success()
-
-        except Exception as e:
-            return ctx.mark_failed(e)
-
-    async def before_execute(self, ctx: PipelineContext) -> None:
+    def before_execute(self, ctx: PipelineContext) -> None:
         """
         Hook called before execute().
 
@@ -110,7 +117,7 @@ class BasePipeline(ABC):
         """
         pass
 
-    async def after_execute(self, ctx: PipelineContext) -> None:
+    def after_execute(self, ctx: PipelineContext) -> None:
         """
         Hook called after successful execute().
 

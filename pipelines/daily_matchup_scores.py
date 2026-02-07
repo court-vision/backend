@@ -42,7 +42,7 @@ class DailyMatchupScoresPipeline(BasePipeline):
         self.espn_extractor = ESPNExtractor()
         self.yahoo_extractor = YahooExtractor()
 
-    async def execute(self, ctx: PipelineContext) -> None:
+    def execute(self, ctx: PipelineContext) -> None:
         """Execute the daily matchup scores pipeline."""
         central_tz = pytz.timezone("US/Central")
         today = ctx.started_at.date()
