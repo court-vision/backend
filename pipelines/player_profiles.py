@@ -45,7 +45,7 @@ class PlayerProfilesPipeline(BasePipeline):
         super().__init__()
         self.nba_extractor = NBAApiExtractor()
 
-    def execute(self, ctx: PipelineContext) -> None:
+    async def execute(self, ctx: PipelineContext) -> None:
         """Execute the player profiles pipeline."""
         ctx.log.info("starting_profile_fetch")
 

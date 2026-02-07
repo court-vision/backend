@@ -42,7 +42,7 @@ class AdvancedStatsPipeline(BasePipeline):
         super().__init__()
         self.nba_extractor = NBAApiExtractor()
 
-    def execute(self, ctx: PipelineContext) -> None:
+    async def execute(self, ctx: PipelineContext) -> None:
         """Execute the advanced stats pipeline."""
         central_tz = pytz.timezone("US/Central")
 

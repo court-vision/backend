@@ -39,7 +39,7 @@ class InjuryReportPipeline(BasePipeline):
         super().__init__()
         self.injuries_extractor = InjuriesExtractor()
 
-    def execute(self, ctx: PipelineContext) -> None:
+    async def execute(self, ctx: PipelineContext) -> None:
         """Execute the injury report pipeline."""
         central_tz = pytz.timezone("US/Central")
         today = ctx.started_at.date()

@@ -43,7 +43,7 @@ class PlayerSeasonStatsPipeline(BasePipeline):
         self.espn_extractor = ESPNExtractor()
         self.nba_extractor = NBAApiExtractor()
 
-    def execute(self, ctx: PipelineContext) -> None:
+    async def execute(self, ctx: PipelineContext) -> None:
         """Execute the cumulative player stats pipeline."""
         central_tz = pytz.timezone("US/Central")
 
