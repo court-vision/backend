@@ -79,11 +79,17 @@ class DailyMatchupScoresPipeline(BasePipeline):
                     )
 
                 if matchup_data:
+                    # Use provider's matchup period if available (Yahoo may differ
+                    # from local schedule numbering), otherwise use local schedule's
+                    effective_matchup_period = matchup_data.get(
+                        "matchup_period", matchup_info["matchup_number"]
+                    )
+
                     # Upsert daily score
                     record = {
                         "team_id": team.team_id,
                         "team_name": matchup_data["team_name"],
-                        "matchup_period": matchup_info["matchup_number"],
+                        "matchup_period": effective_matchup_period,
                         "opponent_team_name": matchup_data["opponent_team_name"],
                         "date": today,
                         "day_of_matchup": matchup_info["day_index"],

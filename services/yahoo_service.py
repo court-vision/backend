@@ -818,58 +818,73 @@ class YahooService:
                     else:
                         continue
 
-                    # Find the current/most recent matchup
-                    for matchup_key, matchup_data in matchups_iter:
+                    # Find the current in-progress matchup by status ("midevent"),
+                    # rather than taking the first matchup which would be week 1.
+                    matchups_list = list(matchups_iter)
+
+                    target_matchup_info = None
+                    for matchup_key, matchup_data in matchups_list:
                         if matchup_key == "count":
                             continue
                         if isinstance(matchup_data, dict) and "matchup" in matchup_data:
-                            matchup_info = matchup_data["matchup"]
+                            mi = matchup_data["matchup"]
+                            if mi.get("status") == "midevent":
+                                target_matchup_info = mi
+                                break
 
-                            # Get matchup week
-                            matchup_week = int(matchup_info.get("week", 1))
+                    # Fallback: take the last matchup (most recent) if none is midevent
+                    if not target_matchup_info:
+                        for matchup_key, matchup_data in reversed(matchups_list):
+                            if matchup_key == "count":
+                                continue
+                            if isinstance(matchup_data, dict) and "matchup" in matchup_data:
+                                target_matchup_info = matchup_data["matchup"]
+                                break
 
-                            # Parse teams in matchup
-                            teams_in_matchup = matchup_info.get("0", {}).get("teams", {})
-                            if isinstance(teams_in_matchup, dict):
-                                teams_iter = teams_in_matchup.items()
-                            elif isinstance(teams_in_matchup, list):
-                                teams_iter = enumerate(teams_in_matchup)
-                            else:
-                                teams_iter = []
+                    if target_matchup_info:
+                        matchup_week = int(target_matchup_info.get("week", 1))
 
-                            for t_key, t_data in teams_iter:
-                                if t_key == "count":
-                                    continue
-                                if isinstance(t_data, dict) and "team" in t_data:
-                                    team_info = t_data["team"]
-                                    team_details = {}
-                                    team_points = 0.0
+                        # Parse teams in matchup
+                        teams_in_matchup = target_matchup_info.get("0", {}).get("teams", {})
+                        if isinstance(teams_in_matchup, dict):
+                            teams_iter = teams_in_matchup.items()
+                        elif isinstance(teams_in_matchup, list):
+                            teams_iter = enumerate(teams_in_matchup)
+                        else:
+                            teams_iter = []
 
-                                    # Parse team details from nested structure
-                                    for t_item in team_info:
-                                        if isinstance(t_item, list):
-                                            for sub in t_item:
-                                                if isinstance(sub, dict):
-                                                    team_details.update(sub)
-                                        elif isinstance(t_item, dict):
-                                            if "team_points" in t_item:
-                                                tp = t_item["team_points"]
-                                                team_points = float(tp.get("total", 0))
-                                            else:
-                                                team_details.update(t_item)
+                        for t_key, t_data in teams_iter:
+                            if t_key == "count":
+                                continue
+                            if isinstance(t_data, dict) and "team" in t_data:
+                                team_info = t_data["team"]
+                                team_details = {}
+                                team_points = 0.0
 
-                                    t_team_key = team_details.get("team_key", "")
-                                    t_name = team_details.get("name", "Unknown")
+                                # Parse team details from nested structure
+                                for t_item in team_info:
+                                    if isinstance(t_item, list):
+                                        for sub in t_item:
+                                            if isinstance(sub, dict):
+                                                team_details.update(sub)
+                                    elif isinstance(t_item, dict):
+                                        if "team_points" in t_item:
+                                            tp = t_item["team_points"]
+                                            team_points = float(tp.get("total", 0))
+                                        else:
+                                            team_details.update(t_item)
 
-                                    if t_team_key == team_key:
-                                        our_score = team_points
-                                    else:
-                                        opponent_team_key = t_team_key
-                                        opponent_name = t_name
-                                        opponent_score = team_points
+                                t_team_key = team_details.get("team_key", "")
+                                t_name = team_details.get("name", "Unknown")
 
-                            current_matchup = matchup_info
-                            break
+                                if t_team_key == team_key:
+                                    our_score = team_points
+                                else:
+                                    opponent_team_key = t_team_key
+                                    opponent_name = t_name
+                                    opponent_score = team_points
+
+                        current_matchup = target_matchup_info
 
             if not current_matchup:
                 return MatchupResp(

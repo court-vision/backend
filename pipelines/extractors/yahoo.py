@@ -212,7 +212,7 @@ class YahooExtractor(BaseExtractor):
         except requests.exceptions.ConnectionError:
             raise NetworkError("Yahoo connection failed")
 
-        # Parse matchup response to find the requested matchup period
+        # Parse matchup response to find the current matchup
         fantasy_content = data.get("fantasy_content", {})
         team_data = fantasy_content.get("team", [])
 
@@ -220,6 +220,7 @@ class YahooExtractor(BaseExtractor):
         opponent_score = 0.0
         opponent_name = "Unknown"
         found_matchup = False
+        yahoo_week = matchup_period
 
         for item in team_data:
             if isinstance(item, dict) and "matchups" in item:
@@ -227,67 +228,81 @@ class YahooExtractor(BaseExtractor):
 
                 # Handle both dict and list responses from Yahoo API
                 if isinstance(matchups, dict):
-                    matchups_iter = matchups.items()
+                    matchups_iter = list(matchups.items())
                 elif isinstance(matchups, list):
-                    matchups_iter = enumerate(matchups)
+                    matchups_iter = list(enumerate(matchups))
                 else:
                     continue
 
-                for matchup_key, matchup_data in matchups_iter:
+                # Find the current in-progress matchup by status ("midevent"),
+                # rather than matching by week number which may differ between
+                # Yahoo and the local schedule.
+                target_matchup_info = None
+                for matchup_key, matchup_val in matchups_iter:
                     if matchup_key == "count":
                         continue
+                    if isinstance(matchup_val, dict) and "matchup" in matchup_val:
+                        mi = matchup_val["matchup"]
+                        status = mi.get("status", "")
+                        if status == "midevent":
+                            target_matchup_info = mi
+                            break
 
-                    if isinstance(matchup_data, dict) and "matchup" in matchup_data:
-                        matchup_info = matchup_data["matchup"]
+                # Fallback: match by week number if no midevent matchup found
+                if not target_matchup_info:
+                    for matchup_key, matchup_val in matchups_iter:
+                        if matchup_key == "count":
+                            continue
+                        if isinstance(matchup_val, dict) and "matchup" in matchup_val:
+                            mi = matchup_val["matchup"]
+                            week = int(mi.get("week", 0))
+                            if week == matchup_period:
+                                target_matchup_info = mi
+                                break
 
-                        # Check if this is the requested matchup period
-                        week = int(matchup_info.get("week", 0))
-                        if week != matchup_period:
+                if target_matchup_info:
+                    found_matchup = True
+                    yahoo_week = int(target_matchup_info.get("week", matchup_period))
+
+                    # Parse teams in matchup
+                    teams_in_matchup = target_matchup_info.get("0", {}).get("teams", {})
+                    if isinstance(teams_in_matchup, dict):
+                        teams_iter = teams_in_matchup.items()
+                    elif isinstance(teams_in_matchup, list):
+                        teams_iter = enumerate(teams_in_matchup)
+                    else:
+                        teams_iter = []
+
+                    for t_key, t_data in teams_iter:
+                        if t_key == "count":
                             continue
 
-                        found_matchup = True
+                        if isinstance(t_data, dict) and "team" in t_data:
+                            team_info = t_data["team"]
+                            team_details = {}
+                            team_points = 0.0
 
-                        # Parse teams in matchup
-                        teams_in_matchup = matchup_info.get("0", {}).get("teams", {})
-                        if isinstance(teams_in_matchup, dict):
-                            teams_iter = teams_in_matchup.items()
-                        elif isinstance(teams_in_matchup, list):
-                            teams_iter = enumerate(teams_in_matchup)
-                        else:
-                            teams_iter = []
+                            # Parse team details from nested structure
+                            for t_item in team_info:
+                                if isinstance(t_item, list):
+                                    for sub in t_item:
+                                        if isinstance(sub, dict):
+                                            team_details.update(sub)
+                                elif isinstance(t_item, dict):
+                                    if "team_points" in t_item:
+                                        tp = t_item["team_points"]
+                                        team_points = float(tp.get("total", 0))
+                                    else:
+                                        team_details.update(t_item)
 
-                        for t_key, t_data in teams_iter:
-                            if t_key == "count":
-                                continue
+                            t_team_key = team_details.get("team_key", "")
+                            t_name = team_details.get("name", "Unknown")
 
-                            if isinstance(t_data, dict) and "team" in t_data:
-                                team_info = t_data["team"]
-                                team_details = {}
-                                team_points = 0.0
-
-                                # Parse team details from nested structure
-                                for t_item in team_info:
-                                    if isinstance(t_item, list):
-                                        for sub in t_item:
-                                            if isinstance(sub, dict):
-                                                team_details.update(sub)
-                                    elif isinstance(t_item, dict):
-                                        if "team_points" in t_item:
-                                            tp = t_item["team_points"]
-                                            team_points = float(tp.get("total", 0))
-                                        else:
-                                            team_details.update(t_item)
-
-                                t_team_key = team_details.get("team_key", "")
-                                t_name = team_details.get("name", "Unknown")
-
-                                if t_team_key == team_key:
-                                    our_score = team_points
-                                else:
-                                    opponent_name = t_name
-                                    opponent_score = team_points
-
-                        break  # Found our matchup, no need to continue
+                            if t_team_key == team_key:
+                                our_score = team_points
+                            else:
+                                opponent_name = t_name
+                                opponent_score = team_points
 
         if not found_matchup:
             self.log.warning("matchup_not_found", team=team_name, week=matchup_period)
@@ -298,4 +313,5 @@ class YahooExtractor(BaseExtractor):
             "current_score": our_score,
             "opponent_team_name": opponent_name,
             "opponent_current_score": opponent_score,
+            "matchup_period": yahoo_week,
         }, new_tokens
