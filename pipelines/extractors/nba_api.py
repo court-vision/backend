@@ -245,6 +245,48 @@ class NBAApiExtractor(BaseExtractor):
                 raise NetworkError(f"NBA API connection error: {e}")
             raise
 
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @nba_api_circuit
+    def get_player_index(self, season: str | None = None) -> list[dict]:
+        """
+        Fetch all player profiles in a single bulk API call.
+
+        Uses the PlayerIndex endpoint which returns biographical data
+        (height, weight, position, draft info, etc.) for all players in one request.
+
+        Args:
+            season: Season string like "2025-26" (defaults to settings.nba_season)
+
+        Returns:
+            List of player dicts with profile data
+        """
+        from nba_api.stats.endpoints import playerindex
+
+        season = season or settings.nba_season
+        self.log.debug("player_index_start", season=season)
+
+        try:
+            idx = playerindex.PlayerIndex(
+                season=season,
+                league_id="00",
+            )
+            api_data = idx.get_normalized_dict()["PlayerIndex"]
+
+            self.log.info("player_index_complete", player_count=len(api_data))
+            return api_data
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                raise NetworkError(f"NBA API timeout: {e}")
+            if "connection" in error_str:
+                raise NetworkError(f"NBA API connection error: {e}")
+            raise
+
     def get_all_player_ids(self, season: str | None = None) -> list[int]:
         """
         Get all active player IDs for a season.

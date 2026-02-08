@@ -2,32 +2,33 @@
 Player Profiles Pipeline
 
 Fetches player biographical data (height, weight, position, draft info) from NBA API.
+Uses the PlayerIndex bulk endpoint for single-call retrieval of all players.
 """
 
-import time
 from datetime import datetime
 
-import pytz
-
-from core.settings import settings
+from db.base import db
 from db.models.nba import Player, PlayerProfile
 from pipelines.base import BasePipeline
 from pipelines.config import PipelineConfig
 from pipelines.context import PipelineContext
 from pipelines.extractors import NBAApiExtractor
 
+# Batch size for bulk DB upserts
+BATCH_SIZE = 100
+
 
 class PlayerProfilesPipeline(BasePipeline):
     """
-    Fetch player profiles and insert into player_profiles.
+    Fetch player profiles using the PlayerIndex bulk endpoint.
 
     This pipeline:
-    1. Gets all active player IDs
-    2. For each player, fetches CommonPlayerInfo
-    3. Inserts/updates profile records
+    1. Fetches all active players in a single PlayerIndex API call
+    2. Transforms the response into player dimension + profile records
+    3. Bulk upserts all records in batched DB writes
 
-    Note: This pipeline makes one API call per player, so it should be
-    run infrequently (weekly or on-demand) to avoid rate limiting.
+    Previously made one CommonPlayerInfo call per player (~500 calls, 5-10 min).
+    Now uses a single PlayerIndex call (~2-5 seconds total).
     """
 
     config = PipelineConfig(
@@ -35,11 +36,8 @@ class PlayerProfilesPipeline(BasePipeline):
         display_name="Player Profiles",
         description="Fetches player biographical data (height, position, draft info)",
         target_table="nba.player_profiles",
-        timeout_seconds=1800,  # 30 minutes - this pipeline is slow
+        timeout_seconds=120,
     )
-
-    # Rate limit: wait between API calls (seconds)
-    API_DELAY = 0.6
 
     def __init__(self):
         super().__init__()
@@ -49,101 +47,129 @@ class PlayerProfilesPipeline(BasePipeline):
         """Execute the player profiles pipeline."""
         ctx.log.info("starting_profile_fetch")
 
-        # Get all active player IDs
-        player_ids = self.nba_extractor.get_all_player_ids()
-        total_players = len(player_ids)
+        # Single API call to get all player profiles
+        raw_players = self.nba_extractor.get_player_index()
+        total_players = len(raw_players)
+        ctx.log.info("players_fetched", count=total_players)
 
-        ctx.log.info("players_to_process", count=total_players)
+        # Transform into player dimension and profile records
+        players_data = []
+        profiles_data = []
+        current_year = datetime.now().year
+        now = datetime.utcnow()
 
-        # Process each player with rate limiting
-        for i, player_id in enumerate(player_ids, 1):
-            try:
-                # Fetch player info
-                info = self.nba_extractor.get_player_info(player_id)
-
-                if info:
-                    self._process_player_info(player_id, info, ctx)
-                    ctx.increment_records()
-
-                # Log progress every 50 players
-                if i % 50 == 0:
-                    ctx.log.info(
-                        "progress",
-                        processed=i,
-                        total=total_players,
-                        percent=round(i / total_players * 100, 1),
-                    )
-
-                # Rate limit to avoid API throttling
-                time.sleep(self.API_DELAY)
-
-            except Exception as e:
-                ctx.log.warning(
-                    "player_fetch_error",
-                    player_id=player_id,
-                    error=str(e),
-                )
+        for raw in raw_players:
+            player_id = raw.get("PERSON_ID")
+            if not player_id:
                 continue
 
+            first_name = raw.get("PLAYER_FIRST_NAME", "")
+            last_name = raw.get("PLAYER_LAST_NAME", "")
+            full_name = f"{first_name} {last_name}".strip() or f"Player {player_id}"
+            position = raw.get("POSITION")
+
+            # Player dimension record
+            players_data.append({
+                "id": player_id,
+                "name": full_name,
+                "name_normalized": full_name.lower().strip(),
+                "position": position,
+                "created_at": now,
+                "updated_at": now,
+            })
+
+            # Compute season_exp from from_year
+            from_year = self._parse_int(raw.get("FROM_YEAR"))
+            season_exp = (current_year - from_year) if from_year else None
+
+            # Validate team abbreviation
+            team_abbrev = raw.get("TEAM_ABBREVIATION")
+            if team_abbrev and len(team_abbrev) > 3:
+                team_abbrev = None
+
+            # Profile record
+            profiles_data.append({
+                "player": player_id,
+                "first_name": first_name or None,
+                "last_name": last_name or None,
+                "height": raw.get("HEIGHT") or None,
+                "weight": self._parse_int(raw.get("WEIGHT")),
+                "position": position,
+                "jersey_number": raw.get("JERSEY_NUMBER") or None,
+                "team_id": team_abbrev,
+                "draft_year": self._parse_int(raw.get("DRAFT_YEAR")),
+                "draft_round": self._parse_int(raw.get("DRAFT_ROUND")),
+                "draft_number": self._parse_int(raw.get("DRAFT_NUMBER")),
+                "season_exp": season_exp,
+                "country": raw.get("COUNTRY") or None,
+                "school": raw.get("COLLEGE") or None,
+                "from_year": from_year,
+                "to_year": self._parse_int(raw.get("TO_YEAR")),
+                "updated_at": now,
+            })
+
+        # Bulk upsert in a single transaction
+        ctx.log.info(
+            "bulk_upserting",
+            player_count=len(players_data),
+            profile_count=len(profiles_data),
+        )
+
+        with db.atomic():
+            # Upsert player dimension records in batches
+            for i in range(0, len(players_data), BATCH_SIZE):
+                batch = players_data[i : i + BATCH_SIZE]
+                (
+                    Player.insert_many(batch)
+                    .on_conflict(
+                        conflict_target=[Player.id],
+                        preserve=[
+                            Player.name,
+                            Player.name_normalized,
+                            Player.position,
+                            Player.updated_at,
+                        ],
+                    )
+                    .execute()
+                )
+
+            # Upsert profile records in batches
+            for i in range(0, len(profiles_data), BATCH_SIZE):
+                batch = profiles_data[i : i + BATCH_SIZE]
+                (
+                    PlayerProfile.insert_many(batch)
+                    .on_conflict(
+                        conflict_target=[PlayerProfile.player],
+                        preserve=[
+                            PlayerProfile.first_name,
+                            PlayerProfile.last_name,
+                            PlayerProfile.height,
+                            PlayerProfile.weight,
+                            PlayerProfile.position,
+                            PlayerProfile.jersey_number,
+                            PlayerProfile.team,
+                            PlayerProfile.draft_year,
+                            PlayerProfile.draft_round,
+                            PlayerProfile.draft_number,
+                            PlayerProfile.season_exp,
+                            PlayerProfile.country,
+                            PlayerProfile.school,
+                            PlayerProfile.from_year,
+                            PlayerProfile.to_year,
+                            PlayerProfile.updated_at,
+                        ],
+                    )
+                    .execute()
+                )
+
+        ctx.increment_records(len(profiles_data))
         ctx.log.info("processing_complete", records=ctx.records_processed)
-
-    def _process_player_info(
-        self, player_id: int, info: dict, ctx: PipelineContext
-    ) -> None:
-        """Process and store player info."""
-        # Ensure player exists in dimension table
-        full_name = f"{info.get('FIRST_NAME', '')} {info.get('LAST_NAME', '')}".strip()
-        if not full_name:
-            full_name = info.get("DISPLAY_FIRST_LAST", f"Player {player_id}")
-
-        Player.upsert_player(player_id=player_id, name=full_name)
-
-        # Parse birthdate
-        birthdate = None
-        if info.get("BIRTHDATE"):
-            try:
-                # NBA API returns ISO format: "1988-03-14T00:00:00"
-                birthdate_str = info["BIRTHDATE"].split("T")[0]
-                birthdate = datetime.strptime(birthdate_str, "%Y-%m-%d").date()
-            except (ValueError, AttributeError):
-                pass
-
-        # Prepare profile data
-        profile_data = {
-            "first_name": info.get("FIRST_NAME"),
-            "last_name": info.get("LAST_NAME"),
-            "birthdate": birthdate,
-            "height": info.get("HEIGHT"),
-            "weight": self._parse_int(info.get("WEIGHT")),
-            "position": info.get("POSITION"),
-            "jersey_number": info.get("JERSEY"),
-            "team_id": self._get_team_abbrev(info),
-            "draft_year": self._parse_int(info.get("DRAFT_YEAR")),
-            "draft_round": self._parse_int(info.get("DRAFT_ROUND")),
-            "draft_number": self._parse_int(info.get("DRAFT_NUMBER")),
-            "season_exp": self._parse_int(info.get("SEASON_EXP")),
-            "country": info.get("COUNTRY"),
-            "school": info.get("SCHOOL"),
-            "from_year": self._parse_int(info.get("FROM_YEAR")),
-            "to_year": self._parse_int(info.get("TO_YEAR")),
-        }
-
-        # Upsert profile
-        PlayerProfile.upsert_profile(player_id, profile_data)
 
     def _parse_int(self, value) -> int | None:
         """Safely parse an integer value."""
         if value is None:
             return None
         try:
-            # Handle "Undrafted" or other non-numeric values
             return int(value)
         except (ValueError, TypeError):
             return None
-
-    def _get_team_abbrev(self, info: dict) -> str | None:
-        """Extract team abbreviation from player info."""
-        abbrev = info.get("TEAM_ABBREVIATION")
-        if abbrev and len(abbrev) <= 3:
-            return abbrev
-        return None
