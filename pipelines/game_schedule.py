@@ -40,7 +40,7 @@ class GameSchedulePipeline(BasePipeline):
         super().__init__()
         self.nba_extractor = NBAApiExtractor()
 
-    async def execute(self, ctx: PipelineContext) -> None:
+    def execute(self, ctx: PipelineContext) -> None:
         """Execute the game schedule pipeline."""
         central_tz = pytz.timezone("US/Central")
 
