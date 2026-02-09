@@ -27,7 +27,8 @@ def setup_middleware(app: FastAPI):
         "https://www.courtvisionaries.live", # Production
         "https://courtvisionaries.live", # Production
         "https://www.courtvision.dev", # Production
-        "https://courtvision.dev" # Production
+        "https://courtvision.dev", # Production
+        "https://sqlmate.courtvision.dev" # SQLMate
     ]
 
     app.add_middleware(
