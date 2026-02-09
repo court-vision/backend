@@ -76,7 +76,16 @@ class TeamService:
             validation_result = EspnService.check_league(league_info)
 
         if not validation_result.valid:
-            return TeamAddResp(status=ApiStatus.ERROR, message=validation_result.message or "Invalid league information", team_id=None, already_exists=False)
+            # Try to strip the team name and try again
+            league_info.team_name = league_info.team_name.strip(" \t\n\r")
+            if league_info.provider == FantasyProvider.YAHOO:
+                validation_result_retry = await YahooService.check_league(league_info)
+            else:
+                validation_result_retry = EspnService.check_league(league_info)
+
+            if not validation_result_retry.valid:
+                return TeamAddResp(status=ApiStatus.ERROR, message=validation_result_retry.message or "Invalid league information", team_id=None, already_exists=False)
+            validation_result = validation_result_retry
         
         try:
             team_exists = Team.select().where(

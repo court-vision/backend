@@ -12,7 +12,7 @@ class SlimPlayer(BaseModel):
     Team: str = Field(min_length=1, description="Team name cannot be empty")
 
 class SlimGene(BaseModel):
-    Day: int = Field(ge=0, le=6, description="Day must be between 0 and 6")
+    Day: int = Field(ge=0, le=13, description="Day must be between 0 and 13 (for all-star week)")
     Additions: list[SlimPlayer] = Field(default_factory=list)
     Removals: list[SlimPlayer] = Field(default_factory=list)
     Roster: dict[str, SlimPlayer] = Field(default_factory=dict)
