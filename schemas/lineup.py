@@ -22,14 +22,14 @@ class LineupInfo(BaseModel):
     Improvement: int = Field(description="Improvement value")
     Timestamp: str = Field(description="Lineup timestamp")
     Week: int = Field(ge=1, le=20, description="Week must be between 1 and 20")
-    Threshold: float = Field(ge=0, description="Threshold must be non-negative")
+    StreamingSlots: int = Field(ge=0, description="Number of streaming slots used")
     Id: int | None = None
 
 #                          ------- Incoming -------                           #
 
 class GenerateLineupReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
-    threshold: float = Field(ge=0, description="Threshold must be non-negative")
+    streaming_slots: int = Field(ge=1, le=10, description="Number of roster spots to use for streaming")
     week: int = Field(ge=1, description="Week must be positive")
 
 class SaveLineupReq(BaseRequest):

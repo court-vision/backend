@@ -13,13 +13,13 @@ import json
 class LineupService:
 
     @staticmethod
-    async def generate_lineup(user_id: int, team_id: int, threshold: float, week: str):
+    async def generate_lineup(user_id: int, team_id: int, streaming_slots: int, week: int):
         try:
             # Get the league info
             league_info = Team.select(Team.league_info).where(Team.user_id == user_id).where(Team.team_id == team_id).get().league_info
             if not league_info:
                 return GenerateLineupResp(status=ApiStatus.ERROR, message="League info not found", data=None)
-            
+
             # Get the roster and free agent data
             team_data_resp: TeamDataResp = await EspnService.get_team_data(TeamService.deserialize_league_info(json.loads(league_info)))
             free_agent_data_resp: TeamDataResp = await EspnService.get_free_agents(TeamService.deserialize_league_info(json.loads(league_info)), NUM_FREE_AGENTS)
@@ -28,24 +28,24 @@ class LineupService:
 
             roster_data: list[PlayerResp] = team_data_resp.data
             free_agent_data: list[PlayerResp] = free_agent_data_resp.data
-            
+
             # Call Go server to generate the lineup
-            lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v2(roster_data, free_agent_data, threshold, week)
-            
+            lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v2(roster_data, free_agent_data, streaming_slots, week)
+
             return lineup_resp
-            
+
         except Exception as e:
             print(f"Error in generate_lineup: {e}")
             return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
-    async def generate_lineup_v2(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], threshold: float, week: int) -> GenerateLineupResp:
+    async def generate_lineup_v2(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], streaming_slots: int, week: int) -> GenerateLineupResp:
         try:
             # Make HTTP request to Go server to generate the lineup
             response = requests.post(f"{FEATURES_SERVER_ENDPOINT}/generate-lineup", json={
                 "roster_data": [player.model_dump() for player in roster_data],
                 "free_agent_data": [player.model_dump() for player in free_agent_data],
-                "threshold": threshold,
+                "streaming_slots": streaming_slots,
                 "week": week
             })
             if response.status_code != 200:
@@ -63,7 +63,7 @@ class LineupService:
             "Timestamp": lineup_info.Timestamp,
             "Improvement": lineup_info.Improvement,
             "Week": lineup_info.Week,
-            "Threshold": lineup_info.Threshold,
+            "StreamingSlots": lineup_info.StreamingSlots,
             "Lineup": [{
                 "Day": gene.Day,
                 "Additions": [{
@@ -104,7 +104,7 @@ class LineupService:
                 Timestamp=lineup_data['Timestamp'],
                 Improvement=lineup_data['Improvement'],
                 Week=lineup_data['Week'],
-                Threshold=lineup_data['Threshold'],
+                StreamingSlots=lineup_data.get('StreamingSlots', lineup_data.get('Threshold', 0)),
                 Lineup=[
                     SlimGene(
                         Day=gene['Day'],

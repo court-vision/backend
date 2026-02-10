@@ -18,7 +18,7 @@ def _get_user_id(current_user: dict) -> int:
 @router.post('/generate', response_model=GenerateLineupResp)
 async def generate_lineup(req: GenerateLineupReq, current_user: dict = Depends(get_current_user)):
     user_id = _get_user_id(current_user)
-    return await LineupService.generate_lineup(user_id, req.team_id, req.threshold, req.week)
+    return await LineupService.generate_lineup(user_id, req.team_id, req.streaming_slots, req.week)
 
 @router.get('', response_model=GetLineupsResp)
 async def get_lineups(team_id: int, current_user: dict = Depends(get_current_user)):
