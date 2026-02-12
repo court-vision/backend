@@ -213,6 +213,7 @@ class StreamerService:
                 data=StreamerData(
                     matchup_number=matchup_number,
                     current_day_index=current_day_index,
+                    game_span=game_span,
                     avg_days=avg_days,
                     teams_with_b2b=teams_with_b2b,
                     streamers=streamers

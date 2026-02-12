@@ -32,6 +32,7 @@ class StreamerData(BaseModel):
     """Complete streamer search results."""
     matchup_number: int
     current_day_index: int
+    game_span: int
     avg_days: int
     teams_with_b2b: list[str]
     streamers: list[StreamerPlayerResp]
