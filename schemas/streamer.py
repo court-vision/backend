@@ -1,6 +1,13 @@
+from enum import Enum
+
 from pydantic import BaseModel, Field
 from typing import Optional
 from .common import BaseRequest, BaseResponse, LeagueInfo
+
+
+class StreamerMode(str, Enum):
+    WEEK = "week"
+    DAILY = "daily"
 
 
 class StreamerPlayerResp(BaseModel):
@@ -34,6 +41,8 @@ class StreamerData(BaseModel):
     current_day_index: int
     game_span: int
     avg_days: int
+    mode: StreamerMode
+    target_day: Optional[int] = None
     teams_with_b2b: list[str]
     streamers: list[StreamerPlayerResp]
 
@@ -47,10 +56,14 @@ class StreamerReq(BaseRequest):
         default=False,
         description="Only show players on teams with remaining B2Bs"
     )
-    day: Optional[int] = Field(
+    mode: StreamerMode = Field(
+        default=StreamerMode.WEEK,
+        description="Scoring mode: 'week' for rest-of-week hold, 'daily' for single-day pickup"
+    )
+    target_day: Optional[int] = Field(
         default=None,
         ge=0,
-        description="Day index within the matchup (0-indexed). If None, uses current day."
+        description="Day index for daily mode (0-indexed). If None, uses current day."
     )
     avg_days: int = Field(
         default=7,

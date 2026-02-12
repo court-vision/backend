@@ -5,7 +5,7 @@ from schemas.streamer import (
     StreamerResp,
     StreamerData,
     StreamerPlayerResp,
-    StreamerReq
+    StreamerMode
 )
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
@@ -24,27 +24,36 @@ from services.schedule_service import (
 class StreamerService:
     """Service for finding and ranking streaming candidates."""
 
-    # Ranking weights
-    WEIGHT_B2B = 50.0           # Bonus for having B2B remaining
-    WEIGHT_GAMES_REMAINING = 10.0  # Per game remaining
-    WEIGHT_AVG_POINTS = 1.0     # Per point of last_7 average
-    WEIGHT_B2B_GAMES = 5.0      # Per game that's part of a B2B
+    # Week mode: values schedule density (more games = more value)
+    WEEK_WEIGHTS = {
+        "b2b": 50.0,
+        "games_remaining": 10.0,
+        "avg_points": 1.0,
+        "b2b_games": 5.0,
+    }
+
+    # Daily mode: values per-game performance, B2B still meaningful (2 games for 1 pickup)
+    DAILY_WEIGHTS = {
+        "b2b": 15.0,
+        "games_remaining": 2.0,
+        "avg_points": 3.0,
+        "b2b_games": 8.0,
+    }
 
     @staticmethod
     def _calculate_streamer_score(
         has_b2b: bool,
         games_remaining: int,
-        avg_points_last_7: Optional[float],
-        b2b_game_count: int
+        avg_points_last_n: Optional[float],
+        b2b_game_count: int,
+        weights: dict
     ) -> float:
         """
         Calculate the streaming score for a player.
 
-        Score Components:
-        1. B2B Bonus: +50 if team has remaining B2B games
-        2. Games Remaining: +10 per remaining game
-        3. Performance: +1 per point of last_7 average
-        4. B2B Game Density: +5 per game that's part of a B2B
+        Score components are weighted differently based on mode:
+        - Week mode: favors schedule density (games remaining, B2B sequences)
+        - Daily mode: favors per-game performance, with B2B as a meaningful bonus
 
         Returns:
             The calculated streamer score.
@@ -52,14 +61,14 @@ class StreamerService:
         score = 0.0
 
         if has_b2b:
-            score += StreamerService.WEIGHT_B2B
+            score += weights["b2b"]
 
-        score += games_remaining * StreamerService.WEIGHT_GAMES_REMAINING
+        score += games_remaining * weights["games_remaining"]
 
-        if avg_points_last_7 is not None:
-            score += avg_points_last_7 * StreamerService.WEIGHT_AVG_POINTS
+        if avg_points_last_n is not None:
+            score += avg_points_last_n * weights["avg_points"]
 
-        score += b2b_game_count * StreamerService.WEIGHT_B2B_GAMES
+        score += b2b_game_count * weights["b2b_games"]
 
         return round(score, 1)
 
@@ -69,19 +78,26 @@ class StreamerService:
         fa_count: int = 50,
         exclude_injured: bool = True,
         b2b_only: bool = False,
-        day: Optional[int] = None,
+        mode: StreamerMode = StreamerMode.WEEK,
+        target_day: Optional[int] = None,
         avg_days: int = 7,
         team_id: Optional[int] = None
     ) -> StreamerResp:
         """
         Find and rank the best streaming candidates from free agents.
 
+        Supports two modes:
+        - week: Rank by rest-of-week value (schedule density + performance).
+        - daily: Rank by single-day pickup value (performance-focused).
+                 Only returns players with a game on the target day.
+
         Args:
-            league_info: ESPN league credentials and team info.
+            league_info: ESPN/Yahoo league credentials and team info.
             fa_count: Number of free agents to fetch (default 50).
             exclude_injured: Whether to exclude injured players (default True).
             b2b_only: Only show players on teams with remaining B2Bs (default False).
-            day: Day index within the matchup (0-indexed). If None, uses current day.
+            mode: Scoring mode - 'week' or 'daily'.
+            target_day: Day index for daily mode (0-indexed). If None, uses current day.
             avg_days: Number of days for rolling average calculation (default 7).
 
         Returns:
@@ -100,22 +116,30 @@ class StreamerService:
             matchup_number = matchup["matchup_number"]
             game_span = matchup["game_span"]
             start_date = matchup["start_date"]
+            current_day_index = matchup["current_day_index"]
 
-            # If day is provided, use it; otherwise use the current day index
-            if day is not None:
-                # Validate day is within matchup bounds
-                if day >= game_span:
+            # Determine effective date based on mode
+            if mode == StreamerMode.DAILY and target_day is not None:
+                # Validate target_day is within matchup bounds
+                if target_day >= game_span:
                     return StreamerResp(
                         status=ApiStatus.ERROR,
-                        message=f"Day {day} is out of bounds. Matchup has {game_span} days (0-{game_span - 1}).",
+                        message=f"Day {target_day} is out of bounds. Matchup has {game_span} days (0-{game_span - 1}).",
                         data=None
                     )
-                current_day_index = day
-                # Calculate effective date for schedule lookups
-                effective_date = start_date + timedelta(days=day)
+                effective_date = start_date + timedelta(days=target_day)
             else:
-                current_day_index = matchup["current_day_index"]
                 effective_date = date.today()
+                # In daily mode with no target_day, default to current day
+                if mode == StreamerMode.DAILY:
+                    target_day = current_day_index
+
+            # Select scoring weights based on mode
+            weights = (
+                StreamerService.DAILY_WEIGHTS
+                if mode == StreamerMode.DAILY
+                else StreamerService.WEEK_WEIGHTS
+            )
 
             # Get teams with B2B games
             teams_with_b2b = get_teams_with_b2b(effective_date)
@@ -172,6 +196,10 @@ class StreamerService:
                 if games_remaining == 0:
                     continue
 
+                # In daily mode, only include players with a game on the target day
+                if mode == StreamerMode.DAILY and target_day not in game_days:
+                    continue
+
                 # Get last n-day average from our database
                 # Yahoo uses name-based lookup, ESPN uses player ID
                 if is_yahoo:
@@ -184,8 +212,9 @@ class StreamerService:
                 streamer_score = StreamerService._calculate_streamer_score(
                     has_b2b=team_has_b2b,
                     games_remaining=games_remaining,
-                    avg_points_last_7=avg_points_last_n,
-                    b2b_game_count=b2b_game_count
+                    avg_points_last_n=avg_points_last_n,
+                    b2b_game_count=b2b_game_count,
+                    weights=weights
                 )
 
                 streamers.append(StreamerPlayerResp(
@@ -204,8 +233,11 @@ class StreamerService:
                     injury_status=None  # Could be enhanced later
                 ))
 
-            # Sort by has_b2b (True first), then by streamer_score (descending)
-            streamers.sort(key=lambda x: (-x.has_b2b, -x.streamer_score))
+            # Week mode: group B2B first, then by score. Daily mode: purely by score.
+            if mode == StreamerMode.WEEK:
+                streamers.sort(key=lambda x: (-x.has_b2b, -x.streamer_score))
+            else:
+                streamers.sort(key=lambda x: -x.streamer_score)
 
             return StreamerResp(
                 status=ApiStatus.SUCCESS,
@@ -215,6 +247,8 @@ class StreamerService:
                     current_day_index=current_day_index,
                     game_span=game_span,
                     avg_days=avg_days,
+                    mode=mode,
+                    target_day=target_day if mode == StreamerMode.DAILY else None,
                     teams_with_b2b=teams_with_b2b,
                     streamers=streamers
                 )
