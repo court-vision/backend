@@ -14,7 +14,7 @@ from pipelines.context import PipelineContext
 from pipelines.player_game_stats import PlayerGameStatsPipeline
 from pipelines.player_season_stats import PlayerSeasonStatsPipeline
 from pipelines.daily_matchup_scores import DailyMatchupScoresPipeline
-from pipelines.advanced_stats import AdvancedStatsPipeline
+from pipelines.player_advanced_stats import PlayerAdvancedStatsPipeline
 from pipelines.player_profiles import PlayerProfilesPipeline
 from pipelines.game_schedule import GameSchedulePipeline
 from pipelines.injury_report import InjuryReportPipeline
@@ -30,7 +30,7 @@ PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     "player_season_stats": PlayerSeasonStatsPipeline,
     "daily_matchup_scores": DailyMatchupScoresPipeline,
     # Extended data pipelines
-    "advanced_stats": AdvancedStatsPipeline,
+    "player_advanced_stats": PlayerAdvancedStatsPipeline,
     "game_schedule": GameSchedulePipeline,
     # "injury_report": InjuryReportPipeline, -- requires BALLDONTLIE All-Star tier subscription
     # Reference data pipelines (run less frequently)

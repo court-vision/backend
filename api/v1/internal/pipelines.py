@@ -103,6 +103,21 @@ async def trigger_daily_matchup_scores(
     )
 
 
+@router.post("/player-advanced-stats", response_model=PipelineResponse)
+async def trigger_player_advanced_stats(
+    _: str = Security(verify_pipeline_token),
+) -> PipelineResponse:
+    """
+    Trigger the player advanced stats pipeline.
+    """
+    result = await run_pipeline("player_advanced_stats")
+    return PipelineResponse(
+        status=result.status,
+        message=result.message,
+        data=result,
+    )
+
+
 @router.post("/all", response_model=JobCreatedResponse)
 async def trigger_all_pipelines(
     _: str = Security(verify_pipeline_token),

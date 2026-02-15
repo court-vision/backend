@@ -16,7 +16,7 @@ from pipelines.context import PipelineContext
 from pipelines.extractors import NBAApiExtractor
 
 
-class AdvancedStatsPipeline(BasePipeline):
+class PlayerAdvancedStatsPipeline(BasePipeline):
     """
     Fetch advanced player stats and insert into player_advanced_stats.
 

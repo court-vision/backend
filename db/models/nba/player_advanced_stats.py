@@ -94,14 +94,14 @@ class PlayerAdvancedStats(BaseModel):
     efg_pct = DecimalField(max_digits=5, decimal_places=3, null=True)
 
     # Usage and involvement
-    usg_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
-    ast_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
+    usg_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
+    ast_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
     ast_to_tov = DecimalField(max_digits=5, decimal_places=2, null=True)
-    ast_ratio = DecimalField(max_digits=5, decimal_places=1, null=True)
-    reb_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
-    oreb_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
-    dreb_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
-    tov_pct = DecimalField(max_digits=5, decimal_places=1, null=True)
+    ast_ratio = DecimalField(max_digits=6, decimal_places=3, null=True)
+    reb_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
+    oreb_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
+    dreb_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
+    tov_pct = DecimalField(max_digits=6, decimal_places=3, null=True)
 
     # Pace and impact
     pace = DecimalField(max_digits=5, decimal_places=1, null=True)
