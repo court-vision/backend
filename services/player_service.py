@@ -1,11 +1,27 @@
 import unicodedata
 from typing import Optional
 from datetime import date, timedelta
-from schemas.player import PlayerStatsResp, PlayerStats, AvgStats, GameLog
+from schemas.player import (
+    PlayerStatsResp,
+    PlayerStats,
+    AvgStats,
+    AdvancedStatsData,
+    GameLog,
+)
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from core.logging import get_logger
+
+
+WINDOW_SIZES = {
+    "season": None,
+    "l5": 5,
+    "l10": 10,
+    "l15": 15,
+    "l20": 20,
+}
 
 
 def _normalize_name(name: str) -> str:
@@ -15,6 +31,111 @@ def _normalize_name(name: str) -> str:
     return ascii_name.lower().strip()
 
 
+def _compute_avg_stats(game_logs_list: list) -> AvgStats:
+    """Compute average stats from a list of game log records."""
+    games = len(game_logs_list)
+    if games == 0:
+        return AvgStats(
+            avg_fpts=0, avg_points=0, avg_rebounds=0, avg_assists=0,
+            avg_steals=0, avg_blocks=0, avg_turnovers=0, avg_minutes=0,
+            avg_fg_pct=0, avg_fg3_pct=0, avg_ft_pct=0,
+            avg_ts_pct=0, avg_efg_pct=0, avg_three_rate=0, avg_ft_rate=0,
+            avg_fgm=0, avg_fga=0, avg_fg3m=0, avg_fg3a=0, avg_ftm=0, avg_fta=0,
+        )
+
+    total_fpts = sum(g.fpts for g in game_logs_list)
+    total_pts = sum(g.pts for g in game_logs_list)
+    total_reb = sum(g.reb for g in game_logs_list)
+    total_ast = sum(g.ast for g in game_logs_list)
+    total_stl = sum(g.stl for g in game_logs_list)
+    total_blk = sum(g.blk for g in game_logs_list)
+    total_tov = sum(g.tov for g in game_logs_list)
+    total_min = sum(g.min for g in game_logs_list)
+    total_fgm = sum(g.fgm for g in game_logs_list)
+    total_fga = sum(g.fga for g in game_logs_list)
+    total_fg3m = sum(g.fg3m for g in game_logs_list)
+    total_fg3a = sum(g.fg3a for g in game_logs_list)
+    total_ftm = sum(g.ftm for g in game_logs_list)
+    total_fta = sum(g.fta for g in game_logs_list)
+
+    # Basic shooting percentages
+    avg_fg_pct = round((total_fgm / total_fga) * 100, 1) if total_fga > 0 else 0.0
+    avg_fg3_pct = round((total_fg3m / total_fg3a) * 100, 1) if total_fg3a > 0 else 0.0
+    avg_ft_pct = round((total_ftm / total_fta) * 100, 1) if total_fta > 0 else 0.0
+
+    # Advanced shooting efficiency
+    # TS% = PTS / (2 * (FGA + 0.44 * FTA))
+    tsa = total_fga + 0.44 * total_fta
+    avg_ts_pct = round((total_pts / (2 * tsa)) * 100, 1) if tsa > 0 else 0.0
+
+    # EFG% = (FGM + 0.5 * 3PM) / FGA
+    avg_efg_pct = round(((total_fgm + 0.5 * total_fg3m) / total_fga) * 100, 1) if total_fga > 0 else 0.0
+
+    # 3P Rate = 3PA / FGA
+    avg_three_rate = round((total_fg3a / total_fga) * 100, 1) if total_fga > 0 else 0.0
+
+    # FT Rate = FTA / FGA
+    avg_ft_rate = round((total_fta / total_fga) * 100, 1) if total_fga > 0 else 0.0
+
+    return AvgStats(
+        avg_fpts=round(total_fpts / games, 1),
+        avg_points=round(total_pts / games, 1),
+        avg_rebounds=round(total_reb / games, 1),
+        avg_assists=round(total_ast / games, 1),
+        avg_steals=round(total_stl / games, 1),
+        avg_blocks=round(total_blk / games, 1),
+        avg_turnovers=round(total_tov / games, 1),
+        avg_minutes=round(total_min / games, 1),
+        avg_fg_pct=avg_fg_pct,
+        avg_fg3_pct=avg_fg3_pct,
+        avg_ft_pct=avg_ft_pct,
+        avg_ts_pct=avg_ts_pct,
+        avg_efg_pct=avg_efg_pct,
+        avg_three_rate=avg_three_rate,
+        avg_ft_rate=avg_ft_rate,
+        avg_fgm=round(total_fgm / games, 1),
+        avg_fga=round(total_fga / games, 1),
+        avg_fg3m=round(total_fg3m / games, 1),
+        avg_fg3a=round(total_fg3a / games, 1),
+        avg_ftm=round(total_ftm / games, 1),
+        avg_fta=round(total_fta / games, 1),
+    )
+
+
+def _to_pct(value) -> Optional[float]:
+    """Convert a decimal value (0.234) to a percentage (23.4) for API response."""
+    if value is None:
+        return None
+    return round(float(value) * 100, 1)
+
+
+def _fetch_advanced_stats(player_id: int) -> Optional[AdvancedStatsData]:
+    """Fetch the latest advanced stats for a player from the pipeline table.
+
+    The NBA API stores percentage stats as decimals (e.g., USG_PCT=0.234).
+    This function converts them to human-readable percentages (23.4) for the API response.
+    """
+    record = PlayerAdvancedStats.get_latest_for_player(player_id)
+    if not record:
+        return None
+
+    return AdvancedStatsData(
+        off_rating=float(record.off_rating) if record.off_rating is not None else None,
+        def_rating=float(record.def_rating) if record.def_rating is not None else None,
+        net_rating=float(record.net_rating) if record.net_rating is not None else None,
+        usg_pct=_to_pct(record.usg_pct),
+        ast_pct=_to_pct(record.ast_pct),
+        ast_to_tov=float(record.ast_to_tov) if record.ast_to_tov is not None else None,
+        reb_pct=_to_pct(record.reb_pct),
+        oreb_pct=_to_pct(record.oreb_pct),
+        dreb_pct=_to_pct(record.dreb_pct),
+        tov_pct=_to_pct(record.tov_pct),
+        pace=float(record.pace) if record.pace is not None else None,
+        pie=_to_pct(record.pie),
+        plus_minus=float(record.plus_minus) if record.plus_minus is not None else None,
+    )
+
+
 class PlayerService:
 
     @staticmethod
@@ -22,7 +143,8 @@ class PlayerService:
         espn_id: Optional[int] = None,
         player_id: Optional[int] = None,
         name: Optional[str] = None,
-        team: Optional[str] = None
+        team: Optional[str] = None,
+        window: str = "season",
     ) -> PlayerStatsResp:
         log = get_logger()
         try:
@@ -75,44 +197,20 @@ class PlayerService:
             player_team = latest_game.team_id
             games_played = len(game_logs_list)
 
-            # Calculate averages
-            total_fpts = sum(g.fpts for g in game_logs_list)
-            total_pts = sum(g.pts for g in game_logs_list)
-            total_reb = sum(g.reb for g in game_logs_list)
-            total_ast = sum(g.ast for g in game_logs_list)
-            total_stl = sum(g.stl for g in game_logs_list)
-            total_blk = sum(g.blk for g in game_logs_list)
-            total_tov = sum(g.tov for g in game_logs_list)
-            total_min = sum(g.min for g in game_logs_list)
+            # Step 3: Apply window to compute averages
+            window_size = WINDOW_SIZES.get(window)
+            if window_size is not None:
+                windowed_logs = game_logs_list[-window_size:]
+            else:
+                windowed_logs = game_logs_list
 
-            # Calculate shooting totals for percentages
-            total_fgm = sum(g.fgm for g in game_logs_list)
-            total_fga = sum(g.fga for g in game_logs_list)
-            total_fg3m = sum(g.fg3m for g in game_logs_list)
-            total_fg3a = sum(g.fg3a for g in game_logs_list)
-            total_ftm = sum(g.ftm for g in game_logs_list)
-            total_fta = sum(g.fta for g in game_logs_list)
+            window_games = len(windowed_logs)
+            avg_stats = _compute_avg_stats(windowed_logs)
 
-            # Calculate shooting percentages (handle division by zero)
-            avg_fg_pct = round((total_fgm / total_fga) * 100, 1) if total_fga > 0 else 0.0
-            avg_fg3_pct = round((total_fg3m / total_fg3a) * 100, 1) if total_fg3a > 0 else 0.0
-            avg_ft_pct = round((total_ftm / total_fta) * 100, 1) if total_fta > 0 else 0.0
+            # Step 4: Fetch advanced stats from pipeline
+            advanced_stats = _fetch_advanced_stats(player.id)
 
-            avg_stats = AvgStats(
-                avg_fpts=round(total_fpts / games_played, 1),
-                avg_points=round(total_pts / games_played, 1),
-                avg_rebounds=round(total_reb / games_played, 1),
-                avg_assists=round(total_ast / games_played, 1),
-                avg_steals=round(total_stl / games_played, 1),
-                avg_blocks=round(total_blk / games_played, 1),
-                avg_turnovers=round(total_tov / games_played, 1),
-                avg_minutes=round(total_min / games_played, 1),
-                avg_fg_pct=avg_fg_pct,
-                avg_fg3_pct=avg_fg3_pct,
-                avg_ft_pct=avg_ft_pct,
-            )
-
-            # Build game logs
+            # Step 5: Build full game logs (always return all for charts/tables)
             game_logs = [
                 GameLog(
                     date=str(g.game_date),
@@ -134,7 +232,6 @@ class PlayerService:
                 for g in game_logs_list
             ]
 
-            # Use the player ID from the Player dimension
             resolved_player_id = player.id
 
             player_stats = PlayerStats(
@@ -142,7 +239,10 @@ class PlayerService:
                 name=player_name,
                 team=player_team,
                 games_played=games_played,
+                window=window,
+                window_games=window_games,
                 avg_stats=avg_stats,
+                advanced_stats=advanced_stats,
                 game_logs=game_logs,
             )
 
@@ -295,4 +395,3 @@ class PlayerService:
                 result[name] = None
 
         return result
-

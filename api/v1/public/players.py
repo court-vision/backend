@@ -48,7 +48,8 @@ async def list_players(
     "/stats",
     response_model=PlayerStatsResp,
     summary="Get player statistics",
-    description="Retrieve detailed statistics for a player by ID or name/team combination.",
+    description="Retrieve detailed statistics for a player by ID or name/team combination. "
+    "Use the `window` parameter to get averages over a specific game window.",
     responses={
         200: {"description": "Player stats retrieved successfully"},
         404: {"description": "Player not found"},
@@ -62,6 +63,7 @@ async def get_player_stats_by_query(
     player_id: Optional[int] = Query(None, description="Player ID (alias for espn_id, for backwards compatibility)"),
     name: Optional[str] = Query(None, description="Player name (used for public/roster lookup)"),
     team: Optional[str] = Query(None, description="Player team abbreviation (used with name)"),
+    window: str = Query("season", description="Stat window for averages: season, l5, l10, l15, l20", pattern="^(season|l5|l10|l15|l20)$"),
 ) -> PlayerStatsResp:
     """
     Get player stats by ID or by name/team combination.
@@ -70,8 +72,18 @@ async def get_player_stats_by_query(
     1. espn_id - ESPN player ID (most reliable for internal use)
     2. player_id - Alias for espn_id (backwards compatibility)
     3. name + team - Name-based lookup (for public queries)
+
+    The `window` parameter controls which games are used to compute averages:
+    - `season` (default): Full season averages
+    - `l5`: Last 5 games
+    - `l10`: Last 10 games
+    - `l15`: Last 15 games
+    - `l20`: Last 20 games
+
+    Game logs are always returned in full regardless of window.
+    Advanced stats (net rating, usage, PIE, etc.) are always season-level.
     """
-    return await PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team)
+    return await PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team, window=window)
 
 
 @router.get(

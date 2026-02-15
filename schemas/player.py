@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from .common import BaseResponse
 
 
@@ -33,6 +33,35 @@ class AvgStats(BaseModel):
     avg_fg_pct: float
     avg_fg3_pct: float
     avg_ft_pct: float
+    # Shooting efficiency
+    avg_ts_pct: float
+    avg_efg_pct: float
+    avg_three_rate: float
+    avg_ft_rate: float
+    # Volume averages
+    avg_fgm: float
+    avg_fga: float
+    avg_fg3m: float
+    avg_fg3a: float
+    avg_ftm: float
+    avg_fta: float
+
+
+class AdvancedStatsData(BaseModel):
+    """Advanced stats from pipeline - always season-level."""
+    off_rating: Optional[float] = None
+    def_rating: Optional[float] = None
+    net_rating: Optional[float] = None
+    usg_pct: Optional[float] = None
+    ast_pct: Optional[float] = None
+    ast_to_tov: Optional[float] = None
+    reb_pct: Optional[float] = None
+    oreb_pct: Optional[float] = None
+    dreb_pct: Optional[float] = None
+    tov_pct: Optional[float] = None
+    pace: Optional[float] = None
+    pie: Optional[float] = None
+    plus_minus: Optional[float] = None
 
 
 class PlayerStats(BaseModel):
@@ -40,10 +69,12 @@ class PlayerStats(BaseModel):
     name: str
     team: str
     games_played: int
+    window: str
+    window_games: int
     avg_stats: AvgStats
+    advanced_stats: Optional[AdvancedStatsData] = None
     game_logs: List[GameLog]
 
 
 class PlayerStatsResp(BaseResponse):
     data: PlayerStats | None = None
-
