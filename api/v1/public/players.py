@@ -1,6 +1,6 @@
 from typing import Optional
 from fastapi import APIRouter, Query, Request, Path
-from schemas.player import PlayerStatsResp
+from schemas.player import PlayerStatsResp, PlayerPercentilesResp
 from schemas.players_list import PlayersListResp
 from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
@@ -63,7 +63,7 @@ async def get_player_stats_by_query(
     player_id: Optional[int] = Query(None, description="Player ID (alias for espn_id, for backwards compatibility)"),
     name: Optional[str] = Query(None, description="Player name (used for public/roster lookup)"),
     team: Optional[str] = Query(None, description="Player team abbreviation (used with name)"),
-    window: str = Query("season", description="Stat window for averages: season, l5, l10, l15, l20", pattern="^(season|l5|l10|l15|l20)$"),
+    window: str = Query("season", description="Stat window for averages: 'season' for full season, or 'lN' for last N games (e.g. l5, l10, l15)", pattern="^(season|l[1-9][0-9]?)$"),
 ) -> PlayerStatsResp:
     """
     Get player stats by ID or by name/team combination.
@@ -75,10 +75,7 @@ async def get_player_stats_by_query(
 
     The `window` parameter controls which games are used to compute averages:
     - `season` (default): Full season averages
-    - `l5`: Last 5 games
-    - `l10`: Last 10 games
-    - `l15`: Last 15 games
-    - `l20`: Last 20 games
+    - `lN`: Last N games (e.g. l5, l10, l15, l20, l30)
 
     Game logs are always returned in full regardless of window.
     Advanced stats (net rating, usage, PIE, etc.) are always season-level.
@@ -142,3 +139,24 @@ async def get_player_trends(
 ) -> PlayerTrendsResp:
     """Get trend data for a player."""
     return await TrendsService.get_player_trends(player_id=player_id)
+
+
+@router.get(
+    "/{player_id}/percentiles",
+    response_model=PlayerPercentilesResp,
+    summary="Get player percentile ranks",
+    description="Get percentile ranks for a player's stats compared to all qualifying players.",
+    responses={
+        200: {"description": "Percentiles calculated successfully"},
+        404: {"description": "Player not found"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_percentiles(
+    request: Request,
+    player_id: int = Path(..., description="NBA player ID"),
+    min_games: int = Query(20, ge=1, description="Minimum games played to qualify"),
+) -> PlayerPercentilesResp:
+    """Get percentile ranks for a player's stats vs the league."""
+    return await PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games)

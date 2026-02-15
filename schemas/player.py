@@ -78,3 +78,21 @@ class PlayerStats(BaseModel):
 
 class PlayerStatsResp(BaseResponse):
     data: PlayerStats | None = None
+
+
+class PercentileData(BaseModel):
+    avg_fpts: int
+    avg_points: int
+    avg_rebounds: int
+    avg_assists: int
+    avg_steals: int
+    avg_blocks: int
+    avg_turnovers: int
+    avg_minutes: int
+    avg_fg_pct: int
+    avg_fg3_pct: int
+    avg_ft_pct: int
+
+
+class PlayerPercentilesResp(BaseResponse):
+    data: PercentileData | None = None

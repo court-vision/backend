@@ -1,12 +1,15 @@
 import unicodedata
 from typing import Optional
 from datetime import date, timedelta
+from peewee import fn
 from schemas.player import (
     PlayerStatsResp,
     PlayerStats,
     AvgStats,
     AdvancedStatsData,
     GameLog,
+    PercentileData,
+    PlayerPercentilesResp,
 )
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
@@ -15,13 +18,13 @@ from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from core.logging import get_logger
 
 
-WINDOW_SIZES = {
-    "season": None,
-    "l5": 5,
-    "l10": 10,
-    "l15": 15,
-    "l20": 20,
-}
+def _parse_window_size(window: str) -> int | None:
+    """Parse a window string into a game count. Returns None for full season."""
+    if window == "season":
+        return None
+    if window.startswith("l") and window[1:].isdigit():
+        return int(window[1:])
+    return None
 
 
 def _normalize_name(name: str) -> str:
@@ -198,7 +201,7 @@ class PlayerService:
             games_played = len(game_logs_list)
 
             # Step 3: Apply window to compute averages
-            window_size = WINDOW_SIZES.get(window)
+            window_size = _parse_window_size(window)
             if window_size is not None:
                 windowed_logs = game_logs_list[-window_size:]
             else:
@@ -395,3 +398,108 @@ class PlayerService:
                 result[name] = None
 
         return result
+
+    @staticmethod
+    async def get_player_percentiles(player_id: int, min_games: int = 20) -> PlayerPercentilesResp:
+        log = get_logger()
+        try:
+            # Verify player exists
+            player = Player.get_or_none(Player.id == player_id)
+            if not player:
+                return PlayerPercentilesResp(
+                    status=ApiStatus.ERROR,
+                    message="Player not found",
+                    data=None,
+                )
+
+            # Get per-player season averages for all qualifying players
+            stat_fields = {
+                "avg_fpts": fn.AVG(PlayerGameStats.fpts),
+                "avg_points": fn.AVG(PlayerGameStats.pts),
+                "avg_rebounds": fn.AVG(PlayerGameStats.reb),
+                "avg_assists": fn.AVG(PlayerGameStats.ast),
+                "avg_steals": fn.AVG(PlayerGameStats.stl),
+                "avg_blocks": fn.AVG(PlayerGameStats.blk),
+                "avg_turnovers": fn.AVG(PlayerGameStats.tov),
+                "avg_minutes": fn.AVG(PlayerGameStats.min),
+                "avg_fg_pct": fn.CASE(
+                    None,
+                    [(fn.SUM(PlayerGameStats.fga) > 0,
+                      fn.SUM(PlayerGameStats.fgm) * 100.0 / fn.SUM(PlayerGameStats.fga))],
+                    0.0,
+                ),
+                "avg_fg3_pct": fn.CASE(
+                    None,
+                    [(fn.SUM(PlayerGameStats.fg3a) > 0,
+                      fn.SUM(PlayerGameStats.fg3m) * 100.0 / fn.SUM(PlayerGameStats.fg3a))],
+                    0.0,
+                ),
+                "avg_ft_pct": fn.CASE(
+                    None,
+                    [(fn.SUM(PlayerGameStats.fta) > 0,
+                      fn.SUM(PlayerGameStats.ftm) * 100.0 / fn.SUM(PlayerGameStats.fta))],
+                    0.0,
+                ),
+            }
+
+            query = (
+                PlayerGameStats.select(
+                    PlayerGameStats.player_id,
+                    fn.COUNT(PlayerGameStats.id).alias("games"),
+                    *[expr.alias(name) for name, expr in stat_fields.items()],
+                )
+                .group_by(PlayerGameStats.player_id)
+                .having(fn.COUNT(PlayerGameStats.id) >= min_games)
+            )
+
+            # Build distributions: {stat_name: [values]}
+            all_players = list(query.dicts())
+            if not all_players:
+                return PlayerPercentilesResp(
+                    status=ApiStatus.ERROR,
+                    message="No qualifying players found",
+                    data=None,
+                )
+
+            # Find target player's row
+            target_row = None
+            for row in all_players:
+                if row["player_id"] == player_id:
+                    target_row = row
+                    break
+
+            if target_row is None:
+                return PlayerPercentilesResp(
+                    status=ApiStatus.ERROR,
+                    message=f"Player does not meet minimum games threshold ({min_games})",
+                    data=None,
+                )
+
+            # Compute percentile for each stat
+            # Percentile = (number of players with lower average / total players) * 100
+            total = len(all_players)
+            invert_stats = {"avg_turnovers"}  # lower is better
+
+            percentiles = {}
+            for stat_name in stat_fields:
+                target_val = float(target_row[stat_name])
+                if stat_name in invert_stats:
+                    # For turnovers, fewer is better, so count players with HIGHER avg
+                    lower_count = sum(1 for r in all_players if float(r[stat_name]) > target_val)
+                else:
+                    lower_count = sum(1 for r in all_players if float(r[stat_name]) < target_val)
+                percentiles[stat_name] = round((lower_count / total) * 100)
+
+            return PlayerPercentilesResp(
+                status=ApiStatus.SUCCESS,
+                message="Percentiles calculated successfully",
+                data=PercentileData(**percentiles),
+            )
+
+        except Exception as e:
+            log.error("get_player_percentiles_error", error=str(e), player_id=player_id)
+            return PlayerPercentilesResp(
+                status=ApiStatus.ERROR,
+                message="Internal server error",
+                data=None,
+            )
