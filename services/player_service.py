@@ -464,7 +464,7 @@ class PlayerService:
             # Find target player's row
             target_row = None
             for row in all_players:
-                if row["player_id"] == player_id:
+                if row["player"] == player_id:
                     target_row = row
                     break
 
