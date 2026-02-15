@@ -58,6 +58,7 @@ class GamesService:
                         arena=None,
                     )
                     for game in games
+                    if game.get("homeTeam") and game.get("awayTeam")
                 ]
 
             return GamesOnDateResp(
