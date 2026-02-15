@@ -1,7 +1,7 @@
 import unicodedata
 from typing import Optional
 from datetime import date, timedelta
-from peewee import fn
+from peewee import fn, Case
 from schemas.player import (
     PlayerStatsResp,
     PlayerStats,
@@ -422,19 +422,19 @@ class PlayerService:
                 "avg_blocks": fn.AVG(PlayerGameStats.blk),
                 "avg_turnovers": fn.AVG(PlayerGameStats.tov),
                 "avg_minutes": fn.AVG(PlayerGameStats.min),
-                "avg_fg_pct": fn.CASE(
+                "avg_fg_pct": Case(
                     None,
                     [(fn.SUM(PlayerGameStats.fga) > 0,
                       fn.SUM(PlayerGameStats.fgm) * 100.0 / fn.SUM(PlayerGameStats.fga))],
                     0.0,
                 ),
-                "avg_fg3_pct": fn.CASE(
+                "avg_fg3_pct": Case(
                     None,
                     [(fn.SUM(PlayerGameStats.fg3a) > 0,
                       fn.SUM(PlayerGameStats.fg3m) * 100.0 / fn.SUM(PlayerGameStats.fg3a))],
                     0.0,
                 ),
-                "avg_ft_pct": fn.CASE(
+                "avg_ft_pct": Case(
                     None,
                     [(fn.SUM(PlayerGameStats.fta) > 0,
                       fn.SUM(PlayerGameStats.ftm) * 100.0 / fn.SUM(PlayerGameStats.fta))],
