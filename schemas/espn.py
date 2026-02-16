@@ -14,6 +14,7 @@ class PlayerResp(BaseModel):
     team: str
     valid_positions: list[str]
     injured: bool
+    injury_status: Optional[str] = None
 
 class TeamDataReq(BaseRequest):
     league_info: LeagueInfo

@@ -3,8 +3,10 @@ from services.team_service import TeamService
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.user_sync_service import UserSyncService
+from services.team_insights_service import TeamInsightsService
 from schemas.team import TeamAddReq, TeamRemoveReq, TeamUpdateReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp
 from schemas.espn import TeamDataReq, TeamDataResp
+from schemas.team_insights import TeamInsightsResp
 from schemas.common import ApiStatus, FantasyProvider
 from core.clerk_auth import get_current_user
 
@@ -53,3 +55,8 @@ async def view_team(team_id: int, _: dict = Depends(get_current_user)):
     if league_info.provider == FantasyProvider.YAHOO:
         return await YahooService.get_team_data(league_info, 0, team_id)
     return await EspnService.get_team_data(league_info, 0)
+
+
+@router.get('/{team_id}/insights', response_model=TeamInsightsResp)
+async def get_team_insights(team_id: int, _: dict = Depends(get_current_user)):
+    return await TeamInsightsService.get_team_insights(team_id)

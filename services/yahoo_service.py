@@ -552,6 +552,7 @@ class YahooService:
                                 "team": team_abbrev,
                                 "valid_positions": valid_positions,
                                 "injured": injured,
+                                "injury_status": status if status else None,
                             })
 
             # Batch lookup stats by name from our internal database
@@ -571,6 +572,7 @@ class YahooService:
                     team=p["team"],
                     valid_positions=p["valid_positions"],
                     injured=p["injured"],
+                    injury_status=p["injury_status"],
                 ))
 
             return TeamDataResp(
@@ -704,6 +706,7 @@ class YahooService:
                                 "team": team_abbrev,
                                 "valid_positions": valid_positions,
                                 "injured": injured,
+                                "injury_status": status if status else None,
                             })
 
             # Batch lookup stats by name from our internal database
@@ -723,6 +726,7 @@ class YahooService:
                     team=p["team"],
                     valid_positions=p["valid_positions"],
                     injured=p["injured"],
+                    injury_status=p["injury_status"],
                 ))
 
             return TeamDataResp(

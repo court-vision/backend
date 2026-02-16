@@ -128,6 +128,7 @@ class EspnService:
                         team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
                         valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
                         injured=player.injured,
+                        injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
                     ) for player in players
                 ]
             )
@@ -168,6 +169,7 @@ class EspnService:
                         team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
                         valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
                         injured=player.injured,
+                        injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
                     ) for player in players
                 ]
             )
