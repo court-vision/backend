@@ -11,7 +11,7 @@ import pandas as pd
 import pytz
 
 from core.settings import settings
-from db.models.nba import Player, PlayerGameStats, PlayerOwnership
+from db.models.nba import Player, PlayerGameStats
 from pipelines.base import BasePipeline
 from pipelines.config import PipelineConfig
 from pipelines.context import PipelineContext
@@ -24,12 +24,11 @@ class PlayerGameStatsPipeline(BasePipeline):
     Fetch yesterday's game stats from NBA API and insert into player_game_stats.
 
     This pipeline:
-    1. Fetches ESPN player data for roster percentages and ESPN IDs
+    1. Fetches ESPN player data for ESPN IDs
     2. Fetches NBA game logs for yesterday
     3. Calculates fantasy points for each player
     4. Upserts player dimension records
     5. Inserts game stats into nba.player_game_stats
-    6. Records ownership snapshots in nba.player_ownership
     """
 
     config = PipelineConfig(
@@ -91,7 +90,6 @@ class PlayerGameStatsPipeline(BasePipeline):
             # Get ESPN data if available
             espn_info = espn_data.get(normalized_name)
             espn_id = espn_info["espn_id"] if espn_info else None
-            rost_pct = espn_info["rost_pct"] if espn_info else None
 
             # Calculate stats
             player_stats = {
@@ -129,14 +127,5 @@ class PlayerGameStatsPipeline(BasePipeline):
                 team_id=team_abbrev,
                 pipeline_run_id=ctx.run_id,
             )
-
-            # Record ownership snapshot if available
-            if rost_pct is not None:
-                PlayerOwnership.record_ownership(
-                    player_id=player_id,
-                    snapshot_date=game_date,
-                    rost_pct=rost_pct,
-                    pipeline_run_id=ctx.run_id,
-                )
 
             ctx.increment_records()
