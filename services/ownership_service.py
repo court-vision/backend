@@ -8,6 +8,7 @@ from core.logging import get_logger
 from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
+from db.models.nba.player_game_stats import PlayerGameStats
 from schemas.common import ApiStatus
 from schemas.ownership import (
     OwnershipTrendingResp,
@@ -102,7 +103,7 @@ class OwnershipService:
                 p.id: p for p in Player.select().where(Player.id.in_(player_ids))
             }
 
-            # Get team info from latest season stats
+            # Get team info from latest season stats, falling back to most recent game
             team_info = {}
             if player_ids:
                 latest_date = (
@@ -119,7 +120,24 @@ class OwnershipService:
                             & (PlayerSeasonStats.as_of_date == latest_date)
                         )
                     ):
-                        team_info[stats.player_id] = stats.team_id
+                        if stats.team_id:
+                            team_info[stats.player_id] = stats.team_id
+
+                # Fill missing teams from most recent game stats
+                missing_ids = [pid for pid in player_ids if pid not in team_info]
+                if missing_ids:
+                    for pid in missing_ids:
+                        latest_game = (
+                            PlayerGameStats.select(PlayerGameStats.team)
+                            .where(
+                                (PlayerGameStats.player_id == pid)
+                                & (PlayerGameStats.team.is_null(False))
+                            )
+                            .order_by(PlayerGameStats.game_date.desc())
+                            .first()
+                        )
+                        if latest_game and latest_game.team_id:
+                            team_info[pid] = latest_game.team_id
 
             # Build trending lists
             trending_up = []
