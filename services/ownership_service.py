@@ -60,12 +60,23 @@ class OwnershipService:
                     PlayerOwnership.snapshot_date == yesterday
                 )
             }
-            past_data = {
-                row.player_id: float(row.rost_pct)
-                for row in PlayerOwnership.select().where(
-                    PlayerOwnership.snapshot_date == past_date
-                )
-            }
+            # Find the closest available snapshot at or before past_date to handle
+            # gaps where the pipeline didn't run on the exact target date
+            actual_past_date = (
+                PlayerOwnership.select(PlayerOwnership.snapshot_date)
+                .where(PlayerOwnership.snapshot_date <= past_date)
+                .order_by(PlayerOwnership.snapshot_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            past_data = {}
+            if actual_past_date:
+                past_data = {
+                    row.player_id: float(row.rost_pct)
+                    for row in PlayerOwnership.select().where(
+                        PlayerOwnership.snapshot_date == actual_past_date
+                    )
+                }
 
             # Calculate changes with velocity
             changes = []
