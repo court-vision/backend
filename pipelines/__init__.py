@@ -18,6 +18,7 @@ from pipelines.player_advanced_stats import PlayerAdvancedStatsPipeline
 from pipelines.player_ownership import PlayerOwnershipPipeline
 from pipelines.player_profiles import PlayerProfilesPipeline
 from pipelines.game_schedule import GameSchedulePipeline
+from pipelines.game_start_times import GameStartTimesPipeline
 from pipelines.injury_report import InjuryReportPipeline
 from schemas.pipeline import PipelineResult
 from schemas.common import ApiStatus
@@ -34,9 +35,18 @@ PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     # Extended data pipelines
     "player_advanced_stats": PlayerAdvancedStatsPipeline,
     "game_schedule": GameSchedulePipeline,
+    "game_start_times": GameStartTimesPipeline,
     # "injury_report": InjuryReportPipeline, -- requires BALLDONTLIE All-Star tier subscription
     # Reference data pipelines (run less frequently)
     "player_profiles": PlayerProfilesPipeline,
+}
+
+# Notification pipelines - separate from PIPELINE_REGISTRY so they
+# don't run in run_all_pipelines(). Triggered independently.
+from pipelines.lineup_alerts import LineupAlertsPipeline
+
+NOTIFICATION_PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
+    "lineup_alerts": LineupAlertsPipeline,
 }
 
 
@@ -135,8 +145,11 @@ __all__ = [
     "AdvancedStatsPipeline",
     "PlayerProfilesPipeline",
     "GameSchedulePipeline",
+    "GameStartTimesPipeline",
+    "LineupAlertsPipeline",
     # Registry functions
     "PIPELINE_REGISTRY",
+    "NOTIFICATION_PIPELINE_REGISTRY",
     "get_pipeline",
     "run_pipeline",
     "run_all_pipelines",

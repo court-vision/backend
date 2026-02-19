@@ -118,6 +118,31 @@ async def trigger_player_advanced_stats(
     )
 
 
+@router.post("/lineup-alerts", response_model=PipelineResponse)
+async def trigger_lineup_alerts(
+    _: str = Security(verify_pipeline_token),
+) -> PipelineResponse:
+    """
+    Trigger the lineup alerts pipeline.
+
+    Checks all eligible users' lineups and sends notifications if issues
+    are found. Self-gates based on game start times - if no games are
+    within the notification window, returns immediately.
+
+    Safe to call frequently (every 15 min); deduplication prevents
+    repeat notifications.
+    """
+    from pipelines.lineup_alerts import LineupAlertsPipeline
+
+    pipeline = LineupAlertsPipeline()
+    result = await pipeline.run()
+    return PipelineResponse(
+        status=result.status,
+        message=result.message,
+        data=result,
+    )
+
+
 @router.post("/all", response_model=JobCreatedResponse)
 async def trigger_all_pipelines(
     _: str = Security(verify_pipeline_token),

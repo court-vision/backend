@@ -13,6 +13,7 @@ from peewee import (
     IntegerField,
     BooleanField,
     ForeignKeyField,
+    TimeField,
 )
 
 from db.base import BaseModel
@@ -58,6 +59,7 @@ class Game(BaseModel):
     home_score = IntegerField(null=True)
     away_score = IntegerField(null=True)
     status = CharField(max_length=20, default="scheduled")  # scheduled, in_progress, final
+    start_time_et = TimeField(null=True)  # e.g., 19:30 for 7:30 PM ET
     arena = CharField(max_length=100, null=True)
     attendance = IntegerField(null=True)
     updated_at = DateTimeField(default=datetime.utcnow)
@@ -208,3 +210,46 @@ class Game(BaseModel):
             )
             .count()
         )
+
+    @classmethod
+    def get_earliest_game_time_on_date(cls, game_date: date):
+        """
+        Get the earliest game start time (ET) on a given date.
+
+        Args:
+            game_date: Date to check
+
+        Returns:
+            datetime.time or None if no games with start times
+        """
+        from peewee import fn
+
+        result = (
+            cls.select(fn.MIN(cls.start_time_et))
+            .where(
+                (cls.game_date == game_date)
+                & (cls.start_time_et.is_null(False))
+            )
+            .scalar()
+        )
+        return result
+
+    @classmethod
+    def get_teams_playing_on_date(cls, game_date: date) -> set[str]:
+        """
+        Get set of team abbreviations with games on a given date.
+
+        Args:
+            game_date: Date to check
+
+        Returns:
+            Set of team abbreviation strings (both home and away)
+        """
+        games = cls.select(cls.home_team_id, cls.away_team_id).where(
+            cls.game_date == game_date
+        )
+        teams = set()
+        for game in games:
+            teams.add(game.home_team_id)
+            teams.add(game.away_team_id)
+        return teams

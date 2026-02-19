@@ -20,6 +20,7 @@ from core.resilience import (
 )
 from pipelines.extractors.base import BaseExtractor
 from pipelines.transformers.names import normalize_name
+from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP
 
 
 ESPN_FANTASY_ENDPOINT = (
@@ -214,3 +215,107 @@ class ESPNExtractor(BaseExtractor):
                 }
 
         return None
+
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @espn_api_circuit
+    def get_roster_with_slots(
+        self,
+        league_id: int,
+        team_name: str,
+        espn_s2: str,
+        swid: str,
+        year: int,
+    ) -> Optional[list[dict]]:
+        """
+        Fetch a team's roster with lineup slot assignments.
+
+        Returns player data needed for lineup alerts: name, team, lineup_slot,
+        injured status, and injury status.
+
+        Args:
+            league_id: ESPN league ID
+            team_name: Name of the team to find
+            espn_s2: ESPN S2 cookie for authentication
+            swid: ESPN SWID cookie for authentication
+            year: Season year
+
+        Returns:
+            List of dicts with keys: name, team, lineup_slot, injured, injury_status
+            or None if team not found
+        """
+        params = {"view": ["mTeam", "mRoster"]}
+        cookies = {"espn_s2": espn_s2, "SWID": swid}
+        endpoint = ESPN_FANTASY_ENDPOINT.format(year, league_id)
+
+        team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+
+        try:
+            response = requests.get(
+                endpoint,
+                params=params,
+                cookies=cookies,
+                timeout=settings.http_timeout,
+            )
+
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 60))
+                raise RateLimitError("ESPN rate limited", retry_after=retry_after)
+
+            if response.status_code >= 500:
+                raise ServerError("ESPN server error", status_code=response.status_code)
+
+            response.raise_for_status()
+            data = response.json()
+
+        except requests.exceptions.Timeout:
+            raise NetworkError("ESPN request timed out")
+        except requests.exceptions.ConnectionError:
+            raise NetworkError("ESPN connection failed")
+
+        # Find the team by name
+        teams = data.get("teams", [])
+        target_team = None
+        for team in teams:
+            if team.get("name", "").strip() == team_name.strip():
+                target_team = team
+                break
+
+        if not target_team:
+            self.log.warning("team_not_found", team=team_name)
+            return None
+
+        # Extract roster with lineup slots
+        roster = []
+        entries = target_team.get("roster", {}).get("entries", [])
+
+        for entry in entries:
+            player_data = entry.get("playerPoolEntry", {}).get("player", {})
+            if not player_data:
+                player_data = entry.get("player", {})
+
+            name = player_data.get("fullName", "Unknown")
+
+            pro_team_id = player_data.get("proTeamId", 0)
+            team_abbrev = PRO_TEAM_MAP.get(pro_team_id, "FA")
+            team_abbrev = team_abbrev_corrections.get(team_abbrev, team_abbrev)
+
+            lineup_slot_id = entry.get("lineupSlotId", 0)
+            lineup_slot = POSITION_MAP.get(lineup_slot_id, "")
+
+            injured = player_data.get("injured", False)
+            injury_status = player_data.get("injuryStatus")
+
+            roster.append({
+                "name": name,
+                "team": team_abbrev,
+                "lineup_slot": lineup_slot,
+                "injured": injured,
+                "injury_status": injury_status,
+            })
+
+        self.log.info("roster_extracted", team=team_name, player_count=len(roster))
+        return roster

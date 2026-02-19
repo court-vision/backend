@@ -45,6 +45,9 @@ def init_db():
         PlayerInjury,
     )
 
+    # Import notification models
+    from .models.notifications import NotificationPreference, NotificationLog
+
     # Create tables if they don't exist
     # Note: Order matters for foreign key dependencies
     # 1. Dimension tables first (Player, NBATeam)
@@ -63,6 +66,8 @@ def init_db():
         PlayerGameStats, PlayerSeasonStats, PlayerOwnership,
         # NBA schema - extended data tables
         PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
+        # User schema - notification tables
+        NotificationPreference, NotificationLog,
     ], safe=True)
 
 # Function to close database connection

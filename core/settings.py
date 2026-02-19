@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     yahoo_redirect_uri: str = "http://localhost:8000/v1/internal/yahoo/callback"
     frontend_url: str = "http://localhost:3000"
 
+    # Resend (email notifications)
+    resend_api_key: Optional[SecretStr] = None
+    notification_from_email: str = "alerts@courtvision.app"
+    lineup_alert_window_minutes: int = 90
+
     # Development mode
     development_mode: bool = False
 
