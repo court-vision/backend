@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # Resend (email notifications)
     resend_api_key: Optional[SecretStr] = None
-    notification_from_email: str = "alerts@courtvision.app"
+    notification_from_email: str = "alerts@courtvision.dev"
     lineup_alert_window_minutes: int = 90
 
     # Development mode
