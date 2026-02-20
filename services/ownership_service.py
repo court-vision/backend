@@ -2,7 +2,8 @@
 Service for ownership trend operations.
 """
 
-from datetime import date, timedelta
+from datetime import datetime, timedelta
+import pytz
 
 from core.logging import get_logger
 from db.models.nba.players import Player
@@ -50,7 +51,8 @@ class OwnershipService:
         log = get_logger()
 
         try:
-            yesterday = date.today() - timedelta(days=1)
+            central_tz = pytz.timezone("US/Central")
+            yesterday = (datetime.now(central_tz) - timedelta(hours=3)).date() - timedelta(days=1)
             past_date = yesterday - timedelta(days=days)
 
             # Get current and past ownership data
