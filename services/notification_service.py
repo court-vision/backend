@@ -104,7 +104,7 @@ class NotificationService:
 
     def _send_email(self, to: str, subject: str, body: str) -> NotificationResult:
         """
-        Send an email. Uses Resend when configured, otherwise stubs.
+        Send an email via Resend. Falls back to log stub if no API key configured.
 
         Args:
             to: Recipient email address
@@ -115,17 +115,22 @@ class NotificationService:
             NotificationResult
         """
         if self.resend_api_key:
-            # Resend integration:
-            # import resend
-            # resend.api_key = self.resend_api_key
-            # result = resend.Emails.send({
-            #     "from": "Court Vision <alerts@courtvision.app>",
-            #     "to": to,
-            #     "subject": subject,
-            #     "text": body,
-            # })
-            # return NotificationResult(success=True, message_id=result["id"])
-            pass
+            try:
+                import resend
+
+                resend.api_key = self.resend_api_key.get_secret_value()
+                result = resend.Emails.send({
+                    "from": f"Court Vision <{settings.notification_from_email}>",
+                    "to": [to],
+                    "subject": subject,
+                    "text": body,
+                })
+                message_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+                self.log.info("email_sent", to=to, message_id=message_id)
+                return NotificationResult(success=True, message_id=message_id)
+            except Exception as e:
+                self.log.error("email_send_failed", to=to, error=str(e))
+                return NotificationResult(success=False, error=str(e))
 
         # Stub: log the email and return success
         self.log.info(

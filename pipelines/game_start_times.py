@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime
 
-from db.models.nba import Game
+from db.models.nba import Game, NBATeam
 from pipelines.base import BasePipeline
 from pipelines.config import PipelineConfig
 from pipelines.context import PipelineContext
@@ -54,11 +54,12 @@ class GameStartTimesPipeline(BasePipeline):
 
         game_dates = schedule_data["leagueSchedule"]["gameDates"]
         season_year = schedule_data["leagueSchedule"]["seasonYear"]
-
-        # Convert "2025-26" to "2025-26" (already in the right format)
         season = season_year
 
-        ctx.log.info("schedule_loaded", game_dates_count=len(game_dates), season=season)
+        # Cache valid NBA team IDs to skip global/international games
+        valid_team_ids = {t.id for t in NBATeam.select(NBATeam.id)}
+
+        ctx.log.info("schedule_loaded", game_dates_count=len(game_dates), season=season, valid_teams=len(valid_team_ids))
 
         for game_date_entry in game_dates:
             for game in game_date_entry["games"]:
@@ -85,6 +86,10 @@ class GameStartTimesPipeline(BasePipeline):
                 away_tricode = game.get("awayTeam", {}).get("teamTricode")
 
                 if not home_tricode or not away_tricode:
+                    continue
+
+                # Skip international/global games with non-NBA teams
+                if home_tricode not in valid_team_ids or away_tricode not in valid_team_ids:
                     continue
 
                 game_data = {

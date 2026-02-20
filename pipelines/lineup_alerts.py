@@ -246,39 +246,22 @@ class LineupAlertsPipeline(BasePipeline):
         """
         Get users eligible for lineup alerts.
 
-        Returns users with alerts enabled (or no prefs row, which defaults to enabled).
-        Returns list of (User, NotificationPreference | None) tuples.
-        """
-        result = []
+        Opt-in model: only processes users who have an explicit
+        NotificationPreference row with lineup_alerts_enabled=True.
+        Users without a row are not processed until they opt in via the UI.
 
-        # Get all prefs where alerts are enabled
+        Returns list of (User, NotificationPreference) tuples.
+        """
         enabled_prefs = list(
             NotificationPreference.select()
             .where(NotificationPreference.lineup_alerts_enabled == True)
         )
-        enabled_user_ids = set()
+
+        result = []
         for pref in enabled_prefs:
             user = User.select().where(User.user_id == pref.user_id).first()
             if user:
                 result.append((user, pref))
-                enabled_user_ids.add(user.user_id)
-
-        # Get user IDs with alerts explicitly disabled
-        disabled_user_ids = set(
-            pref.user_id for pref in
-            NotificationPreference.select(NotificationPreference.user)
-            .where(NotificationPreference.lineup_alerts_enabled == False)
-        )
-
-        # Users without any prefs row default to enabled
-        all_excluded = enabled_user_ids | disabled_user_ids
-        if all_excluded:
-            users_without_prefs = User.select().where(User.user_id.not_in(all_excluded))
-        else:
-            users_without_prefs = User.select()
-
-        for user in users_without_prefs:
-            result.append((user, None))
 
         return result
 
