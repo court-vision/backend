@@ -54,7 +54,7 @@ class StreamerReq(BaseRequest):
     exclude_injured: bool = Field(default=True)
     b2b_only: bool = Field(
         default=False,
-        description="Only show players on teams with remaining B2Bs"
+        description="Only show B2B players (week: any remaining B2B, daily: target day + next day)"
     )
     mode: StreamerMode = Field(
         default=StreamerMode.WEEK,

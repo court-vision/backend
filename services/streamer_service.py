@@ -41,6 +41,18 @@ class StreamerService:
     }
 
     @staticmethod
+    def _get_daily_b2b_metrics(game_days: list[int], pickup_day: int) -> tuple[bool, int]:
+        """
+        In daily mode, only count B2Bs that include the pickup day itself.
+
+        Example:
+        - pickup_day=0 with games [0, 3, 4] => no daily-relevant B2B
+        - pickup_day=0 with games [0, 1, 4] => daily-relevant B2B
+        """
+        has_pickup_day_b2b = pickup_day in game_days and (pickup_day + 1) in game_days
+        return has_pickup_day_b2b, (2 if has_pickup_day_b2b else 0)
+
+    @staticmethod
     def _calculate_streamer_score(
         has_b2b: bool,
         games_remaining: int,
@@ -90,12 +102,13 @@ class StreamerService:
         - week: Rank by rest-of-week value (schedule density + performance).
         - daily: Rank by single-day pickup value (performance-focused).
                  Only returns players with a game on the target day.
+                 B2B only applies when target day and next day are both games.
 
         Args:
             league_info: ESPN/Yahoo league credentials and team info.
             fa_count: Number of free agents to fetch (default 50).
             exclude_injured: Whether to exclude injured players (default True).
-            b2b_only: Only show players on teams with remaining B2Bs (default False).
+            b2b_only: Only show B2B players (week: any remaining B2B, daily: target day + next day).
             mode: Scoring mode - 'week' or 'daily'.
             target_day: Day index for daily mode (0-indexed). If None, uses current day.
             avg_days: Number of days for rolling average calculation (default 7).
@@ -141,8 +154,16 @@ class StreamerService:
                 else StreamerService.WEEK_WEIGHTS
             )
 
-            # Get teams with B2B games
-            teams_with_b2b = get_teams_with_b2b(effective_date)
+            # Get teams with B2B games.
+            # Daily mode only considers B2Bs that include the pickup day itself.
+            if mode == StreamerMode.DAILY:
+                teams_with_b2b = sorted(
+                    team
+                    for team, team_games in matchup["games"].items()
+                    if str(target_day) in team_games and str(target_day + 1) in team_games
+                )
+            else:
+                teams_with_b2b = get_teams_with_b2b(effective_date)
 
             # Fetch free agents - route by provider
             # Pass team_id for Yahoo so tokens can be refreshed and persisted
@@ -182,15 +203,8 @@ class StreamerService:
 
                 # Get team schedule info
                 team = fa.team
-                team_has_b2b = has_remaining_b2b(team, effective_date)
-
-                # Skip non-B2B teams if b2b_only is set
-                if b2b_only and not team_has_b2b:
-                    continue
-
-                games_remaining = get_remaining_games(team, effective_date)
                 game_days = get_remaining_game_days(team, effective_date)
-                b2b_game_count = get_b2b_game_count(team, effective_date)
+                games_remaining = get_remaining_games(team, effective_date)
 
                 # Skip players with no remaining games
                 if games_remaining == 0:
@@ -198,6 +212,19 @@ class StreamerService:
 
                 # In daily mode, only include players with a game on the target day
                 if mode == StreamerMode.DAILY and target_day not in game_days:
+                    continue
+
+                if mode == StreamerMode.DAILY:
+                    team_has_b2b, b2b_game_count = StreamerService._get_daily_b2b_metrics(
+                        game_days=game_days,
+                        pickup_day=target_day
+                    )
+                else:
+                    team_has_b2b = has_remaining_b2b(team, effective_date)
+                    b2b_game_count = get_b2b_game_count(team, effective_date)
+
+                # Skip non-B2B teams if b2b_only is set
+                if b2b_only and not team_has_b2b:
                     continue
 
                 # Get last n-day average from our database

@@ -16,7 +16,8 @@ async def find_streamers(req: StreamerReq) -> StreamerResp:
     - week (default): Rank by rest-of-week value, prioritizing schedule density
       and players on teams with remaining back-to-back games.
     - daily: Rank by single-day pickup value, prioritizing per-game performance.
-      Only returns players with a game on the target day.
+      Only returns players with a game on the target day. In this mode, B2B
+      only means the target day + the next day.
 
     Request body:
     - league_info: ESPN/Yahoo league credentials
