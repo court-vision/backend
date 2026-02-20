@@ -19,7 +19,7 @@ from core.settings import settings
 from db.models.users import User
 from db.models.teams import Team
 from db.models.nba.games import Game
-from db.models.notifications import NotificationPreference, NotificationLog
+from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
 from pipelines.base import BasePipeline
 from pipelines.config import PipelineConfig
 from pipelines.context import PipelineContext
@@ -128,6 +128,22 @@ class LineupAlertsPipeline(BasePipeline):
         if provider != "espn":
             return
 
+        # Look up team-level override and merge with global prefs
+        team_pref = (
+            NotificationTeamPreference.select()
+            .where(
+                (NotificationTeamPreference.user == user.user_id)
+                & (NotificationTeamPreference.team_id == team.team_id)
+            )
+            .first()
+        )
+        effective_prefs = self._get_effective_prefs(prefs, team_pref)
+
+        # If team-level alerts are explicitly disabled, skip this team
+        if effective_prefs.lineup_alerts_enabled is False:
+            ctx.log.debug("team_alerts_disabled", user_id=user.user_id, team_id=team.team_id)
+            return
+
         # Check dedup - already notified today?
         already_sent = (
             NotificationLog.select()
@@ -168,7 +184,7 @@ class LineupAlertsPipeline(BasePipeline):
         issues = self.lineup_checker.check_lineup(
             roster=roster,
             teams_playing_today=teams_playing,
-            prefs=prefs,
+            prefs=effective_prefs,
         )
 
         if not issues:
@@ -187,7 +203,7 @@ class LineupAlertsPipeline(BasePipeline):
             team=team,
             issues=issues,
             first_game_time=earliest_game_time,
-            prefs=prefs,
+            prefs=effective_prefs,
         )
 
         # Log the notification
@@ -220,6 +236,24 @@ class LineupAlertsPipeline(BasePipeline):
             issue_count=len(issues),
             success=result.success,
         )
+
+    def _get_effective_prefs(self, global_prefs, team_pref):
+        """Merge team override on top of global prefs. Team wins where not None."""
+        if team_pref is None:
+            return global_prefs
+
+        class _EffectivePrefs:
+            pass
+
+        ep = _EffectivePrefs()
+        for field in [
+            "lineup_alerts_enabled", "alert_benched_starters",
+            "alert_active_non_playing", "alert_injured_active",
+            "alert_minutes_before", "email",
+        ]:
+            team_val = getattr(team_pref, field, None)
+            setattr(ep, field, team_val if team_val is not None else getattr(global_prefs, field))
+        return ep
 
     def _in_notification_window(
         self,

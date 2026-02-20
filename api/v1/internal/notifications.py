@@ -14,7 +14,7 @@ from core.clerk_auth import get_current_user
 from db.models.users import User
 from db.models.teams import Team
 from db.models.nba.games import Game
-from db.models.notifications import NotificationPreference, NotificationLog
+from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
 from pipelines.extractors import ESPNExtractor
 from services.lineup_check_service import LineupCheckService
 from services.notification_service import NotificationService
@@ -24,6 +24,10 @@ from schemas.notifications import (
     NotificationPreferenceReq,
     NotificationPreferenceResp,
     NotificationPreferenceResponse,
+    NotificationTeamPreferenceReq,
+    NotificationTeamPreferenceResp,
+    NotificationTeamPreferenceListResponse,
+    NotificationTeamPreferenceSingleResponse,
     LineupIssueResp,
     LineupCheckResp,
     LineupCheckResponse,
@@ -122,6 +126,140 @@ async def update_preferences(
         message="Notification preferences updated",
         data=data,
     )
+
+
+@router.get("/team-preferences", response_model=NotificationTeamPreferenceListResponse)
+async def get_team_preferences(current_user: dict = Depends(get_current_user)):
+    """List all team-level notification preference overrides for the current user."""
+    user_id = _get_user_id(current_user)
+
+    rows = list(
+        NotificationTeamPreference.select()
+        .where(NotificationTeamPreference.user == user_id)
+    )
+
+    data = [
+        NotificationTeamPreferenceResp(
+            team_id=row.team_id,
+            has_override=True,
+            lineup_alerts_enabled=row.lineup_alerts_enabled,
+            alert_benched_starters=row.alert_benched_starters,
+            alert_active_non_playing=row.alert_active_non_playing,
+            alert_injured_active=row.alert_injured_active,
+            alert_minutes_before=row.alert_minutes_before,
+            email=row.email,
+        )
+        for row in rows
+    ]
+
+    return NotificationTeamPreferenceListResponse(
+        status=ApiStatus.SUCCESS,
+        message=f"Found {len(data)} team preference override(s)",
+        data=data,
+    )
+
+
+@router.put("/team-preferences/{team_id}", response_model=NotificationTeamPreferenceSingleResponse)
+async def upsert_team_preference(
+    team_id: int,
+    req: NotificationTeamPreferenceReq,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create or update a team-level notification preference override."""
+    user_id = _get_user_id(current_user)
+
+    # Verify team belongs to user
+    team = (
+        Team.select()
+        .where((Team.team_id == team_id) & (Team.user_id == user_id))
+        .first()
+    )
+    if not team:
+        return NotificationTeamPreferenceSingleResponse(
+            status=ApiStatus.NOT_FOUND,
+            message="Team not found",
+            data=None,
+        )
+
+    # Upsert
+    existing = (
+        NotificationTeamPreference.select()
+        .where(
+            (NotificationTeamPreference.user == user_id)
+            & (NotificationTeamPreference.team_id == team_id)
+        )
+        .first()
+    )
+
+    if existing:
+        existing.lineup_alerts_enabled = req.lineup_alerts_enabled
+        existing.alert_benched_starters = req.alert_benched_starters
+        existing.alert_active_non_playing = req.alert_active_non_playing
+        existing.alert_injured_active = req.alert_injured_active
+        existing.alert_minutes_before = req.alert_minutes_before
+        existing.email = req.email
+        existing.save()
+        row = existing
+    else:
+        row = NotificationTeamPreference.create(
+            user=user_id,
+            team_id=team_id,
+            lineup_alerts_enabled=req.lineup_alerts_enabled,
+            alert_benched_starters=req.alert_benched_starters,
+            alert_active_non_playing=req.alert_active_non_playing,
+            alert_injured_active=req.alert_injured_active,
+            alert_minutes_before=req.alert_minutes_before,
+            email=req.email,
+        )
+
+    data = NotificationTeamPreferenceResp(
+        team_id=row.team_id,
+        has_override=True,
+        lineup_alerts_enabled=row.lineup_alerts_enabled,
+        alert_benched_starters=row.alert_benched_starters,
+        alert_active_non_playing=row.alert_active_non_playing,
+        alert_injured_active=row.alert_injured_active,
+        alert_minutes_before=row.alert_minutes_before,
+        email=row.email,
+    )
+
+    return NotificationTeamPreferenceSingleResponse(
+        status=ApiStatus.SUCCESS,
+        message="Team preference override saved",
+        data=data,
+    )
+
+
+@router.delete("/team-preferences/{team_id}")
+async def delete_team_preference(
+    team_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a team-level override, reverting that team to global defaults."""
+    user_id = _get_user_id(current_user)
+
+    # Verify team belongs to user
+    team = (
+        Team.select()
+        .where((Team.team_id == team_id) & (Team.user_id == user_id))
+        .first()
+    )
+    if not team:
+        return {"status": ApiStatus.NOT_FOUND.value, "message": "Team not found"}
+
+    deleted = (
+        NotificationTeamPreference.delete()
+        .where(
+            (NotificationTeamPreference.user == user_id)
+            & (NotificationTeamPreference.team_id == team_id)
+        )
+        .execute()
+    )
+
+    if deleted:
+        return {"status": ApiStatus.SUCCESS.value, "message": "Team preference override deleted"}
+    else:
+        return {"status": ApiStatus.NOT_FOUND.value, "message": "No override found for this team"}
 
 
 @router.get("/check-lineup/{team_id}", response_model=LineupCheckResponse)

@@ -95,3 +95,38 @@ class NotificationLog(BaseModel):
             f"type={self.notification_type}, "
             f"status={self.status})>"
         )
+
+
+class NotificationTeamPreference(BaseModel):
+    """
+    Per-team notification preference overrides.
+
+    All preference fields are nullable. None means inherit from the user's
+    global NotificationPreference. Only non-None values override the global.
+    Unique constraint on (user, team_id).
+    """
+
+    id = AutoField(primary_key=True)
+    user = ForeignKeyField(User, on_delete="CASCADE", backref="team_notification_prefs")
+    team_id = IntegerField()
+    # All nullable — None = inherit from global NotificationPreference
+    lineup_alerts_enabled = BooleanField(null=True, default=None)
+    alert_benched_starters = BooleanField(null=True, default=None)
+    alert_active_non_playing = BooleanField(null=True, default=None)
+    alert_injured_active = BooleanField(null=True, default=None)
+    alert_minutes_before = IntegerField(null=True, default=None)
+    email = CharField(max_length=255, null=True, default=None)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    class Meta:
+        table_name = "notification_team_preferences"
+        schema = "usr"
+        indexes = ((("user", "team_id"), True),)
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+    def __repr__(self):
+        return f"<NotificationTeamPreference(user={self.user_id}, team={self.team_id})>"

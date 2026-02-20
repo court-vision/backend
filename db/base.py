@@ -46,7 +46,7 @@ def init_db():
     )
 
     # Import notification models
-    from .models.notifications import NotificationPreference, NotificationLog
+    from .models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
 
     # Create tables if they don't exist
     # Note: Order matters for foreign key dependencies
@@ -67,7 +67,7 @@ def init_db():
         # NBA schema - extended data tables
         PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
         # User schema - notification tables
-        NotificationPreference, NotificationLog,
+        NotificationPreference, NotificationLog, NotificationTeamPreference,
     ], safe=True)
 
 # Function to close database connection
