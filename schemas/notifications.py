@@ -20,7 +20,7 @@ class NotificationPreferenceReq(BaseModel):
     alert_benched_starters: bool = True
     alert_active_non_playing: bool = True
     alert_injured_active: bool = True
-    alert_minutes_before: int = Field(default=90, ge=15, le=180)
+    alert_minutes_before: int = Field(default=90, ge=15, le=150)
     email: Optional[str] = None
 
 
@@ -33,7 +33,7 @@ class NotificationPreferenceResp(BaseModel):
     alert_benched_starters: bool = True
     alert_active_non_playing: bool = True
     alert_injured_active: bool = True
-    alert_minutes_before: int = Field(default=90, ge=15, le=180)
+    alert_minutes_before: int = Field(default=90, ge=15, le=150)
     email: Optional[str] = None
 
 
@@ -43,7 +43,7 @@ class NotificationTeamPreferenceReq(BaseModel):
     alert_benched_starters: Optional[bool] = None
     alert_active_non_playing: Optional[bool] = None
     alert_injured_active: Optional[bool] = None
-    alert_minutes_before: Optional[int] = Field(default=None, ge=15, le=180)
+    alert_minutes_before: Optional[int] = Field(default=None, ge=15, le=150)
     email: Optional[str] = None
 
 

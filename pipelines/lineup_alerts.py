@@ -2,8 +2,11 @@
 Lineup Alerts Pipeline
 
 Checks all eligible users' lineups and sends notifications if issues are found.
-Self-gates based on game start times - only proceeds when within the notification
-window (configurable, default 90 min before first tip-off).
+Self-gates in two stages:
+  1. Broad gate: only enters the user loop when within the configured outer window
+     (LINEUP_ALERT_WINDOW_MINUTES env var, default 150 min) before first tip-off.
+  2. Per-user gate: each team is only alerted when within that team's configured
+     alert_minutes_before window.
 
 Safe to call frequently (every 15 min); deduplication prevents repeat notifications.
 """
@@ -97,7 +100,7 @@ class LineupAlertsPipeline(BasePipeline):
 
             for team in teams:
                 try:
-                    self._process_team(ctx, user, team, prefs, teams_playing, today, earliest_game_time)
+                    self._process_team(ctx, user, team, prefs, teams_playing, today, now_et_time, earliest_game_time)
                     # Rate limit ESPN API calls
                     time_mod.sleep(1)
                 except Exception as e:
@@ -117,6 +120,7 @@ class LineupAlertsPipeline(BasePipeline):
         prefs,
         teams_playing: set[str],
         today,
+        now_et_time: time,
         earliest_game_time,
     ) -> None:
         """Process a single team for lineup alerts."""
@@ -142,6 +146,20 @@ class LineupAlertsPipeline(BasePipeline):
         # If team-level alerts are explicitly disabled, skip this team
         if effective_prefs.lineup_alerts_enabled is False:
             ctx.log.debug("team_alerts_disabled", user_id=user.user_id, team_id=team.team_id)
+            return
+
+        # Check if we're within this team's configured alert window
+        game_dt = datetime.combine(today, earliest_game_time)
+        now_dt = datetime.combine(today, now_et_time)
+        user_window_start = game_dt - timedelta(minutes=effective_prefs.alert_minutes_before)
+        user_window_end = game_dt - timedelta(minutes=15)
+        if not (user_window_start <= now_dt <= user_window_end):
+            ctx.log.debug(
+                "outside_user_notification_window",
+                user_id=user.user_id,
+                team_id=team.team_id,
+                alert_minutes_before=effective_prefs.alert_minutes_before,
+            )
             return
 
         # Check dedup - already notified today?
