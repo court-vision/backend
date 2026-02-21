@@ -235,6 +235,29 @@ class Game(BaseModel):
         return result
 
     @classmethod
+    def get_latest_game_time_on_date(cls, game_date: date):
+        """
+        Get the latest game start time (ET) on a given date.
+
+        Args:
+            game_date: Date to check
+
+        Returns:
+            datetime.time or None if no games with start times
+        """
+        from peewee import fn
+
+        result = (
+            cls.select(fn.MAX(cls.start_time_et))
+            .where(
+                (cls.game_date == game_date)
+                & (cls.start_time_et.is_null(False))
+            )
+            .scalar()
+        )
+        return result
+
+    @classmethod
     def get_teams_playing_on_date(cls, game_date: date) -> set[str]:
         """
         Get set of team abbreviations with games on a given date.

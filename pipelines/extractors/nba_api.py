@@ -4,6 +4,7 @@ NBA API Extractor
 Fetches data from NBA Stats API via nba_api library.
 """
 
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -285,6 +286,70 @@ class NBAApiExtractor(BaseExtractor):
                 raise NetworkError(f"NBA API timeout: {e}")
             if "connection" in error_str:
                 raise NetworkError(f"NBA API connection error: {e}")
+            raise
+
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @nba_api_circuit
+    def check_all_games_final(self, game_date: date) -> bool:
+        """
+        Check if all NBA games on a given date have finished.
+
+        Uses the live scoreboard endpoint for real-time game status.
+        Returns True if all games are Final (gameStatus==3) or the scoreboard
+        has already rolled to a different date (games are definitely done).
+        Returns False if any game is still in progress.
+
+        Args:
+            game_date: The NBA game date to check (ET-based)
+
+        Returns:
+            True if all games are final, False if any are still live
+        """
+        from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
+
+        date_str = game_date.isoformat()
+        self.log.debug("scoreboard_check_start", game_date=date_str)
+
+        try:
+            board = live_scoreboard.ScoreBoard()
+            data = board.get_dict()["scoreboard"]
+            scoreboard_date = data.get("gameDate", "")
+
+            if scoreboard_date != date_str:
+                # Scoreboard has rolled to a different date — last night's games are done
+                self.log.info(
+                    "scoreboard_date_rolled",
+                    expected=date_str,
+                    scoreboard=scoreboard_date,
+                )
+                return True
+
+            games = data.get("games", [])
+            if not games:
+                self.log.info("scoreboard_no_games", game_date=date_str)
+                return True
+
+            not_final = [g.get("gameId") for g in games if g.get("gameStatus") != 3]
+            all_final = len(not_final) == 0
+
+            self.log.info(
+                "scoreboard_status",
+                game_date=date_str,
+                total_games=len(games),
+                not_final_count=len(not_final),
+            )
+            return all_final
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                raise NetworkError(f"NBA live API timeout: {e}")
+            if "connection" in error_str:
+                raise NetworkError(f"NBA live API connection error: {e}")
             raise
 
     def get_all_player_ids(self, season: str | None = None) -> list[int]:
