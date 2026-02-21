@@ -35,7 +35,7 @@ class PlayerSeasonStatsPipeline(BasePipeline):
         display_name="Player Season Stats",
         description="Updates season totals and rankings for players who played yesterday",
         target_table="nba.player_season_stats",
-        depends_on=("daily_player_stats",),
+        depends_on=("player_game_stats",),
     )
 
     def __init__(self):

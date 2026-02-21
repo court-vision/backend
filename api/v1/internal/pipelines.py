@@ -60,7 +60,7 @@ async def trigger_daily_player_stats(
     Fetches yesterday's game stats from NBA API and ESPN ownership data,
     then inserts into nba.player_game_stats table.
     """
-    result = await run_pipeline("daily_player_stats")
+    result = await run_pipeline("player_game_stats")
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -77,7 +77,7 @@ async def trigger_cumulative_player_stats(
 
     Updates season totals and rankings for players who played yesterday.
     """
-    result = await run_pipeline("cumulative_player_stats")
+    result = await run_pipeline("player_season_stats")
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -273,8 +273,9 @@ async def trigger_all_pipelines(
 
     Returns immediately with a job ID. Use GET /jobs/{job_id} to check status.
 
-    Runs: daily-player-stats -> cumulative-player-stats -> daily-matchup-scores
-          -> advanced-stats -> game-schedule -> player-profiles
+    Runs (registry order): player_game_stats -> player_ownership -> player_season_stats
+          -> daily_matchup_scores -> player_advanced_stats -> game_schedule
+          -> game_start_times -> player_profiles
     """
     job_manager = get_job_manager()
     pipeline_count = len(PIPELINE_REGISTRY)
