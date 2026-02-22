@@ -9,7 +9,7 @@ from __future__ import annotations
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, Any
 
 import pytz
@@ -46,6 +46,7 @@ class PipelineContext:
         default_factory=lambda: datetime.now(pytz.timezone("US/Central"))
     )
     records_processed: int = 0
+    date_override: Optional[date] = None
 
     _db_run: Optional[PipelineRun] = field(default=None, repr=False)
     _log: Any = field(default=None, repr=False)

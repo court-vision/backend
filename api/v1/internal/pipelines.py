@@ -11,6 +11,7 @@ The /all endpoint uses a fire-and-forget pattern:
 """
 
 import asyncio
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Security, HTTPException, Query
@@ -55,14 +56,16 @@ async def get_available_pipelines(
 @router.post("/daily-player-stats", response_model=PipelineResponse)
 async def trigger_daily_player_stats(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD). Omit for automatic date."),
 ) -> PipelineResponse:
     """
     Trigger the daily player stats pipeline.
 
-    Fetches yesterday's game stats from NBA API and ESPN ownership data,
+    Fetches game stats from NBA API and ESPN ownership data,
     then inserts into nba.player_game_stats table.
+    Pass ?date=YYYY-MM-DD to backfill a specific date.
     """
-    result = await run_pipeline("player_game_stats")
+    result = await run_pipeline("player_game_stats", date_override=date)
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -73,13 +76,15 @@ async def trigger_daily_player_stats(
 @router.post("/cumulative-player-stats", response_model=PipelineResponse)
 async def trigger_cumulative_player_stats(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD). Omit for automatic date."),
 ) -> PipelineResponse:
     """
     Trigger the cumulative player stats pipeline.
 
-    Updates season totals and rankings for players who played yesterday.
+    Updates season totals and rankings for players who played on the given date.
+    Pass ?date=YYYY-MM-DD to backfill a specific date.
     """
-    result = await run_pipeline("player_season_stats")
+    result = await run_pipeline("player_season_stats", date_override=date)
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -90,14 +95,16 @@ async def trigger_cumulative_player_stats(
 @router.post("/daily-matchup-scores", response_model=PipelineResponse)
 async def trigger_daily_matchup_scores(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD). Omit for automatic date."),
 ) -> PipelineResponse:
     """
     Trigger the daily matchup scores pipeline.
 
     Fetches current matchup scores for all saved teams and records
     daily snapshots for visualization.
+    Pass ?date=YYYY-MM-DD to backfill a specific date.
     """
-    result = await run_pipeline("daily_matchup_scores")
+    result = await run_pipeline("daily_matchup_scores", date_override=date)
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -108,11 +115,14 @@ async def trigger_daily_matchup_scores(
 @router.post("/player-advanced-stats", response_model=PipelineResponse)
 async def trigger_player_advanced_stats(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD). Omit for automatic date."),
 ) -> PipelineResponse:
     """
     Trigger the player advanced stats pipeline.
+
+    Pass ?date=YYYY-MM-DD to backfill a specific date.
     """
-    result = await run_pipeline("player_advanced_stats")
+    result = await run_pipeline("player_advanced_stats", date_override=date)
     return PipelineResponse(
         status=result.status,
         message=result.message,
@@ -123,6 +133,8 @@ async def trigger_player_advanced_stats(
 @router.post("/post-game", response_model=PipelineResponse)
 async def trigger_post_game(
     _: str = Security(verify_pipeline_token),
+    force: bool = Query(False, description="Bypass all gates and dedup check. Use for backfills."),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD). Implies force=true."),
 ) -> PipelineResponse:
     """
     Post-game pipeline trigger with self-gating.
@@ -133,6 +145,9 @@ async def trigger_post_game(
 
     Only triggers once per NBA game date via date-keyed PipelineRun dedup.
     Safe to call frequently — returns immediately if outside window or already triggered.
+
+    Pass ?force=true to skip all gates (useful for manual re-triggers or backfills).
+    Pass ?date=YYYY-MM-DD to backfill a specific date (implies force=true).
     """
     import pytz
     from datetime import datetime, timedelta
@@ -141,6 +156,9 @@ async def trigger_post_game(
     from db.models.nba.games import Game
     from db.models.pipeline_run import PipelineRun
     from pipelines.extractors.nba_api import NBAApiExtractor
+
+    # A date override implies force — skip all time/readiness gating
+    force = force or (date is not None)
 
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)
@@ -151,93 +169,97 @@ async def trigger_post_game(
     else:
         nba_date = now_et.date()
 
-    # Check if there are any scheduled games on the NBA date
-    latest_game_time = Game.get_latest_game_time_on_date(nba_date)
-    if not latest_game_time:
-        log.info("post_game_no_games", nba_date=str(nba_date))
-        return PipelineResponse(
-            status=ApiStatus.SUCCESS,
-            message=f"No games scheduled for NBA date {nba_date}",
-        )
+    if not force:
+        # Check if there are any scheduled games on the NBA date
+        latest_game_time = Game.get_latest_game_time_on_date(nba_date)
+        if not latest_game_time:
+            log.info("post_game_no_games", nba_date=str(nba_date))
+            return PipelineResponse(
+                status=ApiStatus.SUCCESS,
+                message=f"No games scheduled for NBA date {nba_date}",
+            )
 
-    # Gate 1: Time window — only attempt within [estimated_end, estimated_end + window]
-    latest_game_dt = datetime.combine(nba_date, latest_game_time)
-    estimated_end_dt = latest_game_dt + timedelta(minutes=settings.estimated_game_duration_minutes)
-    window_end_dt = estimated_end_dt + timedelta(minutes=settings.post_game_pipeline_window_minutes)
-    now_et_naive = now_et.replace(tzinfo=None)
+        # Gate 1: Time window — only attempt within [estimated_end, estimated_end + window]
+        latest_game_dt = datetime.combine(nba_date, latest_game_time)
+        estimated_end_dt = latest_game_dt + timedelta(minutes=settings.estimated_game_duration_minutes)
+        window_end_dt = estimated_end_dt + timedelta(minutes=settings.post_game_pipeline_window_minutes)
+        now_et_naive = now_et.replace(tzinfo=None)
 
-    if not (estimated_end_dt <= now_et_naive <= window_end_dt):
-        log.info(
-            "post_game_outside_window",
-            nba_date=str(nba_date),
-            estimated_end=str(estimated_end_dt),
-            window_end=str(window_end_dt),
-            current_time=str(now_et_naive),
-        )
-        return PipelineResponse(
-            status=ApiStatus.SUCCESS,
-            message="Outside post-game window",
-        )
+        if not (estimated_end_dt <= now_et_naive <= window_end_dt):
+            log.info(
+                "post_game_outside_window",
+                nba_date=str(nba_date),
+                estimated_end=str(estimated_end_dt),
+                window_end=str(window_end_dt),
+                current_time=str(now_et_naive),
+            )
+            return PipelineResponse(
+                status=ApiStatus.SUCCESS,
+                message="Outside post-game window",
+            )
 
-    # Gate 2: Data readiness — verify all games are actually Final via live scoreboard
-    nba_extractor = NBAApiExtractor()
-    try:
-        all_final = nba_extractor.check_all_games_final(nba_date)
-    except Exception as e:
-        log.error("post_game_scoreboard_error", nba_date=str(nba_date), error=str(e))
-        return PipelineResponse(
-            status=ApiStatus.SUCCESS,
-            message="Live scoreboard check failed, will retry",
-        )
+        # Gate 2: Data readiness — verify all games are actually Final via live scoreboard
+        nba_extractor = NBAApiExtractor()
+        try:
+            all_final = nba_extractor.check_all_games_final(nba_date)
+        except Exception as e:
+            log.error("post_game_scoreboard_error", nba_date=str(nba_date), error=str(e))
+            return PipelineResponse(
+                status=ApiStatus.SUCCESS,
+                message="Live scoreboard check failed, will retry",
+            )
 
-    if not all_final:
-        log.info(
-            "post_game_games_not_final",
-            nba_date=str(nba_date),
-            current_time=str(now_et_naive),
-        )
-        return PipelineResponse(
-            status=ApiStatus.SUCCESS,
-            message="Games still in progress, will retry next interval",
-        )
+        if not all_final:
+            log.info(
+                "post_game_games_not_final",
+                nba_date=str(nba_date),
+                current_time=str(now_et_naive),
+            )
+            return PipelineResponse(
+                status=ApiStatus.SUCCESS,
+                message="Games still in progress, will retry next interval",
+            )
 
-    # Dedup: one trigger per NBA date, keyed by date in the pipeline_name
-    dedup_key = f"post_game_trigger_{nba_date.isoformat()}"
-    already_ran = (
-        PipelineRun.select()
-        .where(
-            (PipelineRun.pipeline_name == dedup_key)
-            & (PipelineRun.status == "success")
+        # Dedup: one trigger per NBA date, keyed by date in the pipeline_name
+        dedup_key = f"post_game_trigger_{nba_date.isoformat()}"
+        already_ran = (
+            PipelineRun.select()
+            .where(
+                (PipelineRun.pipeline_name == dedup_key)
+                & (PipelineRun.status == "success")
+            )
+            .exists()
         )
-        .exists()
-    )
-    if already_ran:
-        log.info("post_game_already_triggered", nba_date=str(nba_date), dedup_key=dedup_key)
-        return PipelineResponse(
-            status=ApiStatus.SUCCESS,
-            message=f"Already triggered post-game pipelines for {nba_date}",
-        )
+        if already_ran:
+            log.info("post_game_already_triggered", nba_date=str(nba_date), dedup_key=dedup_key)
+            return PipelineResponse(
+                status=ApiStatus.SUCCESS,
+                message=f"Already triggered post-game pipelines for {nba_date}",
+            )
 
-    # All gates pass — trigger pipelines and record dedup marker
+        # Record dedup marker so normal polling won't re-trigger
+        dedup_run = PipelineRun.start_run(dedup_key)
+        dedup_run.mark_success()
+
+    # All gates pass (or bypassed) — trigger pipelines
     job_manager = get_job_manager()
     pipeline_count = len(PIPELINE_REGISTRY)
     job = await job_manager.create_job(pipeline_count)
 
-    dedup_run = PipelineRun.start_run(dedup_key)
-    dedup_run.mark_success()
-
-    asyncio.create_task(_run_pipelines_background(job.job_id))
+    target_date = date or nba_date
+    asyncio.create_task(_run_pipelines_background(job.job_id, date_override=target_date if date else None))
 
     log.info(
         "post_game_triggered",
-        nba_date=str(nba_date),
+        nba_date=str(target_date),
         job_id=job.job_id,
         pipeline_count=pipeline_count,
+        forced=force,
     )
 
     return PipelineResponse(
         status=ApiStatus.SUCCESS,
-        message=f"Post-game pipelines triggered for {nba_date}. Job ID: {job.job_id}",
+        message=f"Post-game pipelines triggered for {target_date}. Job ID: {job.job_id}",
     )
 
 
@@ -380,6 +402,7 @@ async def trigger_live_stats(
 @router.post("/all", response_model=JobCreatedResponse)
 async def trigger_all_pipelines(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD) for all pipelines. Omit for automatic date."),
 ) -> JobCreatedResponse:
     """
     Trigger all pipelines in the background (fire-and-forget).
@@ -389,6 +412,8 @@ async def trigger_all_pipelines(
     Runs (registry order): player_game_stats -> player_ownership -> player_season_stats
           -> daily_matchup_scores -> player_advanced_stats -> game_schedule
           -> game_start_times -> player_profiles
+
+    Pass ?date=YYYY-MM-DD to backfill all pipelines for a specific date.
     """
     job_manager = get_job_manager()
     pipeline_count = len(PIPELINE_REGISTRY)
@@ -397,9 +422,9 @@ async def trigger_all_pipelines(
     job = await job_manager.create_job(pipeline_count)
 
     # Start background task
-    asyncio.create_task(_run_pipelines_background(job.job_id))
+    asyncio.create_task(_run_pipelines_background(job.job_id, date_override=date))
 
-    log.info("pipeline_job_started", job_id=job.job_id, pipeline_count=pipeline_count)
+    log.info("pipeline_job_started", job_id=job.job_id, pipeline_count=pipeline_count, date_override=str(date) if date else None)
 
     return JobCreatedResponse(
         status=ApiStatus.SUCCESS,
@@ -416,14 +441,17 @@ async def trigger_all_pipelines(
 @router.post("/all/sync", response_model=AllPipelinesResponse)
 async def trigger_all_pipelines_sync(
     _: str = Security(verify_pipeline_token),
+    date: Optional[date] = Query(None, description="Override game date (YYYY-MM-DD) for all pipelines. Omit for automatic date."),
 ) -> AllPipelinesResponse:
     """
     Trigger all pipelines synchronously (blocks until complete).
 
     WARNING: This can take several minutes. Use POST /all for fire-and-forget.
     Only use this endpoint if you need the results immediately and can wait.
+
+    Pass ?date=YYYY-MM-DD to backfill all pipelines for a specific date.
     """
-    results = await run_all_pipelines()
+    results = await run_all_pipelines(date_override=date)
 
     # Determine overall status
     all_success = all(r.status == ApiStatus.SUCCESS for r in results.values())
@@ -529,7 +557,7 @@ async def get_job_status(
     )
 
 
-async def _run_pipelines_background(job_id: str) -> None:
+async def _run_pipelines_background(job_id: str, date_override: Optional[date] = None) -> None:
     """
     Run all pipelines in the background and update job status.
 
@@ -538,7 +566,7 @@ async def _run_pipelines_background(job_id: str) -> None:
     job_manager = get_job_manager()
     pipeline_names = list(PIPELINE_REGISTRY.keys())
 
-    log.info("background_job_starting", job_id=job_id, pipelines=pipeline_names)
+    log.info("background_job_starting", job_id=job_id, pipelines=pipeline_names, date_override=str(date_override) if date_override else None)
 
     await job_manager.update_job_started(job_id)
 
@@ -554,7 +582,7 @@ async def _run_pipelines_background(job_id: str) -> None:
             await job_manager.update_current_pipeline(job_id, name)
 
             try:
-                result = await run_pipeline(name)
+                result = await run_pipeline(name, date_override=date_override)
 
                 # Convert to job result format
                 # Note: result.status is already a string due to use_enum_values=True

@@ -6,7 +6,8 @@ Abstract base class for all data pipelines.
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from datetime import date
+from typing import ClassVar, Optional
 
 from db.base import db
 from pipelines.config import PipelineConfig
@@ -75,7 +76,7 @@ class BasePipeline(ABC):
         """
         pass
 
-    def _run_sync(self) -> PipelineResult:
+    def _run_sync(self, date_override: Optional[date] = None) -> PipelineResult:
         """
         Run the full pipeline lifecycle synchronously.
 
@@ -90,7 +91,7 @@ class BasePipeline(ABC):
             db.connect()
 
         try:
-            ctx = PipelineContext(self.config.name)
+            ctx = PipelineContext(self.config.name, date_override=date_override)
             ctx.start_tracking()
 
             try:
@@ -104,7 +105,7 @@ class BasePipeline(ABC):
             if not db.is_closed():
                 db.close()
 
-    async def run(self) -> PipelineResult:
+    async def run(self, date_override: Optional[date] = None) -> PipelineResult:
         """
         Run the pipeline with full lifecycle management.
 
@@ -112,10 +113,14 @@ class BasePipeline(ABC):
         (including DB and HTTP I/O) runs in a thread pool worker via
         asyncio.to_thread() to avoid blocking the event loop.
 
+        Args:
+            date_override: If provided, pipelines use this date instead of
+                           computing from the current time. Useful for backfills.
+
         Returns:
             PipelineResult with status, timing, and records processed
         """
-        return await asyncio.to_thread(self._run_sync)
+        return await asyncio.to_thread(self._run_sync, date_override)
 
     def before_execute(self, ctx: PipelineContext) -> None:
         """

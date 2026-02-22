@@ -46,14 +46,21 @@ class PlayerAdvancedStatsPipeline(BasePipeline):
         """Execute the advanced stats pipeline."""
         central_tz = pytz.timezone("US/Central")
 
-        # Use yesterday as the as_of_date
-        yesterday = ctx.started_at - timedelta(days=1)
-        as_of_date = yesterday.date()
+        # Determine the as_of_date. Use an explicit override for backfills;
+        # otherwise use CST with a 6am cutoff (before 6am = previous night's games).
+        if ctx.date_override:
+            as_of_date = ctx.date_override
+        else:
+            now_cst = ctx.started_at  # already in CST from PipelineContext
+            if now_cst.hour < 6:
+                as_of_date = (now_cst - timedelta(days=1)).date()
+            else:
+                as_of_date = now_cst.date()
 
         # Determine season string
-        season = f"{yesterday.year}-{str(yesterday.year + 1)[-2:]}"
-        if yesterday.month < 8:
-            season = f"{yesterday.year - 1}-{str(yesterday.year)[-2:]}"
+        season = f"{as_of_date.year}-{str(as_of_date.year + 1)[-2:]}"
+        if as_of_date.month < 8:
+            season = f"{as_of_date.year - 1}-{str(as_of_date.year)[-2:]}"
 
         ctx.log.info("fetching_advanced_stats", season=season, as_of_date=str(as_of_date))
 

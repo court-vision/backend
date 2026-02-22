@@ -52,8 +52,7 @@ class OwnershipService:
 
         try:
             central_tz = pytz.timezone("US/Central")
-            # Adjust for Central Time zone as well as pipeline running at 3am Central Time
-            yesterday = (datetime.now(central_tz) - timedelta(hours=3)).date() - timedelta(days=1)
+            yesterday = datetime.now(central_tz).date() - timedelta(days=1)
             past_date = yesterday - timedelta(days=days)
 
             # Get current and past ownership data

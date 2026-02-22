@@ -5,7 +5,8 @@ Provides a registry of all available pipelines and helper functions
 for running them by name.
 """
 
-from typing import Type
+from datetime import date
+from typing import Optional, Type
 
 from core.logging import get_logger
 from pipelines.base import BasePipeline
@@ -70,21 +71,23 @@ def get_pipeline(name: str) -> BasePipeline:
     return PIPELINE_REGISTRY[name]()
 
 
-async def run_pipeline(name: str) -> PipelineResult:
+async def run_pipeline(name: str, date_override: Optional[date] = None) -> PipelineResult:
     """
     Run a pipeline by name.
 
     Args:
         name: Pipeline name
+        date_override: If provided, the pipeline uses this date instead of
+                       computing from the current time. Useful for backfills.
 
     Returns:
         PipelineResult with status and details
     """
     pipeline = get_pipeline(name)
-    return await pipeline.run()
+    return await pipeline.run(date_override=date_override)
 
 
-async def run_all_pipelines() -> dict[str, PipelineResult]:
+async def run_all_pipelines(date_override: Optional[date] = None) -> dict[str, PipelineResult]:
     """
     Run all pipelines in sequence.
 
@@ -96,6 +99,10 @@ async def run_all_pipelines() -> dict[str, PipelineResult]:
     5. game_schedule - NBA game results
     6. injury_report - Player injury status
     7. player_profiles - Biographical data (slow, run weekly)
+
+    Args:
+        date_override: If provided, all pipelines use this date instead of
+                       computing from the current time. Useful for backfills.
 
     Returns:
         Dict mapping pipeline name to PipelineResult
@@ -109,7 +116,7 @@ async def run_all_pipelines() -> dict[str, PipelineResult]:
 
     for i, name in enumerate(pipeline_names, 1):
         log.info("running_pipeline", pipeline=name, step=f"{i}/{len(pipeline_names)}")
-        results[name] = await run_pipeline(name)
+        results[name] = await run_pipeline(name, date_override=date_override)
 
     success_count = sum(1 for r in results.values() if r.status == ApiStatus.SUCCESS)
     log.info(

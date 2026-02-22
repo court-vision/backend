@@ -11,7 +11,6 @@ endpoint (POST /v1/internal/pipelines/live-stats).
 
 from datetime import timedelta
 
-import pytz
 
 from db.models.nba import Player, LivePlayerStats
 from pipelines.base import BasePipeline
@@ -47,14 +46,13 @@ class LiveGameStatsPipeline(BasePipeline):
 
     def execute(self, ctx: PipelineContext) -> None:
         """Execute the live game stats pipeline."""
-        eastern = pytz.timezone("US/Eastern")
-
-        # Use ET-based date (before 6am = still on yesterday's game date)
-        now_et = ctx.started_at.astimezone(eastern)
-        if now_et.hour < 6:
-            game_date = (now_et - timedelta(days=1)).date()
+        # Use CST-based date with 6am cutoff (before 6am = still on previous night's game date).
+        # ctx.started_at is already in CST from PipelineContext.
+        now_cst = ctx.started_at
+        if now_cst.hour < 6:
+            game_date = (now_cst - timedelta(days=1)).date()
         else:
-            game_date = now_et.date()
+            game_date = now_cst.date()
 
         ctx.log.info("live_stats_start", game_date=str(game_date))
 
