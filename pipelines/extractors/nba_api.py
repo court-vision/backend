@@ -4,6 +4,7 @@ NBA API Extractor
 Fetches data from NBA Stats API via nba_api library.
 """
 
+import json
 from datetime import date
 from typing import Any
 
@@ -449,6 +450,11 @@ class NBAApiExtractor(BaseExtractor):
             return game
 
         except Exception as e:
+            if isinstance(e, json.JSONDecodeError):
+                # NBA live API occasionally returns an empty body (pre-game, between
+                # quarters, or transient hiccup). Treat as no data available.
+                self.log.warning("live_box_score_empty_response", game_id=game_id, error=str(e))
+                return None
             error_str = str(e).lower()
             if "timeout" in error_str:
                 raise NetworkError(f"NBA live BoxScore timeout: {e}")

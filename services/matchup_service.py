@@ -131,19 +131,37 @@ class MatchupService:
                 result.append(LiveMatchupPlayer(**p.model_dump(), live=live_overlay))
             return result
 
+        def compute_live_score(espn_base: float, live_roster: list[LiveMatchupPlayer]) -> float:
+            """
+            ESPN's totalPoints (mSchedule) is batch-processed and doesn't include
+            today's in-progress or recently completed games. Add today's live fpts
+            for active roster players (not BE/IR) on top of the ESPN base score.
+            """
+            today_fpts = sum(
+                p.live.live_fpts
+                for p in live_roster
+                if p.lineup_slot not in ("BE", "IR")
+                and p.live is not None
+                and p.live.game_status >= 2
+            )
+            return round(espn_base + today_fpts, 2)
+
+        your_live_roster = build_live_roster(matchup.data.your_team.roster)
+        opponent_live_roster = build_live_roster(matchup.data.opponent_team.roster)
+
         your_team = LiveMatchupTeam(
             team_name=matchup.data.your_team.team_name,
             team_id=matchup.data.your_team.team_id,
-            current_score=matchup.data.your_team.current_score,
+            current_score=compute_live_score(matchup.data.your_team.current_score, your_live_roster),
             projected_score=matchup.data.your_team.projected_score,
-            roster=build_live_roster(matchup.data.your_team.roster),
+            roster=your_live_roster,
         )
         opponent_team = LiveMatchupTeam(
             team_name=matchup.data.opponent_team.team_name,
             team_id=matchup.data.opponent_team.team_id,
-            current_score=matchup.data.opponent_team.current_score,
+            current_score=compute_live_score(matchup.data.opponent_team.current_score, opponent_live_roster),
             projected_score=matchup.data.opponent_team.projected_score,
-            roster=build_live_roster(matchup.data.opponent_team.roster),
+            roster=opponent_live_roster,
         )
 
         return LiveMatchupResp(
