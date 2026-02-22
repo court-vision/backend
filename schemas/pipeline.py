@@ -123,3 +123,29 @@ class JobListResponse(BaseModel):
 
     class Config:
         use_enum_values = True
+
+
+class LiveStatsData(BaseModel):
+    """Data payload for the live stats trigger endpoint."""
+
+    pipeline_name: str
+    status: str
+    records_processed: int = 0
+    games_total: int = 0
+    all_games_complete: bool = False
+    duration_seconds: Optional[float] = None
+
+
+class LiveStatsResponse(BaseModel):
+    """Response for the live stats trigger endpoint.
+
+    The all_games_complete field is read by the cron-runner's live loop
+    to determine when to exit.
+    """
+
+    status: ApiStatus
+    message: str
+    data: LiveStatsData
+
+    class Config:
+        use_enum_values = True

@@ -78,3 +78,50 @@ class MatchupScoreHistory(BaseModel):
 class MatchupScoreHistoryResp(BaseResponse):
     """Response containing matchup score history"""
     data: Optional[MatchupScoreHistory] = None
+
+
+# ------------------------------- Live Matchup Models ------------------------------- #
+
+class PlayerLiveStats(BaseModel):
+    """Live in-game stat overlay for a player (from live_player_stats table)."""
+    nba_player_id: int
+    live_fpts: int
+    live_pts: int
+    live_reb: int
+    live_ast: int
+    live_stl: int
+    live_blk: int
+    live_tov: int
+    live_min: int
+    game_status: int               # 1=scheduled, 2=in_progress, 3=final
+    period: Optional[int] = None
+    game_clock: Optional[str] = None
+    last_updated: Optional[str] = None
+
+
+class LiveMatchupPlayer(MatchupPlayerResp):
+    """MatchupPlayerResp extended with live game stats (None if no game today)."""
+    live: Optional[PlayerLiveStats] = None
+
+
+class LiveMatchupTeam(BaseModel):
+    team_name: str
+    team_id: int
+    current_score: float           # From ESPN/Yahoo (live, correct custom scoring)
+    projected_score: float
+    roster: list[LiveMatchupPlayer]
+
+
+class LiveMatchupData(BaseModel):
+    matchup_period: int
+    matchup_period_start: str
+    matchup_period_end: str
+    your_team: LiveMatchupTeam
+    opponent_team: LiveMatchupTeam
+    projected_winner: str
+    projected_margin: float
+    game_date: str                 # ET game date used for live stats lookup
+
+
+class LiveMatchupResp(BaseResponse):
+    data: Optional[LiveMatchupData] = None

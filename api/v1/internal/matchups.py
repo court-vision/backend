@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from services.user_sync_service import UserSyncService
-from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp
+from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp
 from core.clerk_auth import get_current_user
 
 
@@ -55,6 +55,23 @@ async def get_matchup_by_team(
         team_id,
         avg_window
     )
+
+
+@router.get('/live/{team_id}', response_model=LiveMatchupResp)
+async def get_live_matchup(
+    team_id: int,
+    current_user: dict = Depends(get_current_user)
+) -> LiveMatchupResp:
+    """
+    Get the current matchup with live in-game stats per player.
+
+    Combines ESPN/Yahoo live scores (correct for custom league scoring) with
+    per-player box score stats from the live polling pipeline (~60s cadence).
+    Players with no game today have live=null. Includes all roster slots
+    (active and bench) so the frontend can render the full matchup layout.
+    """
+    user_id = _get_user_id(current_user)
+    return await MatchupService.get_live_matchup_by_team_id(user_id, team_id)
 
 
 @router.get('/history/{team_id}', response_model=MatchupScoreHistoryResp)

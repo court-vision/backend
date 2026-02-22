@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.team_service import TeamService
@@ -5,7 +7,12 @@ from schemas.matchup import (
     MatchupResp,
     MatchupScoreHistoryResp,
     MatchupScoreHistory,
-    DailyScorePoint
+    DailyScorePoint,
+    LiveMatchupResp,
+    LiveMatchupData,
+    LiveMatchupTeam,
+    LiveMatchupPlayer,
+    PlayerLiveStats,
 )
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from db.models.stats.daily_matchup_score import DailyMatchupScore
@@ -67,6 +74,92 @@ class MatchupService:
         if league_info.provider == FantasyProvider.YAHOO:
             return await YahooService.get_matchup_data(league_info, avg_window, team_id)
         return await EspnService.get_matchup_data(league_info, avg_window)
+
+    @staticmethod
+    async def get_live_matchup_by_team_id(
+        user_id: int,
+        team_id: int,
+    ) -> LiveMatchupResp:
+        """
+        Get the current matchup augmented with live in-game stats per player.
+
+        Fetches the current matchup (ESPN/Yahoo scores + roster) then overlays
+        live stats from live_player_stats for each roster player matched by name.
+        """
+        import pytz
+        from db.models.nba.live_player_stats import LivePlayerStats as LiveStatsModel
+
+        # Reuse existing matchup fetch (handles ESPN and Yahoo routing)
+        matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
+
+        if matchup.status != ApiStatus.SUCCESS or not matchup.data:
+            return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
+
+        # Today's NBA game date (before 6am ET = yesterday)
+        eastern = pytz.timezone("US/Eastern")
+        now_et = datetime.now(eastern)
+        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+
+        # Single DB query for live stats across both rosters, matched by normalized name
+        all_names = [
+            p.name for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
+        ]
+        live_stats_list = LiveStatsModel.get_live_stats_by_names(all_names, game_date)
+        name_to_live = {stat.player.name_normalized: stat for stat in live_stats_list}
+
+        def build_live_roster(roster) -> list[LiveMatchupPlayer]:
+            result = []
+            for p in roster:
+                stat = name_to_live.get(p.name.lower().strip())
+                live_overlay = None
+                if stat:
+                    live_overlay = PlayerLiveStats(
+                        nba_player_id=stat.player_id,
+                        live_fpts=stat.fpts,
+                        live_pts=stat.pts,
+                        live_reb=stat.reb,
+                        live_ast=stat.ast,
+                        live_stl=stat.stl,
+                        live_blk=stat.blk,
+                        live_tov=stat.tov,
+                        live_min=stat.min,
+                        game_status=stat.game_status,
+                        period=stat.period,
+                        game_clock=stat.game_clock,
+                        last_updated=stat.last_updated.isoformat() if stat.last_updated else None,
+                    )
+                result.append(LiveMatchupPlayer(**p.model_dump(), live=live_overlay))
+            return result
+
+        your_team = LiveMatchupTeam(
+            team_name=matchup.data.your_team.team_name,
+            team_id=matchup.data.your_team.team_id,
+            current_score=matchup.data.your_team.current_score,
+            projected_score=matchup.data.your_team.projected_score,
+            roster=build_live_roster(matchup.data.your_team.roster),
+        )
+        opponent_team = LiveMatchupTeam(
+            team_name=matchup.data.opponent_team.team_name,
+            team_id=matchup.data.opponent_team.team_id,
+            current_score=matchup.data.opponent_team.current_score,
+            projected_score=matchup.data.opponent_team.projected_score,
+            roster=build_live_roster(matchup.data.opponent_team.roster),
+        )
+
+        return LiveMatchupResp(
+            status=ApiStatus.SUCCESS,
+            message="Live matchup data fetched successfully",
+            data=LiveMatchupData(
+                matchup_period=matchup.data.matchup_period,
+                matchup_period_start=matchup.data.matchup_period_start,
+                matchup_period_end=matchup.data.matchup_period_end,
+                your_team=your_team,
+                opponent_team=opponent_team,
+                projected_winner=matchup.data.projected_winner,
+                projected_margin=matchup.data.projected_margin,
+                game_date=str(game_date),
+            ),
+        )
 
     @staticmethod
     async def get_score_history(

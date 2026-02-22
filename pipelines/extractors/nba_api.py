@@ -352,6 +352,113 @@ class NBAApiExtractor(BaseExtractor):
                 raise NetworkError(f"NBA live API connection error: {e}")
             raise
 
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @nba_api_circuit
+    def get_scoreboard_games(self, game_date: date) -> list[dict]:
+        """
+        Fetch today's games from the live scoreboard.
+
+        Returns a list of dicts with game ID, status, period, and clock for
+        each game on the given date. Returns an empty list if the scoreboard
+        has rolled to a different date (i.e. all games are done for that date).
+
+        Args:
+            game_date: The NBA game date to check (ET-based)
+
+        Returns:
+            List of dicts with keys: game_id, game_status, period, game_clock
+        """
+        from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
+
+        date_str = game_date.isoformat()
+        self.log.debug("scoreboard_games_start", game_date=date_str)
+
+        try:
+            board = live_scoreboard.ScoreBoard()
+            data = board.get_dict()["scoreboard"]
+            scoreboard_date = data.get("gameDate", "")
+
+            if scoreboard_date != date_str:
+                self.log.info(
+                    "scoreboard_date_mismatch",
+                    expected=date_str,
+                    scoreboard=scoreboard_date,
+                )
+                return []
+
+            games = data.get("games", [])
+            result = [
+                {
+                    "game_id": g.get("gameId"),
+                    "game_status": g.get("gameStatus", 1),
+                    "period": g.get("period", 0),
+                    "game_clock": g.get("gameClock", ""),
+                }
+                for g in games
+                if g.get("gameId")
+            ]
+
+            self.log.info("scoreboard_games_complete", game_count=len(result))
+            return result
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                raise NetworkError(f"NBA live API timeout: {e}")
+            if "connection" in error_str:
+                raise NetworkError(f"NBA live API connection error: {e}")
+            raise
+
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @nba_api_circuit
+    def get_live_box_score(self, game_id: str) -> dict | None:
+        """
+        Fetch the live box score for a specific game.
+
+        Returns the full game dict from NBA's live BoxScore endpoint, which
+        contains homeTeam.players[] and awayTeam.players[] with statistics
+        sub-dicts per player.
+
+        Args:
+            game_id: NBA game ID (e.g. "0022501234")
+
+        Returns:
+            Game dict with homeTeam/awayTeam player arrays, or None if not found
+        """
+        from nba_api.live.nba.endpoints import boxscore as live_boxscore
+
+        self.log.debug("live_box_score_start", game_id=game_id)
+
+        try:
+            board = live_boxscore.BoxScore(game_id)
+            game = board.get_dict().get("game")
+
+            if not game:
+                self.log.warning("live_box_score_empty", game_id=game_id)
+                return None
+
+            self.log.debug("live_box_score_complete", game_id=game_id)
+            return game
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                raise NetworkError(f"NBA live BoxScore timeout: {e}")
+            if "connection" in error_str:
+                raise NetworkError(f"NBA live BoxScore connection error: {e}")
+            if "404" in error_str or "not found" in error_str:
+                self.log.warning("live_box_score_not_found", game_id=game_id)
+                return None
+            raise
+
     def get_all_player_ids(self, season: str | None = None) -> list[int]:
         """
         Get all active player IDs for a season.

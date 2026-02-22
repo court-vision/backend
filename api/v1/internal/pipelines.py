@@ -31,6 +31,8 @@ from schemas.pipeline import (
     PipelineJobInfo,
     PipelineJobDetail,
     PipelineJobResult,
+    LiveStatsResponse,
+    LiveStatsData,
 )
 from schemas.common import ApiStatus
 
@@ -261,6 +263,117 @@ async def trigger_lineup_alerts(
         status=result.status,
         message=result.message,
         data=result,
+    )
+
+
+@router.post("/live-stats", response_model=LiveStatsResponse)
+async def trigger_live_stats(
+    _: str = Security(verify_pipeline_token),
+) -> LiveStatsResponse:
+    """
+    Trigger the live game stats pipeline.
+
+    Called every ~60 seconds by the cron-runner's live loop. Self-gates
+    against the game schedule — returns immediately (no-op) if no games
+    are scheduled today or if we're more than 15 minutes before tip-off.
+
+    The all_games_complete field in the response signals the cron-runner
+    loop to exit once all games for the day are final.
+
+    Safe to call frequently — runs in milliseconds when outside game window.
+    """
+    import time
+    from datetime import datetime, timedelta
+
+    import pytz
+
+    from db.models.nba.games import Game
+    from pipelines.extractors.nba_api import NBAApiExtractor
+    from pipelines.live_game_stats import LiveGameStatsPipeline
+
+    start_time = time.monotonic()
+    eastern = pytz.timezone("US/Eastern")
+    now_et = datetime.now(eastern)
+
+    # ET-based NBA date (before 6am = still yesterday's game date)
+    if now_et.hour < 6:
+        game_date = (now_et - timedelta(days=1)).date()
+    else:
+        game_date = now_et.date()
+
+    # Check if there are any games today
+    games_today = Game.get_games_on_date(game_date)
+    if not games_today:
+        log.info("live_stats_no_games", game_date=str(game_date))
+        return LiveStatsResponse(
+            status=ApiStatus.SUCCESS,
+            message=f"No games scheduled for {game_date}",
+            data=LiveStatsData(
+                pipeline_name="live_game_stats",
+                status="skipped",
+                games_total=0,
+                all_games_complete=True,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+            ),
+        )
+
+    # Pre-tip-off gate: don't run until 15 min before first game
+    earliest_start = Game.get_earliest_game_time_on_date(game_date)
+    if earliest_start:
+        now_et_naive = now_et.replace(tzinfo=None)
+        earliest_dt = datetime.combine(game_date, earliest_start)
+        gate_dt = earliest_dt - timedelta(minutes=15)
+
+        if now_et_naive < gate_dt:
+            log.info(
+                "live_stats_pregame",
+                game_date=str(game_date),
+                earliest_start=str(earliest_start),
+                gate_time=str(gate_dt),
+                current_time=str(now_et_naive),
+            )
+            return LiveStatsResponse(
+                status=ApiStatus.SUCCESS,
+                message=f"Games haven't started yet. First tip-off at {earliest_start} ET.",
+                data=LiveStatsData(
+                    pipeline_name="live_game_stats",
+                    status="skipped",
+                    games_total=len(games_today),
+                    all_games_complete=False,
+                    duration_seconds=round(time.monotonic() - start_time, 3),
+                ),
+            )
+
+    # Run the pipeline
+    pipeline = LiveGameStatsPipeline()
+    result = await pipeline.run()
+
+    # Check if all games are final so the cron-runner knows when to exit
+    nba_extractor = NBAApiExtractor()
+    try:
+        all_complete = nba_extractor.check_all_games_final(game_date)
+    except Exception as e:
+        log.warning("live_stats_final_check_failed", error=str(e))
+        all_complete = False
+
+    log.info(
+        "live_stats_triggered",
+        game_date=str(game_date),
+        records_processed=result.records_processed or 0,
+        all_games_complete=all_complete,
+    )
+
+    return LiveStatsResponse(
+        status=result.status,
+        message=result.message,
+        data=LiveStatsData(
+            pipeline_name="live_game_stats",
+            status=result.status,
+            records_processed=result.records_processed or 0,
+            games_total=len(games_today),
+            all_games_complete=all_complete,
+            duration_seconds=result.duration_seconds,
+        ),
     )
 
 

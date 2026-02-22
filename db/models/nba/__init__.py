@@ -14,6 +14,7 @@ from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.games import Game
 from db.models.nba.player_injuries import PlayerInjury
+from db.models.nba.live_player_stats import LivePlayerStats
 
 __all__ = [
     # Dimension tables
@@ -28,4 +29,6 @@ __all__ = [
     "PlayerAdvancedStats",
     "Game",
     "PlayerInjury",
+    # Live data
+    "LivePlayerStats",
 ]

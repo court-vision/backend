@@ -67,10 +67,11 @@ def calculate_fantasy_points(stats: PlayerStats) -> int:
 
 def minutes_to_int(min_str: Union[str, int, float, None]) -> int:
     """
-    Convert minutes from MM:SS format or float to integer minutes.
+    Convert minutes to an integer from various formats.
 
-    Handles various formats from different data sources:
-    - String "34:56" -> 34
+    Handles:
+    - ISO 8601 duration "PT34M56.00S" -> 34  (nba_api live BoxScore format)
+    - String "34:56" -> 34                    (nba_api stats format)
     - Float 34.5 -> 34
     - Int 34 -> 34
     - None -> 0
@@ -82,6 +83,8 @@ def minutes_to_int(min_str: Union[str, int, float, None]) -> int:
         Integer minutes (truncated, not rounded)
 
     Examples:
+        >>> minutes_to_int("PT34M56.00S")
+        34
         >>> minutes_to_int("34:56")
         34
         >>> minutes_to_int(34.5)
@@ -89,14 +92,26 @@ def minutes_to_int(min_str: Union[str, int, float, None]) -> int:
         >>> minutes_to_int(None)
         0
     """
+    import re
+
     if min_str is None:
         return 0
 
     if isinstance(min_str, (int, float)):
         return int(min_str)
 
-    if ":" in str(min_str):
-        parts = str(min_str).split(":")
+    s = str(min_str)
+
+    # ISO 8601 duration format: "PT18M00.00S" (from nba_api live BoxScore)
+    if s.startswith("PT"):
+        match = re.match(r"PT(\d+)M", s)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    # MM:SS format: "34:56" (from nba_api stats endpoints)
+    if ":" in s:
+        parts = s.split(":")
         return int(parts[0])
 
     try:
