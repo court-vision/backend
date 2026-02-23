@@ -398,6 +398,10 @@ class NBAApiExtractor(BaseExtractor):
                     "game_status": g.get("gameStatus", 1),
                     "period": g.get("period", 0),
                     "game_clock": g.get("gameClock", ""),
+                    "home_team": g.get("homeTeam", {}).get("teamTricode", ""),
+                    "away_team": g.get("awayTeam", {}).get("teamTricode", ""),
+                    "home_score": g.get("homeTeam", {}).get("score"),
+                    "away_score": g.get("awayTeam", {}).get("score"),
                 }
                 for g in games
                 if g.get("gameId")
