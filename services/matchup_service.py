@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.team_service import TeamService
+from services.schedule_service import get_current_matchup as _get_schedule_matchup
 from schemas.matchup import (
     MatchupResp,
     MatchupScoreHistoryResp,
@@ -98,14 +99,46 @@ class MatchupService:
         # Today's NBA game date (before 6am ET = yesterday)
         eastern = pytz.timezone("US/Eastern")
         now_et = datetime.now(eastern)
-        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+        today_et = now_et.date()
+        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else today_et
 
-        # Single DB query for live stats across both rosters, matched by normalized name
-        all_names = [
-            p.name for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
-        ]
-        live_stats_list = LiveStatsModel.get_live_stats_by_names(all_names, game_date)
-        name_to_live = {stat.player.name_normalized: stat for stat in live_stats_list}
+        espn_matchup_period = matchup.data.matchup_period
+
+        # Use daily_matchup_scores as the canonical baseline (settled, authoritative).
+        # Fall back to ESPN's totalPoints if the pipeline hasn't run yet for this period.
+        baseline = (
+            DailyMatchupScore
+            .select()
+            .where(
+                (DailyMatchupScore.team_id == team_id) &
+                (DailyMatchupScore.matchup_period == espn_matchup_period)
+            )
+            .order_by(DailyMatchupScore.date.desc())
+            .first()
+        )
+
+        your_base = float(baseline.current_score) if baseline else matchup.data.your_team.current_score
+        opponent_base = float(baseline.opponent_current_score) if baseline else matchup.data.opponent_team.current_score
+
+        # Guard: only overlay live stats when both conditions hold:
+        # A) game_date falls within the current ESPN matchup week (prevents old-week bleed at boundary)
+        # B) today's pipeline snapshot doesn't already exist (prevents double-counting completed games)
+        schedule_matchup = _get_schedule_matchup(game_date)
+        week_matches = (
+            schedule_matchup is not None
+            and schedule_matchup["matchup_number"] == espn_matchup_period
+        )
+        baseline_is_today = baseline is not None and baseline.date == today_et
+        include_live = week_matches and not baseline_is_today
+
+        if include_live:
+            all_names = [
+                p.name for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
+            ]
+            live_stats_list = LiveStatsModel.get_live_stats_by_names(all_names, game_date)
+            name_to_live = {stat.player.name_normalized: stat for stat in live_stats_list}
+        else:
+            name_to_live = {}
 
         def build_live_roster(roster) -> list[LiveMatchupPlayer]:
             result = []
@@ -131,11 +164,11 @@ class MatchupService:
                 result.append(LiveMatchupPlayer(**p.model_dump(), live=live_overlay))
             return result
 
-        def compute_live_score(espn_base: float, live_roster: list[LiveMatchupPlayer]) -> float:
+        def compute_live_score(base: float, live_roster: list[LiveMatchupPlayer]) -> float:
             """
-            ESPN's totalPoints (mSchedule) is batch-processed and doesn't include
-            today's in-progress or recently completed games. Add today's live fpts
-            for active roster players (not BE/IR) on top of the ESPN base score.
+            Add today's live fpts for active roster players (not BE/IR) on top of
+            the pipeline baseline score. With name_to_live={}, today_fpts=0 and base
+            is returned unchanged (covers the freeze / pipeline-already-ran cases).
             """
             today_fpts = sum(
                 p.live.live_fpts
@@ -144,7 +177,7 @@ class MatchupService:
                 and p.live is not None
                 and p.live.game_status >= 2
             )
-            return round(espn_base + today_fpts, 2)
+            return round(base + today_fpts, 2)
 
         your_live_roster = build_live_roster(matchup.data.your_team.roster)
         opponent_live_roster = build_live_roster(matchup.data.opponent_team.roster)
@@ -152,14 +185,14 @@ class MatchupService:
         your_team = LiveMatchupTeam(
             team_name=matchup.data.your_team.team_name,
             team_id=matchup.data.your_team.team_id,
-            current_score=compute_live_score(matchup.data.your_team.current_score, your_live_roster),
+            current_score=compute_live_score(your_base, your_live_roster),
             projected_score=matchup.data.your_team.projected_score,
             roster=your_live_roster,
         )
         opponent_team = LiveMatchupTeam(
             team_name=matchup.data.opponent_team.team_name,
             team_id=matchup.data.opponent_team.team_id,
-            current_score=compute_live_score(matchup.data.opponent_team.current_score, opponent_live_roster),
+            current_score=compute_live_score(opponent_base, opponent_live_roster),
             projected_score=matchup.data.opponent_team.projected_score,
             roster=opponent_live_roster,
         )

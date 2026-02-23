@@ -43,6 +43,11 @@ class PipelineConfig:
     # Dependencies (other pipeline names that must complete first)
     depends_on: tuple[str, ...] = field(default_factory=tuple)
 
+    # If True, this pipeline is excluded from the post-game batch run.
+    # Use for pipelines whose data source (e.g. ESPN matchup rollover) isn't
+    # ready immediately after games end and needs its own cron schedule.
+    post_game_excluded: bool = False
+
     def __post_init__(self):
         """Validate configuration."""
         if not self.name:

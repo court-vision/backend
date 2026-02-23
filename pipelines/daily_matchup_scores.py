@@ -35,6 +35,9 @@ class DailyMatchupScoresPipeline(BasePipeline):
         display_name="Daily Matchup Scores",
         description="Fetches current matchup scores for all saved teams",
         target_table="stats_s2.daily_matchup_score",
+        # ESPN matchup data isn't ready immediately after games end — it rolls over
+        # later in the morning. Run via a dedicated 10am ET cron instead.
+        post_game_excluded=True,
     )
 
     def __init__(self):
@@ -129,6 +132,11 @@ class DailyMatchupScoresPipeline(BasePipeline):
                     error=str(e),
                 )
                 continue
+
+        if teams and ctx.records_processed == 0:
+            raise RuntimeError(
+                f"0 of {len(teams)} teams processed — ESPN/Yahoo API may be unavailable or returning no matchup data"
+            )
 
     def _fetch_espn_matchup(
         self,

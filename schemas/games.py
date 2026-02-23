@@ -20,6 +20,7 @@ class GameInfo(BaseModel):
     arena: Optional[str] = Field(None, description="Arena name")
     period: Optional[int] = Field(None, description="Current period (null if not started)")
     game_clock: Optional[str] = Field(None, description="Remaining time in period (ISO 8601 duration, null if not live)")
+    start_time_et: Optional[str] = Field(None, description="Scheduled tip-off time in ET (HH:MM format)")
 
 
 class GamesOnDateData(BaseModel):

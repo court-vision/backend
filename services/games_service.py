@@ -61,6 +61,7 @@ class GamesService:
                         arena=g.arena,
                         period=None,
                         game_clock=None,
+                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
                     )
                     for g in games
                 ]
@@ -87,6 +88,7 @@ class GamesService:
                                 arena=g.arena,
                                 period=live_by_id[g.game_id]["period"] if g.game_id in live_by_id else None,
                                 game_clock=live_by_id[g.game_id]["game_clock"] if g.game_id in live_by_id else None,
+                                start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
                             )
                             for g in games
                         ]

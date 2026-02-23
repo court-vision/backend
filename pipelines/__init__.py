@@ -42,6 +42,12 @@ PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     "player_profiles": PlayerProfilesPipeline,
 }
 
+# Pipelines included in the post-game batch run (excludes post_game_excluded ones)
+POST_GAME_PIPELINE_NAMES: list[str] = [
+    name for name, cls in PIPELINE_REGISTRY.items()
+    if not cls.config.post_game_excluded
+]
+
 # Notification pipelines - separate from PIPELINE_REGISTRY so they
 # don't run in run_all_pipelines(). Triggered independently.
 from pipelines.lineup_alerts import LineupAlertsPipeline
@@ -156,6 +162,7 @@ __all__ = [
     "LineupAlertsPipeline",
     # Registry functions
     "PIPELINE_REGISTRY",
+    "POST_GAME_PIPELINE_NAMES",
     "NOTIFICATION_PIPELINE_REGISTRY",
     "get_pipeline",
     "run_pipeline",

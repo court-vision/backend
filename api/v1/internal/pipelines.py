@@ -22,7 +22,7 @@ from core.job_manager import (
 )
 from core.logging import get_logger
 from core.pipeline_auth import verify_pipeline_token
-from pipelines import run_pipeline, run_all_pipelines, list_pipelines, PIPELINE_REGISTRY
+from pipelines import run_pipeline, run_all_pipelines, list_pipelines, PIPELINE_REGISTRY, POST_GAME_PIPELINE_NAMES
 from schemas.pipeline import (
     PipelineResponse,
     AllPipelinesResponse,
@@ -241,13 +241,12 @@ async def trigger_post_game(
         dedup_run = PipelineRun.start_run(dedup_key)
         dedup_run.mark_success()
 
-    # All gates pass (or bypassed) — trigger pipelines
+    # All gates pass (or bypassed) — trigger pipelines (excludes post_game_excluded ones)
     job_manager = get_job_manager()
-    pipeline_count = len(PIPELINE_REGISTRY)
-    job = await job_manager.create_job(pipeline_count)
+    job = await job_manager.create_job(len(POST_GAME_PIPELINE_NAMES))
 
     target_date = date or nba_date
-    asyncio.create_task(_run_pipelines_background(job.job_id, date_override=target_date if date else None))
+    asyncio.create_task(_run_pipelines_background(job.job_id, date_override=target_date if date else None, pipeline_names=POST_GAME_PIPELINE_NAMES))
 
     log.info(
         "post_game_triggered",
@@ -557,14 +556,15 @@ async def get_job_status(
     )
 
 
-async def _run_pipelines_background(job_id: str, date_override: Optional[date] = None) -> None:
+async def _run_pipelines_background(job_id: str, date_override: Optional[date] = None, pipeline_names: Optional[list[str]] = None) -> None:
     """
-    Run all pipelines in the background and update job status.
+    Run pipelines in the background and update job status.
 
     This function is spawned as a background task and runs independently.
+    pipeline_names: subset of PIPELINE_REGISTRY to run; defaults to all.
     """
     job_manager = get_job_manager()
-    pipeline_names = list(PIPELINE_REGISTRY.keys())
+    pipeline_names = pipeline_names if pipeline_names is not None else list(PIPELINE_REGISTRY.keys())
 
     log.info("background_job_starting", job_id=job_id, pipelines=pipeline_names, date_override=str(date_override) if date_override else None)
 
