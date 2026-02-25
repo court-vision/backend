@@ -99,8 +99,7 @@ class MatchupService:
         # Today's NBA game date (before 6am ET = yesterday)
         eastern = pytz.timezone("US/Eastern")
         now_et = datetime.now(eastern)
-        today_et = now_et.date()
-        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else today_et
+        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
 
         espn_matchup_period = matchup.data.matchup_period
 
@@ -120,16 +119,23 @@ class MatchupService:
         your_base = float(baseline.current_score) if baseline else matchup.data.your_team.current_score
         opponent_base = float(baseline.opponent_current_score) if baseline else matchup.data.opponent_team.current_score
 
-        # Guard: only overlay live stats when both conditions hold:
-        # A) game_date falls within the current ESPN matchup week (prevents old-week bleed at boundary)
-        # B) today's pipeline snapshot doesn't already exist (prevents double-counting completed games)
+        # Guard: only overlay live stats when game_date falls within the current ESPN matchup week.
+        # This prevents old-week bleed at the week boundary.
+        #
+        # NOTE: We do NOT gate on whether a today-dated pipeline snapshot exists. The
+        # DailyMatchupScoresPipeline runs at 10am ET (before any games start), so a
+        # baseline.date == today simply means "the morning snapshot ran" — it does NOT
+        # mean today's games are already counted in ESPN's totalPoints. Blocking on that
+        # check causes live stats to be suppressed all evening.
+        # Double-counting is not a risk because compute_live_score queries live_player_stats
+        # filtered to game_date == today, so yesterday's settled games (already in the base)
+        # are never re-added.
         schedule_matchup = _get_schedule_matchup(game_date)
         week_matches = (
             schedule_matchup is not None
             and schedule_matchup["matchup_number"] == espn_matchup_period
         )
-        baseline_is_today = baseline is not None and baseline.date == today_et
-        include_live = week_matches and not baseline_is_today
+        include_live = week_matches
 
         if include_live:
             all_names = [
