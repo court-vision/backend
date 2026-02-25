@@ -8,9 +8,10 @@ No authentication required.
 from datetime import datetime, timedelta, date
 
 import pytz
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from core.logging import get_logger
+from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from db.models.nba.live_player_stats import LivePlayerStats
 from db.models.nba.players import Player
 from pipelines.extractors.nba_api import NBAApiExtractor
@@ -29,7 +30,8 @@ def _get_nba_date() -> date:
 
 
 @router.get("/players/today")
-async def get_live_players_today() -> dict:
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_live_players_today(request: Request) -> dict:
     """
     Get live stats for all players with games today.
 
@@ -88,7 +90,8 @@ async def get_live_players_today() -> dict:
 
 
 @router.get("/schedule/today")
-async def get_today_schedule() -> dict:
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_today_schedule(request: Request) -> dict:
     """
     Get game scheduling info for today's live polling.
 
@@ -147,7 +150,8 @@ async def get_today_schedule() -> dict:
 
 
 @router.get("/scoreboard")
-async def get_live_scoreboard() -> dict:
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_live_scoreboard(request: Request) -> dict:
     """
     Get the current NBA scoreboard with live game statuses.
 
