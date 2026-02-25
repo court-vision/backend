@@ -29,7 +29,7 @@ async def list_players(
     team: Optional[str] = Query(None, description="Filter by team abbreviation (e.g., LAL)"),
     position: Optional[str] = Query(None, description="Filter by position (G, F, C)"),
     min_games: Optional[int] = Query(None, ge=1, description="Minimum games played"),
-    search: Optional[str] = Query(None, description="Search by player name"),
+    name: Optional[str] = Query(None, description="Search by player name"),
     limit: int = Query(50, ge=1, le=100, description="Maximum results"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ) -> PlayersListResp:
@@ -38,7 +38,7 @@ async def list_players(
         team=team,
         position=position,
         min_games=min_games,
-        search=search,
+        name=name,
         limit=limit,
         offset=offset,
     )

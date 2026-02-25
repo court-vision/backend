@@ -17,7 +17,7 @@ class PlayersListService:
         team: str | None = None,
         position: str | None = None,
         min_games: int | None = None,
-        search: str | None = None,
+        name: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> PlayersListResp:
@@ -71,7 +71,7 @@ class PlayersListService:
 
             # Apply filters
             if team:
-                query = query.where(PlayerSeasonStats.team == team.upper())
+                query = query.where(PlayerSeasonStats.team_id == team.upper())
 
             if position:
                 query = query.where(Player.position.contains(position.upper()))
@@ -79,9 +79,9 @@ class PlayersListService:
             if min_games:
                 query = query.where(PlayerSeasonStats.gp >= min_games)
 
-            if search:
-                search_normalized = search.lower().strip()
-                query = query.where(Player.name_normalized.contains(search_normalized))
+            if name:
+                name_normalized = name.lower().strip()
+                query = query.where(Player.name_normalized.contains(name_normalized))
 
             # Get total count before pagination
             total = query.count()
