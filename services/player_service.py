@@ -1,3 +1,4 @@
+import math
 import unicodedata
 from typing import Optional
 from datetime import date, timedelta
@@ -335,6 +336,65 @@ class PlayerService:
                 result[espn_id] = round(total_fpts / len(games), 1)
             else:
                 result[espn_id] = None
+
+        return result
+
+    @staticmethod
+    def get_recent_weighted_avg_batch(
+        espn_ids: list[int],
+        days: int = 14,
+        half_life: int = 7
+    ) -> dict[int, Optional[float]]:
+        """
+        Get exponentially decay-weighted recent FPTS averages for multiple players.
+
+        More recent games are weighted higher than older ones. A game played
+        `half_life` days ago receives half the weight of a game played today.
+
+        Args:
+            espn_ids: List of ESPN player IDs.
+            days: Lookback window in days (default 14).
+            half_life: Decay half-life in days (default 7 — week-old game = 0.5x weight).
+
+        Returns:
+            Dict mapping espn_id to weighted average FPTS (or None if no recent games).
+        """
+        if not espn_ids:
+            return {}
+
+        today = date.today()
+        cutoff_date = today - timedelta(days=days)
+        decay_rate = math.log(2) / half_life
+
+        query = (
+            PlayerGameStats.select(PlayerGameStats, Player.espn_id)
+            .join(Player, on=(PlayerGameStats.player_id == Player.id))
+            .where(
+                (Player.espn_id.in_(espn_ids)) &
+                (PlayerGameStats.game_date >= cutoff_date)
+            )
+        )
+
+        player_games: dict[int, list] = {eid: [] for eid in espn_ids}
+        for game in query:
+            espn_id = game.player.espn_id
+            if espn_id in player_games:
+                player_games[espn_id].append(game)
+
+        result = {}
+        for espn_id in espn_ids:
+            games = player_games[espn_id]
+            if not games:
+                result[espn_id] = None
+                continue
+            weighted_sum = 0.0
+            weight_total = 0.0
+            for g in games:
+                days_ago = (today - g.game_date).days
+                weight = math.exp(-decay_rate * days_ago)
+                weighted_sum += g.fpts * weight
+                weight_total += weight
+            result[espn_id] = round(weighted_sum / weight_total, 1) if weight_total > 0 else None
 
         return result
 

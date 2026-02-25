@@ -1,7 +1,9 @@
+import asyncio
 import hashlib
 import requests
 from schemas.lineup import LineupInfo, SlimGene, SlimPlayer
 from services.espn_service import EspnService
+from services.player_service import PlayerService
 from services.team_service import TeamService
 from schemas.espn import PlayerResp, TeamDataResp
 from schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp,GenerateLineupResp
@@ -13,7 +15,7 @@ import json
 class LineupService:
 
     @staticmethod
-    async def generate_lineup(user_id: int, team_id: int, streaming_slots: int, week: int):
+    async def generate_lineup(user_id: int, team_id: int, streaming_slots: int, week: int, avg_mode: str = "season"):
         try:
             # Get the league info
             league_info = Team.select(Team.league_info).where(Team.user_id == user_id).where(Team.team_id == team_id).get().league_info
@@ -28,6 +30,18 @@ class LineupService:
 
             roster_data: list[PlayerResp] = team_data_resp.data
             free_agent_data: list[PlayerResp] = free_agent_data_resp.data
+
+            # Override avg_points with decay-weighted recent average when requested
+            if avg_mode == "recent":
+                all_players = roster_data + free_agent_data
+                espn_ids = [p.player_id for p in all_players]
+                weighted_avgs = await asyncio.to_thread(
+                    PlayerService.get_recent_weighted_avg_batch, espn_ids
+                )
+                for player in all_players:
+                    recent = weighted_avgs.get(player.player_id)
+                    if recent is not None:
+                        player.avg_points = recent
 
             # Call Go server to generate the lineup
             lineup_resp: GenerateLineupResp = await LineupService.generate_lineup_v2(roster_data, free_agent_data, streaming_slots, week)

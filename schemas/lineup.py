@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 from .common import BaseRequest, BaseResponse, LineupResponse
 
 # ------------------------------- Lineup Models ------------------------------- #
@@ -31,6 +31,7 @@ class GenerateLineupReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
     streaming_slots: int = Field(ge=1, le=10, description="Number of roster spots to use for streaming")
     week: int = Field(ge=1, description="Week must be positive")
+    avg_mode: Literal["season", "recent"] = Field(default="season", description="FPTS averaging mode: season avg or decay-weighted last-14-day avg")
 
 class SaveLineupReq(BaseRequest):
     team_id: int = Field(ge=0, description="Team ID must be non-negative")

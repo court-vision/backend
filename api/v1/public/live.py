@@ -52,6 +52,7 @@ async def get_live_players_today(request: Request) -> dict:
 
     players = [
         {
+            "espn_id": row.player.espn_id,
             "player_id": row.player_id,
             "player_name": row.player.name,
             "game_id": row.game_id,
