@@ -22,6 +22,7 @@ from pipelines.game_schedule import GameSchedulePipeline
 from pipelines.game_start_times import GameStartTimesPipeline
 from pipelines.injury_report import InjuryReportPipeline
 from pipelines.player_rolling_stats import PlayerRollingStatsPipeline
+from pipelines.team_stats import TeamStatsPipeline
 from schemas.pipeline import PipelineResult
 from schemas.common import ApiStatus
 
@@ -36,6 +37,8 @@ PIPELINE_REGISTRY: dict[str, Type[BasePipeline]] = {
     "daily_matchup_scores": DailyMatchupScoresPipeline,
     # Rolling averages (depends on player_game_stats)
     "player_rolling_stats": PlayerRollingStatsPipeline,
+    # Team stats (independent of player pipelines)
+    "team_stats": TeamStatsPipeline,
     # Extended data pipelines
     "player_advanced_stats": PlayerAdvancedStatsPipeline,
     "game_schedule": GameSchedulePipeline,
@@ -158,6 +161,8 @@ __all__ = [
     "DailyMatchupScoresPipeline",
     # Rolling averages
     "PlayerRollingStatsPipeline",
+    # Team stats
+    "TeamStatsPipeline",
     # Extended data pipelines
     "PlayerOwnershipPipeline",
     "AdvancedStatsPipeline",

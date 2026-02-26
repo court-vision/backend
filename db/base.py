@@ -40,6 +40,7 @@ def init_db():
         PlayerSeasonStats,
         PlayerOwnership,
         PlayerRollingStats,
+        TeamStats,
         PlayerProfile,
         PlayerAdvancedStats,
         Game,
@@ -64,6 +65,8 @@ def init_db():
         PipelineRun,
         # NBA schema - dimension tables
         Player, NBATeam,
+        # NBA schema - team stats (FK to NBATeam)
+        TeamStats,
         # NBA schema - fact/aggregate tables
         PlayerGameStats, PlayerSeasonStats, PlayerOwnership, PlayerRollingStats,
         # NBA schema - extended data tables

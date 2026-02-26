@@ -469,6 +469,62 @@ class NBAApiExtractor(BaseExtractor):
                 return None
             raise
 
+    @with_retry(
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
+    )
+    @nba_api_circuit
+    def get_team_stats(self, season: str | None = None) -> list[dict]:
+        """
+        Fetch team stats from NBA API combining advanced and base measures.
+
+        Makes two API calls — one for advanced efficiency metrics (OFF_RATING,
+        DEF_RATING, NET_RATING, PACE, TS_PCT, etc.) and one for base per-game
+        counting stats (PTS, REB, AST, STL, BLK, TOV, shooting percentages).
+        Results are merged by TEAM_ABBREVIATION into one dict per team.
+
+        Args:
+            season: Season string like "2025-26" (defaults to settings.nba_season)
+
+        Returns:
+            List of 30 team dicts with both advanced and base stats merged
+        """
+        from nba_api.stats.endpoints import leaguedashteamstats
+
+        season = season or settings.nba_season
+        self.log.debug("team_stats_start", season=season)
+
+        try:
+            adv = leaguedashteamstats.LeagueDashTeamStats(
+                season=season,
+                measure_type_detailed_defense="Advanced",
+                per_mode_detailed="Totals",
+            ).get_normalized_dict()["LeagueDashTeamStats"]
+
+            base = leaguedashteamstats.LeagueDashTeamStats(
+                season=season,
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="PerGame",
+            ).get_normalized_dict()["LeagueDashTeamStats"]
+
+            base_map = {row["TEAM_ABBREVIATION"]: row for row in base}
+            merged = [
+                {**base_map.get(row["TEAM_ABBREVIATION"], {}), **row}
+                for row in adv
+            ]
+
+            self.log.info("team_stats_complete", team_count=len(merged))
+            return merged
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                raise NetworkError(f"NBA API timeout: {e}")
+            if "connection" in error_str:
+                raise NetworkError(f"NBA API connection error: {e}")
+            raise
+
     def get_all_player_ids(self, season: str | None = None) -> list[int]:
         """
         Get all active player IDs for a season.
