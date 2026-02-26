@@ -15,6 +15,7 @@ from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.games import Game
 from db.models.nba.player_injuries import PlayerInjury
 from db.models.nba.live_player_stats import LivePlayerStats
+from db.models.nba.player_rolling_stats import PlayerRollingStats
 
 __all__ = [
     # Dimension tables
@@ -24,6 +25,7 @@ __all__ = [
     "PlayerGameStats",
     "PlayerSeasonStats",
     "PlayerOwnership",
+    "PlayerRollingStats",
     # Extended data tables
     "PlayerProfile",
     "PlayerAdvancedStats",

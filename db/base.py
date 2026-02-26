@@ -39,6 +39,7 @@ def init_db():
         PlayerGameStats,
         PlayerSeasonStats,
         PlayerOwnership,
+        PlayerRollingStats,
         PlayerProfile,
         PlayerAdvancedStats,
         Game,
@@ -64,7 +65,7 @@ def init_db():
         # NBA schema - dimension tables
         Player, NBATeam,
         # NBA schema - fact/aggregate tables
-        PlayerGameStats, PlayerSeasonStats, PlayerOwnership,
+        PlayerGameStats, PlayerSeasonStats, PlayerOwnership, PlayerRollingStats,
         # NBA schema - extended data tables
         PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
         # NBA schema - live data
