@@ -252,7 +252,7 @@ async def trigger_post_game(
         "post_game_triggered",
         nba_date=str(target_date),
         job_id=job.job_id,
-        pipeline_count=pipeline_count,
+        pipeline_count=len(POST_GAME_PIPELINE_NAMES),
         forced=force,
     )
 
