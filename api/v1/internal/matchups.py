@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from services.user_sync_service import UserSyncService
-from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp
+from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp
 from core.clerk_auth import get_current_user
 
 
@@ -90,3 +90,26 @@ async def get_matchup_score_history(
     the score progression over time.
     """
     return await MatchupService.get_score_history(team_id, matchup_period)
+
+
+@router.get('/daily/{team_id}', response_model=DailyMatchupResp)
+async def get_daily_matchup(
+    team_id: int,
+    date: str = Query(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="Target date in YYYY-MM-DD format"
+    ),
+    current_user: dict = Depends(get_current_user)
+) -> DailyMatchupResp:
+    """
+    Get daily drill-down for a matchup day.
+
+    For past dates: returns player box score stats from player_game_stats.
+    For future dates: returns which players have games scheduled.
+    For today: returns stats so far (frontend should prefer live endpoint).
+    """
+    from datetime import date as date_type
+    user_id = _get_user_id(current_user)
+    target_date = date_type.fromisoformat(date)
+    return await MatchupService.get_daily_matchup(user_id, team_id, target_date)

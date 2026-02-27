@@ -125,3 +125,68 @@ class LiveMatchupData(BaseModel):
 
 class LiveMatchupResp(BaseResponse):
     data: Optional[LiveMatchupData] = None
+
+
+# ------------------------------- Daily Matchup Models ------------------------------- #
+
+class DailyMatchupPlayerStats(BaseModel):
+    """Player stats for a single past day. No lineup_slot since we don't snapshot rosters."""
+    player_id: int                             # ESPN player ID (from roster)
+    name: str
+    team: str                                  # NBA team abbreviation
+    position: str
+    nba_player_id: Optional[int] = None        # Resolved NBA player ID
+    had_game: bool                             # Whether their team had a game that day
+    fpts: Optional[int] = None
+    pts: Optional[int] = None
+    reb: Optional[int] = None
+    ast: Optional[int] = None
+    stl: Optional[int] = None
+    blk: Optional[int] = None
+    tov: Optional[int] = None
+    min: Optional[int] = None
+    fgm: Optional[int] = None
+    fga: Optional[int] = None
+    fg3m: Optional[int] = None
+    fg3a: Optional[int] = None
+    ftm: Optional[int] = None
+    fta: Optional[int] = None
+
+
+class DailyMatchupFuturePlayer(BaseModel):
+    """Player info for a future day. Shows whether they have a game."""
+    player_id: int
+    name: str
+    team: str
+    position: str
+    has_game: bool
+    opponent: Optional[str] = None             # e.g., "vs LAL" or "@ BOS"
+    game_time_et: Optional[str] = None         # e.g., "19:30"
+    injured: bool
+    injury_status: Optional[str] = None
+
+
+class DailyMatchupTeam(BaseModel):
+    """Team data for a daily matchup view."""
+    team_name: str
+    team_id: int
+    total_fpts: Optional[float] = None         # Sum of roster fpts (past days only)
+    roster: list[DailyMatchupPlayerStats] | list[DailyMatchupFuturePlayer]
+
+
+class DailyMatchupData(BaseModel):
+    """Response data for daily matchup drill-down."""
+    date: str                                  # ISO date string (YYYY-MM-DD)
+    day_type: str                              # "past", "today", "future"
+    day_of_week: str                           # "Mon", "Tue", etc.
+    day_index: int                             # 0-indexed from matchup start
+    matchup_period: int
+    matchup_period_start: str
+    matchup_period_end: str
+    your_team: DailyMatchupTeam
+    opponent_team: DailyMatchupTeam
+
+
+class DailyMatchupResp(BaseResponse):
+    """Response containing daily matchup drill-down data."""
+    data: Optional[DailyMatchupData] = None
