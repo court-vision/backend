@@ -207,6 +207,31 @@ class LivePlayerStats(BaseModel):
         )
 
     @classmethod
+    def get_live_stats_by_espn_ids(
+        cls,
+        espn_ids: list[int],
+        game_date,
+    ) -> list["LivePlayerStats"]:
+        """
+        Get live stats for players matching a list of ESPN player IDs on a given date.
+
+        Args:
+            espn_ids: List of ESPN player IDs (from fantasy roster)
+            game_date: Date to query
+
+        Returns:
+            List of LivePlayerStats with Player pre-loaded via join
+        """
+        return list(
+            cls.select(cls, Player)
+            .join(Player)
+            .where(
+                (Player.espn_id.in_(espn_ids))
+                & (cls.game_date == game_date)
+            )
+        )
+
+    @classmethod
     def get_live_stats_by_names(
         cls,
         names: list[str],

@@ -144,18 +144,29 @@ class MatchupService:
         include_live = week_matches
 
         if include_live:
-            all_names = [
-                p.name for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
+            all_espn_ids = [
+                p.player_id for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
             ]
-            live_stats_list = LiveStatsModel.get_live_stats_by_names(all_names, game_date)
-            name_to_live = {stat.player.name_normalized: stat for stat in live_stats_list}
+            live_stats_list = LiveStatsModel.get_live_stats_by_espn_ids(all_espn_ids, game_date)
+            espn_id_to_live = {stat.player.espn_id: stat for stat in live_stats_list}
+
+            # Name-based fallback for players without espn_id mapping
+            unresolved_names = [
+                p.name for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
+                if p.player_id not in espn_id_to_live
+            ]
+            name_to_live: dict[str, object] = {}
+            if unresolved_names:
+                fallback_stats = LiveStatsModel.get_live_stats_by_names(unresolved_names, game_date)
+                name_to_live = {stat.player.name_normalized: stat for stat in fallback_stats}
         else:
+            espn_id_to_live = {}
             name_to_live = {}
 
         def build_live_roster(roster) -> list[LiveMatchupPlayer]:
             result = []
             for p in roster:
-                stat = name_to_live.get(p.name.lower().strip())
+                stat = espn_id_to_live.get(p.player_id) or name_to_live.get(p.name.lower().strip())
                 live_overlay = None
                 if stat:
                     live_overlay = PlayerLiveStats(
@@ -356,18 +367,32 @@ class MatchupService:
 
         day_index = (target_date - period_start).days
 
-        # 4. Resolve roster players → NBA player IDs
-        #    Use name-based matching (same approach as get_live_matchup_by_team_id).
-        #    espn_id in the players table is often NULL, so name matching is more reliable.
+        # 4. Resolve roster players → NBA player IDs via espn_id (primary)
+        #    with name-based fallback for any players missing espn_id mapping.
         all_roster = md.your_team.roster + md.opponent_team.roster
-        all_names = [p.name.lower().strip() for p in all_roster]
-        players_by_name = list(Player.select().where(
-            Player.name_normalized.in_(all_names)
+        espn_ids = [p.player_id for p in all_roster]
+        players_by_espn = list(Player.select().where(
+            Player.espn_id.in_(espn_ids)
         ))
-        name_to_nba = {p.name_normalized: p.id for p in players_by_name}
+        espn_to_nba = {p.espn_id: p.id for p in players_by_espn}
+
+        # Name-based fallback for players not resolved via espn_id
+        unresolved_names = [
+            p.name.lower().strip() for p in all_roster
+            if p.player_id not in espn_to_nba
+        ]
+        name_to_nba: dict[str, int] = {}
+        if unresolved_names:
+            players_by_name = list(Player.select().where(
+                Player.name_normalized.in_(unresolved_names)
+            ))
+            name_to_nba = {p.name_normalized: p.id for p in players_by_name}
 
         def resolve_nba_id(roster_player) -> int | None:
-            """Resolve a roster player to an NBA player ID by normalized name."""
+            """Resolve a roster player to an NBA player ID. ESPN ID first, then name."""
+            nba_id = espn_to_nba.get(roster_player.player_id)
+            if nba_id:
+                return nba_id
             return name_to_nba.get(roster_player.name.lower().strip())
 
         # 5. Get games on the target date

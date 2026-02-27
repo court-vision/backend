@@ -73,7 +73,7 @@ class ESPNExtractor(BaseExtractor):
         filters = {
             "players": {
                 "filterSlotIds": {"value": []},
-                "limit": 750,
+                "limit": 1500,
                 "sortPercOwned": {"sortPriority": 1, "sortAsc": False},
                 "sortDraftRanks": {
                     "sortPriority": 2,
