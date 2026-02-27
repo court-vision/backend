@@ -127,9 +127,10 @@ class MatchupService:
         # baseline.date == today simply means "the morning snapshot ran" — it does NOT
         # mean today's games are already counted in ESPN's totalPoints. Blocking on that
         # check causes live stats to be suppressed all evening.
-        # Double-counting is not a risk because compute_live_score queries live_player_stats
-        # filtered to game_date == today, so yesterday's settled games (already in the base)
-        # are never re-added.
+        # Double-counting prevention: compute_live_score only sums game_status == 2
+        # (in-progress). Final games (status 3) are already settled into the baseline
+        # via daily_matchup_scores and are excluded. The live pipeline also cleans up
+        # stale records from previous game days on each run.
         schedule_matchup = _get_schedule_matchup(game_date)
         week_matches = (
             schedule_matchup is not None
@@ -172,16 +173,18 @@ class MatchupService:
 
         def compute_live_score(base: float, live_roster: list[LiveMatchupPlayer]) -> float:
             """
-            Add today's live fpts for active roster players (not BE/IR) on top of
-            the pipeline baseline score. With name_to_live={}, today_fpts=0 and base
-            is returned unchanged (covers the freeze / pipeline-already-ran cases).
+            Add today's live fpts for in-progress roster players (not BE/IR) on
+            top of the pipeline baseline score. Only game_status == 2 (in-progress)
+            is counted — final games (status 3) are already settled into the
+            daily_matchup_scores baseline, so including them would double-count.
+            With name_to_live={}, today_fpts=0 and base is returned unchanged.
             """
             today_fpts = sum(
                 p.live.live_fpts
                 for p in live_roster
                 if p.lineup_slot not in ("BE", "IR")
                 and p.live is not None
-                and p.live.game_status >= 2
+                and p.live.game_status == 2
             )
             return round(base + today_fpts, 2)
 
