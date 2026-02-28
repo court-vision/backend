@@ -88,7 +88,7 @@ class BreakoutService:
             candidates.append(
                 BreakoutCandidateResp(
                     beneficiary=BreakoutBeneficiary(
-                        player_id=beneficiary_player.id,
+                        player_id=beneficiary_player.espn_id or beneficiary_player.id,
                         name=beneficiary_player.name,
                         team=team_abbrev,
                         position=beneficiary_player.position or "",
