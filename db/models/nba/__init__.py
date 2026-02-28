@@ -17,6 +17,7 @@ from db.models.nba.player_injuries import PlayerInjury
 from db.models.nba.live_player_stats import LivePlayerStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.team_stats import TeamStats
+from db.models.nba.breakout_candidates import BreakoutCandidate
 
 __all__ = [
     # Dimension tables
@@ -36,4 +37,6 @@ __all__ = [
     "PlayerInjury",
     # Live data
     "LivePlayerStats",
+    # Breakout detection
+    "BreakoutCandidate",
 ]

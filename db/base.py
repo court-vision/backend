@@ -46,6 +46,7 @@ def init_db():
         Game,
         PlayerInjury,
         LivePlayerStats,
+        BreakoutCandidate,
     )
 
     # Import notification models
@@ -73,6 +74,8 @@ def init_db():
         PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
         # NBA schema - live data
         LivePlayerStats,
+        # NBA schema - breakout detection
+        BreakoutCandidate,
         # User schema - notification tables
         NotificationPreference, NotificationLog, NotificationTeamPreference,
     ], safe=True)

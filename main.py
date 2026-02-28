@@ -14,7 +14,7 @@ from core.settings import settings
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db
 from api.v1.internal import auth, users, teams, lineups, espn, yahoo, matchups, streamers, notifications, api_keys
-from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public
+from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public, breakout as breakout_public
 
 
 async def lifespan(app: FastAPI):
@@ -52,6 +52,7 @@ app = FastAPI(
         {"name": "Rankings", "description": "Fantasy player rankings"},
         {"name": "Ownership", "description": "ESPN roster ownership trends"},
         {"name": "Analytics", "description": "Advanced analytics (API key required)"},
+        {"name": "Streamers", "description": "Streaming player recommendations including breakout candidates"},
     ],
 )
 
@@ -74,6 +75,7 @@ api_v1_public.include_router(ownership.router)
 api_v1_public.include_router(analytics.router)
 api_v1_public.include_router(schedule.router)
 api_v1_public.include_router(live_public.router)
+api_v1_public.include_router(breakout_public.router)
 
 app.include_router(api_v1_public)
 
