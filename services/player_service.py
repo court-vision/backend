@@ -15,6 +15,7 @@ from schemas.player import (
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from core.logging import get_logger
 
@@ -276,19 +277,29 @@ class PlayerService:
         Returns:
             Average fantasy points per game, or None if no games found.
         """
+        if days in (7, 14, 30):
+            record = (
+                PlayerRollingStats.select()
+                .where(
+                    (PlayerRollingStats.player == player_id)
+                    & (PlayerRollingStats.window_days == days)
+                )
+                .order_by(PlayerRollingStats.as_of_date.desc())
+                .first()
+            )
+            return round(float(record.fpts), 1) if record else None
+
+        # Fallback for non-standard windows
         cutoff_date = date.today() - timedelta(days=days)
-
-        query = PlayerGameStats.select().where(
-            (PlayerGameStats.player_id == player_id) &
-            (PlayerGameStats.game_date >= cutoff_date)
+        games = list(
+            PlayerGameStats.select().where(
+                (PlayerGameStats.player_id == player_id)
+                & (PlayerGameStats.game_date >= cutoff_date)
+            )
         )
-
-        games = list(query)
         if not games:
             return None
-
-        total_fpts = sum(g.fpts for g in games)
-        return round(total_fpts / len(games), 1)
+        return round(sum(g.fpts for g in games) / len(games), 1)
 
     @staticmethod
     def get_last_n_day_avg_batch(
@@ -308,9 +319,33 @@ class PlayerService:
         if not espn_ids:
             return {}
 
-        cutoff_date = date.today() - timedelta(days=days)
+        if days in (7, 14, 30):
+            latest_date = (
+                PlayerRollingStats.select(PlayerRollingStats.as_of_date)
+                .where(PlayerRollingStats.window_days == days)
+                .order_by(PlayerRollingStats.as_of_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            if not latest_date:
+                return {eid: None for eid in espn_ids}
 
-        # Query all games for all players with JOIN to Player for espn_id
+            records = list(
+                PlayerRollingStats.select(PlayerRollingStats, Player.espn_id)
+                .join(Player)
+                .where(
+                    (Player.espn_id.in_(espn_ids))
+                    & (PlayerRollingStats.window_days == days)
+                    & (PlayerRollingStats.as_of_date == latest_date)
+                )
+            )
+            result = {eid: None for eid in espn_ids}
+            for rec in records:
+                result[rec.player.espn_id] = round(float(rec.fpts), 1)
+            return result
+
+        # Fallback for non-standard windows
+        cutoff_date = date.today() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.espn_id)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
@@ -319,24 +354,18 @@ class PlayerService:
                 (PlayerGameStats.game_date >= cutoff_date)
             )
         )
-
-        # Group games by ESPN ID
         player_games: dict[int, list] = {eid: [] for eid in espn_ids}
         for game in query:
             espn_id = game.player.espn_id
             if espn_id in player_games:
                 player_games[espn_id].append(game)
-
-        # Calculate averages
         result = {}
         for espn_id in espn_ids:
             games = player_games[espn_id]
             if games:
-                total_fpts = sum(g.fpts for g in games)
-                result[espn_id] = round(total_fpts / len(games), 1)
+                result[espn_id] = round(sum(g.fpts for g in games) / len(games), 1)
             else:
                 result[espn_id] = None
-
         return result
 
     @staticmethod
@@ -416,9 +445,7 @@ class PlayerService:
         if not players:
             return {}
 
-        cutoff_date = date.today() - timedelta(days=days)
-
-        # Build normalized name to team mapping
+        # Build normalized name → team mapping
         name_team_map = {}
         normalized_names = []
         for name, team in players:
@@ -426,7 +453,37 @@ class PlayerService:
             name_team_map[normalized] = team
             normalized_names.append(normalized)
 
-        # Query all games with JOIN to Player for name_normalized
+        if days in (7, 14, 30):
+            latest_date = (
+                PlayerRollingStats.select(PlayerRollingStats.as_of_date)
+                .where(PlayerRollingStats.window_days == days)
+                .order_by(PlayerRollingStats.as_of_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            if not latest_date:
+                return {name: None for name in normalized_names}
+
+            records = list(
+                PlayerRollingStats.select(PlayerRollingStats, Player)
+                .join(Player)
+                .where(
+                    (Player.name_normalized.in_(normalized_names))
+                    & (PlayerRollingStats.window_days == days)
+                    & (PlayerRollingStats.as_of_date == latest_date)
+                )
+            )
+            result = {name: None for name in normalized_names}
+            for rec in records:
+                name_norm = rec.player.name_normalized
+                expected_team = name_team_map.get(name_norm)
+                # Team-match for same-name disambiguation
+                if expected_team is None or rec.team_id == expected_team:
+                    result[name_norm] = round(float(rec.fpts), 1)
+            return result
+
+        # Fallback for non-standard windows
+        cutoff_date = date.today() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
@@ -435,28 +492,20 @@ class PlayerService:
                 (PlayerGameStats.game_date >= cutoff_date)
             )
         )
-
-        # Group games by normalized name (filtering by team for accuracy)
         player_games: dict[str, list] = {name: [] for name in normalized_names}
         for game in query:
             game_name_norm = game.player.name_normalized
             expected_team = name_team_map.get(game_name_norm)
-            # Only include if team matches (handles players with same name)
-            # team_id is the team abbreviation (FK string to NBATeam)
             if expected_team and game.team_id == expected_team:
                 if game_name_norm in player_games:
                     player_games[game_name_norm].append(game)
-
-        # Calculate averages
         result = {}
         for name in normalized_names:
             games = player_games[name]
             if games:
-                total_fpts = sum(g.fpts for g in games)
-                result[name] = round(total_fpts / len(games), 1)
+                result[name] = round(sum(g.fpts for g in games) / len(games), 1)
             else:
                 result[name] = None
-
         return result
 
     @staticmethod

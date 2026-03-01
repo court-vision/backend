@@ -2,11 +2,9 @@
 Service for player trend operations.
 """
 
-from datetime import date, timedelta
-
 from core.logging import get_logger
 from db.models.nba.players import Player
-from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_ownership import PlayerOwnership
 from schemas.common import ApiStatus
@@ -16,7 +14,6 @@ from schemas.player_trends import (
     TrendPeriod,
     OwnershipTrend,
 )
-from peewee import fn
 
 
 class TrendsService:
@@ -45,31 +42,27 @@ class TrendsService:
                     data=None,
                 )
 
-            today = date.today()
             trends = {}
 
-            # Calculate trends for different periods
-            for period_name, days in [
+            # Fetch pre-materialized rolling averages for each window
+            for period_name, window in [
                 ("last_7_days", 7),
                 ("last_14_days", 14),
                 ("last_30_days", 30),
             ]:
-                cutoff = today - timedelta(days=days)
-                games = list(
-                    PlayerGameStats.select()
+                record = (
+                    PlayerRollingStats.select()
                     .where(
-                        (PlayerGameStats.player_id == player_id)
-                        & (PlayerGameStats.game_date >= cutoff)
+                        (PlayerRollingStats.player == player_id)
+                        & (PlayerRollingStats.window_days == window)
                     )
-                    .order_by(PlayerGameStats.game_date.desc())
+                    .order_by(PlayerRollingStats.as_of_date.desc())
+                    .first()
                 )
-
-                if games:
-                    total_fpts = sum(g.fpts for g in games)
-                    avg_fpts = total_fpts / len(games)
+                if record and record.gp > 0:
                     trends[period_name] = TrendPeriod(
-                        avg_fpts=round(avg_fpts, 1),
-                        games=len(games),
+                        avg_fpts=round(float(record.fpts), 1),
+                        games=record.gp,
                     )
 
             # Get current rank
