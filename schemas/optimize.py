@@ -18,21 +18,6 @@ class PlayerInput(BaseModel):
     injury_status: Optional[str] = Field(None, description="Injury status if any")
 
 
-class OptimizeRequest(BaseModel):
-    """Request body for lineup optimization."""
-
-    roster: list[PlayerInput] = Field(
-        ..., description="Current roster players", min_length=1
-    )
-    free_agents: list[PlayerInput] = Field(
-        default=[], description="Available free agents to consider"
-    )
-    week: int = Field(..., ge=1, le=26, description="Fantasy week number")
-    threshold: float = Field(
-        default=30.0, ge=0, le=100, description="Minimum fpts threshold for streaming"
-    )
-
-
 class RecommendedMove(BaseModel):
     """A recommended roster move."""
 
@@ -69,6 +54,15 @@ class OptimizeData(BaseModel):
 
 
 class OptimizeResp(BaseResponse):
-    """Response for POST /v1/analytics/optimize."""
+    """Response for POST /v1/analytics/generate-lineup."""
 
     data: Optional[OptimizeData] = None
+
+
+class GenerateLineupRequest(BaseModel):
+    """Request body for lineup generation from a connected team."""
+
+    team_id: int = Field(..., description="ID of the user's stored team (from manage-teams)")
+    week: int = Field(..., ge=1, le=26, description="Fantasy week to optimize for")
+    streaming_slots: int = Field(default=2, ge=0, le=10, description="Number of streaming add/drop moves to consider")
+    use_recent_stats: bool = Field(default=False, description="Use decay-weighted recent stats instead of season averages")

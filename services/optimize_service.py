@@ -5,15 +5,17 @@ Service for lineup optimization via features service.
 import httpx
 
 from core.logging import get_logger
+from db.models import Team
 from schemas.common import ApiStatus
 from schemas.optimize import (
     OptimizeResp,
     OptimizeData,
-    OptimizeRequest,
+    GenerateLineupRequest,
     OptimizedDay,
     RecommendedMove,
     PlayerInput,
 )
+from services.lineup_service import LineupService
 from utils.constants import FEATURES_SERVER_ENDPOINT
 
 
@@ -23,57 +25,46 @@ class OptimizeService:
     FEATURES_TIMEOUT = 30.0  # seconds
 
     @staticmethod
-    async def optimize_lineup(request: OptimizeRequest) -> OptimizeResp:
+    async def optimize_from_team(api_key, request: GenerateLineupRequest) -> OptimizeResp:
         """
-        Optimize lineup by calling the features service.
+        Generate an optimized lineup by auto-fetching roster and free agents from
+        stored ESPN/Yahoo credentials, then calling the v2 lineup generation service.
 
-        Args:
-            request: Optimization request with roster and parameters
-
-        Returns:
-            OptimizeResp with optimized lineup data
+        Looks up the team by team_id, verifies ownership via the API key's user, fetches
+        roster and free agents from the provider, then calls the v2 lineup generation service.
         """
         log = get_logger()
 
         try:
-            # Prepare payload for features service
-            roster_data = [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "team": p.team,
-                    "position": p.position,
-                    "avg_fpts": p.avg_fpts,
-                    "injury_status": p.injury_status,
-                }
-                for p in request.roster
-            ]
+            roster_players, fa_players = await LineupService.fetch_roster_and_fas(
+                api_key.user_id, request.team_id, request.use_recent_stats
+            )
+        except Team.DoesNotExist:
+            return OptimizeResp(
+                status=ApiStatus.ERROR,
+                message="Team not found or does not belong to this API key",
+                data=None,
+            )
+        except ValueError as e:
+            return OptimizeResp(status=ApiStatus.ERROR, message=str(e), data=None)
 
-            free_agent_data = [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "team": p.team,
-                    "position": p.position,
-                    "avg_fpts": p.avg_fpts,
-                    "injury_status": p.injury_status,
-                }
-                for p in request.free_agents
-            ]
-
+        try:
             payload = {
-                "roster_data": roster_data,
-                "free_agent_data": free_agent_data,
+                "roster_data": [p.model_dump() for p in roster_players],
+                "free_agent_data": [p.model_dump() for p in fa_players],
+                "streaming_slots": request.streaming_slots,
                 "week": request.week,
-                "threshold": request.threshold,
             }
 
             log.info(
-                "calling_features_service",
+                "calling_features_service_from_team",
                 endpoint=f"{FEATURES_SERVER_ENDPOINT}/generate-lineup",
                 week=request.week,
-                roster_size=len(roster_data),
-                free_agents=len(free_agent_data),
+                team_id=request.team_id,
+                roster_size=len(roster_players),
+                free_agents=len(fa_players),
+                streaming_slots=request.streaming_slots,
+                use_recent_stats=request.use_recent_stats,
             )
 
             async with httpx.AsyncClient(timeout=OptimizeService.FEATURES_TIMEOUT) as client:
@@ -84,13 +75,13 @@ class OptimizeService:
                 response.raise_for_status()
                 result = response.json()
 
-            # Transform features service response to our schema
-            optimize_data = OptimizeService._transform_response(result, request.week)
+            optimize_data = OptimizeService._transform_v2_response(result, request.week)
 
             log.info(
-                "optimization_complete",
+                "optimization_from_team_complete",
                 week=request.week,
-                projected_fpts=optimize_data.projected_total_fpts,
+                team_id=request.team_id,
+                improvement=result.get("Improvement", 0),
             )
 
             return OptimizeResp(
@@ -108,11 +99,7 @@ class OptimizeService:
             )
 
         except httpx.HTTPStatusError as e:
-            log.error(
-                "features_service_error",
-                status_code=e.response.status_code,
-                detail=str(e),
-            )
+            log.error("features_service_error", status_code=e.response.status_code, detail=str(e))
             return OptimizeResp(
                 status=ApiStatus.ERROR,
                 message="Failed to optimize lineup",
@@ -120,7 +107,7 @@ class OptimizeService:
             )
 
         except Exception as e:
-            log.error("optimization_error", error=str(e))
+            log.error("optimization_from_team_error", error=str(e))
             return OptimizeResp(
                 status=ApiStatus.ERROR,
                 message="Failed to optimize lineup",
@@ -128,67 +115,67 @@ class OptimizeService:
             )
 
     @staticmethod
-    def _transform_response(result: dict, week: int) -> OptimizeData:
-        """Transform features service response to OptimizeData schema."""
+    def _transform_v2_response(result: dict, week: int) -> OptimizeData:
+        """Transform v2 Go service response to OptimizeData schema.
+
+        v2 response shape:
+          { Lineup: [{Day, Additions, Removals, Roster: {pos: {Name, AvgPoints, Team}}}],
+            Improvement: int, Week: int, StreamingSlots: int, Timestamp: str }
+        """
         daily_lineups = []
         recommended_moves = []
-        notes = []
 
-        # Extract daily lineups from result
-        if "daily_lineups" in result:
-            for day in result["daily_lineups"]:
-                daily_lineups.append(
-                    OptimizedDay(
-                        date=day.get("date", ""),
-                        active_players=day.get("active", []),
-                        bench_players=day.get("bench", []),
-                        projected_fpts=day.get("projected_fpts", 0.0),
-                    )
+        lineup = result.get("Lineup", [])
+        total_moves = sum(len(gene.get("Additions", [])) for gene in lineup)
+        gain_per_move = result.get("Improvement", 0) / max(total_moves, 1)
+
+        for gene in lineup:
+            day = gene.get("Day", 0)
+            roster = gene.get("Roster", {})
+
+            daily_lineups.append(
+                OptimizedDay(
+                    date=f"Week {week}, Day {day}",
+                    active_players=[p["Name"] for p in roster.values()],
+                    bench_players=[],
+                    projected_fpts=sum(p.get("AvgPoints", 0.0) for p in roster.values()),
                 )
+            )
 
-        # Extract recommended moves
-        if "moves" in result:
-            for move in result["moves"]:
-                player_add = None
-                player_drop = None
-
-                if move.get("add"):
-                    add_data = move["add"]
-                    player_add = PlayerInput(
-                        id=add_data.get("id", 0),
-                        name=add_data.get("name", ""),
-                        team=add_data.get("team", ""),
-                        position=add_data.get("position", ""),
-                        avg_fpts=add_data.get("avg_fpts", 0.0),
-                    )
-
-                if move.get("drop"):
-                    drop_data = move["drop"]
-                    player_drop = PlayerInput(
-                        id=drop_data.get("id", 0),
-                        name=drop_data.get("name", ""),
-                        team=drop_data.get("team", ""),
-                        position=drop_data.get("position", ""),
-                        avg_fpts=drop_data.get("avg_fpts", 0.0),
-                    )
-
+            additions = gene.get("Additions", [])
+            removals = gene.get("Removals", [])
+            for i, add in enumerate(additions):
+                drop = removals[i] if i < len(removals) else None
                 recommended_moves.append(
                     RecommendedMove(
-                        action=move.get("action", "stream"),
-                        player_add=player_add,
-                        player_drop=player_drop,
-                        reason=move.get("reason", ""),
-                        projected_gain=move.get("projected_gain", 0.0),
+                        action="stream",
+                        player_add=PlayerInput(
+                            id=0,
+                            name=add["Name"],
+                            team=add["Team"],
+                            position="",
+                            avg_fpts=add.get("AvgPoints", 0.0),
+                        ),
+                        player_drop=PlayerInput(
+                            id=0,
+                            name=drop["Name"],
+                            team=drop["Team"],
+                            position="",
+                            avg_fpts=drop.get("AvgPoints", 0.0),
+                        ) if drop else None,
+                        reason=f"Day {day} streaming move",
+                        projected_gain=round(gain_per_move, 1),
                     )
                 )
 
-        # Extract notes
-        if "notes" in result:
-            notes = result["notes"]
+        notes = [
+            f"Week {week}: +{result.get('Improvement', 0)} projected fpts "
+            f"from {result.get('StreamingSlots', 0)} streaming slot(s)"
+        ]
 
         return OptimizeData(
             week=week,
-            projected_total_fpts=result.get("projected_fpts", 0.0),
+            projected_total_fpts=float(result.get("Improvement", 0)),
             daily_lineups=daily_lineups,
             recommended_moves=recommended_moves,
             optimization_notes=notes,
