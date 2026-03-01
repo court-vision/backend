@@ -1,10 +1,28 @@
-from fastapi import APIRouter
+from typing import Optional
 
-from services.streamer_service import StreamerService
+from fastapi import APIRouter, Depends, Query
+
+from core.clerk_auth import get_current_user
+from schemas.breakout import BreakoutResp
 from schemas.streamer import StreamerReq, StreamerResp
+from services.breakout_service import BreakoutService
+from services.streamer_service import StreamerService
 
 
 router = APIRouter(prefix="/streamers", tags=["Streamers"])
+
+
+@router.get("/breakout", response_model=BreakoutResp)
+async def get_breakout_streamers(
+    limit: int = Query(default=20, ge=1, le=50, description="Maximum candidates to return"),
+    team: Optional[str] = Query(default=None, description="Filter by NBA team abbreviation (e.g. LAL, BOS)"),
+    _: dict = Depends(get_current_user),
+) -> BreakoutResp:
+    """Return breakout streamer candidates for logged-in Court Vision users."""
+    return await BreakoutService.get_breakout_candidates(
+        limit=limit,
+        team_filter=team.upper() if team else None,
+    )
 
 
 @router.post("/find", response_model=StreamerResp)
