@@ -132,10 +132,11 @@ class MatchupService:
         # baseline.date == today simply means "the morning snapshot ran" — it does NOT
         # mean today's games are already counted in ESPN's totalPoints. Blocking on that
         # check causes live stats to be suppressed all evening.
-        # Double-counting prevention: compute_live_score only sums game_status == 2
-        # (in-progress). Final games (status 3) are already settled into the baseline
-        # via daily_matchup_scores and are excluded. The live pipeline also cleans up
-        # stale records from previous game days on each run.
+        # The live pipeline cleans up stale records from previous game days on each
+        # run, so all live_player_stats records are from today only. The morning
+        # baseline (DailyMatchupScoresPipeline at 10am ET) is captured before any
+        # games start, so tonight's games — both in-progress and final — are NOT
+        # in the baseline and must be added by compute_live_score.
         schedule_matchup = _get_schedule_matchup(game_date)
         week_matches = (
             schedule_matchup is not None
@@ -189,10 +190,13 @@ class MatchupService:
 
         def compute_live_score(base: float, live_roster: list[LiveMatchupPlayer]) -> float:
             """
-            Add today's live fpts for in-progress roster players (not BE/IR) on
-            top of the pipeline baseline score. Only game_status == 2 (in-progress)
-            is counted — final games (status 3) are already settled into the
-            daily_matchup_scores baseline, so including them would double-count.
+            Add today's live fpts for active roster players (not BE/IR) on
+            top of the pipeline baseline score. Both in-progress (status 2)
+            and final (status 3) games are included because the baseline is
+            a morning snapshot captured before any games start — tonight's
+            finished games are NOT yet reflected in it. The live pipeline
+            cleans up stale records from previous game days on each run, so
+            all records in live_player_stats are from today only.
             With name_to_live={}, today_fpts=0 and base is returned unchanged.
             """
             today_fpts = sum(
@@ -200,7 +204,7 @@ class MatchupService:
                 for p in live_roster
                 if p.lineup_slot not in ("BE", "IR")
                 and p.live is not None
-                and p.live.game_status == 2
+                and p.live.game_status >= 2
             )
             return round(base + today_fpts, 2)
 
