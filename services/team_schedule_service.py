@@ -7,6 +7,7 @@ from datetime import date
 from core.logging import get_logger
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
+from db.models.nba.team_stats import TeamStats
 from schemas.common import ApiStatus
 from schemas.teams import TeamScheduleResp, TeamScheduleData, ScheduleGame
 
@@ -51,6 +52,15 @@ class TeamScheduleService:
             # Limit results
             games = games[:limit]
 
+            # Build def_rating lookup: {team_abbrev: def_rating}
+            def_rating_map: dict[str, float] = {}
+            try:
+                for ts in TeamStats.get_all_latest():
+                    if ts.def_rating is not None:
+                        def_rating_map[ts.team_id] = float(ts.def_rating)
+            except Exception:
+                pass  # Non-fatal; games still render without def_rating
+
             schedule = []
             for g in games:
                 is_home = g.home_team_id == team_id
@@ -67,6 +77,7 @@ class TeamScheduleService:
                         status=g.status,
                         team_score=team_score,
                         opponent_score=opponent_score,
+                        opponent_def_rating=def_rating_map.get(opponent),
                     )
                 )
 

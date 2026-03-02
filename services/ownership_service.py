@@ -16,6 +16,7 @@ from schemas.ownership import (
     OwnershipTrendingData,
     TrendingPlayer,
 )
+from schemas.player import PlayerOwnershipData, PlayerOwnershipResp
 
 
 class OwnershipService:
@@ -207,5 +208,57 @@ class OwnershipService:
             return OwnershipTrendingResp(
                 status=ApiStatus.ERROR,
                 message="Failed to fetch trending players",
+                data=None,
+            )
+
+    @staticmethod
+    async def get_player_ownership(player_id: int, days: int = 14) -> PlayerOwnershipResp:
+        """
+        Get current ownership percentage for a player.
+
+        Args:
+            player_id: NBA player ID
+            days: Lookback window in days to find previous snapshot
+
+        Returns:
+            PlayerOwnershipResp with current and previous ownership data
+        """
+        log = get_logger()
+        try:
+            trend = PlayerOwnership.get_player_trend(player_id, days=days)
+            if not trend:
+                return PlayerOwnershipResp(
+                    status=ApiStatus.SUCCESS,
+                    message="No ownership data found",
+                    data=None,
+                )
+
+            latest = trend[-1]
+            current_ownership = round(float(latest.rost_pct), 1)
+            snapshot_date = str(latest.snapshot_date)
+
+            prev_ownership = None
+            change = None
+            if len(trend) > 1:
+                prev = trend[0]
+                prev_ownership = round(float(prev.rost_pct), 1)
+                change = round(current_ownership - prev_ownership, 1)
+
+            return PlayerOwnershipResp(
+                status=ApiStatus.SUCCESS,
+                message="Player ownership fetched successfully",
+                data=PlayerOwnershipData(
+                    current_ownership=current_ownership,
+                    prev_ownership=prev_ownership,
+                    change=change,
+                    snapshot_date=snapshot_date,
+                ),
+            )
+
+        except Exception as e:
+            log.error("get_player_ownership_error", error=str(e), player_id=player_id)
+            return PlayerOwnershipResp(
+                status=ApiStatus.ERROR,
+                message="Internal server error",
                 data=None,
             )

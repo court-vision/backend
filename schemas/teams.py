@@ -17,6 +17,7 @@ class ScheduleGame(BaseModel):
     status: str = Field(..., description="Game status: scheduled, in_progress, or final")
     team_score: Optional[int] = Field(None, description="Team's score (if game completed)")
     opponent_score: Optional[int] = Field(None, description="Opponent's score (if game completed)")
+    opponent_def_rating: Optional[float] = Field(None, description="Opponent's defensive rating (points allowed per 100 possessions)")
 
 
 class TeamScheduleData(BaseModel):

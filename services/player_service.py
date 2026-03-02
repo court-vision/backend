@@ -11,12 +11,15 @@ from schemas.player import (
     GameLog,
     PercentileData,
     PlayerPercentilesResp,
+    PlayerStatusData,
+    PlayerStatusResp,
 )
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
+from db.models.nba.player_injuries import PlayerInjury
 from core.logging import get_logger
 
 
@@ -263,6 +266,36 @@ class PlayerService:
                 status=ApiStatus.ERROR,
                 message="Internal server error",
                 data=None
+            )
+
+    @staticmethod
+    async def get_player_status(player_id: int) -> PlayerStatusResp:
+        log = get_logger()
+        try:
+            injury = PlayerInjury.get_current_status(player_id)
+            if not injury:
+                return PlayerStatusResp(
+                    status=ApiStatus.SUCCESS,
+                    message="No injury record found",
+                    data=None,
+                )
+            return PlayerStatusResp(
+                status=ApiStatus.SUCCESS,
+                message="Player status fetched successfully",
+                data=PlayerStatusData(
+                    status=injury.status,
+                    injury_type=injury.injury_type,
+                    injury_detail=injury.injury_detail,
+                    expected_return=str(injury.expected_return) if injury.expected_return else None,
+                    report_date=str(injury.report_date),
+                ),
+            )
+        except Exception as e:
+            log.error("get_player_status_error", error=str(e), player_id=player_id)
+            return PlayerStatusResp(
+                status=ApiStatus.ERROR,
+                message="Internal server error",
+                data=None,
             )
 
     @staticmethod

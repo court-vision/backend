@@ -1,6 +1,6 @@
 from typing import Optional
 from fastapi import APIRouter, Query, Request, Path
-from schemas.player import PlayerStatsResp, PlayerPercentilesResp
+from schemas.player import PlayerStatsResp, PlayerPercentilesResp, PlayerStatusResp, PlayerOwnershipResp
 from schemas.players_list import PlayersListResp
 from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
@@ -8,6 +8,7 @@ from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 from services.player_games_service import PlayerGamesService
 from services.trends_service import TrendsService
+from services.ownership_service import OwnershipService
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 
 router = APIRouter(prefix="/players", tags=["Players"])
@@ -160,3 +161,42 @@ async def get_player_percentiles(
 ) -> PlayerPercentilesResp:
     """Get percentile ranks for a player's stats vs the league."""
     return await PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games)
+
+
+@router.get(
+    "/{player_id}/status",
+    response_model=PlayerStatusResp,
+    summary="Get player injury status",
+    description="Get the most recent injury status for a player.",
+    responses={
+        200: {"description": "Player status retrieved successfully"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_status(
+    request: Request,
+    player_id: int = Path(..., description="NBA player ID"),
+) -> PlayerStatusResp:
+    """Get the most recent injury status for a player."""
+    return await PlayerService.get_player_status(player_id=player_id)
+
+
+@router.get(
+    "/{player_id}/ownership",
+    response_model=PlayerOwnershipResp,
+    summary="Get player ownership",
+    description="Get the current fantasy ownership percentage for a player.",
+    responses={
+        200: {"description": "Ownership data retrieved successfully"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_ownership(
+    request: Request,
+    player_id: int = Path(..., description="NBA player ID"),
+    days: int = Query(14, ge=1, le=30, description="Lookback window in days for trend comparison"),
+) -> PlayerOwnershipResp:
+    """Get current ownership percentage for a player."""
+    return await OwnershipService.get_player_ownership(player_id=player_id, days=days)

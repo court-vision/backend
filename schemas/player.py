@@ -96,3 +96,26 @@ class PercentileData(BaseModel):
 
 class PlayerPercentilesResp(BaseResponse):
     data: PercentileData | None = None
+
+
+class PlayerStatusData(BaseModel):
+    status: Optional[str]          # "Out"/"Doubtful"/"Questionable"/"Probable"/"Available"
+    injury_type: Optional[str]
+    injury_detail: Optional[str]
+    expected_return: Optional[str]
+    report_date: Optional[str]
+
+
+class PlayerStatusResp(BaseResponse):
+    data: Optional[PlayerStatusData] = None
+
+
+class PlayerOwnershipData(BaseModel):
+    current_ownership: float       # 0–100
+    prev_ownership: Optional[float]
+    change: Optional[float]        # percentage point delta
+    snapshot_date: str
+
+
+class PlayerOwnershipResp(BaseResponse):
+    data: Optional[PlayerOwnershipData] = None
