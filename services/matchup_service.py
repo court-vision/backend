@@ -50,7 +50,8 @@ class MatchupService:
     async def get_matchup_by_team_id(
         user_id: int,
         team_id: int,
-        avg_window: str = "season"
+        avg_window: str = "season",
+        scoring_period_id: int | None = None,
     ) -> MatchupResp:
         """
         Get current matchup data for a saved team.
@@ -79,7 +80,7 @@ class MatchupService:
         # Pass team_id for Yahoo so tokens can be refreshed and persisted
         if league_info.provider == FantasyProvider.YAHOO:
             return await YahooService.get_matchup_data(league_info, avg_window, team_id)
-        return await EspnService.get_matchup_data(league_info, avg_window)
+        return await EspnService.get_matchup_data(league_info, avg_window, scoring_period_id=scoring_period_id)
 
     @staticmethod
     async def get_live_matchup_by_team_id(
@@ -95,21 +96,22 @@ class MatchupService:
         import pytz
         from db.models.nba.live_player_stats import LivePlayerStats as LiveStatsModel
 
-        # Reuse existing matchup fetch (handles ESPN and Yahoo routing)
+        eastern = pytz.timezone("US/Eastern")
+        now_et = datetime.now(eastern)
+        today_et = now_et.date()
+
+        # Step 1: Initial ESPN fetch (default scoring period) to get matchup_period
+        # and the current scoring_period_id.
         matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
 
         if matchup.status != ApiStatus.SUCCESS or not matchup.data:
             return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
 
-        # Today's NBA game date (before 6am ET = yesterday)
-        eastern = pytz.timezone("US/Eastern")
-        now_et = datetime.now(eastern)
-        game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
-
         espn_matchup_period = matchup.data.matchup_period
 
-        # Use daily_matchup_scores as the canonical baseline (settled, authoritative).
-        # Fall back to ESPN's totalPoints if the pipeline hasn't run yet for this period.
+        # Step 2: Query the latest DailyMatchupScore for this matchup period.
+        # A fresh baseline (date == today_et) signals the DailyMatchupScoresPipeline
+        # has already captured ESPN's settled totalPoints for the new day.
         baseline = (
             DailyMatchupScore
             .select()
@@ -121,22 +123,43 @@ class MatchupService:
             .first()
         )
 
-        your_base = float(baseline.current_score) if baseline else matchup.data.your_team.current_score
-        opponent_base = float(baseline.opponent_current_score) if baseline else matchup.data.opponent_team.current_score
+        has_fresh_baseline = baseline is not None and baseline.date >= today_et
 
-        # Guard: only overlay live stats when game_date falls within the current ESPN matchup week.
-        # This prevents old-week bleed at the week boundary.
+        # Step 3: Pipeline-driven transition.
         #
-        # NOTE: We do NOT gate on whether a today-dated pipeline snapshot exists. The
-        # DailyMatchupScoresPipeline runs at 10am ET (before any games start), so a
-        # baseline.date == today simply means "the morning snapshot ran" — it does NOT
-        # mean today's games are already counted in ESPN's totalPoints. Blocking on that
-        # check causes live stats to be suppressed all evening.
-        # The live pipeline cleans up stale records from previous game days on each
-        # run, so all live_player_stats records are from today only. The morning
-        # baseline (DailyMatchupScoresPipeline at 10am ET) is captured before any
-        # games start, so tonight's games — both in-progress and final — are NOT
-        # in the baseline and must be added by compute_live_score.
+        # TRANSITIONED (fresh baseline exists for today):
+        #   Use today's lineup (current ESPN scoring period), fresh baseline,
+        #   and overlay only today's live stats (empty until games start).
+        #
+        # OVERNIGHT (no fresh baseline yet — between midnight and pipeline run):
+        #   Use yesterday's lineup (re-fetch ESPN with yesterday's scoringPeriodId),
+        #   old baseline, and overlay yesterday's live stats.
+        if has_fresh_baseline:
+            game_date = today_et
+            your_base = float(baseline.current_score)
+            opponent_base = float(baseline.opponent_current_score)
+            # matchup already has today's lineup from the initial fetch
+        else:
+            # Compute game_date: before 6 AM ET → yesterday, else today
+            game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else today_et
+
+            # Re-fetch ESPN with the game day's scoring period if we're in the
+            # overnight window (game_date != today, meaning ESPN has rolled forward).
+            if game_date != today_et and matchup.data.scoring_period_id is not None:
+                offset = (today_et - game_date).days
+                correct_period = matchup.data.scoring_period_id - offset
+                matchup = await MatchupService.get_matchup_by_team_id(
+                    user_id, team_id, avg_window="season",
+                    scoring_period_id=correct_period,
+                )
+                if matchup.status != ApiStatus.SUCCESS or not matchup.data:
+                    return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
+
+            your_base = float(baseline.current_score) if baseline else matchup.data.your_team.current_score
+            opponent_base = float(baseline.opponent_current_score) if baseline else matchup.data.opponent_team.current_score
+
+        # Guard: only overlay live stats when game_date falls within the current
+        # ESPN matchup week. Prevents old-week bleed at the week boundary.
         schedule_matchup = _get_schedule_matchup(game_date)
         week_matches = (
             schedule_matchup is not None
@@ -170,6 +193,17 @@ class MatchupService:
                 stat = espn_id_to_live.get(p.player_id) or name_to_live.get(p.name.lower().strip())
                 live_overlay = None
                 if stat:
+                    # Read-side staleness defense: if game_status is still 2
+                    # but last_updated is older than 90 minutes, treat as final.
+                    # Display-level safeguard only — does not modify the DB.
+                    effective_status = stat.game_status
+                    effective_clock = stat.game_clock
+                    if stat.game_status == 2 and stat.last_updated:
+                        staleness = datetime.utcnow() - stat.last_updated
+                        if staleness.total_seconds() > 90 * 60:
+                            effective_status = 3
+                            effective_clock = None
+
                     live_overlay = PlayerLiveStats(
                         nba_player_id=stat.player_id,
                         live_fpts=stat.fpts,
@@ -180,9 +214,9 @@ class MatchupService:
                         live_blk=stat.blk,
                         live_tov=stat.tov,
                         live_min=stat.min,
-                        game_status=stat.game_status,
-                        period=stat.period,
-                        game_clock=stat.game_clock,
+                        game_status=effective_status,
+                        period=stat.period if effective_status == 2 else None,
+                        game_clock=effective_clock,
                         last_updated=stat.last_updated.isoformat() if stat.last_updated else None,
                     )
                 result.append(LiveMatchupPlayer(**p.model_dump(), live=live_overlay))

@@ -211,7 +211,11 @@ class EspnService:
         return cleaned_data
 
     @staticmethod
-    async def get_matchup_data(league_info: LeagueInfo, avg_window: str = "season") -> MatchupResp:
+    async def get_matchup_data(
+        league_info: LeagueInfo,
+        avg_window: str = "season",
+        scoring_period_id: int | None = None,
+    ) -> MatchupResp:
         """
         Fetches current matchup data from ESPN API.
 
@@ -226,6 +230,8 @@ class EspnService:
             params = {
                 'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
             }
+            if scoring_period_id is not None:
+                params['scoringPeriodId'] = scoring_period_id
 
             cookies = {
                 'espn_s2': league_info.espn_s2,
@@ -240,6 +246,7 @@ class EspnService:
             # Get current matchup period from ESPN
             status = data.get('status', {})
             current_matchup_period = status.get('currentMatchupPeriod', 1)
+            latest_scoring_period = status.get('latestScoringPeriod')
 
             # Get matchup dates from schedule service
             matchup_dates = get_matchup_dates(current_matchup_period)
@@ -426,7 +433,8 @@ class EspnService:
                     roster=opponent_roster
                 ),
                 projected_winner=projected_winner,
-                projected_margin=projected_margin
+                projected_margin=projected_margin,
+                scoring_period_id=latest_scoring_period,
             )
 
             return MatchupResp(

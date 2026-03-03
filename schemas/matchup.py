@@ -37,6 +37,7 @@ class MatchupData(BaseModel):
     opponent_team: MatchupTeamResp
     projected_winner: str                  # Team name of projected winner
     projected_margin: float                # Projected point differential
+    scoring_period_id: int | None = None   # ESPN scoring period used for this response
 
 
 # ------------------------------- Request/Response Models ------------------------------- #
