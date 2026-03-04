@@ -143,8 +143,9 @@ class MatchupService:
 
         if periods_match:
             # MATCH: baseline is current. Use baseline + live overlay.
-            # game_date for live stats = the date the baseline was captured.
-            game_date = baseline.date
+            # game_date must use the NBA date convention (before 6 AM ET = yesterday)
+            # to match how the live pipeline stores records.
+            game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
         else:
