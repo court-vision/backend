@@ -145,7 +145,26 @@ class MatchupService:
             # MATCH: baseline is current. Use baseline + live overlay.
             # game_date must use the NBA date convention (before 6 AM ET = yesterday)
             # to match how the live pipeline stores records.
-            game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+            #
+            # Exception: after ESPN flips (N→N+1) and the pipeline re-runs capturing
+            # settled scores, we're in MATCH mode but yesterday's games are done.
+            # Querying yesterday's live stats would double-count scores already in
+            # the baseline. Gate on whether there are genuinely active records.
+            if now_et.hour < 6:
+                yesterday_et = (now_et - timedelta(days=1)).date()
+                staleness_cutoff = datetime.utcnow() - timedelta(minutes=30)
+                has_active_yesterday = (
+                    LiveStatsModel.select()
+                    .where(
+                        (LiveStatsModel.game_date == yesterday_et)
+                        & (LiveStatsModel.game_status == 2)
+                        & (LiveStatsModel.last_updated >= staleness_cutoff)
+                    )
+                    .exists()
+                )
+                game_date = yesterday_et if has_active_yesterday else now_et.date()
+            else:
+                game_date = now_et.date()
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
         else:
