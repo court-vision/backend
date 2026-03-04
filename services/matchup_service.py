@@ -51,7 +51,6 @@ class MatchupService:
         user_id: int,
         team_id: int,
         avg_window: str = "season",
-        scoring_period_id: int | None = None,
     ) -> MatchupResp:
         """
         Get current matchup data for a saved team.
@@ -80,7 +79,7 @@ class MatchupService:
         # Pass team_id for Yahoo so tokens can be refreshed and persisted
         if league_info.provider == FantasyProvider.YAHOO:
             return await YahooService.get_matchup_data(league_info, avg_window, team_id)
-        return await EspnService.get_matchup_data(league_info, avg_window, scoring_period_id=scoring_period_id)
+        return await EspnService.get_matchup_data(league_info, avg_window)
 
     @staticmethod
     async def get_live_matchup_by_team_id(
@@ -98,20 +97,18 @@ class MatchupService:
 
         eastern = pytz.timezone("US/Eastern")
         now_et = datetime.now(eastern)
-        today_et = now_et.date()
 
-        # Step 1: Initial ESPN fetch (default scoring period) to get matchup_period
-        # and the current scoring_period_id.
+        # Step 1: Fetch ESPN — always use the default (current) scoring period.
+        # We trust whatever ESPN returns as the current roster and lineup.
         matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
 
         if matchup.status != ApiStatus.SUCCESS or not matchup.data:
             return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
 
         espn_matchup_period = matchup.data.matchup_period
+        espn_scoring_period = matchup.data.scoring_period_id
 
-        # Step 2: Query the latest DailyMatchupScore for this matchup period.
-        # A fresh baseline (date == today_et) signals the DailyMatchupScoresPipeline
-        # has already captured ESPN's settled totalPoints for the new day.
+        # Step 2: Query the latest DailyMatchupScore baseline for this matchup period.
         baseline = (
             DailyMatchupScore
             .select()
@@ -123,49 +120,50 @@ class MatchupService:
             .first()
         )
 
-        has_fresh_baseline = baseline is not None and baseline.date >= today_et
+        # Step 3: Determine mode by comparing scoring periods.
+        #
+        # MATCH (baseline.scoring_period_id == ESPN's current scoring period):
+        #   ESPN is still on the same day the baseline was captured.
+        #   Use baseline + live overlay. This covers active games, finished
+        #   games, or no games yet — ESPN's lineup slots are correct for
+        #   the current period.
+        #
+        # MISMATCH (scoring periods differ, or no baseline exists):
+        #   ESPN has flipped to a new day. The previous period's live stats
+        #   are no longer valid. Use ESPN's totalPoints directly as the
+        #   score (settled at flip time). No live overlay.
+        #   The pipeline will eventually run and create a new baseline,
+        #   returning us to MATCH mode.
+        baseline_period = baseline.scoring_period_id if baseline else None
+        periods_match = (
+            baseline_period is not None
+            and espn_scoring_period is not None
+            and baseline_period == espn_scoring_period
+        )
 
-        # Step 3: Pipeline-driven transition.
-        #
-        # TRANSITIONED (fresh baseline exists for today):
-        #   Use today's lineup (current ESPN scoring period), fresh baseline,
-        #   and overlay only today's live stats (empty until games start).
-        #
-        # OVERNIGHT (no fresh baseline yet — between midnight and pipeline run):
-        #   Use yesterday's lineup (re-fetch ESPN with yesterday's scoringPeriodId),
-        #   old baseline, and overlay yesterday's live stats.
-        if has_fresh_baseline:
-            game_date = today_et
+        if periods_match:
+            # MATCH: baseline is current. Use baseline + live overlay.
+            # game_date for live stats = the date the baseline was captured.
+            game_date = baseline.date
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
-            # matchup already has today's lineup from the initial fetch
         else:
-            # Compute game_date: before 6 AM ET → yesterday, else today
-            game_date = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else today_et
+            # MISMATCH: ESPN has flipped, or no baseline yet.
+            # Use ESPN's totalPoints directly. No live overlay.
+            game_date = now_et.date()
+            your_base = matchup.data.your_team.current_score
+            opponent_base = matchup.data.opponent_team.current_score
 
-            # Re-fetch ESPN with the game day's scoring period if we're in the
-            # overnight window (game_date != today, meaning ESPN has rolled forward).
-            if game_date != today_et and matchup.data.scoring_period_id is not None:
-                offset = (today_et - game_date).days
-                correct_period = matchup.data.scoring_period_id - offset
-                matchup = await MatchupService.get_matchup_by_team_id(
-                    user_id, team_id, avg_window="season",
-                    scoring_period_id=correct_period,
-                )
-                if matchup.status != ApiStatus.SUCCESS or not matchup.data:
-                    return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
-
-            your_base = float(baseline.current_score) if baseline else matchup.data.your_team.current_score
-            opponent_base = float(baseline.opponent_current_score) if baseline else matchup.data.opponent_team.current_score
-
-        # Guard: only overlay live stats when game_date falls within the current
-        # ESPN matchup week. Prevents old-week bleed at the week boundary.
-        schedule_matchup = _get_schedule_matchup(game_date)
-        week_matches = (
-            schedule_matchup is not None
-            and schedule_matchup["matchup_number"] == espn_matchup_period
-        )
-        include_live = week_matches
+        # Only overlay live stats in MATCH mode AND when game_date falls
+        # within the current ESPN matchup week (prevents old-week bleed).
+        # In MISMATCH mode, ESPN has flipped — previous live stats are stale.
+        include_live = False
+        if periods_match:
+            schedule_matchup = _get_schedule_matchup(game_date)
+            include_live = (
+                schedule_matchup is not None
+                and schedule_matchup["matchup_number"] == espn_matchup_period
+            )
 
         if include_live:
             all_espn_ids = [

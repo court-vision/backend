@@ -37,6 +37,10 @@ class DailyMatchupScore(BaseModel):
     current_score = DecimalField(max_digits=8, decimal_places=2)
     opponent_current_score = DecimalField(max_digits=8, decimal_places=2)
 
+    # ESPN scoring period this snapshot was captured under.
+    # Used to detect when ESPN flips to a new day (N → N+1).
+    scoring_period_id = SmallIntegerField(null=True)
+
     # Audit columns for pipeline tracking
     pipeline_run_id = UUIDField(null=True, index=True)
     created_at = DateTimeField(default=datetime.utcnow)

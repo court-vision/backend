@@ -214,7 +214,6 @@ class EspnService:
     async def get_matchup_data(
         league_info: LeagueInfo,
         avg_window: str = "season",
-        scoring_period_id: int | None = None,
     ) -> MatchupResp:
         """
         Fetches current matchup data from ESPN API.
@@ -230,8 +229,6 @@ class EspnService:
             params = {
                 'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
             }
-            if scoring_period_id is not None:
-                params['scoringPeriodId'] = scoring_period_id
 
             cookies = {
                 'espn_s2': league_info.espn_s2,
