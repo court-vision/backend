@@ -19,6 +19,8 @@ from schemas.matchup import (
     DailyMatchupTeam,
     DailyMatchupPlayerStats,
     DailyMatchupFuturePlayer,
+    WeeklyMatchupResp,
+    WeeklyMatchupData,
 )
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from db.models.stats.daily_matchup_score import DailyMatchupScore
@@ -607,5 +609,258 @@ class MatchupService:
                 matchup_period_end=md.matchup_period_end,
                 your_team=your_team,
                 opponent_team=opponent_team,
+            ),
+        )
+
+    @staticmethod
+    async def get_weekly_matchup(
+        user_id: int,
+        team_id: int,
+    ) -> WeeklyMatchupResp:
+        """
+        Get all days in the current matchup period in a single ESPN API call.
+
+        Makes one ESPN call, resolves player IDs once, then bulk-fetches all
+        required DB data for the entire period before building per-day responses.
+        This replaces N parallel getDailyMatchup calls from the frontend.
+        """
+        import pytz
+        from db.models.nba.players import Player
+        from db.models.nba.player_game_stats import PlayerGameStats
+        from db.models.nba.live_player_stats import LivePlayerStats
+        from db.models.nba.games import Game
+
+        # 1. ONE ESPN/Yahoo call for the whole week
+        matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
+
+        if matchup.status != ApiStatus.SUCCESS or not matchup.data:
+            return WeeklyMatchupResp(status=matchup.status, message=matchup.message, data=None)
+
+        md = matchup.data
+        period_start = date_type.fromisoformat(md.matchup_period_start)
+        period_end = date_type.fromisoformat(md.matchup_period_end)
+        dates = [
+            period_start + timedelta(days=i)
+            for i in range((period_end - period_start).days + 1)
+        ]
+
+        # 2. NBA date convention: before 6 AM ET counts as yesterday
+        eastern = pytz.timezone("US/Eastern")
+        now_et = datetime.now(eastern)
+        nba_today = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+
+        # 3. Resolve all roster players → NBA IDs once for the whole week
+        all_roster = md.your_team.roster + md.opponent_team.roster
+        espn_ids = [p.player_id for p in all_roster]
+        players_by_espn = list(Player.select().where(Player.espn_id.in_(espn_ids)))
+        espn_to_nba = {p.espn_id: p.id for p in players_by_espn}
+
+        unresolved_names = [
+            p.name.lower().strip() for p in all_roster
+            if p.player_id not in espn_to_nba
+        ]
+        name_to_nba: dict[str, int] = {}
+        if unresolved_names:
+            players_by_name = list(Player.select().where(
+                Player.name_normalized.in_(unresolved_names)
+            ))
+            name_to_nba = {p.name_normalized: p.id for p in players_by_name}
+
+        def resolve_nba_id(roster_player) -> int | None:
+            nba_id = espn_to_nba.get(roster_player.player_id)
+            if nba_id:
+                return nba_id
+            return name_to_nba.get(roster_player.name.lower().strip())
+
+        all_nba_ids = list({
+            nid for p in all_roster
+            if (nid := resolve_nba_id(p)) is not None
+        })
+
+        # 4. Bulk-fetch all DB data for the entire period in 3 queries
+        past_and_today = [d for d in dates if d <= nba_today]
+
+        # PlayerGameStats for all past/today dates at once
+        stats_by_player_date: dict[tuple[int, date_type], object] = {}
+        if all_nba_ids and past_and_today:
+            stats_rows = list(
+                PlayerGameStats.select()
+                .where(
+                    (PlayerGameStats.player_id.in_(all_nba_ids))
+                    & (PlayerGameStats.game_date.in_(past_and_today))
+                )
+            )
+            for s in stats_rows:
+                stats_by_player_date[(s.player_id, s.game_date)] = s
+
+        # LivePlayerStats for today only (overlays missing PlayerGameStats)
+        live_by_player: dict[int, object] = {}
+        if all_nba_ids and nba_today in dates:
+            live_rows = list(
+                LivePlayerStats.select()
+                .where(
+                    (LivePlayerStats.player_id.in_(all_nba_ids))
+                    & (LivePlayerStats.game_date == nba_today)
+                )
+            )
+            for ls in live_rows:
+                live_by_player[ls.player_id] = ls
+
+        # All games for the entire matchup period at once
+        all_games = list(Game.select().where(Game.game_date.in_(dates)))
+        games_by_date: dict[date_type, list] = {}
+        for g in all_games:
+            games_by_date.setdefault(g.game_date, []).append(g)
+
+        # 5. Build per-day data using pre-fetched lookups
+        def build_day(target_date: date_type) -> DailyMatchupData:
+            if target_date < nba_today:
+                day_type = "past"
+            elif target_date == nba_today:
+                day_type = "today"
+            else:
+                day_type = "future"
+
+            day_index = (target_date - period_start).days
+
+            games_on_date = games_by_date.get(target_date, [])
+            teams_playing: set[str] = set()
+            team_game_map: dict[str, object] = {}
+            for game in games_on_date:
+                teams_playing.add(game.home_team_id)
+                teams_playing.add(game.away_team_id)
+                team_game_map[game.home_team_id] = game
+                team_game_map[game.away_team_id] = game
+
+            if day_type in ("past", "today"):
+                # Merge PlayerGameStats + live overlay into a single lookup
+                nba_id_to_stats: dict[int, object] = {}
+                for p in all_roster:
+                    nba_id = resolve_nba_id(p)
+                    if nba_id is None:
+                        continue
+                    stat = stats_by_player_date.get((nba_id, target_date))
+                    if stat:
+                        nba_id_to_stats[nba_id] = stat
+                    elif day_type == "today":
+                        live = live_by_player.get(nba_id)
+                        if live:
+                            nba_id_to_stats[nba_id] = live
+
+                def build_past_roster(roster) -> list[DailyMatchupPlayerStats]:
+                    result = []
+                    for p in roster:
+                        nba_id = resolve_nba_id(p)
+                        had_game = p.team in teams_playing
+                        stats = nba_id_to_stats.get(nba_id) if nba_id else None
+                        result.append(DailyMatchupPlayerStats(
+                            player_id=p.player_id,
+                            name=p.name,
+                            team=p.team,
+                            position=p.position,
+                            nba_player_id=nba_id,
+                            had_game=had_game,
+                            fpts=stats.fpts if stats else None,
+                            pts=stats.pts if stats else None,
+                            reb=stats.reb if stats else None,
+                            ast=stats.ast if stats else None,
+                            stl=stats.stl if stats else None,
+                            blk=stats.blk if stats else None,
+                            tov=stats.tov if stats else None,
+                            min=stats.min if stats else None,
+                            fgm=stats.fgm if stats else None,
+                            fga=stats.fga if stats else None,
+                            fg3m=stats.fg3m if stats else None,
+                            fg3a=stats.fg3a if stats else None,
+                            ftm=stats.ftm if stats else None,
+                            fta=stats.fta if stats else None,
+                        ))
+                    result.sort(key=lambda x: (
+                        0 if x.fpts is not None else (1 if x.had_game else 2),
+                        -(x.fpts or 0),
+                    ))
+                    return result
+
+                your_roster = build_past_roster(md.your_team.roster)
+                opp_roster = build_past_roster(md.opponent_team.roster)
+                your_total = sum(p.fpts for p in your_roster if p.fpts is not None)
+                opp_total = sum(p.fpts for p in opp_roster if p.fpts is not None)
+
+                your_team = DailyMatchupTeam(
+                    team_name=md.your_team.team_name,
+                    team_id=md.your_team.team_id,
+                    total_fpts=float(your_total),
+                    roster=your_roster,
+                )
+                opponent_team = DailyMatchupTeam(
+                    team_name=md.opponent_team.team_name,
+                    team_id=md.opponent_team.team_id,
+                    total_fpts=float(opp_total),
+                    roster=opp_roster,
+                )
+
+            else:
+                def build_future_roster(roster) -> list[DailyMatchupFuturePlayer]:
+                    result = []
+                    for p in roster:
+                        game = team_game_map.get(p.team)
+                        has_game = game is not None
+                        opponent = None
+                        game_time = None
+                        if game:
+                            if game.home_team_id == p.team:
+                                opponent = f"vs {game.away_team_id}"
+                            else:
+                                opponent = f"@ {game.home_team_id}"
+                            game_time = str(game.start_time_et) if game.start_time_et else None
+                        result.append(DailyMatchupFuturePlayer(
+                            player_id=p.player_id,
+                            name=p.name,
+                            team=p.team,
+                            position=p.position,
+                            has_game=has_game,
+                            opponent=opponent,
+                            game_time_et=game_time,
+                            injured=p.injured,
+                            injury_status=p.injury_status,
+                        ))
+                    result.sort(key=lambda x: (0 if x.has_game else 1, x.name))
+                    return result
+
+                your_roster = build_future_roster(md.your_team.roster)
+                opp_roster = build_future_roster(md.opponent_team.roster)
+                your_team = DailyMatchupTeam(
+                    team_name=md.your_team.team_name,
+                    team_id=md.your_team.team_id,
+                    total_fpts=None,
+                    roster=your_roster,
+                )
+                opponent_team = DailyMatchupTeam(
+                    team_name=md.opponent_team.team_name,
+                    team_id=md.opponent_team.team_id,
+                    total_fpts=None,
+                    roster=opp_roster,
+                )
+
+            return DailyMatchupData(
+                date=target_date.isoformat(),
+                day_type=day_type,
+                day_of_week=target_date.strftime("%a"),
+                day_index=day_index,
+                matchup_period=md.matchup_period,
+                matchup_period_start=md.matchup_period_start,
+                matchup_period_end=md.matchup_period_end,
+                your_team=your_team,
+                opponent_team=opponent_team,
+            )
+
+        days = [build_day(d) for d in dates]
+
+        return WeeklyMatchupResp(
+            status=ApiStatus.SUCCESS,
+            message="Weekly matchup data fetched successfully",
+            data=WeeklyMatchupData(
+                matchup_period=md.matchup_period,
+                days=days,
             ),
         )

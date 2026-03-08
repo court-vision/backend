@@ -191,3 +191,16 @@ class DailyMatchupData(BaseModel):
 class DailyMatchupResp(BaseResponse):
     """Response containing daily matchup drill-down data."""
     data: Optional[DailyMatchupData] = None
+
+
+# ------------------------------- Weekly Matchup Models ------------------------------- #
+
+class WeeklyMatchupData(BaseModel):
+    """All days in the current matchup period, computed in a single ESPN call."""
+    matchup_period: int
+    days: list[DailyMatchupData]
+
+
+class WeeklyMatchupResp(BaseResponse):
+    """Response containing all days for the current matchup period."""
+    data: Optional[WeeklyMatchupData] = None

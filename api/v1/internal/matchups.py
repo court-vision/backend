@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from services.user_sync_service import UserSyncService
-from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp
+from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp, WeeklyMatchupResp
 from core.clerk_auth import get_current_user
 
 
@@ -90,6 +90,22 @@ async def get_matchup_score_history(
     the score progression over time.
     """
     return await MatchupService.get_score_history(team_id, matchup_period)
+
+
+@router.get('/week/{team_id}', response_model=WeeklyMatchupResp)
+async def get_weekly_matchup(
+    team_id: int,
+    current_user: dict = Depends(get_current_user)
+) -> WeeklyMatchupResp:
+    """
+    Get all days in the current matchup period in a single request.
+
+    Makes one ESPN/Yahoo API call and returns per-day player data for every
+    day in the matchup period. Use this instead of N parallel getDailyMatchup
+    calls when rendering the matchup bar chart.
+    """
+    user_id = _get_user_id(current_user)
+    return await MatchupService.get_weekly_matchup(user_id, team_id)
 
 
 @router.get('/daily/{team_id}', response_model=DailyMatchupResp)
