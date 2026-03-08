@@ -475,6 +475,23 @@ class MatchupService:
             ) if nba_ids else []
             nba_id_to_stats = {s.player_id: s for s in stats_list}
 
+            # For today: overlay live stats for players not yet in PlayerGameStats.
+            # The nightly pipeline hasn't run yet, so PlayerGameStats is empty for
+            # today — pull from the live_player_stats table instead (same source
+            # the live matchup endpoint uses).
+            if day_type == "today" and nba_ids:
+                from db.models.nba.live_player_stats import LivePlayerStats
+                live_stats_list = list(
+                    LivePlayerStats.select()
+                    .where(
+                        (LivePlayerStats.player_id.in_(nba_ids))
+                        & (LivePlayerStats.game_date == target_date)
+                    )
+                )
+                for ls in live_stats_list:
+                    if ls.player_id not in nba_id_to_stats:
+                        nba_id_to_stats[ls.player_id] = ls
+
             def build_past_roster(roster) -> list[DailyMatchupPlayerStats]:
                 result = []
                 for p in roster:
