@@ -98,6 +98,11 @@ class MatchupService:
         eastern = pytz.timezone("US/Eastern")
         now_et = datetime.now(eastern)
 
+        # NBA date convention: before 6 AM ET counts as yesterday.
+        # This matches how the live pipeline stores records and ensures
+        # we don't prematurely advance to the next day after midnight.
+        nba_today = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+
         # Step 1: Fetch ESPN — always use the default (current) scoring period.
         # We trust whatever ESPN returns as the current roster and lineup.
         matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
@@ -120,65 +125,50 @@ class MatchupService:
             .first()
         )
 
-        # Step 3: Determine mode by comparing scoring periods.
+        # Step 3: Determine base scores and live overlay date.
         #
-        # MATCH (baseline.scoring_period_id == ESPN's current scoring period):
-        #   ESPN is still on the same day the baseline was captured.
-        #   Use baseline + live overlay. This covers active games, finished
-        #   games, or no games yet — ESPN's lineup slots are correct for
-        #   the current period.
+        # Timeline: ESPN batches at ~3 AM ET; our pipeline runs at ~4 AM ET (9 AM UTC).
+        # baseline.date = D means captured at 4 AM on D, after ESPN's batch,
+        # so it already reflects cumulative scores through end of day D-1.
+        # Games on day D are never in baseline.date = D.
         #
-        # MISMATCH (scoring periods differ, or no baseline exists):
-        #   ESPN has flipped to a new day. The previous period's live stats
-        #   are no longer valid. Use ESPN's totalPoints directly as the
-        #   score (settled at flip time). No live overlay.
-        #   The pipeline will eventually run and create a new baseline,
-        #   returning us to MATCH mode.
-        baseline_period = baseline.scoring_period_id if baseline else None
-        periods_match = (
-            baseline_period is not None
-            and espn_scoring_period is not None
-            and baseline_period == espn_scoring_period
-        )
-
-        if periods_match:
-            # MATCH: baseline is current. Use baseline + live overlay.
-            # game_date must use the NBA date convention (before 6 AM ET = yesterday)
-            # to match how the live pipeline stores records.
-            #
-            # Exception: after ESPN flips (N→N+1) and the pipeline re-runs capturing
-            # settled scores, we're in MATCH mode but yesterday's games are done.
-            # Querying yesterday's live stats would double-count scores already in
-            # the baseline. Gate on whether there are genuinely active records.
-            if now_et.hour < 6:
-                yesterday_et = (now_et - timedelta(days=1)).date()
-                staleness_cutoff = datetime.utcnow() - timedelta(minutes=30)
-                has_active_yesterday = (
-                    LiveStatsModel.select()
-                    .where(
-                        (LiveStatsModel.game_date == yesterday_et)
-                        & (LiveStatsModel.game_status == 2)
-                        & (LiveStatsModel.last_updated >= staleness_cutoff)
-                    )
-                    .exists()
-                )
-                game_date = yesterday_et if has_active_yesterday else now_et.date()
-            else:
-                game_date = now_et.date()
+        # Live overlay is needed when nba_today >= baseline.date:
+        #   - baseline.date == nba_today: common case, today's games not captured yet.
+        #   - baseline.date < nba_today: baseline is stale (pipeline hasn't run today).
+        #   - baseline.date > nba_today: pipeline already ran for tomorrow
+        #     (4 AM ET window when nba_today=yesterday), baseline already has today → no overlay.
+        #
+        # Example timeline (day N = Friday, games end ~midnight):
+        #   Fri 8 PM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
+        #   Sat 1 AM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
+        #   Sat 3 AM:  ESPN batch runs (totalPoints updated, lineup flipped)
+        #   Sat 3:30 AM: nba_today=Fri, baseline.date=Fri → overlay Fri live ✓
+        #   Sat 4 AM:  pipeline runs → baseline.date=Sat (includes Fri games)
+        #   Sat 4:30 AM: nba_today=Fri, baseline.date=Sat → Sat > Fri → no overlay ✓
+        #   Sat 9 AM:  nba_today=Sat, baseline.date=Sat  → overlay Sat live (0 until tipoff) ✓
+        game_date = nba_today
+        if baseline:
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
+            # baseline.date = D means captured at ~4 AM ET on day D (after ESPN's
+            # 3 AM batch), so it reflects cumulative scores through end of day D-1.
+            # Games on day D are NOT in the baseline.
+            # We need live overlay whenever nba_today >= baseline.date, i.e. when
+            # today's games couldn't be in the baseline yet.
+            # Using <= (not <) because baseline.date == nba_today is the common case:
+            # the baseline from 4 AM today doesn't include today's games.
+            # Edge: if pipeline already ran for nba_today+1 (baseline.date > nba_today),
+            # the baseline already includes nba_today's games — no overlay needed.
+            baseline_excludes_nba_today = baseline.date <= nba_today
         else:
-            # MISMATCH: ESPN has flipped, or no baseline yet.
-            # Use ESPN's totalPoints directly. No live overlay.
-            game_date = now_et.date()
             your_base = matchup.data.your_team.current_score
             opponent_base = matchup.data.opponent_team.current_score
+            baseline_excludes_nba_today = False
 
-        # Only overlay live stats in MATCH mode AND when game_date falls
-        # within the current ESPN matchup week (prevents old-week bleed).
-        # In MISMATCH mode, ESPN has flipped — previous live stats are stale.
+        # Include live overlay only when nba_today's games aren't yet in the
+        # baseline, AND game_date falls within the current ESPN matchup week.
         include_live = False
-        if periods_match:
+        if baseline_excludes_nba_today:
             schedule_matchup = _get_schedule_matchup(game_date)
             include_live = (
                 schedule_matchup is not None
@@ -409,7 +399,11 @@ class MatchupService:
                 data=None,
             )
 
-        # 3. Determine day_type
+        # 3. Determine day_type using the NBA date convention:
+        #    before 6 AM ET counts as yesterday (games that started the
+        #    previous evening). This matches how the live pipeline stores
+        #    records and prevents the day from advancing prematurely after
+        #    midnight when ESPN has flipped but games may still be in progress.
         eastern = pytz.timezone("US/Eastern")
         now_et = datetime.now(eastern)
         today = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
