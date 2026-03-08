@@ -127,7 +127,7 @@ class MatchupService:
 
         # Step 3: Determine base scores and live overlay date.
         #
-        # Timeline: ESPN batches at ~3 AM ET; our pipeline runs at ~4 AM ET (9 AM UTC).
+        # Timeline: ESPN batches at ~2 AM ET; our pipeline runs at ~2:30 AM ET (7:30 AM UTC).
         # baseline.date = D means captured at 4 AM on D, after ESPN's batch,
         # so it already reflects cumulative scores through end of day D-1.
         # Games on day D are never in baseline.date = D.
@@ -141,12 +141,20 @@ class MatchupService:
         # Example timeline (day N = Friday, games end ~midnight):
         #   Fri 8 PM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
         #   Sat 1 AM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
-        #   Sat 3 AM:  ESPN batch runs (totalPoints updated, lineup flipped)
-        #   Sat 3:30 AM: nba_today=Fri, baseline.date=Fri → overlay Fri live ✓
-        #   Sat 4 AM:  pipeline runs → baseline.date=Sat (includes Fri games)
-        #   Sat 4:30 AM: nba_today=Fri, baseline.date=Sat → Sat > Fri → no overlay ✓
-        #   Sat 9 AM:  nba_today=Sat, baseline.date=Sat  → overlay Sat live (0 until tipoff) ✓
-        game_date = nba_today
+        #   Sat 2 AM:  ESPN batch runs (totalPoints updated, lineup flipped)
+        #   Sat 2:15 AM: nba_today=Fri, baseline.date=Fri → overlay Fri live ✓
+        #   Sat 2:30 AM: pipeline runs → baseline.date=Sat (includes Fri games)
+        #   Sat 2:45 AM: nba_today=Fri, baseline.date=Sat → Sat > Fri → no overlay, game_date=Sat ✓
+        #   Sat 6 AM:  nba_today=Sat, baseline.date=Sat  → overlay Sat live (0 until tipoff) ✓
+        # When the pipeline has already run for the next calendar day
+        # (baseline.date > nba_today), advance game_date so the frontend shows
+        # tomorrow's upcoming view instead of staying stuck on yesterday.
+        # This happens in the ~30 min window after ESPN batch + pipeline run,
+        # before the 6 AM ET cutoff advances nba_today naturally.
+        if baseline and baseline.date > nba_today:
+            game_date = baseline.date
+        else:
+            game_date = nba_today
         if baseline:
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
