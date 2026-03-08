@@ -9,6 +9,7 @@ from schemas.common import BaseResponse
 class BreakoutBeneficiary(BaseModel):
     """The player expected to benefit from the minutes vacuum."""
     player_id: int
+    nba_player_id: Optional[int] = None  # NBA (nba_api) player ID for terminal navigation
     name: str
     team: str
     position: str

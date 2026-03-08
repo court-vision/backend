@@ -13,6 +13,7 @@ class StreamerMode(str, Enum):
 class StreamerPlayerResp(BaseModel):
     """A streaming candidate player."""
     player_id: int
+    nba_player_id: Optional[int] = None  # NBA (nba_api) player ID for terminal navigation
     name: str
     team: str
     valid_positions: list[str]

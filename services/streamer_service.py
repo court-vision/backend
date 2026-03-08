@@ -11,6 +11,7 @@ from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.player_service import PlayerService
+from db.models.nba.players import Player as PlayerModel
 from services.schedule_service import (
     get_current_matchup,
     get_remaining_games,
@@ -259,6 +260,17 @@ class StreamerService:
                     injured=fa.injured,
                     injury_status=None  # Could be enhanced later
                 ))
+
+            # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
+            espn_ids = [s.player_id for s in streamers]
+            if espn_ids:
+                nba_id_map: dict[int, int] = {
+                    row.espn_id: row.id
+                    for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
+                    .where(PlayerModel.espn_id.in_(espn_ids))
+                }
+                for s in streamers:
+                    s.nba_player_id = nba_id_map.get(s.player_id)
 
             # Week mode: group B2B first, then by score. Daily mode: purely by score.
             if mode == StreamerMode.WEEK:
