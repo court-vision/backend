@@ -25,13 +25,14 @@ def _make_request(headers: dict, client_ip: str = "1.2.3.4") -> MagicMock:
 class TestGetRateLimitKey:
 
     def test_api_key_header_uses_prefixed_key(self):
-        key = "sk_live_abcdefghijklmnopqrstuvwxyz"
+        # Real keys are "cv_" + token_urlsafe(32); first 11 chars stored as key_prefix
+        key = "cv_abc12345678901234567890123456789012345"
         request = _make_request({"X-API-Key": key})
         result = get_rate_limit_key(request)
         assert result == f"api_key:{key[:11]}"
 
     def test_api_key_prefix_is_11_chars(self):
-        key = "sk_live_abc123xyz"
+        key = "cv_abc123xyz"
         request = _make_request({"X-API-Key": key})
         result = get_rate_limit_key(request)
         prefix = result.removeprefix("api_key:")
@@ -43,7 +44,7 @@ class TestGetRateLimitKey:
         assert result == "203.0.113.42"
 
     def test_api_key_overrides_ip(self):
-        key = "sk_live_testkey"
+        key = "cv_testkey1234"
         request = _make_request({"X-API-Key": key}, client_ip="203.0.113.42")
         result = get_rate_limit_key(request)
         assert result.startswith("api_key:")
