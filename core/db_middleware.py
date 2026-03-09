@@ -14,4 +14,11 @@ class DatabaseMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             if not db.is_closed():
-                await asyncio.to_thread(db.close)
+                # Use manual_close() instead of close() to physically close the
+                # connection rather than returning it to the pool. This prevents
+                # stale connections (e.g., after a DB restart) from being reused
+                # on the next request.
+                try:
+                    await asyncio.to_thread(db.manual_close)
+                except Exception:
+                    pass
