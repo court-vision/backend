@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pytz
 from typing import Optional
 from pathlib import Path
@@ -34,19 +34,29 @@ def _parse_date(date_str: str) -> date:
     return datetime.strptime(date_str, "%m/%d/%Y").date()
 
 
+def _get_nba_today() -> date:
+    """Return today's NBA game date in ET (before 6 AM ET counts as yesterday)."""
+    eastern = pytz.timezone("US/Eastern")
+    now_et = datetime.now(eastern)
+    if now_et.hour < 6:
+        return (now_et - timedelta(days=1)).date()
+    return now_et.date()
+
+
 def get_current_matchup(current_date: Optional[date] = None) -> Optional[dict]:
     """
     Get the current matchup info based on the provided date.
 
     Args:
-        current_date: The date to check. Defaults to today.
+        current_date: The date to check. Defaults to NBA-convention today
+                      (ET-aware, before 6 AM ET counts as yesterday).
 
     Returns:
         Dict with matchup info including 'matchup_number', 'start_date', 'end_date',
         'game_span', 'games', and 'current_day_index', or None if no matchup found.
     """
     if current_date is None:
-        current_date = date.today()
+        current_date = _get_nba_today()
 
     schedule = _load_schedule().get("schedule", {})
 
@@ -250,7 +260,7 @@ def get_remaining_game_days(team_abbrev: str, current_date: Optional[date] = Non
         List of day indices (0-indexed) for remaining games.
     """
     if current_date is None:
-        current_date = date.today()
+        current_date = _get_nba_today()
 
     matchup = get_current_matchup(current_date)
     if not matchup:
@@ -333,7 +343,7 @@ def get_teams_with_b2b(current_date: Optional[date] = None) -> list[str]:
         List of team abbreviations that have at least one remaining B2B.
     """
     if current_date is None:
-        current_date = date.today()
+        current_date = _get_nba_today()
 
     matchup = get_current_matchup(current_date)
     if not matchup:
