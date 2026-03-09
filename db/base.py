@@ -12,7 +12,6 @@ db = PooledPostgresqlDatabase(
     db_name,
     max_connections=20,
     stale_timeout=300,
-    max_age=300,  # Recycle connections older than 5 minutes (belt-and-suspenders)
     **parsed_url
 )
 

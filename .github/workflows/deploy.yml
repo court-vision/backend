@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           railway up \
-            --service staging-api \
+            --service api-staging \
             --ci \
             -m "Deploy from ${{ github.sha }}"
 
