@@ -1,0 +1,194 @@
+name: Deploy Backend
+
+# Release train model (mirrors data-platform):
+#   - Every push to main (after tests pass): deploy to staging + smoke test
+#   - Nightly at 2 AM ET (7 AM UTC): smoke test staging, then deploy to production
+#   - workflow_dispatch: same as nightly (on-demand production deploy for hotfixes)
+#
+# Required GitHub secrets (scoped to each environment):
+#   court-vision / staging:    RAILWAY_TOKEN           (Railway env-scoped token)
+#   court-vision / production: RAILWAY_TOKEN           (Railway env-scoped token)
+#
+# Required GitHub variables (scoped to each environment):
+#   court-vision / staging:    API_STAGING_URL    (public Railway URL for staging backend)
+#   court-vision / production: API_PRODUCTION_URL (public Railway URL for production backend)
+
+on:
+  workflow_run:
+    workflows: ["Backend Tests"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * *'  # 2 AM ET daily — deploy previous day's changes to production
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------------
+  # Stage 1: Deploy to staging
+  # Runs only on CI push (workflow_run). Skipped on schedule/dispatch
+  # since staging already has the latest code from continuous deploys.
+  # ------------------------------------------------------------------
+  deploy-staging:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success'
+    environment: court-vision / staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          railway up \
+            --service staging-api \
+            --ci \
+            -m "Deploy from ${{ github.sha }}"
+
+      - name: Wait for staging to become healthy
+        env:
+          API_STAGING_URL: ${{ vars.API_STAGING_URL }}
+        run: |
+          echo "Waiting for staging to become healthy..."
+          for i in $(seq 1 30); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$API_STAGING_URL/ping" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Staging is healthy!"
+              exit 0
+            fi
+            echo "Attempt $i/30: HTTP $status — retrying in 10s..."
+            sleep 10
+          done
+          echo "Staging failed to become healthy after 5 minutes"
+          exit 1
+
+  # ------------------------------------------------------------------
+  # Stage 2: Smoke tests against staging
+  # Runs after every staging deploy AND before every production deploy.
+  # On schedule/dispatch, deploy-staging is skipped so this runs first.
+  # ------------------------------------------------------------------
+  smoke-test-staging:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: >
+      always() &&
+      (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
+    environment: court-vision / staging
+
+    steps:
+      - name: Verify public API is responsive
+        env:
+          API_STAGING_URL: ${{ vars.API_STAGING_URL }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "$API_STAGING_URL/ping")
+          if [ "$status" != "200" ]; then
+            echo "Health check failed: HTTP $status"
+            exit 1
+          fi
+          echo "Health check: OK"
+
+      - name: Verify public rankings endpoint
+        env:
+          API_STAGING_URL: ${{ vars.API_STAGING_URL }}
+        run: |
+          response=$(curl -s -w "\n%{http_code}" "$API_STAGING_URL/v1/rankings/")
+          body=$(echo "$response" | head -n -1)
+          http_status=$(echo "$response" | tail -n 1)
+
+          if [ "$http_status" != "200" ]; then
+            echo "Rankings endpoint failed: HTTP $http_status"
+            echo "$body"
+            exit 1
+          fi
+
+          api_status=$(echo "$body" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('status', 'unknown'))
+          " 2>/dev/null || echo "unknown")
+
+          if [ "$api_status" != "success" ]; then
+            echo "Rankings returned unexpected status: $api_status"
+            echo "$body"
+            exit 1
+          fi
+
+          echo "Rankings endpoint: OK (status=$api_status)"
+
+      - name: Verify live players endpoint
+        env:
+          API_STAGING_URL: ${{ vars.API_STAGING_URL }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "$API_STAGING_URL/v1/live/players/today")
+          if [ "$status" != "200" ]; then
+            echo "Live players endpoint failed: HTTP $status"
+            exit 1
+          fi
+          echo "Live players endpoint: OK"
+
+  # ------------------------------------------------------------------
+  # Stage 3: Deploy to production
+  # Runs only on schedule (nightly) or workflow_dispatch (hotfix).
+  # Requires staging smoke tests to have passed.
+  # ------------------------------------------------------------------
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: smoke-test-staging
+    if: >
+      always() &&
+      needs.smoke-test-staging.result == 'success' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    environment: court-vision / production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          railway up \
+            --service api \
+            --ci \
+            -m "Deploy from ${{ github.sha }}"
+
+      - name: Wait for production to become healthy
+        env:
+          API_PRODUCTION_URL: ${{ vars.API_PRODUCTION_URL }}
+        run: |
+          echo "Waiting for production to become healthy..."
+          for i in $(seq 1 30); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$API_PRODUCTION_URL/ping" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Production is healthy!"
+              exit 0
+            fi
+            echo "Attempt $i/30: HTTP $status — retrying in 10s..."
+            sleep 10
+          done
+          echo "Production failed health check — roll back via Railway dashboard"
+          exit 1
+
+      - name: Post-deploy verification
+        env:
+          API_PRODUCTION_URL: ${{ vars.API_PRODUCTION_URL }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "$API_PRODUCTION_URL/v1/rankings/")
+          if [ "$status" != "200" ]; then
+            echo "Post-deploy verification failed: HTTP $status"
+            echo "Roll back via Railway dashboard → Deployments → previous deployment → Redeploy"
+            exit 1
+          fi
+          echo "Production deployment verified"

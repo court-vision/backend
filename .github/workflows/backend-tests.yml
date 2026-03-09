@@ -1,0 +1,80 @@
+name: Backend Tests
+
+on:
+  pull_request:
+    paths:
+      - "**"
+      - ".github/workflows/backend-tests.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "**"
+      - ".github/workflows/backend-tests.yml"
+  schedule:
+    # 07:00 UTC daily (02:00 ET) — after post-game pipelines complete
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: cv_test
+          POSTGRES_USER: cv
+          POSTGRES_PASSWORD: cv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U cv -d cv_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://cv:cv@127.0.0.1:5432/cv_test
+      PIPELINE_API_TOKEN: ci-test-token
+      # Fake Clerk values — sufficient for unit/api tests (no real JWT validation)
+      CLERK_JWKS_URL: https://fake.clerk.dev/.well-known/jwks.json
+      CLERK_SECRET_KEY: sk_test_fake
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit and API tests
+        run: |
+          python -m pytest -m "unit or api" --cov=. --cov-report=term-missing --cov-report=xml
+
+      - name: Run integration tests (main/nightly/manual only)
+        if: github.event_name != 'pull_request'
+        run: |
+          set +e
+          python -m pytest -m "integration"
+          status=$?
+          if [ $status -eq 5 ]; then
+            echo "No integration tests collected yet."
+            exit 0
+          fi
+          exit $status
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
