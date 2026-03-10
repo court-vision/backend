@@ -1183,22 +1183,120 @@
             "gameSpan": 7,
             "games": {
                 "IND": {
-                    "0": true
-                },
-                "SAC": {
-                    "0": true
+                    "0": true,
+                    "4": true,
+                    "6": true
                 },
                 "MIN": {
-                    "0": true
-                },
-                "PHX": {
-                    "0": true
+                    "0": true,
+                    "4": true,
+                    "6": true
                 },
                 "NOP": {
-                    "0": true
+                    "0": true,
+                    "3": true,
+                    "6": true
+                },
+                "PHX": {
+                    "0": true,
+                    "2": true,
+                    "6": true
+                },
+                "SAC": {
+                    "0": true,
+                    "3": true,
+                    "6": true
                 },
                 "SAS": {
-                    "0": true
+                    "0": true,
+                    "2": true,
+                    "5": true
+                },
+                "MIA": {
+                    "1": true
+                },
+                "NYK": {
+                    "1": true,
+                    "5": true
+                },
+                "ORL": {
+                    "1": true,
+                    "5": true
+                },
+                "TOR": {
+                    "1": true
+                },
+                "LAL": {
+                    "2": true,
+                    "6": true
+                },
+                "OKC": {
+                    "2": true,
+                    "5": true
+                },
+                "BOS": {
+                    "3": true
+                },
+                "DEN": {
+                    "3": true
+                },
+                "HOU": {
+                    "3": true
+                },
+                "LAC": {
+                    "3": true
+                },
+                "MIL": {
+                    "3": true,
+                    "6": true
+                },
+                "POR": {
+                    "3": true,
+                    "6": true
+                },
+                "ATL": {
+                    "4": true,
+                    "6": true
+                },
+                "BKN": {
+                    "4": true,
+                    "6": true
+                },
+                "CHA": {
+                    "4": true,
+                    "6": true
+                },
+                "CHI": {
+                    "4": true,
+                    "6": true
+                },
+                "CLE": {
+                    "4": true,
+                    "6": true
+                },
+                "DAL": {
+                    "4": true
+                },
+                "DET": {
+                    "4": true
+                },
+                "GSW": {
+                    "4": true,
+                    "6": true
+                },
+                "MEM": {
+                    "4": true
+                },
+                "PHI": {
+                    "4": true,
+                    "6": true
+                },
+                "UTA": {
+                    "4": true
+                },
+                "WAS": {
+                    "4": true,
+                    "6": true
                 }
             }
         },
@@ -3090,35 +3188,171 @@
             "endDate": "03/15/2026",
             "gameSpan": 7,
             "games": {
-                "CLE": {
-                    "0": true
-                },
-                "PHI": {
-                    "0": true
-                },
                 "BKN": {
-                    "0": true
+                    "0": true,
+                    "1": true,
+                    "3": true,
+                    "5": true
                 },
-                "MEM": {
-                    "0": true
-                },
-                "OKC": {
-                    "0": true
+                "CLE": {
+                    "0": true,
+                    "2": true,
+                    "4": true,
+                    "6": true
                 },
                 "DEN": {
-                    "0": true
-                },
-                "UTA": {
-                    "0": true
+                    "0": true,
+                    "2": true,
+                    "3": true,
+                    "5": true
                 },
                 "GSW": {
-                    "0": true
+                    "0": true,
+                    "1": true,
+                    "4": true,
+                    "6": true
                 },
                 "LAC": {
-                    "0": true
+                    "0": true,
+                    "2": true,
+                    "4": true,
+                    "5": true
+                },
+                "MEM": {
+                    "0": true,
+                    "1": true,
+                    "3": true,
+                    "4": true
                 },
                 "NYK": {
-                    "0": true
+                    "0": true,
+                    "2": true,
+                    "4": true,
+                    "6": true
+                },
+                "OKC": {
+                    "0": true,
+                    "3": true,
+                    "6": true
+                },
+                "PHI": {
+                    "0": true,
+                    "1": true,
+                    "3": true,
+                    "5": true,
+                    "6": true
+                },
+                "UTA": {
+                    "0": true,
+                    "2": true,
+                    "4": true,
+                    "6": true
+                },
+                "ATL": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "BOS": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "CHA": {
+                    "1": true,
+                    "2": true,
+                    "5": true
+                },
+                "CHI": {
+                    "1": true,
+                    "3": true,
+                    "4": true
+                },
+                "DAL": {
+                    "1": true,
+                    "3": true,
+                    "4": true,
+                    "6": true
+                },
+                "DET": {
+                    "1": true,
+                    "3": true,
+                    "4": true,
+                    "6": true
+                },
+                "HOU": {
+                    "1": true,
+                    "2": true,
+                    "4": true
+                },
+                "IND": {
+                    "1": true,
+                    "3": true,
+                    "4": true,
+                    "6": true
+                },
+                "LAL": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "MIA": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "MIL": {
+                    "1": true,
+                    "3": true,
+                    "5": true,
+                    "6": true
+                },
+                "MIN": {
+                    "1": true,
+                    "2": true,
+                    "4": true,
+                    "6": true
+                },
+                "PHX": {
+                    "1": true,
+                    "3": true,
+                    "4": true
+                },
+                "POR": {
+                    "1": true,
+                    "4": true,
+                    "6": true
+                },
+                "SAC": {
+                    "1": true,
+                    "2": true,
+                    "5": true,
+                    "6": true
+                },
+                "SAS": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "TOR": {
+                    "1": true,
+                    "2": true,
+                    "4": true,
+                    "6": true
+                },
+                "WAS": {
+                    "1": true,
+                    "3": true,
+                    "5": true
+                },
+                "NOP": {
+                    "2": true,
+                    "4": true
+                },
+                "ORL": {
+                    "2": true,
+                    "3": true,
+                    "5": true
                 }
             }
         }
