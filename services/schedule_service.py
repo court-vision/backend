@@ -35,10 +35,17 @@ def _parse_date(date_str: str) -> date:
 
 
 def _get_nba_today() -> date:
-    """Return today's NBA game date in ET (before 6 AM ET counts as yesterday)."""
+    """Return the current fantasy scheduling date in ET.
+
+    Before 2 AM ET counts as yesterday — aligns with when ESPN's batch update
+    runs (~2 AM ET), after which the new fantasy day becomes active.
+
+    Note: for NBA *game* dates (live stats, scoreboard), games_service uses a
+    separate 6 AM ET rule so late-night games stay on the correct game date.
+    """
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)
-    if now_et.hour < 6:
+    if now_et.hour < 2:
         return (now_et - timedelta(days=1)).date()
     return now_et.date()
 
@@ -132,9 +139,8 @@ def get_remaining_games(team_abbrev: str, current_date: Optional[date] = None) -
     Returns:
         Number of remaining games in the current matchup.
     """
-    central_tz = pytz.timezone("US/Central")
     if current_date is None:
-        current_date = datetime.now(central_tz).date()
+        current_date = _get_nba_today()
 
     matchup = get_current_matchup(current_date)
     if not matchup:
@@ -187,9 +193,8 @@ def get_remaining_games_for_matchup(
         Number of remaining games. Returns total games if matchup hasn't started,
         0 if matchup has ended, otherwise games remaining from current day.
     """
-    central_tz = pytz.timezone("US/Central")
     if current_date is None:
-        current_date = datetime.now(central_tz).date()
+        current_date = _get_nba_today()
 
     matchup = get_matchup_by_number(matchup_number)
     if not matchup:
