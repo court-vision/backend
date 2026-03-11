@@ -143,10 +143,15 @@ class StreamerService:
                     )
                 effective_date = start_date + timedelta(days=target_day)
             else:
-                effective_date = date.today()
-                # In daily mode with no target_day, default to current day
                 if mode == StreamerMode.DAILY:
+                    # Default to current day; derive effective_date from start_date+index
+                    # so game_days filtering is consistent with the explicit targetDay path.
+                    # Using date.today() (UTC) would drift from _get_nba_today() (ET) after
+                    # ~7 PM ET (midnight UTC), causing target_day to fall outside game_days.
                     target_day = current_day_index
+                    effective_date = start_date + timedelta(days=target_day)
+                else:
+                    effective_date = date.today()
 
             # Select scoring weights based on mode
             weights = (
