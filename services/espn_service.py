@@ -6,7 +6,7 @@ from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPl
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, AVG_WINDOW_MAP, json_parsing
 from schemas.common import ApiStatus
-from services.schedule_service import get_remaining_games, get_matchup_dates
+from services.schedule_service import get_remaining_games, get_dates_for_scoring_periods
 
 class Player(object):
     '''Player are part of team'''
@@ -245,8 +245,12 @@ class EspnService:
             current_matchup_period = status.get('currentMatchupPeriod', 1)
             latest_scoring_period = status.get('latestScoringPeriod')
 
-            # Get matchup dates from schedule service
-            matchup_dates = get_matchup_dates(current_matchup_period)
+            # Resolve matchup period dates via ESPN's scoring period map (handles playoffs).
+            # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
+            settings = data.get('settings', {})
+            matchup_period_map = settings.get('scheduleSettings', {}).get('matchupPeriods', {})
+            scoring_periods = matchup_period_map.get(str(current_matchup_period), [current_matchup_period])
+            matchup_dates = get_dates_for_scoring_periods(scoring_periods)
             matchup_start_date = matchup_dates[0] if matchup_dates else None
             matchup_end_date = matchup_dates[1] if matchup_dates else None
 

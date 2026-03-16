@@ -237,6 +237,31 @@ def get_matchup_dates(matchup_number: int) -> Optional[tuple[date, date]]:
     return (matchup["start_date"], matchup["end_date"])
 
 
+def get_dates_for_scoring_periods(scoring_periods: list[int]) -> Optional[tuple[date, date]]:
+    """
+    Get the combined date range covering all given scoring periods.
+
+    Used for playoff matchup periods where ESPN maps one matchup period to
+    multiple scoring periods (e.g., a 2-week playoff round = [21, 22]).
+
+    Args:
+        scoring_periods: List of scoring period numbers to span.
+
+    Returns:
+        Tuple of (earliest start_date, latest end_date) or None if none found.
+    """
+    schedule = _load_schedule().get("schedule", {})
+    starts, ends = [], []
+    for sp in scoring_periods:
+        entry = schedule.get(str(sp))
+        if entry:
+            starts.append(_parse_date(entry["startDate"]))
+            ends.append(_parse_date(entry["endDate"]))
+    if not starts:
+        return None
+    return (min(starts), max(ends))
+
+
 def get_current_matchup_dates(current_date: Optional[date] = None) -> Optional[tuple[date, date]]:
     """
     Get the start and end dates for the current matchup.

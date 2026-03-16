@@ -398,6 +398,12 @@ class MatchupService:
             return DailyMatchupResp(status=matchup.status, message=matchup.message, data=None)
 
         md = matchup.data
+        if not md.matchup_period_start or not md.matchup_period_end:
+            return DailyMatchupResp(
+                status=ApiStatus.NOT_FOUND,
+                message="Matchup period dates unavailable — schedule may not cover current playoff period",
+                data=None,
+            )
         period_start = date_type.fromisoformat(md.matchup_period_start)
         period_end = date_type.fromisoformat(md.matchup_period_end)
 
@@ -637,6 +643,12 @@ class MatchupService:
             return WeeklyMatchupResp(status=matchup.status, message=matchup.message, data=None)
 
         md = matchup.data
+        if not md.matchup_period_start or not md.matchup_period_end:
+            return WeeklyMatchupResp(
+                status=ApiStatus.NOT_FOUND,
+                message="Matchup period dates unavailable — schedule may not cover current playoff period",
+                data=None,
+            )
         period_start = date_type.fromisoformat(md.matchup_period_start)
         period_end = date_type.fromisoformat(md.matchup_period_end)
         dates = [
