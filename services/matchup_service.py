@@ -3,7 +3,6 @@ from datetime import datetime, date as date_type, timedelta
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.team_service import TeamService
-from services.schedule_service import get_current_matchup as _get_schedule_matchup
 from schemas.matchup import (
     MatchupResp,
     MatchupScoreHistoryResp,
@@ -176,14 +175,19 @@ class MatchupService:
             baseline_excludes_nba_today = False
 
         # Include live overlay only when nba_today's games aren't yet in the
-        # baseline, AND game_date falls within the current ESPN matchup week.
+        # baseline, AND game_date falls within the current ESPN matchup period.
+        # Use the matchup's actual date range (already correctly spanning 2 weeks
+        # for playoff periods) rather than comparing local-schedule week numbers,
+        # which diverge from ESPN's matchup period IDs during playoffs.
         include_live = False
-        if baseline_excludes_nba_today:
-            schedule_matchup = _get_schedule_matchup(game_date)
-            include_live = (
-                schedule_matchup is not None
-                and schedule_matchup["matchup_number"] == espn_matchup_period
-            )
+        if (
+            baseline_excludes_nba_today
+            and matchup.data.matchup_period_start
+            and matchup.data.matchup_period_end
+        ):
+            mp_start = date_type.fromisoformat(matchup.data.matchup_period_start)
+            mp_end = date_type.fromisoformat(matchup.data.matchup_period_end)
+            include_live = mp_start <= game_date <= mp_end
 
         if include_live:
             all_espn_ids = [

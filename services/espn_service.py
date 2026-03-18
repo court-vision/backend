@@ -250,6 +250,12 @@ class EspnService:
             settings = data.get('settings', {})
             matchup_period_map = settings.get('scheduleSettings', {}).get('matchupPeriods', {})
             scoring_periods = matchup_period_map.get(str(current_matchup_period), [current_matchup_period])
+            # For leagues in week 2 of a 2-week playoff, matchupPeriods may not
+            # include the playoff matchup period key, causing scoring_periods to
+            # fall back to a single-period list covering only week 1. Extend the
+            # list with latestScoringPeriod so the date range reaches week 2.
+            if latest_scoring_period and latest_scoring_period not in scoring_periods:
+                scoring_periods = list(scoring_periods) + [latest_scoring_period]
             matchup_dates = get_dates_for_scoring_periods(scoring_periods)
             matchup_start_date = matchup_dates[0] if matchup_dates else None
             matchup_end_date = matchup_dates[1] if matchup_dates else None
