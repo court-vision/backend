@@ -2,8 +2,8 @@ name: Deploy Backend
 
 # Release train model (mirrors data-platform):
 #   - Every push to main (after tests pass): deploy to staging + smoke test
-#   - Nightly at 2 AM ET (7 AM UTC): smoke test staging, then deploy to production
-#   - workflow_dispatch: same as nightly (on-demand production deploy for hotfixes)
+#   - Nightly at 2 AM CST (8 AM UTC): triggered by data-platform cron-runner via repository_dispatch
+#   - workflow_dispatch: on-demand production deploy for hotfixes
 #
 # Required GitHub secrets (scoped to each environment):
 #   court-vision / staging:    RAILWAY_TOKEN           (Railway env-scoped token)
@@ -18,6 +18,8 @@ on:
     workflows: ["Backend Tests"]
     types: [completed]
     branches: [main]
+  repository_dispatch:
+    types: [nightly-deploy]  # triggered by data-platform cron at 2AM CST
   workflow_dispatch:
 
 jobs:
@@ -142,7 +144,7 @@ jobs:
     if: >
       always() &&
       needs.smoke-test-staging.result == 'success' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
     environment: court-vision / production
 
     steps:
