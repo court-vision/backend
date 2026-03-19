@@ -65,9 +65,14 @@ def _live_top_performers(game_id: str, team_player_ids: set[int], limit: int = 5
 
 
 def _get_team_player_ids(team_id: str) -> set[int]:
-    """Get all current player IDs on a team from the latest season stats."""
+    """Get all current player IDs on a team from the latest season stats.
+
+    Uses the team-specific latest date so teams that haven't played recently
+    still return their roster (they have no row for the global latest date).
+    """
     latest_date = (
         PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
+        .where(PlayerSeasonStats.team == team_id)
         .order_by(PlayerSeasonStats.as_of_date.desc())
         .limit(1)
         .scalar()
@@ -224,36 +229,10 @@ class NBATeamLiveGameService:
                     ),
                 )
 
-            # --- No game today: find most recent final or next upcoming ---
+            # --- No game today: show next upcoming first, then fall back to most recent final ---
             all_games = Game.get_team_games(team_id=team_id)
 
-            # Most recent final
-            past_games = [g for g in all_games if g.status == "final" and g.game_date < nba_today]
-            if past_games:
-                g = past_games[-1]
-                home_performers = _live_top_performers(g.game_id, _get_team_player_ids(g.home_team_id))
-                away_performers = _live_top_performers(g.game_id, _get_team_player_ids(g.away_team_id))
-                return NBATeamLiveGameResp(
-                    status=ApiStatus.SUCCESS,
-                    message=f"Most recent game for {team.name}",
-                    data=NBATeamLiveGameData(
-                        game_id=g.game_id,
-                        game_date=g.game_date.isoformat(),
-                        home_team=g.home_team_id,
-                        away_team=g.away_team_id,
-                        home_score=g.home_score,
-                        away_score=g.away_score,
-                        status=g.status,
-                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
-                        arena=g.arena,
-                        home_top_performers=home_performers,
-                        away_top_performers=away_performers,
-                        is_today=False,
-                        is_upcoming=False,
-                    ),
-                )
-
-            # Next upcoming game
+            # Next upcoming game (preferred — most actionable for the user)
             upcoming = [g for g in all_games if g.status == "scheduled" and g.game_date > nba_today]
             if upcoming:
                 g = upcoming[0]
@@ -272,6 +251,30 @@ class NBATeamLiveGameService:
                         injured_players=injured,
                         is_today=False,
                         is_upcoming=True,
+                    ),
+                )
+
+            # Most recent final (fallback — season may be over)
+            # Note: live_player_stats only stores current-day data, so performers
+            # are intentionally not populated here.
+            past_games = [g for g in all_games if g.status == "final" and g.game_date < nba_today]
+            if past_games:
+                g = past_games[-1]
+                return NBATeamLiveGameResp(
+                    status=ApiStatus.SUCCESS,
+                    message=f"Most recent game for {team.name}",
+                    data=NBATeamLiveGameData(
+                        game_id=g.game_id,
+                        game_date=g.game_date.isoformat(),
+                        home_team=g.home_team_id,
+                        away_team=g.away_team_id,
+                        home_score=g.home_score,
+                        away_score=g.away_score,
+                        status=g.status,
+                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
+                        arena=g.arena,
+                        is_today=False,
+                        is_upcoming=False,
                     ),
                 )
 

@@ -37,9 +37,12 @@ class NBATeamRosterService:
                     data=None,
                 )
 
-            # Find the latest as_of_date with data
+            # Find the latest as_of_date for THIS TEAM specifically.
+            # Using a global max would exclude teams that haven't played recently
+            # (their rows don't exist for the most recent date in the table).
             latest_date = (
                 PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
+                .where(PlayerSeasonStats.team == team_id)
                 .order_by(PlayerSeasonStats.as_of_date.desc())
                 .limit(1)
                 .scalar()
