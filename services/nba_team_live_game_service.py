@@ -12,11 +12,13 @@ from db.models.nba.teams import NBATeam
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.live_player_stats import LivePlayerStats
+from db.models.nba.live_game_score_snapshots import LiveGameScoreSnapshot
 from db.models.nba.player_injuries import PlayerInjury
 from schemas.common import ApiStatus
 from schemas.teams import (
     NBATeamLiveGameResp,
     NBATeamLiveGameData,
+    GameScoreSnapshot,
     TopPerformer,
     InjuredPlayer,
 )
@@ -168,7 +170,8 @@ class NBATeamLiveGameService:
                         extractor = NBAApiExtractor()
                         box = extractor.get_live_box_score(g.game_id)
                         if box:
-                            game_data = box.get("game", {})
+                            # box is already the unwrapped inner game dict
+                            game_data = box
                             home_team_data = game_data.get("homeTeam", {})
                             away_team_data = game_data.get("awayTeam", {})
 
@@ -189,8 +192,28 @@ class NBATeamLiveGameService:
                                 p.get("score", 0)
                                 for p in away_team_data.get("periods", [])
                             ]
+                        else:
+                            # API temporarily unavailable — fall back to most recent snapshot
+                            snapshot = LiveGameScoreSnapshot.get_latest_for_game(g.game_id)
+                            if snapshot and LiveGameScoreSnapshot.is_game_live(g.game_id):
+                                home_score = snapshot.home_score
+                                away_score = snapshot.away_score
+                                period = snapshot.period
+                                game_clock = snapshot.game_clock
+                                status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
                     except Exception as e:
                         log.warning("live_box_score_fetch_failed", error=str(e), game_id=g.game_id)
+                        # Fall back to snapshot on exception too
+                        try:
+                            snapshot = LiveGameScoreSnapshot.get_latest_for_game(g.game_id)
+                            if snapshot and LiveGameScoreSnapshot.is_game_live(g.game_id):
+                                home_score = snapshot.home_score
+                                away_score = snapshot.away_score
+                                period = snapshot.period
+                                game_clock = snapshot.game_clock
+                                status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
+                        except Exception:
+                            pass
 
                 # Top performers from live_player_stats
                 if g.game_id and status in ("in_progress", "final"):
@@ -203,6 +226,25 @@ class NBATeamLiveGameService:
                 injured: list[InjuredPlayer] = []
                 if status == "scheduled":
                     injured = _get_injured_players(team_id, team_player_ids)
+
+                # Score history for chart (all snapshots for this game, chronological)
+                score_history: list[GameScoreSnapshot] = []
+                if g.game_id:
+                    try:
+                        snapshots = LiveGameScoreSnapshot.get_snapshots_for_game(g.game_id)
+                        score_history = [
+                            GameScoreSnapshot(
+                                captured_at=s.captured_at.isoformat(),
+                                period=s.period,
+                                game_clock=s.game_clock,
+                                home_score=s.home_score,
+                                away_score=s.away_score,
+                                game_status=s.game_status,
+                            )
+                            for s in snapshots
+                        ]
+                    except Exception as e:
+                        log.warning("score_history_fetch_failed", error=str(e), game_id=g.game_id)
 
                 return NBATeamLiveGameResp(
                     status=ApiStatus.SUCCESS,
@@ -226,6 +268,7 @@ class NBATeamLiveGameService:
                         injured_players=injured,
                         is_today=True,
                         is_upcoming=status == "scheduled",
+                        score_history=score_history,
                     ),
                 )
 

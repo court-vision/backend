@@ -114,6 +114,17 @@ class NBATeamRosterResp(BaseResponse):
 
 # ── NBA Team Live Game ────────────────────────────────────────────────────────
 
+class GameScoreSnapshot(BaseModel):
+    """Score snapshot for an NBA game at a specific point in time."""
+
+    captured_at: str          # ISO 8601 datetime (UTC)
+    period: Optional[int] = None
+    game_clock: Optional[str] = None
+    home_score: int
+    away_score: int
+    game_status: int          # 1=scheduled, 2=in_progress, 3=final
+
+
 class TopPerformer(BaseModel):
     """Top performer in a game."""
 
@@ -161,6 +172,7 @@ class NBATeamLiveGameData(BaseModel):
     injured_players: list[InjuredPlayer] = Field(default_factory=list)
     is_today: bool = False
     is_upcoming: bool = False
+    score_history: list[GameScoreSnapshot] = Field(default_factory=list)
 
 
 class NBATeamLiveGameResp(BaseResponse):
