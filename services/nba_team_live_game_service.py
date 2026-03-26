@@ -36,7 +36,7 @@ def _get_nba_today() -> date:
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}
 
 
-def _live_top_performers(game_id: str, team_player_ids: set[int], limit: int = 5) -> list[TopPerformer]:
+def _live_top_performers(game_id: str, team_player_ids: set[int], limit: int = 15) -> list[TopPerformer]:
     """Fetch top performers from live stats for a specific game and team."""
     rows = list(
         LivePlayerStats.select(LivePlayerStats, Player)
