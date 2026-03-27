@@ -133,6 +133,7 @@ class Game(BaseModel):
         team_id: str,
         start_date: date | None = None,
         end_date: date | None = None,
+        season: str | None = None,
     ) -> list["Game"]:
         """
         Get games for a specific team within a date range.
@@ -141,6 +142,7 @@ class Game(BaseModel):
             team_id: Team abbreviation
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
+            season: Season identifier (e.g., '2025-26') to filter by
 
         Returns:
             List of Game records
@@ -149,6 +151,8 @@ class Game(BaseModel):
             (cls.home_team_id == team_id) | (cls.away_team_id == team_id)
         )
 
+        if season:
+            query = query.where(cls.season == season)
         if start_date:
             query = query.where(cls.game_date >= start_date)
         if end_date:

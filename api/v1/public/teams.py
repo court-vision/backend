@@ -29,7 +29,7 @@ async def get_team_schedule(
     request: Request,
     team_abbrev: str = Path(..., description="Team abbreviation (e.g., LAL, BOS, GSW)"),
     upcoming: bool = Query(False, description="Only return future games"),
-    limit: int = Query(20, ge=1, le=100, description="Maximum number of games to return"),
+    limit: int = Query(20, ge=1, le=200, description="Maximum number of games to return"),
 ) -> TeamScheduleResp:
     """Get schedule for a team."""
     return await TeamScheduleService.get_team_schedule(

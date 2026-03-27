@@ -5,6 +5,7 @@ Service for NBA team schedule operations.
 from datetime import date
 
 from core.logging import get_logger
+from core.settings import get_settings
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
@@ -45,9 +46,14 @@ class TeamScheduleService:
                     data=None,
                 )
 
-            # Get games
+            # Get games (filter to current season to avoid prior-season games eating into limit)
             start_date = date.today() if upcoming else None
-            games = Game.get_team_games(team_id=team_id, start_date=start_date)
+            settings = get_settings()
+            games = Game.get_team_games(
+                team_id=team_id,
+                start_date=start_date,
+                season=settings.nba_season,
+            )
 
             # Limit results
             games = games[:limit]
