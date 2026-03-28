@@ -46,9 +46,16 @@ class TeamScheduleService:
                     data=None,
                 )
 
-            # Get games (filter to current season to avoid prior-season games eating into limit)
-            start_date = date.today() if upcoming else None
+            # Get games filtered to current season.
+            # Use regular season start date to exclude preseason games
+            # (which share the same season tag but consume limit slots).
+            from services.schedule_service import get_matchup_by_number
             settings = get_settings()
+            if upcoming:
+                start_date = date.today()
+            else:
+                matchup_1 = get_matchup_by_number(1)
+                start_date = matchup_1["start_date"] if matchup_1 else None
             games = Game.get_team_games(
                 team_id=team_id,
                 start_date=start_date,
