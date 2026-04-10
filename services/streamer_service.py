@@ -88,7 +88,7 @@ class StreamerService:
     @staticmethod
     async def find_streamers(
         league_info: LeagueInfo,
-        fa_count: int = 50,
+        fa_count: int = 300,
         exclude_injured: bool = True,
         b2b_only: bool = False,
         mode: StreamerMode = StreamerMode.WEEK,
