@@ -51,7 +51,7 @@ class StreamerData(BaseModel):
 class StreamerReq(BaseRequest):
     """Request for finding streamers."""
     league_info: LeagueInfo
-    fa_count: int = Field(default=50, ge=5, le=200)
+    fa_count: int = Field(default=300, ge=5, le=300)
     exclude_injured: bool = Field(default=True)
     b2b_only: bool = Field(
         default=False,
