@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from services.user_sync_service import UserSyncService
-from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp, WeeklyMatchupResp
+from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp, WeeklyMatchupResp, SeasonSummaryResp
 from core.clerk_auth import get_current_user
 
 
@@ -106,6 +106,20 @@ async def get_weekly_matchup(
     """
     user_id = _get_user_id(current_user)
     return await MatchupService.get_weekly_matchup(user_id, team_id)
+
+
+@router.get('/season-summary/{team_id}', response_model=SeasonSummaryResp)
+async def get_season_summary(
+    team_id: int,
+    _: dict = Depends(get_current_user)
+) -> SeasonSummaryResp:
+    """
+    Get the full-season W/L record, total points, and per-week results for a team.
+
+    Aggregates DailyMatchupScore snapshots across all matchup periods.
+    The last snapshot per period is used as the final score for that week.
+    """
+    return await MatchupService.get_season_summary(team_id)
 
 
 @router.get('/daily/{team_id}', response_model=DailyMatchupResp)

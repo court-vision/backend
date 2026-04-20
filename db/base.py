@@ -48,6 +48,7 @@ def init_db():
         LivePlayerStats,
         LiveGameScoreSnapshot,
         BreakoutCandidate,
+        PlayoffSeries,
     )
 
     # Import notification models
@@ -78,6 +79,8 @@ def init_db():
         LiveGameScoreSnapshot,
         # NBA schema - breakout detection
         BreakoutCandidate,
+        # NBA schema - playoff bracket
+        PlayoffSeries,
         # User schema - notification tables
         NotificationPreference, NotificationLog, NotificationTeamPreference,
     ], safe=True)

@@ -20,6 +20,9 @@ from schemas.matchup import (
     DailyMatchupFuturePlayer,
     WeeklyMatchupResp,
     WeeklyMatchupData,
+    SeasonSummaryResp,
+    SeasonSummaryData,
+    WeekResult,
 )
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from db.models.stats.daily_matchup_score import DailyMatchupScore
@@ -878,5 +881,79 @@ class MatchupService:
             data=WeeklyMatchupData(
                 matchup_period=md.matchup_period,
                 days=days,
+            ),
+        )
+
+    @staticmethod
+    async def get_season_summary(team_id: int) -> SeasonSummaryResp:
+        """
+        Aggregate all DailyMatchupScore records for a team into a season summary.
+
+        Uses the last day's snapshot per matchup period as the final score
+        (the final score for that week after all games have been played).
+        """
+        records = list(
+            DailyMatchupScore
+            .select()
+            .where(DailyMatchupScore.team_id == team_id)
+            .order_by(DailyMatchupScore.matchup_period, DailyMatchupScore.date)
+        )
+
+        if not records:
+            return SeasonSummaryResp(
+                status=ApiStatus.NOT_FOUND,
+                message=f"No season data found for team {team_id}",
+                data=None,
+            )
+
+        # Group by matchup_period; last record per period = final score
+        periods: dict[int, list] = {}
+        for r in records:
+            periods.setdefault(r.matchup_period, []).append(r)
+
+        wins = losses = 0
+        total_pf = total_pa = 0.0
+        best_week: WeekResult | None = None
+        worst_week: WeekResult | None = None
+        weeks: list[WeekResult] = []
+
+        for period in sorted(periods):
+            last = periods[period][-1]
+            pf = float(last.current_score)
+            pa = float(last.opponent_current_score)
+            won = pf > pa
+
+            wins += int(won)
+            losses += int(not won)
+            total_pf += pf
+            total_pa += pa
+
+            week = WeekResult(
+                matchup_period=period,
+                opponent_team_name=last.opponent_team_name,
+                points_for=round(pf, 2),
+                points_against=round(pa, 2),
+                won=won,
+            )
+            weeks.append(week)
+
+            if best_week is None or pf > best_week.points_for:
+                best_week = week
+            if worst_week is None or pf < worst_week.points_for:
+                worst_week = week
+
+        return SeasonSummaryResp(
+            status=ApiStatus.SUCCESS,
+            message="Season summary retrieved",
+            data=SeasonSummaryData(
+                team_id=team_id,
+                team_name=records[0].team_name,
+                wins=wins,
+                losses=losses,
+                total_points_for=round(total_pf, 2),
+                total_points_against=round(total_pa, 2),
+                best_week=best_week,
+                worst_week=worst_week,
+                weeks=weeks,
             ),
         )

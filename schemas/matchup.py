@@ -204,3 +204,29 @@ class WeeklyMatchupData(BaseModel):
 class WeeklyMatchupResp(BaseResponse):
     """Response containing all days for the current matchup period."""
     data: Optional[WeeklyMatchupData] = None
+
+
+# ------------------------------- Season Summary Models ------------------------------- #
+
+class WeekResult(BaseModel):
+    matchup_period: int
+    opponent_team_name: str
+    points_for: float
+    points_against: float
+    won: bool
+
+
+class SeasonSummaryData(BaseModel):
+    team_id: int
+    team_name: str
+    wins: int
+    losses: int
+    total_points_for: float
+    total_points_against: float
+    best_week: Optional[WeekResult] = None
+    worst_week: Optional[WeekResult] = None
+    weeks: list[WeekResult]
+
+
+class SeasonSummaryResp(BaseResponse):
+    data: Optional[SeasonSummaryData] = None
