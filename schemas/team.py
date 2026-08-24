@@ -25,6 +25,8 @@ class TeamGetResp(BaseResponse):
 class TeamAddResp(BaseResponse):
     """Add team response"""
     data: Optional[TeamResponse] = None
+    team_id: Optional[int] = None
+    already_exists: bool = False
 
 class TeamRemoveResp(BaseResponse):
     """Remove team response"""

@@ -1,5 +1,7 @@
 from schemas.team import TeamAddReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
-from db.models import Team
+from db.models import Team, League
+from peewee import JOIN
+from services.league_service import LeagueService
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
@@ -10,14 +12,23 @@ class TeamService:
     @staticmethod
     async def get_teams(user_id: int) -> TeamGetResp:
         try:
-            teams_query = Team.select().where(Team.user_id == user_id)
-            teams: list[TeamResponse] = [TeamResponse(team_id=team.team_id, league_info=TeamService.deserialize_league_info(json.loads(team.league_info))) for team in teams_query]
+            teams_query = Team.select(Team, League).join(League, JOIN.LEFT_OUTER).where(Team.user_id == user_id)
+            teams: list[TeamResponse] = [TeamService._to_team_response(team) for team in teams_query]
 
             return TeamGetResp(status=ApiStatus.SUCCESS, message="Teams fetched successfully", data=teams)
             
         except Exception as e:
             print(f"Error in get_teams: {e}")
             return TeamGetResp(status=ApiStatus.ERROR, message="Internal server error")
+
+    @staticmethod
+    def _to_team_response(team: Team, league_info: LeagueInfo | None = None) -> TeamResponse:
+        league = team.league if team.league_id is not None else None
+        return TeamResponse(
+            team_id=team.team_id,
+            league_info=league_info or TeamService.deserialize_league_info(json.loads(team.league_info)),
+            league=LeagueService.to_summary(league),
+        )
 
     @staticmethod
     def serialize_league_info(league_info: LeagueInfo) -> str:
@@ -88,21 +99,29 @@ class TeamService:
             validation_result = validation_result_retry
         
         try:
-            team_exists = Team.select().where(
+            existing = Team.select().where(
                 (Team.user_id == user_id) & (Team.team_identifier == team_identifier)
-            ).exists()
-            
-            if team_exists:
-                return TeamAddResp(status=ApiStatus.SUCCESS, message="Team already exists", team_id=None, already_exists=True)
-            
+            ).first()
+
+            if existing is not None:
+                if existing.league_id is None:
+                    await LeagueService.sync_for_team(existing, league_info, espn_payload=validation_result.league_payload)
+                return TeamAddResp(status=ApiStatus.SUCCESS, message="Team already exists",
+                                   data=TeamService._to_team_response(existing, league_info),
+                                   team_id=existing.team_id, already_exists=True)
+
             # Create new team
             team = Team.create(
                 user_id=user_id,
                 team_identifier=team_identifier,
                 league_info=TeamService.serialize_league_info(league_info)
             )
+            # Detect the league's scoring settings from the provider (never raises)
+            await LeagueService.sync_for_team(team, league_info, espn_payload=validation_result.league_payload)
 
-            return TeamAddResp(status=ApiStatus.SUCCESS, message="Team added successfully", team_id=team.team_id, already_exists=False)
+            return TeamAddResp(status=ApiStatus.SUCCESS, message="Team added successfully",
+                               data=TeamService._to_team_response(team, league_info),
+                               team_id=team.team_id, already_exists=False)
             
         except Exception as e:
             print(f"Error in add_team: {e}")
@@ -138,7 +157,13 @@ class TeamService:
                 (Team.user_id == user_id) & (Team.team_id == team_id)
             ).execute()
 
-            return TeamUpdateResp(status=ApiStatus.SUCCESS, message="Team updated successfully", data=TeamResponse(team_id=team_id, league_info=league_info))
+            team = Team.get_or_none((Team.user_id == user_id) & (Team.team_id == team_id))
+            if team is None:
+                return TeamUpdateResp(status=ApiStatus.ERROR, message="Team not found", data=None)
+            await LeagueService.sync_for_team(team, league_info, espn_payload=validation_result.league_payload)
+
+            return TeamUpdateResp(status=ApiStatus.SUCCESS, message="Team updated successfully",
+                                  data=TeamService._to_team_response(team, league_info))
             
         except Exception as e:
             print(f"Error in update_team: {e}")
@@ -147,12 +172,12 @@ class TeamService:
     @staticmethod
     async def view_team(team_id: int) -> TeamViewResp:
         try:
-            team = Team.select().where(Team.team_id == team_id).first()
+            team = Team.select(Team, League).join(League, JOIN.LEFT_OUTER).where(Team.team_id == team_id).first()
             if not team:
                 return TeamViewResp(status=ApiStatus.ERROR, message="Team not found", data=None)
 
             # This will be passed to the ESPN service to get the roster data
-            return TeamViewResp(status=ApiStatus.SUCCESS, message="Team fetched successfully", data=TeamResponse(team_id=team.team_id, league_info=TeamService.deserialize_league_info(json.loads(team.league_info))))
+            return TeamViewResp(status=ApiStatus.SUCCESS, message="Team fetched successfully", data=TeamService._to_team_response(team))
 
         except Exception as e:
             print(f"Error in view_team: {e}")

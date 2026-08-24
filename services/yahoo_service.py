@@ -27,6 +27,7 @@ from utils.yahoo_helpers import (
 )
 from services.schedule_service import get_remaining_games
 from services.player_service import PlayerService
+from services.player_value_service import PlayerValueService
 
 
 # Yahoo API endpoints
@@ -129,7 +130,7 @@ class YahooService:
             "redirect_uri": settings.yahoo_redirect_uri,
         }
 
-        response = requests.post(YAHOO_TOKEN_URL, headers=headers, data=data)
+        response = requests.post(YAHOO_TOKEN_URL, headers=headers, data=data, timeout=settings.http_timeout)
         response.raise_for_status()
 
         token_data = response.json()
@@ -169,7 +170,7 @@ class YahooService:
             "refresh_token": refresh_token,
         }
 
-        response = requests.post(YAHOO_TOKEN_URL, headers=headers, data=data)
+        response = requests.post(YAHOO_TOKEN_URL, headers=headers, data=data, timeout=settings.http_timeout)
         response.raise_for_status()
 
         token_data = response.json()
@@ -267,7 +268,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/team/{team_key}?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
 
             if response.status_code == 401:
                 return ValidateLeagueResp(
@@ -324,7 +325,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/users;use_login=1/games;game_codes=nba/leagues?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -403,7 +404,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/league/{league_key}/teams?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -476,7 +477,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/team/{team_key}/roster/players?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
 
             if response.status_code == 401:
                 return TeamDataResp(
@@ -557,7 +558,9 @@ class YahooService:
 
             # Batch lookup stats by name from our internal database
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+            # Per-league point weights (falls back to the default formula when no league is synced)
+            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
+            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
 
             # Build final player list with stats
             players = []
@@ -634,7 +637,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/league/{league_key}/players;status=FA;sort=OR;count={fa_count}?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
 
             if response.status_code == 401:
                 return TeamDataResp(
@@ -711,7 +714,9 @@ class YahooService:
 
             # Batch lookup stats by name from our internal database
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+            # Per-league point weights (falls back to the default formula when no league is synced)
+            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
+            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
 
             # Build final player list with stats
             players = []
@@ -788,7 +793,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/team/{team_key}/matchups?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
 
             if response.status_code == 401:
                 return MatchupResp(
@@ -1005,7 +1010,7 @@ class YahooService:
             endpoint = f"{YAHOO_API_BASE}/team/{team_key}/roster/players?format=json"
             headers = YahooService._get_headers(access_token)
 
-            response = requests.get(endpoint, headers=headers)
+            response = requests.get(endpoint, headers=headers, timeout=settings.http_timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -1093,7 +1098,9 @@ class YahooService:
 
             # Batch lookup stats by name
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            name_to_avg = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
+            # Per-league point weights (falls back to the default formula when no league is synced)
+            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
+            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
 
             # Build MatchupPlayerResp list
             roster = []

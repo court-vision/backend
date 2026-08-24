@@ -1,5 +1,6 @@
 from datetime import datetime
 import requests
+from core.settings import settings
 import json
 from schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPlayerResp
@@ -48,6 +49,7 @@ class Player(object):
                 self.stats[id] = dict(applied_total=applied_total, applied_avg=applied_avg, team=game.get('team', None), date=game.get('date', None))
                 if split.get('stats'):
                     if 'averageStats' in split.keys():
+                        self.stats[id]['avg_raw'] = split['averageStats']   # stat-id keyed, for scoring fallbacks
                         self.stats[id]['avg'] = {STATS_MAP.get(i, i): split['averageStats'][i] for i in split['averageStats'].keys() if STATS_MAP.get(i) != ''}
                         self.stats[id]['total'] = {STATS_MAP.get(i, i): split['stats'][i] for i in split['stats'].keys() if STATS_MAP.get(i) != ''}
                     else:
@@ -55,6 +57,12 @@ class Player(object):
                         self.stats[id]['total'] = {STATS_MAP.get(i, i): split['stats'][i] for i in split['stats'].keys() if STATS_MAP.get(i) != ''}
         self.total_points = self.stats.get(f'{year}_total', {}).get('applied_total', 0)
         self.avg_points = self.stats.get(f'{year}_total', {}).get('applied_avg', 0)
+        if not self.avg_points and self.stats.get(f'{year}_total', {}).get('avg_raw'):
+            # Category leagues: ESPN's appliedAverage is 0, so value the player with the default
+            # points formula over their raw per-game averages (Phase 3 replaces this with a category proxy).
+            from services.scoring.points import DEFAULT_POINTS
+            from services.scoring.providers.espn_settings import statline_from_espn_stats
+            self.avg_points = round(DEFAULT_POINTS.score(statline_from_espn_stats(self.stats[f'{year}_total']['avg_raw'])), 2)
         self.projected_total_points= self.stats.get(f'{year}_projected', {}).get('applied_total', 0)
         self.projected_avg_points = self.stats.get(f'{year}_projected', {}).get('applied_avg', 0)
 
@@ -69,8 +77,9 @@ class EspnService:
     
     @staticmethod
     def check_league(league_info: LeagueInfo) -> ValidateLeagueResp:
+        # Team names + league settings are all validation (and league sync) need.
         params = {
-            'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
+            'view': ['mTeam', 'mSettings']
         }
 
         # Clean the input just in case it is what is making mobile requests fail
@@ -83,11 +92,14 @@ class EspnService:
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
 
         try:
-            response = requests.get(endpoint, params=params, cookies={'espn_s2': league_info.espn_s2, 'SWID': league_info.swid})
+            response = requests.get(endpoint, params=params, cookies={'espn_s2': league_info.espn_s2, 'SWID': league_info.swid}, timeout=settings.http_timeout)
             response.raise_for_status()
             data = response.json()
             teams = [team['name'] for team in data['teams']]
-            return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found") if league_info.team_name in teams else ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=False, message="Team not found in valid league")
+            if league_info.team_name in teams:
+                # league_payload is excluded from serialization; LeagueService reuses it for settings sync
+                return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found", league_payload=data)
+            return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=False, message="Team not found in valid league")
         except requests.exceptions.HTTPError as e:
             return ValidateLeagueResp(status=ApiStatus.ERROR, valid=False, message=f"Invalid league information {e}")
 
@@ -110,7 +122,7 @@ class EspnService:
             }
             
             endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            data = requests.get(endpoint, params=params, cookies=cookies).json()
+            data = requests.get(endpoint, params=params, cookies=cookies, timeout=settings.http_timeout).json()
             roster = EspnService.get_roster(league_info.team_name, data['teams'])
             players = [Player(player, league_info.year) for player in roster]
 
@@ -153,7 +165,7 @@ class EspnService:
             }
 
             endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            data = requests.get(endpoint, params=params, headers=headers, cookies=cookies).json()
+            data = requests.get(endpoint, params=params, headers=headers, cookies=cookies, timeout=settings.http_timeout).json()
             players = [Player(player, league_info.year) for player in data['players']]
 
             team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
@@ -187,7 +199,7 @@ class EspnService:
         filters = {"players":{"filterSlotIds":{"value":[]},"limit": 750, "sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":2,"sortAsc":True,"value":"STANDARD"}}}
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
-        data = requests.get(endpoint, params=params, headers=headers).json()
+        data = requests.get(endpoint, params=params, headers=headers, timeout=settings.http_timeout).json()
         data = data['players']
         data = [x.get('player', x) for x in data]
 
@@ -236,7 +248,7 @@ class EspnService:
             }
 
             endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            response = requests.get(endpoint, params=params, cookies=cookies)
+            response = requests.get(endpoint, params=params, cookies=cookies, timeout=settings.http_timeout)
             response.raise_for_status()
             data = response.json()
 

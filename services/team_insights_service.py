@@ -15,6 +15,7 @@ from schemas.common import ApiStatus, FantasyProvider
 from services.team_service import TeamService
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
+from services.player_value_service import PlayerValueService
 from services.player_service import PlayerService, _normalize_name, _compute_avg_stats
 from services import schedule_service
 from db.models.nba.players import Player
@@ -92,20 +93,21 @@ class TeamInsightsService:
                         )
 
             # Step 3: Batch stat window lookups
+            weights = PlayerValueService.weights_for_team(team_id)
             if league_info.provider == FantasyProvider.YAHOO:
                 player_lookups = [(p.name, p.team) for p in base_roster]
-                avgs_l7 = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=7)
-                avgs_l14 = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=14)
-                avgs_l30 = PlayerService.get_last_n_day_avg_batch_by_name(player_lookups, days=30)
+                avgs_l7 = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
+                avgs_l14 = PlayerValueService.rolling_avg_by_name(player_lookups, days=14, weights=weights)
+                avgs_l30 = PlayerValueService.rolling_avg_by_name(player_lookups, days=30, weights=weights)
 
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "name") -> Optional[float]:
                     normalized = _normalize_name(player.name)
                     return avgs.get(normalized)
             else:
                 espn_ids = [p.player_id for p in base_roster]
-                avgs_l7 = PlayerService.get_last_n_day_avg_batch(espn_ids, days=7)
-                avgs_l14 = PlayerService.get_last_n_day_avg_batch(espn_ids, days=14)
-                avgs_l30 = PlayerService.get_last_n_day_avg_batch(espn_ids, days=30)
+                avgs_l7 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=7, weights=weights)
+                avgs_l14 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=14, weights=weights)
+                avgs_l30 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=30, weights=weights)
 
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "espn_id") -> Optional[float]:
                     return avgs.get(player.player_id)

@@ -8,7 +8,9 @@ from services.team_insights_service import TeamInsightsService
 from schemas.team import TeamAddReq, TeamUpdateReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp
 from schemas.espn import TeamDataResp
 from schemas.team_insights import TeamInsightsResp
-from schemas.common import FantasyProvider
+from schemas.common import ApiStatus, FantasyProvider
+from schemas.league import LeagueGetResp, LeagueSyncResp
+from services.league_service import LeagueService
 from api.deps import get_db_user, get_owned_team
 from db.models.users import User
 from db.models.teams import Team
@@ -47,3 +49,25 @@ async def view_team(team: Team = Depends(get_owned_team)):
 @router.get('/{team_id}/insights', response_model=TeamInsightsResp)
 async def get_team_insights(team: Team = Depends(get_owned_team)):
     return await TeamInsightsService.get_team_insights(team.team_id)
+
+
+@router.get('/{team_id}/league', response_model=LeagueGetResp)
+async def get_team_league(team: Team = Depends(get_owned_team)):
+    """Provider-detected league settings for an owned team (None until synced)."""
+    if team.league_id is None:
+        return LeagueGetResp(status=ApiStatus.SUCCESS, message="League settings not synced yet", data=None)
+    return LeagueGetResp(status=ApiStatus.SUCCESS, message="League fetched", data=LeagueService.to_detail(team.league))
+
+
+@router.post('/{team_id}/league/sync', response_model=LeagueSyncResp)
+async def sync_team_league(team: Team = Depends(get_owned_team)):
+    """Re-fetch the league's scoring settings from the provider and store them."""
+    league = await LeagueService.sync_for_team(team, LeagueService.league_info_of(team))
+    if league is None:
+        return LeagueSyncResp(status=ApiStatus.ERROR, message="Could not sync league settings", data=None)
+    synced = league.settings_synced_at is not None
+    return LeagueSyncResp(
+        status=ApiStatus.SUCCESS if synced else ApiStatus.ERROR,
+        message="League settings synced" if synced else "Provider settings unavailable; using default points scoring",
+        data=LeagueService.to_summary(league),
+    )

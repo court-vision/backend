@@ -9,7 +9,8 @@ from schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp, Gen
 from schemas.common import ApiStatus, FantasyProvider
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
-from services.player_service import PlayerService
+from services.player_service import PlayerService, _normalize_name
+from services.player_value_service import PlayerValueService
 from services.team_service import TeamService
 from db.models import Lineup, Team
 from utils.constants import FEATURES_SERVER_ENDPOINT, NUM_FREE_AGENTS
@@ -43,13 +44,26 @@ class LineupService:
 
         if use_recent_stats:
             all_players = roster + fas
-            weighted_avgs = await asyncio.to_thread(
-                PlayerService.get_recent_weighted_avg_batch, [p.player_id for p in all_players]
-            )
-            for player in all_players:
-                recent = weighted_avgs.get(player.player_id)
-                if recent is not None:
-                    player.avg_points = recent
+            weights = PlayerValueService.weights_for_team(team_id)
+            if league_info.provider == FantasyProvider.YAHOO:
+                # Yahoo player ids are not ESPN ids: resolve by normalized name instead
+                weighted_avgs = await asyncio.to_thread(
+                    PlayerValueService.recent_weighted_avg_by_name,
+                    [(p.name, p.team) for p in all_players], 14, 7, weights,
+                )
+                for player in all_players:
+                    recent = weighted_avgs.get(_normalize_name(player.name))
+                    if recent is not None:
+                        player.avg_points = recent
+            else:
+                weighted_avgs = await asyncio.to_thread(
+                    PlayerValueService.recent_weighted_avg_by_espn_id,
+                    [p.player_id for p in all_players], 14, 7, weights,
+                )
+                for player in all_players:
+                    recent = weighted_avgs.get(player.player_id)
+                    if recent is not None:
+                        player.avg_points = recent
 
         return roster, fas
 

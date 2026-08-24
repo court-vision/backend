@@ -339,6 +339,15 @@ class PlayerService:
         espn_ids: list[int],
         days: int = 7
     ) -> dict[int, Optional[float]]:
+        """Last-N-day average fantasy points under the DEFAULT weights (stored fpts)."""
+        from services.player_value_service import PlayerValueService
+        return PlayerValueService.rolling_avg_by_espn_id(espn_ids, days)
+
+    @staticmethod
+    def _stored_last_n_day_avg_batch(
+        espn_ids: list[int],
+        days: int = 7
+    ) -> dict[int, Optional[float]]:
         """
         Get last N day averages for multiple players efficiently.
 
@@ -462,6 +471,15 @@ class PlayerService:
 
     @staticmethod
     def get_last_n_day_avg_batch_by_name(
+        players: list[tuple[str, str]],
+        days: int = 7
+    ) -> dict[str, float | None]:
+        """Last-N-day average fantasy points by name under the DEFAULT weights (stored fpts)."""
+        from services.player_value_service import PlayerValueService
+        return PlayerValueService.rolling_avg_by_name(players, days)
+
+    @staticmethod
+    def _stored_last_n_day_avg_batch_by_name(
         players: list[tuple[str, str]],
         days: int = 7
     ) -> dict[str, float | None]:

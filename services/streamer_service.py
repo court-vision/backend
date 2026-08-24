@@ -11,6 +11,7 @@ from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.player_service import PlayerService
+from services.player_value_service import PlayerValueService
 from db.models.nba.players import Player as PlayerModel
 from services.schedule_service import (
     get_current_matchup,
@@ -190,14 +191,16 @@ class StreamerService:
 
             # Fetch last n-day averages from our database
             # Yahoo uses name-based lookup, ESPN uses player ID
+            # Score free agents with this league's point weights (default formula if unsynced)
+            weights = PlayerValueService.weights_for_league_info(league_info)
             if is_yahoo:
                 player_lookups = [(fa.name, fa.team) for fa in free_agents]
-                last_n_avgs_by_name = PlayerService.get_last_n_day_avg_batch_by_name(
-                    player_lookups, days=avg_days
+                last_n_avgs_by_name = PlayerValueService.rolling_avg_by_name(
+                    player_lookups, days=avg_days, weights=weights
                 )
             else:
                 player_ids = [fa.player_id for fa in free_agents]
-                last_n_avgs = PlayerService.get_last_n_day_avg_batch(player_ids, days=avg_days)
+                last_n_avgs = PlayerValueService.rolling_avg_by_espn_id(player_ids, days=avg_days, weights=weights)
 
             # Build streamer list
             streamers: list[StreamerPlayerResp] = []

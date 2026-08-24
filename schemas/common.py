@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Any, Generic, TypeVar
+from typing import Literal, Optional, Any, Generic, TypeVar
 from enum import Enum
 
 # ------------------------------- Base Models ------------------------------- #
@@ -119,10 +119,31 @@ class UserResponse(BaseModel):
     created_at: Optional[str] = None
     last_login: Optional[str] = None
 
+class CategoryDefResp(BaseModel):
+    key: str
+    label: str
+    higher_is_better: bool
+    is_rate: bool
+
+class LeagueSummary(BaseModel):
+    """Provider-detected league settings (scoring format), embedded in team responses."""
+    id: int
+    provider: FantasyProvider
+    provider_league_id: str
+    season: int
+    name: Optional[str] = None
+    scoring_type: Literal["points", "categories", "roto"]
+    category_win_mode: Optional[Literal["each_category", "most_categories"]] = None
+    categories: list[CategoryDefResp] = []
+    point_weights: dict[str, float] = {}
+    settings_synced: bool = False
+    settings_synced_at: Optional[str] = None
+
 class TeamResponse(BaseModel):
     """Team data response model"""
     team_id: int
     league_info: LeagueInfo
+    league: Optional[LeagueSummary] = None   # None until league settings have been synced
 
 class LineupResponse(BaseModel):
     """Lineup data response model"""

@@ -1,4 +1,4 @@
-from playhouse.pool import PooledPostgresqlDatabase
+from playhouse.pool import PooledPostgresqlExtDatabase
 from playhouse.db_url import parse
 from peewee import Model
 import os
@@ -8,7 +8,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 parsed_url = parse(DATABASE_URL)
 db_name = parsed_url.pop('database')
 
-db = PooledPostgresqlDatabase(
+db = PooledPostgresqlExtDatabase(
     db_name,
     max_connections=20,
     stale_timeout=300,

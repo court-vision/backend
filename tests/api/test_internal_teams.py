@@ -89,3 +89,23 @@ def test_get_teams_syncs_clerk_user(authed_client, monkeypatch):
     assert len(sync_calls) == 1
     assert sync_calls[0]["clerk_id"] == FAKE_USER["clerk_user_id"]
     assert sync_calls[0]["email"] == FAKE_USER["email"]
+
+
+@pytest.mark.api
+def test_add_team_response_exposes_team_id_and_already_exists(authed_client, monkeypatch):
+    """TeamAddResp used to drop these kwargs (pydantic extra=ignore); the frontend reads them."""
+    from services import user_sync_service, team_service
+    from schemas.team import TeamAddResp
+
+    monkeypatch.setattr(user_sync_service.UserSyncService, "get_or_create_user",
+                        staticmethod(lambda clerk_id, email: _make_fake_user_model()))
+
+    async def fake_add(user_id, league_info):
+        return TeamAddResp(status=ApiStatus.SUCCESS, message="Team already exists", team_id=5, already_exists=True)
+
+    monkeypatch.setattr(team_service.TeamService, "add_team", staticmethod(fake_add))
+    res = authed_client.post("/v1/internal/teams/add", json={"league_info": {
+        "provider": "espn", "league_id": 1, "team_name": "T", "year": 2026, "espn_s2": "x", "swid": "y"}})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["team_id"] == 5 and body["already_exists"] is True

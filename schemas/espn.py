@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from .common import BaseRequest, BaseResponse, LeagueInfo
 
@@ -23,6 +23,9 @@ class TeamDataReq(BaseRequest):
 class ValidateLeagueResp(BaseResponse):
     valid: bool
     message: str
+    # Raw provider league payload from validation; reused for league settings sync.
+    # Excluded from serialization so API responses are unchanged.
+    league_payload: Optional[dict] = Field(default=None, exclude=True)
 
 class TeamDataResp(BaseResponse):
     data: Optional[list[PlayerResp]] = None

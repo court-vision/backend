@@ -35,6 +35,7 @@ TEAM_SCOPED_PATHS = [
     "/v1/internal/matchups/week/999",
     "/v1/internal/matchups/season-summary/999",
     "/v1/internal/matchups/daily/999?date=2026-01-15",
+    "/v1/internal/teams/999/league",
 ]
 
 VALID_SAVE_BODY = {

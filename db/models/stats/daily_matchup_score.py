@@ -9,6 +9,7 @@ from peewee import (
     DecimalField,
     UUIDField,
 )
+from playhouse.postgres_ext import BinaryJSONField
 from db.base import BaseModel
 
 
@@ -36,6 +37,8 @@ class DailyMatchupScore(BaseModel):
     # Scores
     current_score = DecimalField(max_digits=8, decimal_places=2)
     opponent_current_score = DecimalField(max_digits=8, decimal_places=2)
+    # Category leagues only: {scoring_format, you: {...}, opp: {...}, wins, losses, ties}
+    category_scores = BinaryJSONField(null=True)
 
     # ESPN scoring period this snapshot was captured under.
     # Used to detect when ESPN flips to a new day (N → N+1).

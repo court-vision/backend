@@ -1,0 +1,793 @@
+{
+  "schedule": [
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1708.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 79.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 201.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 610.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1208.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 333.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 404.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 155.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 96.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 429.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 520.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1708.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 79.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 201.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 610.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1208.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 333.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 404.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 155.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 96.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 429.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 520.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "154": 373.0,
+          "155": 156.0,
+          "156": 395.0,
+          "157": 154.0,
+          "158": 221.0,
+          "159": 150.0,
+          "160": 320.0,
+          "161": 252.0,
+          "162": 246.0,
+          "163": 355.0,
+          "164": 121.0,
+          "165": 313.0,
+          "166": 183.0,
+          "167": 241.0
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 3480.0,
+        "totalPointsLive": 3480.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1716.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 27.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 205.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 603.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1254.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 344.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 429.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 166.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 68.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 517.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 521.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1716.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 27.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 205.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 603.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1254.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 344.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 429.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 166.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 68.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 517.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 521.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "154": 252.0,
+          "155": 145.0,
+          "156": 352.0,
+          "157": 77.0,
+          "158": 288.0,
+          "159": 291.0,
+          "160": 165.0,
+          "161": 294.0,
+          "162": 87.0,
+          "163": 347.0,
+          "164": 213.0,
+          "165": 342.0,
+          "166": 228.0,
+          "167": 193.0
+        },
+        "teamId": 3,
+        "tiebreak": 0.0,
+        "totalPoints": 3274.0,
+        "totalPointsLive": 3274.0
+      },
+      "id": 101,
+      "matchupPeriodId": 21,
+      "playoffTierType": "WINNERS_BRACKET",
+      "winner": "AWAY"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1433.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 37.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 154.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 514.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1048.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 235.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 292.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 170.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 74.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 336.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 473.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1433.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 37.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 154.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 514.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1048.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 235.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 292.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 170.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 74.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 336.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 473.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "154": 91.0,
+          "155": 220.0,
+          "156": 274.0,
+          "157": 178.0,
+          "158": 250.0,
+          "159": 239.0,
+          "160": 221.0,
+          "161": 199.0,
+          "162": 172.0,
+          "163": 210.0,
+          "164": 226.0,
+          "165": 142.0,
+          "166": 163.0,
+          "167": 222.0
+        },
+        "teamId": 5,
+        "tiebreak": 0.0,
+        "totalPoints": 2807.0,
+        "totalPointsLive": 2807.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1436.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 63.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 135.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 530.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1107.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 190.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 232.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 186.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 88.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 335.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 472.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1436.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 63.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 135.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 530.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 1107.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 190.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 232.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 186.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 88.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 335.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 472.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "154": 244.0,
+          "155": 167.0,
+          "156": 251.0,
+          "157": 96.0,
+          "158": 171.0,
+          "159": 102.0,
+          "160": 276.0,
+          "161": 163.0,
+          "162": 151.0,
+          "163": 329.0,
+          "164": 245.0,
+          "165": 353.0,
+          "166": 149.0,
+          "167": 312.0
+        },
+        "teamId": 10,
+        "tiebreak": 0.0,
+        "totalPoints": 3009.0,
+        "totalPointsLive": 3009.0
+      },
+      "id": 102,
+      "matchupPeriodId": 21,
+      "playoffTierType": "WINNERS_CONSOLATION_LADDER",
+      "winner": "HOME"
+    }
+  ],
+  "status": {
+    "activatedDate": 1760213398847,
+    "createdAsLeagueType": 2,
+    "currentLeagueType": 2,
+    "currentMatchupPeriod": 21,
+    "finalScoringPeriod": 167,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "isExpired": false,
+    "isFull": true,
+    "isPlayoffMatchupEdited": false,
+    "isToBeDeleted": false,
+    "isViewable": false,
+    "isWaiverOrderEdited": false,
+    "latestScoringPeriod": 175,
+    "previousSeasons": [],
+    "standingsUpdateDate": 1775978366682,
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 175,
+    "waiverLastExecutionDate": 1775978366669,
+    "waiverProcessStatus": {
+      "2025-10-13T07:54:03.965+00:00": 1,
+      "2025-11-07T08:25:53.880+00:00": 1,
+      "2025-11-15T09:23:21.851+00:00": 1,
+      "2025-11-21T09:30:44.051+00:00": 1,
+      "2025-12-18T08:47:41.785+00:00": 1,
+      "2025-12-22T09:03:51.112+00:00": 2,
+      "2026-01-13T08:36:40.971+00:00": 1,
+      "2026-02-10T08:26:25.884+00:00": 2,
+      "2026-03-15T07:38:22.803+00:00": 1,
+      "2026-04-02T07:11:35.095+00:00": 1
+    }
+  },
+  "teams": [
+    {
+      "abbrev": "FLA",
+      "id": 1,
+      "name": "Flaggin it"
+    },
+    {
+      "abbrev": "SST",
+      "id": 2,
+      "name": "Steve's Smart Team"
+    },
+    {
+      "abbrev": "MMT",
+      "id": 3,
+      "name": "Matthew's Monstrous Team"
+    },
+    {
+      "abbrev": "GGT",
+      "id": 4,
+      "name": "Gabriel's Great Team"
+    },
+    {
+      "abbrev": "Tlee",
+      "id": 5,
+      "name": "Lets See"
+    },
+    {
+      "abbrev": "TDM",
+      "id": 6,
+      "name": "Trade Master"
+    },
+    {
+      "abbrev": "AAT",
+      "id": 7,
+      "name": "Anne's Astounding Team"
+    },
+    {
+      "abbrev": "MNH",
+      "id": 8,
+      "name": "Minnesota Hoopers"
+    },
+    {
+      "abbrev": "Tt",
+      "id": 9,
+      "name": "Tattoo"
+    },
+    {
+      "abbrev": "JST",
+      "id": 10,
+      "name": "James's Scary Team"
+    }
+  ]
+}
