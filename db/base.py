@@ -19,71 +19,16 @@ class BaseModel(Model):
     class Meta:
         database = db
 
-# Function to initialize database connection
 def init_db():
-    """Initialize database connection and create tables if they don't exist."""
+    """Apply pending schema migrations, then open the connection pool.
+
+    Schema is owned by backend/migrations (see migrations/README.md); Peewee
+    models describe tables but never create them.
+    """
+    from .migrate import apply_migrations
+
+    apply_migrations(DATABASE_URL)
     db.connect()
-
-    # Import all models to register them
-    from .models import User, Verification, Team, Lineup
-    from .models.api_keys import APIKey
-    from .models.stats.daily_player_stats import DailyPlayerStats
-    from .models.stats.cumulative_player_stats import CumulativePlayerStats
-    from .models.stats.daily_matchup_score import DailyMatchupScore
-    from .models.pipeline_run import PipelineRun
-
-    # Import new normalized NBA schema models
-    from .models.nba import (
-        Player,
-        NBATeam,
-        PlayerGameStats,
-        PlayerSeasonStats,
-        PlayerOwnership,
-        PlayerRollingStats,
-        TeamStats,
-        PlayerProfile,
-        PlayerAdvancedStats,
-        Game,
-        PlayerInjury,
-        LivePlayerStats,
-        LiveGameScoreSnapshot,
-        BreakoutCandidate,
-        PlayoffSeries,
-    )
-
-    # Import notification models
-    from .models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
-
-    # Create tables if they don't exist
-    # Note: Order matters for foreign key dependencies
-    # 1. Dimension tables first (Player, NBATeam)
-    # 2. Fact/aggregate tables second
-    # 3. Extended data tables last (may reference dimension tables)
-    db.create_tables([
-        # User schema tables
-        User, Verification, Team, Lineup, APIKey,
-        # Legacy stats_s2 schema (will be deprecated)
-        DailyPlayerStats, CumulativePlayerStats, DailyMatchupScore,
-        # NBA schema - audit
-        PipelineRun,
-        # NBA schema - dimension tables
-        Player, NBATeam,
-        # NBA schema - team stats (FK to NBATeam)
-        TeamStats,
-        # NBA schema - fact/aggregate tables
-        PlayerGameStats, PlayerSeasonStats, PlayerOwnership, PlayerRollingStats,
-        # NBA schema - extended data tables
-        PlayerProfile, PlayerAdvancedStats, Game, PlayerInjury,
-        # NBA schema - live data
-        LivePlayerStats,
-        LiveGameScoreSnapshot,
-        # NBA schema - breakout detection
-        BreakoutCandidate,
-        # NBA schema - playoff bracket
-        PlayoffSeries,
-        # User schema - notification tables
-        NotificationPreference, NotificationLog, NotificationTeamPreference,
-    ], safe=True)
 
 # Function to close database connection
 def close_db():

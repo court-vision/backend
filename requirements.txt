@@ -23,6 +23,7 @@ typing_extensions==4.15.0
 # Database
 peewee==3.18.2
 psycopg2-binary==2.9.11
+yoyo-migrations==9.0.0
 
 # Data processing
 numpy==2.3.4

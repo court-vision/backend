@@ -1,8 +1,6 @@
 from fastapi import FastAPI, APIRouter
 from slowapi.errors import RateLimitExceeded
 
-# temp comment for new push
-
 # Apply NBA API patch early, before any nba_api imports elsewhere
 import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
 
