@@ -169,13 +169,13 @@ jobs:
           API_PRODUCTION_URL: ${{ vars.API_PRODUCTION_URL }}
         run: |
           echo "Waiting for production to become healthy..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             status=$(curl -s -o /dev/null -w "%{http_code}" "$API_PRODUCTION_URL/ping" || echo "000")
             if [ "$status" = "200" ]; then
               echo "Production is healthy!"
               exit 0
             fi
-            echo "Attempt $i/30: HTTP $status — retrying in 10s..."
+            echo "Attempt $i/90: HTTP $status — retrying in 10s..."
             sleep 10
           done
           echo "Production failed health check — roll back via Railway dashboard"
