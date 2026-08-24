@@ -36,6 +36,14 @@ POSITION_MAP = {
     'Rookie': 15,
 }
 
+# ESPN uses PHL/PHO where the NBA (and nba.teams) use PHI/PHX.
+TEAM_ABBREV_CORRECTIONS = {"PHL": "PHI", "PHO": "PHX"}
+
+
+def normalize_nba_abbrev(abbrev: str) -> str:
+    return TEAM_ABBREV_CORRECTIONS.get(abbrev, abbrev)
+
+
 PRO_TEAM_MAP = {
     0: 'FA',
     1: 'ATL',

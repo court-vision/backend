@@ -5,7 +5,7 @@ import json
 from schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPlayerResp
 from utils.constants import ESPN_FANTASY_ENDPOINT
-from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, AVG_WINDOW_MAP, json_parsing
+from utils.espn_helpers import TEAM_ABBREV_CORRECTIONS, POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, AVG_WINDOW_MAP, json_parsing
 from schemas.common import ApiStatus
 from services.schedule_service import get_remaining_games, get_dates_for_scoring_periods
 
@@ -126,7 +126,7 @@ class EspnService:
             roster = EspnService.get_roster(league_info.team_name, data['teams'])
             players = [Player(player, league_info.year) for player in roster]
 
-            team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+            team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
             pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
 
             return TeamDataResp(
@@ -168,7 +168,7 @@ class EspnService:
             data = requests.get(endpoint, params=params, headers=headers, cookies=cookies, timeout=settings.http_timeout).json()
             players = [Player(player, league_info.year) for player in data['players']]
 
-            team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+            team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
             pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
 
             return TeamDataResp(
@@ -347,7 +347,7 @@ class EspnService:
                 players = []
                 projected_total = 0.0
 
-                team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+                team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
 
                 for entry in roster_entries:
                     player_data = entry.get('playerPoolEntry', {}).get('player', {})

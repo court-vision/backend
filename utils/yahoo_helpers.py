@@ -53,7 +53,8 @@ YAHOO_STAT_MAP = {
     "31": "TD",
 }
 
-# Yahoo team abbreviations (they use standard NBA abbreviations)
+# Yahoo team abbreviations -> canonical NBA abbreviations (nba.teams primary keys).
+# Note: ESPN uses PHL/PHO; the canonical forms are PHI/PHX (see utils.espn_helpers.TEAM_ABBREV_CORRECTIONS).
 YAHOO_TEAM_MAP = {
     "ATL": "ATL",
     "BOS": "BOS",
@@ -80,10 +81,10 @@ YAHOO_TEAM_MAP = {
     "NYK": "NYK",
     "OKC": "OKC",
     "ORL": "ORL",
-    "PHI": "PHL",
-    "PHL": "PHL",
-    "PHO": "PHO",
-    "PHX": "PHO",
+    "PHI": "PHI",
+    "PHL": "PHI",
+    "PHO": "PHX",
+    "PHX": "PHX",
     "POR": "POR",
     "SAC": "SAC",
     "SA": "SAS",
@@ -93,7 +94,9 @@ YAHOO_TEAM_MAP = {
     "WAS": "WAS",
 }
 
-# Maps user-friendly window names to Yahoo stat types
+# Maps user-friendly window names to Yahoo stat types. Yahoo only offers
+# "lastweek" and "lastmonth", so last_14 has no exact equivalent (approximated
+# by lastmonth). Currently unused: Yahoo rosters are valued from our own DB by name.
 YAHOO_AVG_WINDOW_MAP = {
     "season": "season",
     "last_7": "lastweek",

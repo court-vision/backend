@@ -20,12 +20,10 @@ from core.resilience import (
 )
 from pipelines.extractors.base import BaseExtractor
 from pipelines.transformers.names import normalize_name
-from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP
+from utils.espn_helpers import TEAM_ABBREV_CORRECTIONS, POSITION_MAP, PRO_TEAM_MAP
 
 
-ESPN_FANTASY_ENDPOINT = (
-    "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/segments/0/leagues/{}"
-)
+from utils.constants import ESPN_FANTASY_ENDPOINT  # single source of truth
 
 
 class ESPNExtractor(BaseExtractor):
@@ -251,7 +249,7 @@ class ESPNExtractor(BaseExtractor):
         cookies = {"espn_s2": espn_s2, "SWID": swid}
         endpoint = ESPN_FANTASY_ENDPOINT.format(year, league_id)
 
-        team_abbrev_corrections = {"PHL": "PHI", "PHO": "PHX"}
+        team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
 
         try:
             response = requests.get(
