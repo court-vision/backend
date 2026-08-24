@@ -71,7 +71,8 @@ backend/
 │   └── security.py
 │
 ├── db/
-│   ├── base.py              # DB pool init, table registration, create_tables
+│   ├── base.py              # DB pool init; applies pending migrations on startup
+│   ├── migrate.py           # yoyo-migrations runner (see migrations/README.md)
 │   └── models/
 │       ├── users.py
 │       ├── teams.py
@@ -136,7 +137,7 @@ backend/
 │
 ├── static/                  # Static data files (NBA schedule JSON, etc.)
 ├── scripts/                 # One-off utility scripts
-├── migrations/              # DB migration scripts
+├── migrations/              # yoyo SQL migrations — the schema source of truth for the shared DB
 └── tests/
 ```
 
@@ -147,7 +148,7 @@ backend/
 ### Prerequisites
 
 - Python 3.12
-- PostgreSQL (with `nba` and `stats_s2` schemas)
+- PostgreSQL 16 (an empty database is fine — the schema is built by `migrations/` on first start)
 - A [Clerk](https://clerk.com) application
 
 ### 1. Create and activate a virtual environment
