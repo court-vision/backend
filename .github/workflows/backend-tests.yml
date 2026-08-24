@@ -1,5 +1,9 @@
 name: Backend Tests
 
+# Note: GitHub disables scheduled workflows after 60 days without commits, which
+# also silences the push trigger below (and with it the staging deploy chain).
+# If runs stop appearing, re-enable it under Actions → Backend Tests → Enable.
+
 on:
   pull_request:
     paths:
