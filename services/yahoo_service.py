@@ -28,6 +28,10 @@ from utils.yahoo_helpers import (
 from services.schedule_service import get_remaining_games
 from services.player_service import PlayerService
 from services.player_value_service import PlayerValueService
+from services.scoring.resolver import ResolvedScoring, resolve_scoring
+from services.scoring.providers.yahoo_settings import parse_yahoo_matchup_categories
+from services.player_service import _normalize_name
+from schemas.matchup import CategoryTeamScore
 
 
 # Yahoo API endpoints
@@ -762,7 +766,7 @@ class YahooService:
             )
 
     @staticmethod
-    async def get_matchup_data(league_info: LeagueInfo, avg_window: str = "season", team_id: int | None = None) -> MatchupResp:
+    async def get_matchup_data(league_info: LeagueInfo, avg_window: str = "season", team_id: int | None = None, scoring: ResolvedScoring | None = None) -> MatchupResp:
         """
         Get current matchup data from Yahoo API.
 
@@ -776,6 +780,7 @@ class YahooService:
         """
         from services.schedule_service import get_matchup_dates
 
+        scoring = scoring or resolve_scoring(None)
         try:
             access_token = await YahooService._ensure_valid_token(league_info, team_id)
             team_key = league_info.yahoo_team_key
@@ -927,8 +932,45 @@ class YahooService:
                         future_pts += p.avg_points * p.games_remaining
                 return current + future_pts
 
-            our_projected = calc_projected(our_roster, our_score)
-            opponent_projected = calc_projected(opponent_roster, opponent_score)
+            category_comparison = projected_category_comparison = None
+            your_cat_schema = opp_cat_schema = None
+            if scoring.is_categories and scoring.categories is not None:
+                from services.espn_service import EspnService
+                cats = scoring.categories
+                parsed = parse_yahoo_matchup_categories(current_matchup, team_key, cats.categories)
+                if parsed is None:
+                    from services.scoring.models import CategoryTeamScoreData
+                    your_cat, opp_cat = CategoryTeamScoreData(totals={}), CategoryTeamScoreData(totals={})
+                else:
+                    your_cat, opp_cat = parsed
+                current_cmp = cats.compare(your_cat.totals, opp_cat.totals)
+                if (your_cat.wins + your_cat.losses + your_cat.ties) == 0:
+                    your_cat.wins, your_cat.losses, your_cat.ties = current_cmp.wins, current_cmp.losses, current_cmp.ties
+                    opp_cat.wins, opp_cat.losses, opp_cat.ties = current_cmp.losses, current_cmp.wins, current_cmp.ties
+
+                def proj_inputs(roster):
+                    lines = PlayerValueService.rolling_lines_by_name([(p.name, p.team) for p in roster], days=7)
+                    out = []
+                    for p in roster:
+                        line = lines.get(_normalize_name(p.name))
+                        counts = p.lineup_slot not in ("IR", "IL", "IL+", "BE") and not p.injured
+                        if line is not None:
+                            out.append((line, p.games_remaining, counts))
+                    return out
+
+                proj_cmp = cats.compare(cats.project(your_cat, proj_inputs(our_roster)),
+                                        cats.project(opp_cat, proj_inputs(opponent_roster)))
+                category_comparison = EspnService._comparison_schema(current_cmp)
+                projected_category_comparison = EspnService._comparison_schema(proj_cmp)
+                your_cat_schema = CategoryTeamScore(**your_cat.__dict__)
+                opp_cat_schema = CategoryTeamScore(**opp_cat.__dict__)
+                our_score, opponent_score = float(your_cat.wins), float(your_cat.losses)
+                our_projected, opponent_projected = float(proj_cmp.wins), float(proj_cmp.losses)
+                projected_margin = float(proj_cmp.wins - proj_cmp.losses)
+            else:
+                our_projected = calc_projected(our_roster, our_score)
+                opponent_projected = calc_projected(opponent_roster, opponent_score)
+                projected_margin = round(abs(our_projected - opponent_projected), 2)
 
             # Determine winner
             if our_projected > opponent_projected:
@@ -947,17 +989,23 @@ class YahooService:
                     team_id=int(parsed_key.get("team_id", 0)),
                     current_score=our_score,
                     projected_score=round(our_projected, 2),
-                    roster=our_roster
+                    roster=our_roster,
+                    categories=your_cat_schema,
                 ),
                 opponent_team=MatchupTeamResp(
                     team_name=opponent_name,
                     team_id=0,
                     current_score=opponent_score,
                     projected_score=round(opponent_projected, 2),
-                    roster=opponent_roster
+                    roster=opponent_roster,
+                    categories=opp_cat_schema,
                 ),
                 projected_winner=projected_winner,
-                projected_margin=round(abs(our_projected - opponent_projected), 2)
+                projected_margin=projected_margin,
+                scoring_format=scoring.format,
+                settings_synced=scoring.settings_synced,
+                category_comparison=category_comparison,
+                projected_category_comparison=projected_category_comparison,
             )
 
             return MatchupResp(

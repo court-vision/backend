@@ -1,6 +1,39 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 from .common import BaseRequest, BaseResponse, LeagueInfo
+
+
+# ------------------------------- Category Scoring Models ------------------------------- #
+
+ScoringFormat = Literal["points", "categories"]
+
+
+class CategoryScoreItem(BaseModel):
+    """One category in a head-to-head comparison."""
+    key: str
+    label: str
+    you: float
+    opp: float
+    winner: Literal["you", "opp", "tie"]
+    higher_is_better: bool
+    is_rate: bool
+
+
+class CategoryComparison(BaseModel):
+    items: list[CategoryScoreItem]
+    wins: int
+    losses: int
+    ties: int
+
+
+class CategoryTeamScore(BaseModel):
+    """A team's per-category totals (rates as 0-1 fractions) and record."""
+    totals: dict[str, float]
+    raw: Optional[dict[str, float]] = None    # fgm/fga/ftm/fta/fg3m/fg3a when known
+    wins: int = 0
+    losses: int = 0
+    ties: int = 0
+    live_adjusted: bool = False
 
 
 # ------------------------------- Matchup Data Models ------------------------------- #
@@ -23,9 +56,10 @@ class MatchupTeamResp(BaseModel):
     """Team data within a matchup"""
     team_name: str
     team_id: int                           # ESPN fantasy team ID
-    current_score: float                   # Points scored so far this matchup period
-    projected_score: float                 # Projected final score for matchup period
+    current_score: float                   # Points so far (category leagues: categories won)
+    projected_score: float                 # Projected final score (category leagues: projected categories won)
     roster: list[MatchupPlayerResp]
+    categories: Optional[CategoryTeamScore] = None   # category leagues only
 
 
 class MatchupData(BaseModel):
@@ -36,8 +70,12 @@ class MatchupData(BaseModel):
     your_team: MatchupTeamResp
     opponent_team: MatchupTeamResp
     projected_winner: str                  # Team name of projected winner
-    projected_margin: float                # Projected point differential
+    projected_margin: float                # Projected point differential (category leagues: won - lost)
     scoring_period_id: int | None = None   # ESPN scoring period used for this response
+    scoring_format: ScoringFormat = "points"
+    settings_synced: bool = False
+    category_comparison: Optional[CategoryComparison] = None
+    projected_category_comparison: Optional[CategoryComparison] = None
 
 
 # ------------------------------- Request/Response Models ------------------------------- #
@@ -65,6 +103,8 @@ class DailyScorePoint(BaseModel):
     day_of_matchup: int                    # 0-indexed day within matchup
     your_score: float
     opponent_score: float
+    your_categories: Optional[dict[str, float]] = None
+    opponent_categories: Optional[dict[str, float]] = None
 
 
 class MatchupScoreHistory(BaseModel):
@@ -74,6 +114,7 @@ class MatchupScoreHistory(BaseModel):
     opponent_team_name: str
     matchup_period: int
     history: list[DailyScorePoint]
+    scoring_format: ScoringFormat = "points"
 
 
 class MatchupScoreHistoryResp(BaseResponse):
@@ -86,7 +127,7 @@ class MatchupScoreHistoryResp(BaseResponse):
 class PlayerLiveStats(BaseModel):
     """Live in-game stat overlay for a player (from live_player_stats table)."""
     nba_player_id: int
-    live_fpts: int
+    live_fpts: float                  # scored with the league's point weights
     live_pts: int
     live_reb: int
     live_ast: int
@@ -94,6 +135,12 @@ class PlayerLiveStats(BaseModel):
     live_blk: int
     live_tov: int
     live_min: int
+    live_fgm: int = 0
+    live_fga: int = 0
+    live_fg3m: int = 0
+    live_fg3a: int = 0
+    live_ftm: int = 0
+    live_fta: int = 0
     game_status: int               # 1=scheduled, 2=in_progress, 3=final
     period: Optional[int] = None
     game_clock: Optional[str] = None
@@ -111,6 +158,7 @@ class LiveMatchupTeam(BaseModel):
     current_score: float           # From ESPN/Yahoo (live, correct custom scoring)
     projected_score: float
     roster: list[LiveMatchupPlayer]
+    categories: Optional[CategoryTeamScore] = None
 
 
 class LiveMatchupData(BaseModel):
@@ -122,6 +170,9 @@ class LiveMatchupData(BaseModel):
     projected_winner: str
     projected_margin: float
     game_date: str                 # ET game date used for live stats lookup
+    scoring_format: ScoringFormat = "points"
+    settings_synced: bool = False
+    category_comparison: Optional[CategoryComparison] = None
 
 
 class LiveMatchupResp(BaseResponse):
@@ -138,7 +189,7 @@ class DailyMatchupPlayerStats(BaseModel):
     position: str
     nba_player_id: Optional[int] = None        # Resolved NBA player ID
     had_game: bool                             # Whether their team had a game that day
-    fpts: Optional[int] = None
+    fpts: Optional[float] = None               # scored with the league's point weights
     pts: Optional[int] = None
     reb: Optional[int] = None
     ast: Optional[int] = None
@@ -173,6 +224,7 @@ class DailyMatchupTeam(BaseModel):
     team_id: int
     total_fpts: Optional[float] = None         # Sum of roster fpts (past days only)
     roster: list[DailyMatchupPlayerStats] | list[DailyMatchupFuturePlayer]
+    categories: Optional[dict[str, float]] = None   # category leagues: day totals per category
 
 
 class DailyMatchupData(BaseModel):
@@ -186,6 +238,8 @@ class DailyMatchupData(BaseModel):
     matchup_period_end: str
     your_team: DailyMatchupTeam
     opponent_team: DailyMatchupTeam
+    scoring_format: ScoringFormat = "points"
+    category_comparison: Optional[CategoryComparison] = None
 
 
 class DailyMatchupResp(BaseResponse):
@@ -214,6 +268,9 @@ class WeekResult(BaseModel):
     points_for: float
     points_against: float
     won: bool
+    categories_won: Optional[int] = None
+    categories_lost: Optional[int] = None
+    categories_tied: Optional[int] = None
 
 
 class SeasonSummaryData(BaseModel):
@@ -226,6 +283,7 @@ class SeasonSummaryData(BaseModel):
     best_week: Optional[WeekResult] = None
     worst_week: Optional[WeekResult] = None
     weeks: list[WeekResult]
+    scoring_format: ScoringFormat = "points"
 
 
 class SeasonSummaryResp(BaseResponse):

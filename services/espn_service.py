@@ -1,6 +1,10 @@
 from datetime import datetime
 import requests
 from core.settings import settings
+from services.scoring.models import CategoryTeamScoreData, StatLine
+from services.scoring.providers.espn_settings import parse_espn_category_score, statline_from_espn_stats
+from services.scoring.resolver import ResolvedScoring, resolve_scoring
+from schemas.matchup import CategoryTeamScore, CategoryComparison, CategoryScoreItem
 import json
 from schemas.espn import ValidateLeagueResp, PlayerResp, LeagueInfo, TeamDataResp
 from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPlayerResp
@@ -223,9 +227,18 @@ class EspnService:
         return cleaned_data
 
     @staticmethod
+    def _comparison_schema(cmp) -> CategoryComparison:
+        return CategoryComparison(
+            items=[CategoryScoreItem(key=i.key, label=i.label, you=i.you, opp=i.opp, winner=i.winner,
+                                     higher_is_better=i.higher_is_better, is_rate=i.is_rate) for i in cmp.items],
+            wins=cmp.wins, losses=cmp.losses, ties=cmp.ties,
+        )
+
+    @staticmethod
     async def get_matchup_data(
         league_info: LeagueInfo,
         avg_window: str = "season",
+        scoring: ResolvedScoring | None = None,
     ) -> MatchupResp:
         """
         Fetches current matchup data from ESPN API.
@@ -237,6 +250,7 @@ class EspnService:
         Returns:
             MatchupResp with current matchup data including both teams and projections
         """
+        scoring = scoring or resolve_scoring(None)
         try:
             params = {
                 'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
@@ -259,8 +273,8 @@ class EspnService:
 
             # Resolve matchup period dates via ESPN's scoring period map (handles playoffs).
             # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
-            settings = data.get('settings', {})
-            matchup_period_map = settings.get('scheduleSettings', {}).get('matchupPeriods', {})
+            league_settings = data.get('settings', {})
+            matchup_period_map = league_settings.get('scheduleSettings', {}).get('matchupPeriods', {})
             scoring_periods = matchup_period_map.get(str(current_matchup_period), [current_matchup_period])
             # For leagues in week 2 of a 2-week playoff, matchupPeriods may not
             # include the playoff matchup period key, causing scoring_periods to
@@ -337,15 +351,23 @@ class EspnService:
             our_score = home_data.get('totalPoints', 0) if is_home else away_data.get('totalPoints', 0)
             opponent_score = away_data.get('totalPoints', 0) if is_home else home_data.get('totalPoints', 0)
 
+            your_cat = opp_cat = None
+            if scoring.is_categories:
+                your_cat = parse_espn_category_score(home_data if is_home else away_data) or CategoryTeamScoreData(totals={})
+                opp_cat = parse_espn_category_score(away_data if is_home else home_data) or CategoryTeamScoreData(totals={})
+
             # Build roster responses
             stat_key = f"{league_info.year}_{AVG_WINDOW_MAP.get(avg_window, 'total')}"
             projected_key = f"{league_info.year}_projected"
 
-            def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float]:
+            window_prefix = {'season': '00', 'last_7': '01', 'last_14': '02', 'last_30': '03'}.get(avg_window, '00')
+
+            def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float, list]:
                 """Build roster list and calculate projected score."""
                 roster_entries = team_data.get('roster', {}).get('entries', [])
                 players = []
                 projected_total = 0.0
+                proj_inputs = []
 
                 team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
 
@@ -372,33 +394,28 @@ class EspnService:
                     avg_points = 0.0
                     projected_points = 0.0
 
+                    avg_line = StatLine()
                     for stat_split in stats:
                         if stat_split.get('seasonId') == league_info.year:
                             stat_id = str(stat_split.get('id', ''))
-                            applied_avg = stat_split.get('appliedAverage', 0)
-
-                            # Match stat window
-                            if stat_id.startswith('00'):  # Season total
-                                if avg_window == "season":
-                                    avg_points = round(applied_avg, 2)
-                            elif stat_id.startswith('01'):  # Last 7
-                                if avg_window == "last_7":
-                                    avg_points = round(applied_avg, 2)
-                            elif stat_id.startswith('02'):  # Last 15 (we call it last_14)
-                                if avg_window == "last_14":
-                                    avg_points = round(applied_avg, 2)
-                            elif stat_id.startswith('03'):  # Last 30
-                                if avg_window == "last_30":
-                                    avg_points = round(applied_avg, 2)
+                            if stat_id.startswith(window_prefix):
+                                avg_points = round(stat_split.get('appliedAverage', 0) or 0, 2)
+                                avg_line = statline_from_espn_stats(stat_split.get('averageStats'))
                             elif stat_id.startswith('10'):  # Projected
                                 projected_points = round(stat_split.get('appliedTotal', 0), 2)
+                    if not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
+                        # Category leagues report appliedAverage=0; value the player with the league's
+                        # point weights (default formula) over their raw averages instead.
+                        avg_points = round(scoring.points.score(avg_line), 2)
                     
                     # Calculate games remaining for this player using schedule service
                     games_remaining = get_remaining_games(team_abbrev)
 
                     # Only add to projection if not on IR and not injured
-                    if lineup_slot not in ('IR', '') and not injured:
+                    counts_toward_projection = lineup_slot not in ('IR', '') and not injured
+                    if counts_toward_projection:
                         projected_total += avg_points * games_remaining
+                    proj_inputs.append((avg_line, games_remaining, counts_toward_projection))
 
                     players.append(MatchupPlayerResp(
                         player_id=player_id,
@@ -413,14 +430,33 @@ class EspnService:
                         injury_status=injury_status
                     ))
 
-                return players, projected_total
+                return players, projected_total, proj_inputs
 
-            our_roster, our_projected = build_roster(our_team)
-            opponent_roster, opponent_projected = build_roster(opponent_team)
+            our_roster, our_projected, our_inputs = build_roster(our_team)
+            opponent_roster, opponent_projected, opp_inputs = build_roster(opponent_team)
 
-            # Add current scores to projections
-            our_final_projection = our_score + our_projected
-            opponent_final_projection = opponent_score + opponent_projected
+            category_comparison = projected_category_comparison = None
+            your_cat_schema = opp_cat_schema = None
+            if scoring.is_categories and scoring.categories is not None:
+                cats = scoring.categories
+                current_cmp = cats.compare(your_cat.totals, opp_cat.totals)
+                if (your_cat.wins + your_cat.losses + your_cat.ties) == 0:
+                    your_cat.wins, your_cat.losses, your_cat.ties = current_cmp.wins, current_cmp.losses, current_cmp.ties
+                    opp_cat.wins, opp_cat.losses, opp_cat.ties = current_cmp.losses, current_cmp.wins, current_cmp.ties
+                proj_cmp = cats.compare(cats.project(your_cat, our_inputs), cats.project(opp_cat, opp_inputs))
+                category_comparison = EspnService._comparison_schema(current_cmp)
+                projected_category_comparison = EspnService._comparison_schema(proj_cmp)
+                your_cat_schema = CategoryTeamScore(**your_cat.__dict__)
+                opp_cat_schema = CategoryTeamScore(**opp_cat.__dict__)
+                # Scalars keep the frontend contract: categories won now / projected
+                our_score, opponent_score = float(your_cat.wins), float(your_cat.losses)
+                our_final_projection, opponent_final_projection = float(proj_cmp.wins), float(proj_cmp.losses)
+                projected_margin = float(proj_cmp.wins - proj_cmp.losses)
+            else:
+                # Add current scores to projections
+                our_final_projection = our_score + our_projected
+                opponent_final_projection = opponent_score + opponent_projected
+                projected_margin = round(abs(our_final_projection - opponent_final_projection), 2)
 
             # Determine winner
             if our_final_projection > opponent_final_projection:
@@ -429,8 +465,6 @@ class EspnService:
                 projected_winner = opponent_team.get('name', 'Opponent')
             else:
                 projected_winner = "Tie"
-
-            projected_margin = round(abs(our_final_projection - opponent_final_projection), 2)
 
             # Build response
             matchup_data = MatchupData(
@@ -442,18 +476,24 @@ class EspnService:
                     team_id=our_team_id,
                     current_score=round(our_score, 2),
                     projected_score=round(our_final_projection, 2),
-                    roster=our_roster
+                    roster=our_roster,
+                    categories=your_cat_schema,
                 ),
                 opponent_team=MatchupTeamResp(
                     team_name=opponent_team.get('name', 'Opponent'),
                     team_id=opponent_team_id,
                     current_score=round(opponent_score, 2),
                     projected_score=round(opponent_final_projection, 2),
-                    roster=opponent_roster
+                    roster=opponent_roster,
+                    categories=opp_cat_schema,
                 ),
                 projected_winner=projected_winner,
                 projected_margin=projected_margin,
                 scoring_period_id=latest_scoring_period,
+                scoring_format=scoring.format,
+                settings_synced=scoring.settings_synced,
+                category_comparison=category_comparison,
+                projected_category_comparison=projected_category_comparison,
             )
 
             return MatchupResp(

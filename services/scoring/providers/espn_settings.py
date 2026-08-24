@@ -123,6 +123,10 @@ def parse_espn_category_score(team_matchup: dict[str, Any]) -> CategoryTeamScore
         if key in ("fgm", "fga", "ftm", "fta", "fg3m", "fg3a"):
             raw[key] = value
         totals[key] = value
+    # Derive rate categories from makes/attempts when ESPN omits the percentage ids
+    for key, d in STATS.items():
+        if d.is_rate and key not in totals and d.numerator in raw and d.denominator in raw:
+            totals[key] = round(raw[d.numerator] / raw[d.denominator], 4) if raw[d.denominator] else 0.0
     return CategoryTeamScoreData(
         totals=totals,
         raw=raw or None,
