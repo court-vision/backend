@@ -40,6 +40,17 @@ def test_internal_routes_reject_no_token(unauthed_client, path):
 
 @pytest.mark.api
 @pytest.mark.parametrize("path", [
+    "/v1/internal/espn/validate_league",
+    "/v1/internal/streamers/find",
+])
+def test_internal_post_routes_reject_no_token(unauthed_client, path):
+    """POST routes that take raw league credentials must still require a signed-in user."""
+    res = unauthed_client.post(path, json={})
+    assert res.status_code in (401, 403)
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("path", [
     "/v1/internal/teams/",
     "/v1/internal/api-keys/",
 ])

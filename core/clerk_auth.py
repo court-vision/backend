@@ -5,7 +5,6 @@ This module handles verification of Clerk-issued JWT tokens for API authenticati
 It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
 """
 
-import os
 import jwt
 import requests
 from functools import lru_cache
@@ -13,12 +12,13 @@ from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
-# Clerk JWKS URL - set this in your environment variables
-# Format: https://<your-clerk-frontend-api>.clerk.accounts.dev/.well-known/jwks.json
-CLERK_JWKS_URL = os.environ.get('CLERK_JWKS_URL')
+from core.settings import settings
 
-# Clerk Secret Key - required for fetching user details from Clerk's API
-CLERK_SECRET_KEY = os.environ.get('CLERK_SECRET_KEY')
+# Format: https://<your-clerk-frontend-api>.clerk.accounts.dev/.well-known/jwks.json
+CLERK_JWKS_URL = settings.clerk_jwks_url
+
+# Required for fetching user details from Clerk's API
+CLERK_SECRET_KEY = settings.clerk_secret_key.get_secret_value()
 
 security = HTTPBearer()
 
@@ -51,8 +51,6 @@ def get_public_key_for_token(token: str):
     """
     Get the RSA public key that matches the token's 'kid' (key ID) header.
     """
-    jwks = get_clerk_jwks()
-
     try:
         unverified_header = jwt.get_unverified_header(token)
     except jwt.exceptions.DecodeError as e:
@@ -62,6 +60,9 @@ def get_public_key_for_token(token: str):
     kid = unverified_header.get('kid')
     if not kid:
         raise HTTPException(status_code=401, detail="Token missing key ID")
+
+    # Only well-formed tokens get as far as the (cached) JWKS fetch
+    jwks = get_clerk_jwks()
 
     for key in jwks.get('keys', []):
         if key.get('kid') == kid:
@@ -155,11 +156,17 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             token,
             public_key,
             algorithms=["RS256"],
+            issuer=settings.clerk_issuer,
             options={
-                "verify_aud": False,  # Clerk doesn't use aud claim by default
-                "verify_iss": False,  # Skip issuer verification for flexibility
+                # Clerk session tokens carry no `aud`; `azp` is the equivalent check below
+                "verify_aud": False,
+                "verify_iss": True,
             }
         )
+
+        azp = payload.get("azp")
+        if settings.clerk_authorized_parties and azp and azp not in settings.clerk_authorized_parties:
+            raise HTTPException(status_code=401, detail="Invalid authorized party")
 
         clerk_user_id = payload.get("sub")
         email = payload.get("email")  # May be None if not in JWT claims
@@ -182,6 +189,8 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     except jwt.InvalidTokenError as e:
         print(f"Token validation error: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Unexpected authentication error: {e}")
         raise HTTPException(status_code=401, detail="Authentication failed")

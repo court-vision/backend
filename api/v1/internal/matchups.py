@@ -1,19 +1,12 @@
 from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
-from services.user_sync_service import UserSyncService
 from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp, WeeklyMatchupResp, SeasonSummaryResp
 from core.clerk_auth import get_current_user
+from api.deps import get_owned_team
+from db.models.teams import Team
 
 
 router = APIRouter(prefix="/matchups", tags=["matchups"])
-
-
-def _get_user_id(current_user: dict) -> int:
-    """Helper to get local user_id from Clerk user info."""
-    clerk_user_id = current_user.get("clerk_user_id")
-    email = current_user.get("email")
-    user = UserSyncService.get_or_create_user(clerk_user_id, email)
-    return user.user_id
 
 
 @router.post('/current', response_model=MatchupResp)
@@ -35,13 +28,12 @@ async def get_current_matchup(
 
 @router.get('/current/{team_id}', response_model=MatchupResp)
 async def get_matchup_by_team(
-    team_id: int,
     avg_window: str = Query(
         default="season",
         pattern="^(season|last_7|last_14|last_30)$",
         description="Averaging window: season, last_7, last_14, or last_30"
     ),
-    current_user: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> MatchupResp:
     """
     Get matchup for a saved team using the team's stored league info.
@@ -49,18 +41,16 @@ async def get_matchup_by_team(
     This endpoint is convenient when you have a saved team and don't want
     to pass all the league credentials again.
     """
-    user_id = _get_user_id(current_user)
     return await MatchupService.get_matchup_by_team_id(
-        user_id,
-        team_id,
+        team.user_id_id,
+        team.team_id,
         avg_window
     )
 
 
 @router.get('/live/{team_id}', response_model=LiveMatchupResp)
 async def get_live_matchup(
-    team_id: int,
-    current_user: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> LiveMatchupResp:
     """
     Get the current matchup with live in-game stats per player.
@@ -70,18 +60,16 @@ async def get_live_matchup(
     Players with no game today have live=null. Includes all roster slots
     (active and bench) so the frontend can render the full matchup layout.
     """
-    user_id = _get_user_id(current_user)
-    return await MatchupService.get_live_matchup_by_team_id(user_id, team_id)
+    return await MatchupService.get_live_matchup_by_team_id(team.user_id_id, team.team_id)
 
 
 @router.get('/history/{team_id}', response_model=MatchupScoreHistoryResp)
 async def get_matchup_score_history(
-    team_id: int,
     matchup_period: int | None = Query(
         default=None,
         description="Specific matchup period (week number). If omitted, returns the latest."
     ),
-    _: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> MatchupScoreHistoryResp:
     """
     Get daily score history for a team's matchup period.
@@ -89,13 +77,12 @@ async def get_matchup_score_history(
     Returns historical daily snapshots of both teams' scores for charting
     the score progression over time.
     """
-    return await MatchupService.get_score_history(team_id, matchup_period)
+    return await MatchupService.get_score_history(team.team_id, matchup_period)
 
 
 @router.get('/week/{team_id}', response_model=WeeklyMatchupResp)
 async def get_weekly_matchup(
-    team_id: int,
-    current_user: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> WeeklyMatchupResp:
     """
     Get all days in the current matchup period in a single request.
@@ -104,14 +91,12 @@ async def get_weekly_matchup(
     day in the matchup period. Use this instead of N parallel getDailyMatchup
     calls when rendering the matchup bar chart.
     """
-    user_id = _get_user_id(current_user)
-    return await MatchupService.get_weekly_matchup(user_id, team_id)
+    return await MatchupService.get_weekly_matchup(team.user_id_id, team.team_id)
 
 
 @router.get('/season-summary/{team_id}', response_model=SeasonSummaryResp)
 async def get_season_summary(
-    team_id: int,
-    _: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> SeasonSummaryResp:
     """
     Get the full-season W/L record, total points, and per-week results for a team.
@@ -119,18 +104,17 @@ async def get_season_summary(
     Aggregates DailyMatchupScore snapshots across all matchup periods.
     The last snapshot per period is used as the final score for that week.
     """
-    return await MatchupService.get_season_summary(team_id)
+    return await MatchupService.get_season_summary(team.team_id)
 
 
 @router.get('/daily/{team_id}', response_model=DailyMatchupResp)
 async def get_daily_matchup(
-    team_id: int,
     date: str = Query(
         ...,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="Target date in YYYY-MM-DD format"
     ),
-    current_user: dict = Depends(get_current_user)
+    team: Team = Depends(get_owned_team)
 ) -> DailyMatchupResp:
     """
     Get daily drill-down for a matchup day.
@@ -140,6 +124,5 @@ async def get_daily_matchup(
     For today: returns stats so far (frontend should prefer live endpoint).
     """
     from datetime import date as date_type
-    user_id = _get_user_id(current_user)
     target_date = date_type.fromisoformat(date)
-    return await MatchupService.get_daily_matchup(user_id, team_id, target_date)
+    return await MatchupService.get_daily_matchup(team.user_id_id, team.team_id, target_date)

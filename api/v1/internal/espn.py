@@ -1,8 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from services.espn_service import EspnService
 from schemas.espn import TeamDataReq, ValidateLeagueResp, TeamDataResp, ValidateLeagueReq
+from core.clerk_auth import get_current_user
 
-router = APIRouter(prefix="/espn", tags=["ESPN data"])
+# Callers supply raw league credentials (pre-team-creation), so there is no
+# ownership to check — but every route still requires a signed-in user.
+router = APIRouter(prefix="/espn", tags=["ESPN data"], dependencies=[Depends(get_current_user)])
 
 @router.post("/validate_league", response_model=ValidateLeagueResp)
 async def validate_league(req: ValidateLeagueReq):

@@ -26,7 +26,7 @@ async def get_breakout_streamers(
 
 
 @router.post("/find", response_model=StreamerResp)
-async def find_streamers(req: StreamerReq) -> StreamerResp:
+async def find_streamers(req: StreamerReq, _: dict = Depends(get_current_user)) -> StreamerResp:
     """
     Find and rank the best streaming candidates from free agents.
 

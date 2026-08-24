@@ -62,13 +62,6 @@ class YahooTokenResponse(BaseResponse):
     token_expiry: Optional[str] = None
 
 
-# ---------------------- Helper Functions ---------------------- #
-
-def _get_user_id(current_user: dict) -> str:
-    """Get Clerk user ID from current user dict."""
-    return current_user.get("clerk_user_id", "")
-
-
 # ---------------------- OAuth Endpoints ---------------------- #
 
 @router.get("/authorize", response_model=YahooAuthUrlResponse)
@@ -86,8 +79,9 @@ async def yahoo_authorize(current_user: dict = Depends(get_current_user)):
                 auth_url=None
             )
 
-        user_id = _get_user_id(current_user)
-        auth_url, state = YahooService.get_auth_url(user_id)
+        # Yahoo's OAuth state is keyed by the Clerk user id string, not usr.user_id
+        clerk_user_id = current_user.get("clerk_user_id", "")
+        auth_url, state = YahooService.get_auth_url(clerk_user_id)
 
         return YahooAuthUrlResponse(
             status=ApiStatus.SUCCESS,

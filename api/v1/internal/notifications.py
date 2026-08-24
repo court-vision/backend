@@ -10,7 +10,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 
-from core.clerk_auth import get_current_user
+from api.deps import get_db_user
 from db.models.users import User
 from db.models.teams import Team
 from db.models.nba.games import Game
@@ -18,7 +18,6 @@ from db.models.notifications import NotificationPreference, NotificationLog, Not
 from pipelines.extractors import ESPNExtractor
 from services.lineup_check_service import LineupCheckService
 from services.notification_service import NotificationService
-from services.user_sync_service import UserSyncService
 from schemas.common import ApiStatus
 from schemas.notifications import (
     NotificationPreferenceReq,
@@ -40,18 +39,10 @@ espn_extractor = ESPNExtractor()
 lineup_checker = LineupCheckService()
 
 
-def _get_user_id(current_user: dict) -> int:
-    """Helper to get local user_id from Clerk user info."""
-    clerk_user_id = current_user.get("clerk_user_id")
-    email = current_user.get("email")
-    user = UserSyncService.get_or_create_user(clerk_user_id, email)
-    return user.user_id
-
-
 @router.get("/preferences", response_model=NotificationPreferenceResponse)
-async def get_preferences(current_user: dict = Depends(get_current_user)):
+async def get_preferences(user: User = Depends(get_db_user)):
     """Get the current user's notification preferences (or defaults)."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     prefs = (
         NotificationPreference.select()
@@ -82,10 +73,10 @@ async def get_preferences(current_user: dict = Depends(get_current_user)):
 @router.put("/preferences", response_model=NotificationPreferenceResponse)
 async def update_preferences(
     req: NotificationPreferenceReq,
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
 ):
     """Create or update notification preferences for the current user."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     prefs = (
         NotificationPreference.select()
@@ -129,9 +120,9 @@ async def update_preferences(
 
 
 @router.get("/team-preferences", response_model=NotificationTeamPreferenceListResponse)
-async def get_team_preferences(current_user: dict = Depends(get_current_user)):
+async def get_team_preferences(user: User = Depends(get_db_user)):
     """List all team-level notification preference overrides for the current user."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     rows = list(
         NotificationTeamPreference.select()
@@ -163,10 +154,10 @@ async def get_team_preferences(current_user: dict = Depends(get_current_user)):
 async def upsert_team_preference(
     team_id: int,
     req: NotificationTeamPreferenceReq,
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
 ):
     """Create or update a team-level notification preference override."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     # Verify team belongs to user
     team = (
@@ -233,10 +224,10 @@ async def upsert_team_preference(
 @router.delete("/team-preferences/{team_id}")
 async def delete_team_preference(
     team_id: int,
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
 ):
     """Delete a team-level override, reverting that team to global defaults."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     # Verify team belongs to user
     team = (
@@ -265,7 +256,7 @@ async def delete_team_preference(
 @router.get("/check-lineup/{team_id}", response_model=LineupCheckResponse)
 async def check_lineup(
     team_id: int,
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
 ):
     """
     Manually check lineup issues for a specific team.
@@ -273,7 +264,7 @@ async def check_lineup(
     Returns lineup issues without sending a notification.
     Useful for on-demand checking from the frontend.
     """
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     # Verify team belongs to user
     team = (
@@ -363,7 +354,7 @@ async def check_lineup(
 @router.post("/send-test/{team_id}")
 async def send_test_alert(
     team_id: int,
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
     email: str = Query(..., description="Email address to send the test alert to"),
 ):
     """
@@ -372,7 +363,7 @@ async def send_test_alert(
     Useful for testing Resend integration and verifying lineup issue detection.
     The notification log dedup is also bypassed so you can re-send freely.
     """
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     # Verify team belongs to user
     team = (
@@ -496,11 +487,11 @@ async def send_test_alert(
 
 @router.get("/history")
 async def get_notification_history(
-    current_user: dict = Depends(get_current_user),
+    user: User = Depends(get_db_user),
     limit: int = Query(default=10, ge=1, le=50),
 ):
     """Get recent notification history for the current user."""
-    user_id = _get_user_id(current_user)
+    user_id = user.user_id
 
     logs = (
         NotificationLog.select()

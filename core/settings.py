@@ -6,7 +6,7 @@ with validation and type coercion.
 """
 
 from typing import Optional
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # Clerk Auth
     clerk_jwks_url: str
     clerk_secret_key: SecretStr
+    # JWT issuer to verify against; derived from clerk_jwks_url when unset
+    clerk_issuer: Optional[str] = None
+    # Frontend origins allowed as the token's `azp` (authorized party).
+    # Empty disables the check. Env format is JSON: ["http://localhost:3000"]
+    clerk_authorized_parties: list[str] = []
 
     # Yahoo OAuth Configuration
     yahoo_client_id: Optional[str] = None
@@ -90,6 +95,13 @@ class Settings(BaseSettings):
         if lower_v not in {"json", "console"}:
             raise ValueError("log_format must be 'json' or 'console'")
         return lower_v
+
+    @model_validator(mode="after")
+    def derive_clerk_issuer(self) -> "Settings":
+        """Clerk's issuer is the JWKS host, e.g. https://<instance>.clerk.accounts.dev."""
+        if not self.clerk_issuer:
+            self.clerk_issuer = self.clerk_jwks_url.removesuffix("/.well-known/jwks.json").rstrip("/")
+        return self
 
 
 def get_settings() -> Settings:
