@@ -12,12 +12,12 @@ from typing import Optional
 from core.logging import get_logger
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
-from db.models.nba.players import Player
 from db.models.stats.rankings import Rankings
 from schemas.common import ApiStatus, CategoryDefResp
 from schemas.rankings import RankingsMeta, RankingsPlayer, RankingsResp
 from services.scoring.category_rank import RANKABLE_KEYS, PoolRow, compute_category_scores
-from services.scoring.models import CategoryDef, StatLine
+from services.scoring.models import CategoryDef
+from services.scoring.pool import load_pool
 from services.scoring.vocab import DEFAULT_CATEGORIES
 from services import schedule_service
 
@@ -189,59 +189,11 @@ class RankingsService:
 
     @staticmethod
     def _load_pool(window: Optional[int]) -> tuple[Optional[date], list[PoolRow]]:
-        """Per-game pool rows for a window: the latest rolling snapshot, or each
-        player's latest season snapshot converted from totals to per-game."""
-        if window is not None:
-            latest_date, records = PlayerRollingStats.get_latest_for_window(window)
-            pool: list[PoolRow] = []
-            for rec in records:
-                gp = int(rec.gp or 0)
-                if gp < 1:
-                    continue
-                fpts_avg = float(rec.fpts)
-                pool.append(PoolRow(
-                    id=rec.player_id, name=rec.player.name, team=rec.team_id, gp=gp,
-                    line=StatLine.from_row(rec, gp=1.0),
-                    fpts_avg=fpts_avg, fpts_total=round(fpts_avg * gp, 1),
-                ))
-            return latest_date, pool
+        """Per-game pool rows for a window (see services.scoring.pool.load_pool).
 
-        # Season rows are only written on days a player's GP changes, so take each
-        # player's latest row within the current season (as the nba.rankings view does)
-        # rather than a single as_of_date.
-        current_season = (
-            PlayerSeasonStats.select(PlayerSeasonStats.season)
-            .order_by(PlayerSeasonStats.as_of_date.desc())
-            .limit(1)
-            .scalar()
-        )
-        if not current_season:
-            return None, []
-
-        records = (
-            PlayerSeasonStats.select(PlayerSeasonStats, Player)
-            .join(Player)
-            .where(PlayerSeasonStats.season == current_season)
-            .distinct([PlayerSeasonStats.player])
-            .order_by(PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc())
-        )
-
-        as_of: Optional[date] = None
-        pool = []
-        for rec in records:
-            gp = int(rec.gp or 0)
-            if gp < 1:
-                continue
-            if as_of is None or rec.as_of_date > as_of:
-                as_of = rec.as_of_date
-            line = StatLine.from_row(rec).scaled(1 / gp)
-            line.gp = 1.0
-            fpts_total = float(rec.fpts)
-            pool.append(PoolRow(
-                id=rec.player_id, name=rec.player.name, team=rec.team_id, gp=gp, line=line,
-                fpts_avg=round(fpts_total / gp, 2), fpts_total=fpts_total,
-            ))
-        return as_of, pool
+        Kept as a thin wrapper so callers and tests can stub the pool here.
+        """
+        return load_pool(window)
 
     # ---- helpers --------------------------------------------------------------
 

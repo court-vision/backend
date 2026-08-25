@@ -10,6 +10,7 @@ from schemas.espn import PlayerResp, TeamDataResp
 from schemas.streamer import StreamerMode
 from services import streamer_service as ss
 from services.player_service import _normalize_name
+from services.scoring.resolver import ResolvedScoring
 from services.streamer_service import StreamerService
 
 MATCHUP = {
@@ -42,7 +43,9 @@ def stubbed(monkeypatch):
     monkeypatch.setattr(ss, "get_b2b_game_count", lambda team, d: 2 if team == "DEN" else 0)
     monkeypatch.setattr(ss, "get_teams_with_b2b", lambda d: ["DEN"])
     monkeypatch.setattr(ss.PlayerModel, "select", classmethod(lambda cls, *a, **k: _NoRows()))
-    monkeypatch.setattr(ss.PlayerValueService, "weights_for_league_info", staticmethod(lambda li: {"pts": 1.0}))
+    # A points league with its own weights (no DB): the dispatcher must pass them to the value service
+    monkeypatch.setattr(ss.PlayerValueService, "scoring_for",
+                        staticmethod(lambda li, team_id=None: ResolvedScoring("points", None, True, {"pts": 1.0})))
 
 
 @pytest.mark.unit

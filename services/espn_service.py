@@ -1,6 +1,8 @@
 from datetime import datetime
 import requests
+from core.logging import get_logger
 from core.settings import settings
+from services.player_value_service import PlayerValueService, ValueResult
 from services.scoring.models import CategoryTeamScoreData, StatLine
 from services.scoring.providers.espn_settings import parse_espn_category_score, statline_from_espn_stats
 from services.scoring.resolver import ResolvedScoring, resolve_scoring
@@ -68,7 +70,8 @@ class Player(object):
         self.avg_points = self.stats.get(f'{year}_total', {}).get('applied_avg', 0)
         if not self.avg_points and self.stats.get(f'{year}_total', {}).get('avg_raw'):
             # Category leagues: ESPN's appliedAverage is 0, so value the player with the default
-            # points formula over their raw per-game averages (Phase 3 replaces this with a category proxy).
+            # points formula over their raw per-game averages. This is only the last-resort
+            # fallback: EspnService._to_player_resps overwrites avg_points from our stored stats.
             from services.scoring.points import DEFAULT_POINTS
             from services.scoring.providers.espn_settings import statline_from_espn_stats
             self.avg_points = round(DEFAULT_POINTS.score(statline_from_espn_stats(self.stats[f'{year}_total']['avg_raw'])), 2)
@@ -129,39 +132,80 @@ class EspnService:
                 return team['roster']['entries']
 
     @staticmethod
+    def _scoring_for(league_info: LeagueInfo) -> ResolvedScoring:
+        """The league's resolved scoring (honouring the team's scoring_preview); the
+        default points scoring if the lookup fails, so ESPN data is still served."""
+        try:
+            return PlayerValueService.scoring_for(league_info)
+        except Exception as exc:
+            get_logger().warning("espn_scoring_resolve_failed", league_id=league_info.league_id, error=str(exc))
+            return resolve_scoring(None, getattr(league_info, "scoring_preview", None))
+
+    @staticmethod
+    def _values_for(scoring: ResolvedScoring, espn_ids: list[int], **kwargs) -> dict[int, ValueResult]:
+        """avg_points from our stored stats for a set of ESPN ids; {} if the lookup fails."""
+        try:
+            return PlayerValueService.avg_points_for(scoring, espn_ids=espn_ids, **kwargs)
+        except Exception as exc:
+            get_logger().warning("espn_avg_points_lookup_failed", error=str(exc))
+            return {}
+
+    @staticmethod
+    def _to_player_resps(players: list["Player"], league_info: LeagueInfo) -> list[PlayerResp]:
+        """PlayerResps with `avg_points` computed the same way for every provider:
+        fantasy points under the league's weights, or the category value proxy for
+        H2H-category leagues, from our stored stats (rolling window, then last
+        season's baseline). ESPN's own number -- appliedAverage, or the default
+        formula over its raw averages -- is only the last resort for a player we
+        know nothing about.
+        """
+        scoring = EspnService._scoring_for(league_info)
+        value_kind = PlayerValueService.value_kind_for(scoring)
+        values = EspnService._values_for(scoring, [p.playerId for p in players])
+
+        team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
+        pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
+        out: list[PlayerResp] = []
+        for player in players:
+            valued = values.get(player.playerId)
+            if valued is not None and valued.value is not None:
+                avg_points, source = valued.value, valued.source
+            else:
+                avg_points, source = player.avg_points, "provider"
+            out.append(PlayerResp(
+                player_id=player.playerId,
+                name=player.name,
+                avg_points=avg_points,
+                team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
+                valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
+                injured=player.injured,
+                injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
+                value_kind=value_kind,
+                value_source=source,
+            ))
+        return out
+
+    @staticmethod
     async def get_team_data(league_info: LeagueInfo, fa_count: int = 0) -> TeamDataResp:
         try:
             params = {
                     'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
                 }
-            
+
             cookies = {
                 'espn_s2': league_info.espn_s2,
                 'SWID': league_info.swid
             }
-            
+
             endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
             data = requests.get(endpoint, params=params, cookies=cookies, timeout=settings.http_timeout).json()
             roster = EspnService.get_roster(league_info.team_name, data['teams'])
             players = [Player(player, league_info.year) for player in roster]
 
-            team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
-            pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
-
             return TeamDataResp(
-                status=ApiStatus.SUCCESS, 
+                status=ApiStatus.SUCCESS,
                 message="Team data fetched successfully",
-                data=[
-                    PlayerResp(
-                        player_id=player.playerId,
-                        name=player.name,
-                        avg_points=player.avg_points,
-                        team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
-                        valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
-                        injured=player.injured,
-                        injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
-                    ) for player in players
-                ]
+                data=EspnService._to_player_resps(players, league_info),
             )
         except Exception as e:
             print(f"Error in get_team_data: {e}")
@@ -187,22 +231,10 @@ class EspnService:
             data = requests.get(endpoint, params=params, headers=headers, cookies=cookies, timeout=settings.http_timeout).json()
             players = [Player(player, league_info.year) for player in data['players']]
 
-            team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
-            pos_to_keep = {"PG", "SG", "SF", "PF", "C", "G", "F"}
-
             return TeamDataResp(
                 status=ApiStatus.SUCCESS,
                 message="Free agents fetched successfully",
-                data=[PlayerResp(
-                        player_id=player.playerId,
-                        name=player.name,
-                        avg_points=player.avg_points,
-                        team=team_abbrev_corrections.get(player.proTeam, player.proTeam),
-                        valid_positions=[pos for pos in player.eligibleSlots if pos in pos_to_keep] + ["UT1", "UT2", "UT3"],
-                        injured=player.injured,
-                        injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
-                    ) for player in players
-                ]
+                data=EspnService._to_player_resps(players, league_info),
             )
         except Exception as e:
             print(f"Error in get_free_agents: {e}")
@@ -375,6 +407,19 @@ class EspnService:
 
             window_prefix = {'season': '00', 'last_7': '01', 'last_14': '02', 'last_30': '03'}.get(avg_window, '00')
 
+            def _entry_player(entry: dict) -> dict:
+                return entry.get('playerPoolEntry', {}).get('player', {}) or entry.get('player', {})
+
+            # Our own per-player values for both rosters in one lookup: the category value
+            # for category leagues (so matchup figures agree with the streamer finder and the
+            # optimizer), and the rolling/baseline fpts that stands in when ESPN has no
+            # average yet (opening week) for points leagues.
+            our_values = EspnService._values_for(scoring, [
+                _entry_player(entry).get('id', 0)
+                for team_data in (our_team, opponent_team)
+                for entry in team_data.get('roster', {}).get('entries', [])
+            ])
+
             def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float, list]:
                 """Build roster list and calculate projected score."""
                 roster_entries = team_data.get('roster', {}).get('entries', [])
@@ -385,9 +430,7 @@ class EspnService:
                 team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
 
                 for entry in roster_entries:
-                    player_data = entry.get('playerPoolEntry', {}).get('player', {})
-                    if not player_data:
-                        player_data = entry.get('player', {})
+                    player_data = _entry_player(entry)
 
                     player_id = player_data.get('id', 0)
                     name = player_data.get('fullName', 'Unknown')
@@ -416,9 +459,12 @@ class EspnService:
                                 avg_line = statline_from_espn_stats(stat_split.get('averageStats'))
                             elif stat_id.startswith('10'):  # Projected
                                 projected_points = round(stat_split.get('appliedTotal', 0), 2)
-                    if not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
-                        # Category leagues report appliedAverage=0; value the player with the league's
-                        # point weights (default formula) over their raw averages instead.
+                    ours = our_values.get(player_id)
+                    if ours is not None and ours.value is not None and (scoring.is_categories or not avg_points):
+                        avg_points = ours.value
+                    elif not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
+                        # Last resort (no stored stats for this player): value the player with the
+                        # league's point weights (default formula) over ESPN's raw averages.
                         avg_points = round(scoring.points.score(avg_line), 2)
                     
                     # Calculate games remaining for this player using schedule service

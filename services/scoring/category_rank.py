@@ -47,6 +47,10 @@ class PoolRow:
     line: StatLine
     fpts_avg: float
     fpts_total: float
+    # Provider keys carried along so values can be looked up by ESPN id or by
+    # normalized name (Yahoo rosters) without a second query.
+    espn_id: int | None = None
+    name_normalized: str | None = None
 
 
 @dataclass

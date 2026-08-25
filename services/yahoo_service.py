@@ -572,17 +572,20 @@ class YahooService:
                                 "injury_status": status if status else None,
                             })
 
-            # Batch lookup stats by name from our internal database
+            # Value players from our stored stats under the league's scoring: fantasy
+            # points under its weights, or the category value for H2H-category leagues
+            # (rolling window, then last season's baseline). Same window as ESPN.
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            # Per-league point weights (falls back to the default formula when no league is synced)
-            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
-            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
+            scoring = PlayerValueService.scoring_for(league_info, team_id)
+            value_kind = PlayerValueService.value_kind_for(scoring)
+            name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
 
             # Build final player list with stats
             players = []
             for p in parsed_players:
                 normalized_name = _normalize_name(p["name"])
-                avg_points = name_to_avg.get(normalized_name) or 0.0
+                valued = name_to_value.get(normalized_name)
+                avg_points = valued.value if valued is not None and valued.value is not None else 0.0
 
                 players.append(PlayerResp(
                     player_id=p["player_id"],
@@ -592,6 +595,8 @@ class YahooService:
                     valid_positions=p["valid_positions"],
                     injured=p["injured"],
                     injury_status=p["injury_status"],
+                    value_kind=value_kind,
+                    value_source=valued.source if valued is not None else None,
                 ))
 
             return TeamDataResp(
@@ -728,17 +733,20 @@ class YahooService:
                                 "injury_status": status if status else None,
                             })
 
-            # Batch lookup stats by name from our internal database
+            # Value players from our stored stats under the league's scoring: fantasy
+            # points under its weights, or the category value for H2H-category leagues
+            # (rolling window, then last season's baseline). Same window as ESPN.
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            # Per-league point weights (falls back to the default formula when no league is synced)
-            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
-            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
+            scoring = PlayerValueService.scoring_for(league_info, team_id)
+            value_kind = PlayerValueService.value_kind_for(scoring)
+            name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
 
             # Build final player list with stats
             players = []
             for p in parsed_players:
                 normalized_name = _normalize_name(p["name"])
-                avg_points = name_to_avg.get(normalized_name) or 0.0
+                valued = name_to_value.get(normalized_name)
+                avg_points = valued.value if valued is not None and valued.value is not None else 0.0
 
                 players.append(PlayerResp(
                     player_id=p["player_id"],
@@ -748,6 +756,8 @@ class YahooService:
                     valid_positions=p["valid_positions"],
                     injured=p["injured"],
                     injury_status=p["injury_status"],
+                    value_kind=value_kind,
+                    value_source=valued.source if valued is not None else None,
                 ))
 
             return TeamDataResp(
@@ -929,14 +939,14 @@ class YahooService:
 
             # Fetch our team roster
             our_roster = await YahooService._fetch_roster_for_matchup(
-                team_key, access_token, avg_window
+                team_key, access_token, avg_window, scoring
             )
 
             # Fetch opponent roster if we have their team key
             opponent_roster = []
             if opponent_team_key:
                 opponent_roster = await YahooService._fetch_roster_for_matchup(
-                    opponent_team_key, access_token, avg_window
+                    opponent_team_key, access_token, avg_window, scoring
                 )
 
             # Calculate projected scores
@@ -1057,7 +1067,8 @@ class YahooService:
     async def _fetch_roster_for_matchup(
         team_key: str,
         access_token: str,
-        avg_window: str
+        avg_window: str,
+        scoring: ResolvedScoring | None = None,
     ) -> list[MatchupPlayerResp]:
         """
         Fetch a team's roster with stats for matchup display.
@@ -1066,6 +1077,7 @@ class YahooService:
             team_key: Yahoo team key
             access_token: Valid Yahoo access token
             avg_window: Averaging window for stats
+            scoring: The league's resolved scoring (default points scoring when omitted)
 
         Returns:
             List of MatchupPlayerResp for the team roster
@@ -1160,17 +1172,17 @@ class YahooService:
                                 "injury_status": injury_status,
                             })
 
-            # Batch lookup stats by name
+            # Value players from our stored stats under the league's scoring (see get_team_data)
             player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-            # Per-league point weights (falls back to the default formula when no league is synced)
-            weights = PlayerValueService.weights_for_team(team_id) if team_id else PlayerValueService.weights_for_league_info(league_info)
-            name_to_avg = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
+            scoring = scoring or resolve_scoring(None)
+            name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
 
             # Build MatchupPlayerResp list
             roster = []
             for p in parsed_players:
                 normalized_name = _normalize_name(p["name"])
-                avg_points = name_to_avg.get(normalized_name) or 0.0
+                valued = name_to_value.get(normalized_name)
+                avg_points = valued.value if valued is not None and valued.value is not None else 0.0
                 games_remaining = get_remaining_games(p["team"])
 
                 roster.append(MatchupPlayerResp(

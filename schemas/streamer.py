@@ -3,6 +3,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional
 from .common import BaseRequest, BaseResponse, LeagueInfo
+from .espn import ValueKind
 
 
 class StreamerMode(str, Enum):
@@ -21,6 +22,8 @@ class StreamerPlayerResp(BaseModel):
     # Performance metrics
     avg_points_last_n: Optional[float] = None
     avg_points_season: float
+    # Where avg_points_last_n came from: rolling | baseline (last season) | None
+    avg_source: Optional[str] = None
 
     # Schedule metrics
     games_remaining: int
@@ -46,6 +49,8 @@ class StreamerData(BaseModel):
     target_day: Optional[int] = None
     teams_with_b2b: list[str]
     streamers: list[StreamerPlayerResp]
+    # What the avg_points_* figures measure (fpts, or the category value proxy)
+    value_kind: ValueKind = "fpts"
 
 
 class StreamerReq(BaseRequest):

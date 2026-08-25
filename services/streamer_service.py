@@ -194,18 +194,18 @@ class StreamerService:
 
             free_agents = fa_response.data
 
-            # Fetch last n-day averages from our database
-            # Yahoo uses name-based lookup, ESPN uses player ID
-            # Score free agents with this league's point weights (default formula if unsynced)
-            point_weights = PlayerValueService.weights_for_league_info(league_info)
+            # Value free agents from our stored stats under this league's scoring:
+            # fantasy points under its weights, or the category value for H2H-category
+            # leagues (rolling window, then last season's baseline).
+            # Yahoo uses name-based lookup, ESPN uses player ID.
+            scoring = PlayerValueService.scoring_for(league_info, team_id)
+            value_kind = PlayerValueService.value_kind_for(scoring)
             if is_yahoo:
                 player_lookups = [(fa.name, fa.team) for fa in free_agents]
-                last_n_avgs_by_name = PlayerValueService.rolling_avg_by_name(
-                    player_lookups, days=avg_days, weights=point_weights
-                )
+                last_n_values = PlayerValueService.avg_points_for(scoring, names=player_lookups, days=avg_days)
             else:
                 player_ids = [fa.player_id for fa in free_agents]
-                last_n_avgs = PlayerValueService.rolling_avg_by_espn_id(player_ids, days=avg_days, weights=point_weights)
+                last_n_values = PlayerValueService.avg_points_for(scoring, espn_ids=player_ids, days=avg_days)
 
             # Build streamer list
             streamers: list[StreamerPlayerResp] = []
@@ -241,13 +241,10 @@ class StreamerService:
                 if b2b_only and not team_has_b2b:
                     continue
 
-                # Get last n-day average from our database
-                # Yahoo uses name-based lookup, ESPN uses player ID
-                if is_yahoo:
-                    # rolling_avg_by_name keys by the diacritic-stripped name
-                    avg_points_last_n = last_n_avgs_by_name.get(_normalize_name(fa.name))
-                else:
-                    avg_points_last_n = last_n_avgs.get(fa.player_id)
+                # Our value for the player (Yahoo values are keyed by the diacritic-stripped name)
+                valued = last_n_values.get(_normalize_name(fa.name) if is_yahoo else fa.player_id)
+                avg_points_last_n = valued.value if valued is not None else None
+                avg_source = valued.source if valued is not None else None
 
                 # Calculate streamer score
                 streamer_score = StreamerService._calculate_streamer_score(
@@ -265,6 +262,7 @@ class StreamerService:
                     valid_positions=fa.valid_positions,
                     avg_points_last_n=avg_points_last_n,
                     avg_points_season=fa.avg_points,
+                    avg_source=avg_source,
                     games_remaining=games_remaining,
                     has_b2b=team_has_b2b,
                     b2b_game_count=b2b_game_count,
@@ -302,7 +300,8 @@ class StreamerService:
                     mode=mode,
                     target_day=target_day if mode == StreamerMode.DAILY else None,
                     teams_with_b2b=teams_with_b2b,
-                    streamers=streamers
+                    streamers=streamers,
+                    value_kind=value_kind,
                 )
             )
 

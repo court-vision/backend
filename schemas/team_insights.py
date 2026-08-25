@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 from .common import BaseResponse
+from .espn import ValueKind
 from .matchup import CategoryComparison, ScoringFormat
 
 
@@ -21,6 +22,7 @@ class EnrichedRosterPlayer(BaseModel):
     valid_positions: list[str]
     injured: bool
     injury_status: Optional[str] = None
+    value_source: Optional[str] = None   # rolling | recent | baseline | provider
 
     # Enriched fields
     schedule: Optional[PlayerScheduleInfo] = None
@@ -79,6 +81,7 @@ class TeamInsightsData(BaseModel):
     opponent_category_strengths: Optional[CategoryStrengths] = None   # this week's opponent, same window
     category_comparison: Optional[CategoryComparison] = None          # your vs opponent per-game totals
     scoring_format: ScoringFormat = "points"
+    value_kind: ValueKind = "fpts"       # what avg_points / projected_week_fpts measure
     schedule_overview: Optional[ScheduleOverview] = None
     roster_health: RosterHealthSummary
     projected_week_fpts: Optional[float] = None

@@ -1,8 +1,12 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 from .common import BaseRequest, BaseResponse, LeagueInfo
 
 # ------------------------------- ESPN Data Models ------------------------------- #
+
+# What `avg_points` measures: fantasy points under the league's weights, or the
+# fpts-scale category value proxy for H2H-category leagues.
+ValueKind = Literal["fpts", "cat_value"]
 
 class ValidateLeagueReq(BaseRequest):
     league_info: LeagueInfo
@@ -15,6 +19,9 @@ class PlayerResp(BaseModel):
     valid_positions: list[str]
     injured: bool
     injury_status: Optional[str] = None
+    value_kind: ValueKind = "fpts"
+    # Where avg_points came from: rolling | recent | baseline (last season) | provider (ESPN's own number)
+    value_source: Optional[str] = None
 
 class TeamDataReq(BaseRequest):
     league_info: LeagueInfo

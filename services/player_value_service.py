@@ -1,11 +1,15 @@
 """
-Per-player scalar values under a league's point weights.
+Per-player scalar values under a league's scoring.
 
 One helper for every place that produces `avg_points`: rolling-window averages
 (nba.player_rolling_stats), decay-weighted recent averages (nba.player_game_stats),
-and raw StatLines for category projections. When the weights are the global
-default, values are read straight from the stored `fpts` columns (exact parity
-with the pre-league behavior); otherwise they are recomputed from raw stats.
+raw StatLines for category projections, and -- for H2H-category leagues -- the
+fpts-scale category value (services.scoring.category_value). When the point
+weights are the global default, values are read straight from the stored `fpts`
+columns (exact parity with the pre-league behavior); otherwise they are
+recomputed from raw stats.
+
+`avg_points_for(scoring, ...)` is the single dispatcher every provider uses.
 """
 
 from __future__ import annotations
@@ -13,22 +17,28 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
-from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from schemas.common import LeagueInfo
-from services.scoring.models import StatLine
+from services.scoring.category_rank import PoolRow
+from services.scoring.category_value import category_values, rankable_categories
+from services.scoring.models import CategoryDef, StatLine
 from services.scoring.points import PointsScoring
+from services.scoring.pool import BASELINE_MIN_GP, baseline_records, baseline_season, load_baseline_pool, load_pool
 from services.scoring.vocab import DEFAULT_POINT_WEIGHTS
 
+if TYPE_CHECKING:  # pragma: no cover
+    from services.scoring.resolver import ResolvedScoring
+
 ROLLING_WINDOWS = (7, 14, 30)
-# Last season's final row only counts as a baseline with a real sample behind it
-BASELINE_MIN_GP = 10
 
 ValueSource = Literal["rolling", "recent", "baseline"]
+ValueKind = Literal["fpts", "cat_value"]
+
+__all__ = ["BASELINE_MIN_GP", "PlayerValueService", "ValueKind", "ValueResult", "ValueSource"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,22 @@ class PlayerValueService:
     def weights_for_league_info(league_info: LeagueInfo) -> dict[str, float]:
         from services.scoring.resolver import resolve_scoring_for_league_info
         return resolve_scoring_for_league_info(league_info).point_weights
+
+    @staticmethod
+    def scoring_for(league_info: Optional[LeagueInfo], team_id: Optional[int] = None) -> "ResolvedScoring":
+        """The resolved scoring (format, weights, categories, preview) for a saved
+        team when `team_id` is known, else for raw league credentials."""
+        from services.scoring.resolver import resolve_scoring, resolve_scoring_for_league_info, resolve_scoring_for_team
+        if team_id:
+            return resolve_scoring_for_team(team_id)
+        if league_info is not None:
+            return resolve_scoring_for_league_info(league_info)
+        return resolve_scoring(None)
+
+    @staticmethod
+    def value_kind_for(scoring: "ResolvedScoring") -> ValueKind:
+        """What `avg_points` measures under this scoring."""
+        return "cat_value" if scoring.is_categories else "fpts"
 
     # ---- rolling-window averages (StatLines) --------------------------------
 
@@ -237,21 +263,12 @@ class PlayerValueService:
 
     @staticmethod
     def _baseline_season(season: Optional[str]) -> str:
-        from core.season import previous_season
-        from core.settings import settings
-        return season or previous_season(settings.nba_season)
+        return baseline_season(season)
 
     @staticmethod
     def _baseline_records(season: Optional[str], where):
         """Each player's final row of `season` (gp >= BASELINE_MIN_GP), joined to Player."""
-        return (
-            PlayerSeasonStats.select(PlayerSeasonStats, Player)
-            .join(Player)
-            .where((PlayerSeasonStats.season == PlayerValueService._baseline_season(season))
-                   & (PlayerSeasonStats.gp >= BASELINE_MIN_GP) & where)
-            .distinct([PlayerSeasonStats.player])
-            .order_by(PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc())
-        )
+        return baseline_records(season, where)
 
     @staticmethod
     def _per_game(rec) -> StatLine:
@@ -336,3 +353,94 @@ class PlayerValueService:
         missing = [(n, t) for n, t in players if primary.get(_normalize(n)) is None]
         baseline = PlayerValueService.baseline_lines_by_name(missing) if missing else {}
         return PlayerValueService._fill_baseline(primary, "recent", baseline, PlayerValueService._scorer(weights))
+
+    # ---- category value (H2H-category leagues) ----------------------------------
+
+    @staticmethod
+    def _category_window(days: int) -> int:
+        """Category values are z-scored over a whole rolling snapshot, so an
+        arbitrary day count snaps to the nearest stored window."""
+        return min(ROLLING_WINDOWS, key=lambda w: (abs(w - days), w))
+
+    @staticmethod
+    def _category_pool(days: int) -> tuple[Optional[ValueSource], list[PoolRow]]:
+        """The rolling pool for `days`, or last season's baseline pool when the
+        current season has no fresh snapshot yet."""
+        _, pool = load_pool(PlayerValueService._category_window(days))
+        if pool:
+            return "rolling", pool
+        pool = load_baseline_pool()
+        return ("baseline", pool) if pool else (None, [])
+
+    @staticmethod
+    def _category_scored(cat_defs: list[CategoryDef], days: int) -> tuple[Optional[ValueSource], list[PoolRow], dict[int, float]]:
+        source, pool = PlayerValueService._category_pool(days)
+        values = {pid: value for pid, (value, _z) in category_values(pool, cat_defs).items()} if pool else {}
+        return source, pool, values
+
+    @staticmethod
+    def category_value_by_espn_id(espn_ids: list[int], cat_defs: list[CategoryDef],
+                                  days: int = 14) -> dict[int, ValueResult]:
+        """Category value for each ESPN id over the rolling window (last season's baseline before then)."""
+        if not espn_ids:
+            return {}
+        source, pool, values = PlayerValueService._category_scored(cat_defs, days)
+        by_espn = {row.espn_id: values[row.id] for row in pool if row.espn_id is not None and row.id in values}
+        return {eid: (ValueResult(by_espn[eid], source) if eid in by_espn else ValueResult(None, None))
+                for eid in espn_ids}
+
+    @staticmethod
+    def category_value_by_name(players: list[tuple[str, str]], cat_defs: list[CategoryDef],
+                               days: int = 14) -> dict[str, ValueResult]:
+        """Same, keyed by normalized name (Yahoo rosters); a name shared by two
+        players resolves to the one on the expected team."""
+        if not players:
+            return {}
+        source, pool, values = PlayerValueService._category_scored(cat_defs, days)
+        by_name: dict[str, list[PoolRow]] = {}
+        for row in pool:
+            if row.id not in values:
+                continue
+            for key in {_normalize(row.name), row.name_normalized}:
+                if key:
+                    by_name.setdefault(key, []).append(row)
+
+        out: dict[str, ValueResult] = {}
+        for name, team in players:
+            n = _normalize(name)
+            candidates = by_name.get(n, [])
+            match = next((r for r in candidates if team and r.team == team), None) or (candidates[0] if candidates else None)
+            out[n] = ValueResult(values[match.id], source) if match is not None else ValueResult(None, None)
+        return out
+
+    # ---- the one dispatcher every provider uses --------------------------------
+
+    @staticmethod
+    def avg_points_for(scoring: "ResolvedScoring", *, espn_ids: Optional[list[int]] = None,
+                       names: Optional[list[tuple[str, str]]] = None, days: int = 14,
+                       recent: bool = False) -> dict:
+        """`avg_points` for a set of players under a league's resolved scoring.
+
+        Category leagues (including a `scoring_preview="categories"` team) get the
+        fpts-scale category value over the league's rankable categories; points
+        leagues get fantasy points under the league's weights (rolling window, or
+        the decay-weighted recent average with `recent=True`). Both fall back to
+        last season's per-game baseline. Keys are ESPN ids or normalized names,
+        matching the `espn_ids` / `names` (name, team) input given.
+        """
+        if scoring.is_categories:
+            cats = rankable_categories(scoring)
+            # No decay-weighted category pool exists; "recent" means the shortest window.
+            window = min(days, ROLLING_WINDOWS[0]) if recent else days
+            if names is not None:
+                return PlayerValueService.category_value_by_name(names, cats, days=window)
+            return PlayerValueService.category_value_by_espn_id(espn_ids or [], cats, days=window)
+
+        weights = scoring.point_weights
+        if names is not None:
+            if recent:
+                return PlayerValueService.recent_value_by_name(names, days=days, weights=weights)
+            return PlayerValueService.value_by_name(names, weights=weights, days=days)
+        if recent:
+            return PlayerValueService.recent_value_by_espn_id(espn_ids or [], days=days, weights=weights)
+        return PlayerValueService.value_by_espn_id(espn_ids or [], weights=weights, days=days)

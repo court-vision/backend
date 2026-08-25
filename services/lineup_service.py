@@ -43,27 +43,29 @@ class LineupService:
         roster, fas = team_resp.data, fa_resp.data
 
         if use_recent_stats:
+            # Re-value everyone on recent form under the league's scoring (decay-weighted
+            # fpts for points leagues, the shortest-window category value for category
+            # leagues); players we know nothing about keep the provider's number.
             all_players = roster + fas
-            weights = PlayerValueService.weights_for_team(team_id)
+            scoring = PlayerValueService.scoring_for(league_info, team_id)
             if league_info.provider == FantasyProvider.YAHOO:
                 # Yahoo player ids are not ESPN ids: resolve by normalized name instead
-                weighted_avgs = await asyncio.to_thread(
-                    PlayerValueService.recent_weighted_avg_by_name,
-                    [(p.name, p.team) for p in all_players], 14, 7, weights,
+                values = await asyncio.to_thread(
+                    PlayerValueService.avg_points_for, scoring,
+                    names=[(p.name, p.team) for p in all_players], days=14, recent=True,
                 )
-                for player in all_players:
-                    recent = weighted_avgs.get(_normalize_name(player.name))
-                    if recent is not None:
-                        player.avg_points = recent
+                keyed = [(p, _normalize_name(p.name)) for p in all_players]
             else:
-                weighted_avgs = await asyncio.to_thread(
-                    PlayerValueService.recent_weighted_avg_by_espn_id,
-                    [p.player_id for p in all_players], 14, 7, weights,
+                values = await asyncio.to_thread(
+                    PlayerValueService.avg_points_for, scoring,
+                    espn_ids=[p.player_id for p in all_players], days=14, recent=True,
                 )
-                for player in all_players:
-                    recent = weighted_avgs.get(player.player_id)
-                    if recent is not None:
-                        player.avg_points = recent
+                keyed = [(p, p.player_id) for p in all_players]
+            for player, key in keyed:
+                valued = values.get(key)
+                if valued is not None and valued.value is not None:
+                    player.avg_points = valued.value
+                    player.value_source = valued.source
 
         return roster, fas
 
