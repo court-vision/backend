@@ -1,5 +1,4 @@
-from datetime import date, timedelta
-from typing import Optional
+from typing import Iterable, Optional
 
 from schemas.team_insights import (
     TeamInsightsResp,
@@ -11,15 +10,20 @@ from schemas.team_insights import (
     RosterHealthSummary,
 )
 from schemas.espn import PlayerResp
+from schemas.matchup import CategoryComparison
 from schemas.common import ApiStatus, FantasyProvider
 from services.team_service import TeamService
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
+from services.matchup_service import MatchupService
+from services.matchup_days import comparison_to_schema
 from services.player_value_service import PlayerValueService
-from services.player_service import PlayerService, _normalize_name, _compute_avg_stats
+from services.player_service import _normalize_name
+from services.scoring.categories import CategoryScoring
+from services.scoring.models import CategoryDef, StatLine
+from services.scoring.resolver import ResolvedScoring, resolve_scoring_for_team
+from services.scoring.vocab import DEFAULT_CATEGORIES
 from services import schedule_service
-from db.models.nba.players import Player
-from db.models.nba.player_game_stats import PlayerGameStats
 from core.logging import get_logger
 
 
@@ -27,6 +31,9 @@ from core.logging import get_logger
 _OUT_STATUSES = {"OUT", "O", "IL", "IL+", "SUSPENSION"}
 _DTD_STATUSES = {"DAY_TO_DAY", "DTD"}
 _GTD_STATUSES = {"GTD", "QUESTIONABLE", "DOUBTFUL"}
+
+# Rolling window (days) behind category strengths and the opponent comparison.
+STRENGTHS_WINDOW_DAYS = 14
 
 
 def _classify_injury(injury_status: Optional[str]) -> str:
@@ -93,7 +100,8 @@ class TeamInsightsService:
                         )
 
             # Step 3: Batch stat window lookups
-            weights = PlayerValueService.weights_for_team(team_id)
+            scoring = resolve_scoring_for_team(team_id)
+            weights = scoring.point_weights
             if league_info.provider == FantasyProvider.YAHOO:
                 player_lookups = [(p.name, p.team) for p in base_roster]
                 avgs_l7 = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
@@ -130,8 +138,16 @@ class TeamInsightsService:
                     avg_fpts_l30=_get_avg(player, avgs_l30),
                 ))
 
-            # Step 5: Category strengths (L14 window from our DB)
-            category_strengths = _compute_category_strengths(base_roster, league_info.provider)
+            # Step 5: Category strengths (L14 rolling window) and opponent comparison
+            your_lines = _roster_lines(base_roster, league_info.provider)
+            your_line = StatLine.sum(your_lines) if your_lines else None
+            category_strengths = _strengths_from_line(your_line) if your_line is not None else None
+            opponent_strengths: Optional[CategoryStrengths] = None
+            category_comparison: Optional[CategoryComparison] = None
+            if your_line is not None:
+                opponent_strengths, category_comparison = await _opponent_comparison(
+                    team_id, your_line, league_info.provider, scoring,
+                )
 
             # Step 6: Schedule overview
             schedule_overview = None
@@ -192,6 +208,9 @@ class TeamInsightsService:
                 data=TeamInsightsData(
                     roster=enriched_roster,
                     category_strengths=category_strengths,
+                    opponent_category_strengths=opponent_strengths,
+                    category_comparison=category_comparison,
+                    scoring_format=scoring.format,
                     schedule_overview=schedule_overview,
                     roster_health=roster_health,
                     projected_week_fpts=projected_week_fpts,
@@ -207,57 +226,79 @@ class TeamInsightsService:
             )
 
 
-def _compute_category_strengths(
-    roster: list[PlayerResp],
+# ---- Category strengths ----------------------------------------------------------------
+
+
+def _roster_lines(roster: Iterable, provider: FantasyProvider,
+                  days: int = STRENGTHS_WINDOW_DAYS) -> list[StatLine]:
+    """Per-game average StatLine for each rostered player over the rolling window.
+
+    Works for any roster payload whose players expose `player_id` (ESPN id),
+    `name`, and `team`. Players with no data in the window are skipped.
+    """
+    players = list(roster)
+    if provider == FantasyProvider.YAHOO:
+        lines = PlayerValueService.rolling_lines_by_name([(p.name, p.team) for p in players], days=days)
+    else:
+        lines = PlayerValueService.rolling_lines_by_espn_id([p.player_id for p in players], days=days)
+    return [line for line in lines.values() if line is not None]
+
+
+def _strengths_from_line(line: StatLine, window_days: int = STRENGTHS_WINDOW_DAYS) -> CategoryStrengths:
+    """Strengths from a team per-game total line (the sum of players' per-game lines).
+
+    StatLine.get recomputes FG%/FT% from the summed makes and attempts, so the
+    percentages are volume-weighted 0-1 fractions rather than a mean of player rates.
+    """
+    return CategoryStrengths(
+        avg_points=round(line.pts, 1),
+        avg_rebounds=round(line.reb, 1),
+        avg_assists=round(line.ast, 1),
+        avg_steals=round(line.stl, 1),
+        avg_blocks=round(line.blk, 1),
+        avg_turnovers=round(line.tov, 1),
+        avg_fg_pct=round(line.get("fg_pct"), 4),
+        avg_ft_pct=round(line.get("ft_pct"), 4),
+        avg_fg3m=round(line.fg3m, 1),
+        avg_fga=round(line.fga, 1),
+        avg_fta=round(line.fta, 1),
+        window_days=window_days,
+    )
+
+
+def _category_scoring(scoring: ResolvedScoring) -> CategoryScoring:
+    """The league's categories when it is a category league, else standard 9-cat."""
+    if scoring.is_categories and scoring.categories is not None:
+        return scoring.categories
+    return CategoryScoring([CategoryDef.for_key(k) for k in DEFAULT_CATEGORIES])
+
+
+async def _opponent_comparison(
+    team_id: int,
+    your_line: StatLine,
     provider: FantasyProvider,
-) -> Optional[CategoryStrengths]:
-    """Compute team-wide category averages from the last 14 days of game data."""
+    scoring: ResolvedScoring,
+) -> tuple[Optional[CategoryStrengths], Optional[CategoryComparison]]:
+    """This week's opponent's strengths and a per-category comparison against yours.
+
+    Best-effort: a failed or missing matchup (provider outage, bye, no data)
+    is logged and yields (None, None) so insights never fail because of it.
+    """
+    log = get_logger()
     try:
-        # Resolve ESPN IDs to internal player IDs
-        if provider == FantasyProvider.YAHOO:
-            # For Yahoo, look up by name
-            player_ids = []
-            for p in roster:
-                player = Player.find_by_name(p.name)
-                if player:
-                    player_ids.append(player.id)
-        else:
-            # For ESPN, look up by espn_id
-            espn_ids = [p.player_id for p in roster]
-            players = list(
-                Player.select()
-                .where(Player.espn_id.in_(espn_ids))
-            )
-            player_ids = [p.id for p in players]
+        matchup = await MatchupService.get_matchup_by_team_id(0, team_id)
+        if matchup.status != ApiStatus.SUCCESS or not matchup.data:
+            log.warning("team_insights_no_matchup", team_id=team_id, message=matchup.message)
+            return None, None
 
-        if not player_ids:
-            return None
+        opp_lines = _roster_lines(matchup.data.opponent_team.roster, provider)
+        if not opp_lines:
+            return None, None
+        opp_line = StatLine.sum(opp_lines)
 
-        # Query last 14 days of game stats for all roster players
-        cutoff_date = date.today() - timedelta(days=14)
-        game_logs = list(
-            PlayerGameStats.select()
-            .where(
-                (PlayerGameStats.player_id.in_(player_ids))
-                & (PlayerGameStats.game_date >= cutoff_date)
-            )
-        )
-
-        if not game_logs:
-            return None
-
-        avg_stats = _compute_avg_stats(game_logs)
-
-        return CategoryStrengths(
-            avg_points=avg_stats.avg_points,
-            avg_rebounds=avg_stats.avg_rebounds,
-            avg_assists=avg_stats.avg_assists,
-            avg_steals=avg_stats.avg_steals,
-            avg_blocks=avg_stats.avg_blocks,
-            avg_turnovers=avg_stats.avg_turnovers,
-            avg_fg_pct=avg_stats.avg_fg_pct,
-            avg_ft_pct=avg_stats.avg_ft_pct,
-        )
-
-    except Exception:
-        return None
+        cs = _category_scoring(scoring)
+        comparison = cs.compare(cs.totals_from_line(your_line), cs.totals_from_line(opp_line))
+        return _strengths_from_line(opp_line), comparison_to_schema(comparison)
+    except Exception as e:
+        log.warning("team_insights_opponent_comparison_failed", team_id=team_id, error=str(e))
+        return None, None

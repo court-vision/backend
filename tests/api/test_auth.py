@@ -69,7 +69,7 @@ def test_public_rankings_accessible_without_auth(monkeypatch):
     from schemas.common import ApiStatus
     from schemas.rankings import RankingsResp
 
-    async def fake_get_rankings(window=None):
+    async def fake_get_rankings(**kwargs):
         return RankingsResp(status=ApiStatus.SUCCESS, message="ok", data=[])
 
     monkeypatch.setattr(rankings_service.RankingsService, "get_rankings", staticmethod(fake_get_rankings))

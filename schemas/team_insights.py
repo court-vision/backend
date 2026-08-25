@@ -1,6 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from .common import BaseResponse
+from .matchup import CategoryComparison, ScoringFormat
 
 
 class PlayerScheduleInfo(BaseModel):
@@ -29,15 +30,25 @@ class EnrichedRosterPlayer(BaseModel):
 
 
 class CategoryStrengths(BaseModel):
-    """Team aggregate averages per stat category (L14 window)."""
+    """Team per-game totals per stat category over the trailing window.
+
+    Counting stats are the sum of each rostered player's per-game average over
+    the window (what the roster produces in one game with everyone active).
+    Percentages are 0-1 fractions from summed makes / summed attempts, never a
+    mean of player percentages.
+    """
     avg_points: float
     avg_rebounds: float
     avg_assists: float
     avg_steals: float
     avg_blocks: float
     avg_turnovers: float
-    avg_fg_pct: float
-    avg_ft_pct: float
+    avg_fg_pct: float = Field(description="Team FG% as a 0-1 fraction (sum FGM / sum FGA)")
+    avg_ft_pct: float = Field(description="Team FT% as a 0-1 fraction (sum FTM / sum FTA)")
+    avg_fg3m: float
+    avg_fga: float
+    avg_fta: float
+    window_days: int           # Rolling window the totals are computed over
 
 
 class ScheduleOverview(BaseModel):
@@ -65,6 +76,9 @@ class TeamInsightsData(BaseModel):
     """Complete team insights response."""
     roster: list[EnrichedRosterPlayer]
     category_strengths: Optional[CategoryStrengths] = None
+    opponent_category_strengths: Optional[CategoryStrengths] = None   # this week's opponent, same window
+    category_comparison: Optional[CategoryComparison] = None          # your vs opponent per-game totals
+    scoring_format: ScoringFormat = "points"
     schedule_overview: Optional[ScheduleOverview] = None
     roster_health: RosterHealthSummary
     projected_week_fpts: Optional[float] = None
