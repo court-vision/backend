@@ -19,13 +19,15 @@ from schemas.rankings import RankingsMeta, RankingsPlayer, RankingsResp
 from services.scoring.category_rank import RANKABLE_KEYS, PoolRow, compute_category_scores
 from services.scoring.models import CategoryDef, StatLine
 from services.scoring.vocab import DEFAULT_CATEGORIES
+from services import schedule_service
 
 VALID_WINDOWS = {7, 14, 30}
 VALID_FORMATS = ("points", "categories")
 
 # Games-played floor for category rankings, by window (None = full season).
-# Z-scores over a pool are only meaningful once tiny samples are filtered out.
-DEFAULT_MIN_GAMES: dict[Optional[int], int] = {None: 20, 30: 8, 14: 4, 7: 2}
+# Deliberately 1 everywhere: the rankings page shows the season from day one,
+# volatility included; `min_games` is an explicit opt-in filter.
+DEFAULT_MIN_GAMES: dict[Optional[int], int] = {None: 1, 30: 1, 14: 1, 7: 1}
 
 
 class RankingsService:
@@ -62,8 +64,9 @@ class RankingsService:
 
     @staticmethod
     def _get_season_rankings() -> RankingsResp:
-        """Return full-season rankings from the legacy Rankings model."""
+        """Return full-season rankings from the nba.rankings view (cumulative fpts, no GP floor)."""
         rankings_query = Rankings.select().order_by(Rankings.curr_rank)
+        season, as_of, gp_map = RankingsService._season_gp_map()
 
         rankings_data = [
             RankingsPlayer(
@@ -74,15 +77,17 @@ class RankingsService:
                 total_fpts=float(row.fpts),
                 avg_fpts=float(row.avg_fpts),
                 rank_change=row.rank_change,
+                gp=gp_map.get(row.id),
             )
             for row in rankings_query
         ]
 
         return RankingsResp(
             status=ApiStatus.SUCCESS,
-            message="Rankings fetched successfully",
+            message="Rankings fetched successfully" if rankings_data else RankingsService._empty_message(season, "season"),
             data=rankings_data,
-            meta=RankingsService._meta("points", None, RankingsService._latest_season_date(), [], len(rankings_data)),
+            meta=RankingsService._meta("points", None, as_of, [], len(rankings_data), season=season,
+                                       max_gp=max(gp_map.values(), default=None)),
         )
 
     @staticmethod
@@ -93,7 +98,7 @@ class RankingsService:
         if not records:
             return RankingsResp(
                 status=ApiStatus.SUCCESS,
-                message=f"No L{window} data available yet",
+                message=RankingsService._empty_message(RankingsService._current_season(), f"L{window}"),
                 data=[],
                 meta=RankingsService._meta("points", window, latest_date, [], 0),
             )
@@ -110,12 +115,15 @@ class RankingsService:
             )
             for rank, record in enumerate(records, start=1)
         ]
+        for rp, record in zip(rankings_data, records):
+            rp.gp = int(record.gp or 0)
 
         return RankingsResp(
             status=ApiStatus.SUCCESS,
             message=f"L{window} rankings fetched successfully (as of {latest_date})",
             data=rankings_data,
-            meta=RankingsService._meta("points", window, latest_date, [], len(rankings_data)),
+            meta=RankingsService._meta("points", window, latest_date, [], len(rankings_data),
+                                       max_gp=max((int(r.gp or 0) for r in records), default=None)),
         )
 
     # ---- categories -----------------------------------------------------------
@@ -150,15 +158,19 @@ class RankingsService:
         ]
 
         label = "Season" if window is None else f"L{window}"
-        message = (
-            f"{label} category rankings fetched successfully (as of {as_of})"
-            if rankings_data else f"No {label} data available yet"
-        )
+        season = RankingsService._data_season() if window is None else RankingsService._current_season()
+        if rankings_data:
+            message = f"{label} category rankings fetched successfully (as of {as_of})"
+        elif pool and threshold > 1:
+            message = f"No players with {threshold}+ games in the {label} window yet"
+        else:
+            message = RankingsService._empty_message(season, label)
         return RankingsResp(
             status=ApiStatus.SUCCESS,
             message=message,
             data=rankings_data,
-            meta=RankingsService._meta("categories", window, as_of, cat_defs, len(eligible), threshold),
+            meta=RankingsService._meta("categories", window, as_of, cat_defs, len(eligible), threshold,
+                                       season=season, max_gp=max((r.gp for r in pool), default=None)),
         )
 
     @staticmethod
@@ -234,6 +246,55 @@ class RankingsService:
     # ---- helpers --------------------------------------------------------------
 
     @staticmethod
+    def _current_season() -> str:
+        from core.settings import settings
+        return settings.nba_season
+
+    @staticmethod
+    def _data_season() -> str:
+        """Season of the newest season-stats row (what the season pool/view is scoped to); settings when unknown."""
+        try:
+            season = (
+                PlayerSeasonStats.select(PlayerSeasonStats.season)
+                .order_by(PlayerSeasonStats.as_of_date.desc())
+                .limit(1)
+                .scalar()
+            )
+        except Exception:
+            season = None
+        return season or RankingsService._current_season()
+
+    @staticmethod
+    def _empty_message(season: str, label: str) -> str:
+        return f"No {season} {label} data yet — rankings start after opening night"
+
+    @staticmethod
+    def _season_gp_map() -> tuple[Optional[str], Optional[date], dict[int, int]]:
+        """(season, as_of, {player_id: gp}) from each player's latest row in the newest season —
+        the same scoping rule the nba.rankings view uses."""
+        season = (
+            PlayerSeasonStats.select(PlayerSeasonStats.season)
+            .order_by(PlayerSeasonStats.as_of_date.desc())
+            .limit(1)
+            .scalar()
+        )
+        if not season:
+            return None, None, {}
+        rows = (
+            PlayerSeasonStats.select(PlayerSeasonStats.player, PlayerSeasonStats.gp, PlayerSeasonStats.as_of_date)
+            .where(PlayerSeasonStats.season == season)
+            .distinct([PlayerSeasonStats.player])
+            .order_by(PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc())
+        )
+        gp_map: dict[int, int] = {}
+        as_of: Optional[date] = None
+        for r in rows:
+            gp_map[r.player_id] = int(r.gp or 0)
+            if as_of is None or r.as_of_date > as_of:
+                as_of = r.as_of_date
+        return season, as_of, gp_map
+
+    @staticmethod
     def _latest_season_date() -> Optional[date]:
         return (
             PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
@@ -243,8 +304,18 @@ class RankingsService:
         )
 
     @staticmethod
+    def _season_day(as_of: Optional[date]) -> Optional[int]:
+        if as_of is None:
+            return None
+        try:
+            return schedule_service.season_day(as_of)
+        except Exception:
+            return None
+
+    @staticmethod
     def _meta(format: str, window: Optional[int], as_of: Optional[date], cat_defs: list[CategoryDef],
-              pool_size: int, min_games: Optional[int] = None) -> RankingsMeta:
+              pool_size: int, min_games: Optional[int] = None, season: Optional[str] = None,
+              max_gp: Optional[int] = None) -> RankingsMeta:
         return RankingsMeta(
             format=format,
             window=window,
@@ -252,6 +323,9 @@ class RankingsService:
             categories=[CategoryDefResp(**c.to_json()) for c in cat_defs],
             pool_size=pool_size,
             min_games=min_games,
+            season=season or RankingsService._current_season(),
+            season_day=RankingsService._season_day(as_of),
+            max_gp=max_gp,
         )
 
     @staticmethod

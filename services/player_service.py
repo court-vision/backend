@@ -21,6 +21,9 @@ from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.player_injuries import PlayerInjury
 from core.logging import get_logger
+from core.season import previous_season
+from core.settings import settings
+from services.schedule_service import get_season_bounds
 
 
 def _parse_window_size(window: str) -> int | None:
@@ -144,6 +147,39 @@ def _fetch_advanced_stats(player_id: int) -> Optional[AdvancedStatsData]:
     )
 
 
+def _season_opening_night():
+    """Opening night of the active season, or None if the calendar isn't available."""
+    try:
+        return get_season_bounds().opening_night
+    except Exception:
+        return None
+
+
+def _season_scoped_logs(all_logs: list) -> tuple[list, Optional[str]]:
+    """Game logs for the active season; last season's when the season hasn't started.
+
+    Returns (logs, note) where note explains a fallback (None when current-season data exists).
+    """
+    opening = _season_opening_night()
+    if opening is None:
+        return all_logs, None
+    current = [g for g in all_logs if g.game_date >= opening]
+    if current:
+        return current, None
+    prev_opening = date(opening.year - 1, 8, 1)
+    previous = [g for g in all_logs if prev_opening <= g.game_date < opening]
+    if previous:
+        return previous, f"No {settings.nba_season} games yet; showing {previous_season(settings.nba_season)}"
+    return all_logs, None
+
+
+def scaled_min_games(requested: int, max_games: int) -> int:
+    """A games-played floor that scales with the season: never more than half the max, at least 1."""
+    if max_games <= 0:
+        return 1
+    return max(1, min(requested, math.ceil(0.5 * max_games)))
+
+
 class PlayerService:
 
     @staticmethod
@@ -190,14 +226,19 @@ class PlayerService:
             if team is not None:
                 game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team)
 
-            game_logs_list = list(game_logs_query)
+            all_logs = list(game_logs_query)
 
-            if not game_logs_list:
+            if not all_logs:
                 return PlayerStatsResp(
                     status=ApiStatus.ERROR,
                     message="No game stats found for player",
                     data=None
                 )
+
+            # Season scope: player_game_stats has no season column, so slice by the
+            # calendar's opening night. Before the first game of the season, fall
+            # back to last season's games so the panels aren't empty.
+            game_logs_list, season_note = _season_scoped_logs(all_logs)
 
             # Get player info from Player dimension and most recent game
             latest_game = game_logs_list[-1]
@@ -256,7 +297,7 @@ class PlayerService:
 
             return PlayerStatsResp(
                 status=ApiStatus.SUCCESS,
-                message="Player stats fetched successfully",
+                message=season_note or "Player stats fetched successfully",
                 data=player_stats
             )
 
@@ -362,13 +403,7 @@ class PlayerService:
             return {}
 
         if days in (7, 14, 30):
-            latest_date = (
-                PlayerRollingStats.select(PlayerRollingStats.as_of_date)
-                .where(PlayerRollingStats.window_days == days)
-                .order_by(PlayerRollingStats.as_of_date.desc())
-                .limit(1)
-                .scalar()
-            )
+            latest_date = PlayerRollingStats.latest_fresh_date(days)
             if not latest_date:
                 return {eid: None for eid in espn_ids}
 
@@ -505,13 +540,7 @@ class PlayerService:
             normalized_names.append(normalized)
 
         if days in (7, 14, 30):
-            latest_date = (
-                PlayerRollingStats.select(PlayerRollingStats.as_of_date)
-                .where(PlayerRollingStats.window_days == days)
-                .order_by(PlayerRollingStats.as_of_date.desc())
-                .limit(1)
-                .scalar()
-            )
+            latest_date = PlayerRollingStats.latest_fresh_date(days)
             if not latest_date:
                 return {name: None for name in normalized_names}
 
@@ -602,18 +631,33 @@ class PlayerService:
                 ),
             }
 
-            query = (
-                PlayerGameStats.select(
+            def _pool(start, end):
+                q = PlayerGameStats.select(
                     PlayerGameStats.player_id,
                     fn.COUNT(PlayerGameStats.id).alias("games"),
                     *[expr.alias(name) for name, expr in stat_fields.items()],
                 )
-                .group_by(PlayerGameStats.player_id)
-                .having(fn.COUNT(PlayerGameStats.id) >= min_games)
-            )
+                if start is not None:
+                    q = q.where(PlayerGameStats.game_date >= start)
+                if end is not None:
+                    q = q.where(PlayerGameStats.game_date < end)
+                return list(q.group_by(PlayerGameStats.player_id).dicts())
 
-            # Build distributions: {stat_name: [values]}
-            all_players = list(query.dicts())
+            # Season-scoped pool (career-to-date otherwise); before opening night use last season.
+            opening = _season_opening_night()
+            all_players = _pool(opening, None)
+            if not all_players and opening is not None:
+                all_players = _pool(date(opening.year - 1, 8, 1), opening)
+            if not all_players:
+                return PlayerPercentilesResp(
+                    status=ApiStatus.ERROR,
+                    message="No qualifying players found",
+                    data=None,
+                )
+
+            # The floor scales with how far into the season we are (half the max GP, at most min_games)
+            min_games = scaled_min_games(min_games, max(int(r["games"]) for r in all_players))
+            all_players = [r for r in all_players if int(r["games"]) >= min_games]
             if not all_players:
                 return PlayerPercentilesResp(
                     status=ApiStatus.ERROR,

@@ -35,6 +35,9 @@ class RankingsMeta(BaseModel):
     categories: list[CategoryDefResp] = []      # empty for points rankings
     pool_size: int                              # players ranked (after any min_games filter)
     min_games: Optional[int] = None             # games-played floor applied (categories only)
+    season: Optional[str] = None                # season the data belongs to, e.g. "2026-27"
+    season_day: Optional[int] = None            # 1-based day of the regular season the data runs through
+    max_gp: Optional[int] = None                # most games any ranked player has played
 
 
 class RankingsResp(BaseResponse):

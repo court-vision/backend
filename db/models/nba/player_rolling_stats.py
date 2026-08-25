@@ -187,30 +187,55 @@ class PlayerRollingStats(BaseModel):
 
         return record
 
+    # A snapshot older than its window (plus a few days of pipeline slack) is
+    # last season's data, not "the last N days" — treat it as absent.
+    FRESHNESS_GRACE_DAYS = 3
+
     @classmethod
-    def get_latest_for_window(
-        cls,
-        window_days: int,
-    ) -> tuple[object, list["PlayerRollingStats"]]:
-        """
-        Get the most recent rolling stats records for a given window.
-
-        Returns a (latest_date, records) tuple. Records are joined with
-        the Player dimension so player.name is accessible.
-
-        Args:
-            window_days: Window length (7, 14, or 30)
-
-        Returns:
-            Tuple of (latest_date, list of PlayerRollingStats with player joined)
-        """
-        latest_date = (
+    def _latest_as_of(cls, window_days: int):
+        return (
             cls.select(cls.as_of_date)
             .where(cls.window_days == window_days)
             .order_by(cls.as_of_date.desc())
             .limit(1)
             .scalar()
         )
+
+    @classmethod
+    def latest_fresh_date(cls, window_days: int, today=None):
+        """Latest snapshot date for a window, or None when it is stale (older than window + grace)."""
+        from datetime import date as _date, timedelta
+
+        latest = cls._latest_as_of(window_days)
+        if not latest:
+            return None
+        today = today or _date.today()
+        if latest < today - timedelta(days=window_days + cls.FRESHNESS_GRACE_DAYS):
+            return None
+        return latest
+
+    @classmethod
+    def get_latest_for_window(
+        cls,
+        window_days: int,
+        fresh_only: bool = True,
+    ) -> tuple[object, list["PlayerRollingStats"]]:
+        """
+        Get the most recent rolling stats records for a given window.
+
+        Returns a (latest_date, records) tuple. Records are joined with
+        the Player dimension so player.name is accessible. With `fresh_only`
+        (default) a stale snapshot — e.g. April's L14 read in October — is
+        reported as no data.
+
+        Args:
+            window_days: Window length (7, 14, or 30)
+            fresh_only: Treat snapshots older than window + grace as absent
+
+        Returns:
+            Tuple of (latest_date, list of PlayerRollingStats with player joined)
+        """
+        latest_date = cls.latest_fresh_date(window_days) if fresh_only else cls._latest_as_of(window_days)
 
         if not latest_date:
             return None, []

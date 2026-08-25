@@ -11,11 +11,13 @@ with the pre-league behavior); otherwise they are recomputed from raw stats.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Mapping, Optional
+from typing import Literal, Mapping, Optional
 
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
+from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from schemas.common import LeagueInfo
 from services.scoring.models import StatLine
@@ -23,6 +25,21 @@ from services.scoring.points import PointsScoring
 from services.scoring.vocab import DEFAULT_POINT_WEIGHTS
 
 ROLLING_WINDOWS = (7, 14, 30)
+# Last season's final row only counts as a baseline with a real sample behind it
+BASELINE_MIN_GP = 10
+
+ValueSource = Literal["rolling", "recent", "baseline"]
+
+
+@dataclass(frozen=True)
+class ValueResult:
+    """A per-player scalar and where it came from (None value = nothing known)."""
+    value: Optional[float]
+    source: Optional[ValueSource]
+
+    @property
+    def is_baseline(self) -> bool:
+        return self.source == "baseline"
 
 
 def _normalize(name: str) -> str:
@@ -48,13 +65,8 @@ class PlayerValueService:
 
     @staticmethod
     def _latest_rolling_date(days: int):
-        return (
-            PlayerRollingStats.select(PlayerRollingStats.as_of_date)
-            .where(PlayerRollingStats.window_days == days)
-            .order_by(PlayerRollingStats.as_of_date.desc())
-            .limit(1)
-            .scalar()
-        )
+        """Latest *fresh* rolling snapshot (stale = last season → None)."""
+        return PlayerRollingStats.latest_fresh_date(days)
 
     @staticmethod
     def rolling_lines_by_espn_id(espn_ids: list[int], days: int = 7) -> dict[int, Optional[StatLine]]:
@@ -220,3 +232,107 @@ class PlayerValueService:
             return None
         total_w = sum(w for _, w in pairs)
         return round(sum(v * w for v, w in pairs) / total_w, 1) if total_w > 0 else None
+
+    # ---- previous-season baseline ---------------------------------------------
+
+    @staticmethod
+    def _baseline_season(season: Optional[str]) -> str:
+        from core.season import previous_season
+        from core.settings import settings
+        return season or previous_season(settings.nba_season)
+
+    @staticmethod
+    def _baseline_records(season: Optional[str], where):
+        """Each player's final row of `season` (gp >= BASELINE_MIN_GP), joined to Player."""
+        return (
+            PlayerSeasonStats.select(PlayerSeasonStats, Player)
+            .join(Player)
+            .where((PlayerSeasonStats.season == PlayerValueService._baseline_season(season))
+                   & (PlayerSeasonStats.gp >= BASELINE_MIN_GP) & where)
+            .distinct([PlayerSeasonStats.player])
+            .order_by(PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc())
+        )
+
+    @staticmethod
+    def _per_game(rec) -> StatLine:
+        gp = float(rec.gp or 0)
+        line = StatLine.from_row(rec).scaled(1 / gp) if gp > 0 else StatLine.from_row(rec)
+        line.gp = gp
+        return line
+
+    @staticmethod
+    def baseline_lines_by_espn_id(espn_ids: list[int], season: Optional[str] = None) -> dict[int, Optional[StatLine]]:
+        """Per-game StatLine from each player's previous-season totals, keyed by ESPN id."""
+        if not espn_ids:
+            return {}
+        result: dict[int, Optional[StatLine]] = {eid: None for eid in espn_ids}
+        for rec in PlayerValueService._baseline_records(season, Player.espn_id.in_(espn_ids)):
+            result[rec.player.espn_id] = PlayerValueService._per_game(rec)
+        return result
+
+    @staticmethod
+    def baseline_lines_by_name(players: list[tuple[str, str]], season: Optional[str] = None) -> dict[str, Optional[StatLine]]:
+        """Same, keyed by normalized name (team is not matched — rosters change between seasons)."""
+        if not players:
+            return {}
+        names = [_normalize(n) for n, _ in players]
+        result: dict[str, Optional[StatLine]] = {n: None for n in names}
+        for rec in PlayerValueService._baseline_records(season, Player.name_normalized.in_(names)):
+            result[rec.player.name_normalized] = PlayerValueService._per_game(rec)
+        return result
+
+    # ---- composed values: current window → previous-season baseline ------------
+
+    @staticmethod
+    def _fill_baseline(primary: dict, primary_source: ValueSource, baseline_lines: dict,
+                       scorer: PointsScoring) -> dict:
+        out = {}
+        for key, value in primary.items():
+            if value is not None:
+                out[key] = ValueResult(value, primary_source)
+                continue
+            line = baseline_lines.get(key)
+            out[key] = ValueResult(round(scorer.score(line), 1), "baseline") if line else ValueResult(None, None)
+        return out
+
+    @staticmethod
+    def value_by_espn_id(espn_ids: list[int], weights: Optional[Mapping[str, float]] = None,
+                         days: int = 14) -> dict[int, ValueResult]:
+        """Rolling-window average under `weights`, falling back to last season's per-game baseline."""
+        if not espn_ids:
+            return {}
+        primary = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days, weights)
+        missing = [eid for eid, v in primary.items() if v is None]
+        baseline = PlayerValueService.baseline_lines_by_espn_id(missing) if missing else {}
+        return PlayerValueService._fill_baseline(primary, "rolling", baseline, PlayerValueService._scorer(weights))
+
+    @staticmethod
+    def value_by_name(players: list[tuple[str, str]], weights: Optional[Mapping[str, float]] = None,
+                      days: int = 14) -> dict[str, ValueResult]:
+        if not players:
+            return {}
+        primary = PlayerValueService.rolling_avg_by_name(players, days, weights)
+        missing = [(n, t) for n, t in players if primary.get(_normalize(n)) is None]
+        baseline = PlayerValueService.baseline_lines_by_name(missing) if missing else {}
+        return PlayerValueService._fill_baseline(primary, "rolling", baseline, PlayerValueService._scorer(weights))
+
+    @staticmethod
+    def recent_value_by_espn_id(espn_ids: list[int], days: int = 14, half_life: int = 7,
+                                weights: Optional[Mapping[str, float]] = None) -> dict[int, ValueResult]:
+        """Decay-weighted recent average, falling back to last season's baseline."""
+        if not espn_ids:
+            return {}
+        primary = PlayerValueService.recent_weighted_avg_by_espn_id(espn_ids, days, half_life, weights)
+        missing = [eid for eid, v in primary.items() if v is None]
+        baseline = PlayerValueService.baseline_lines_by_espn_id(missing) if missing else {}
+        return PlayerValueService._fill_baseline(primary, "recent", baseline, PlayerValueService._scorer(weights))
+
+    @staticmethod
+    def recent_value_by_name(players: list[tuple[str, str]], days: int = 14, half_life: int = 7,
+                             weights: Optional[Mapping[str, float]] = None) -> dict[str, ValueResult]:
+        if not players:
+            return {}
+        primary = PlayerValueService.recent_weighted_avg_by_name(players, days, half_life, weights)
+        missing = [(n, t) for n, t in players if primary.get(_normalize(n)) is None]
+        baseline = PlayerValueService.baseline_lines_by_name(missing) if missing else {}
+        return PlayerValueService._fill_baseline(primary, "recent", baseline, PlayerValueService._scorer(weights))

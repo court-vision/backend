@@ -41,27 +41,28 @@ def stub_pool(monkeypatch):
 
 
 @pytest.mark.unit
-def test_category_rankings_default_nine_cat_and_window_min_games(stub_pool):
+def test_category_rankings_default_nine_cat_no_default_floor(stub_pool):
     resp = asyncio.run(RankingsService.get_rankings(window=14, format="categories"))
 
     assert resp.status == ApiStatus.SUCCESS
     assert stub_pool == [14]
-    # gp=2 player is filtered by the L14 default floor of 4 despite the best raw numbers
-    assert {p.id for p in resp.data} == {1, 2, 3}
-    assert [p.rank for p in resp.data] == [1, 2, 3]
+    # No games-played filtering by default: the gp=2 player is ranked (and wins on raw numbers)
+    assert {p.id for p in resp.data} == {1, 2, 3, 4}
+    assert [p.rank for p in resp.data] == [1, 2, 3, 4]
     assert [p.score for p in resp.data] == sorted((p.score for p in resp.data), reverse=True)
-    assert resp.data[0].id == 1                                        # best in 7 of 9 categories
+    assert resp.data[0].id == 4
     assert resp.meta.format == "categories" and resp.meta.window == 14
     assert resp.meta.as_of == date(2026, 3, 4)
-    assert resp.meta.pool_size == 3 and resp.meta.min_games == DEFAULT_MIN_GAMES[14] == 4
+    assert resp.meta.pool_size == 4 and resp.meta.min_games == DEFAULT_MIN_GAMES[14] == 1
+    assert resp.meta.season == "2025-26" and resp.meta.season_day == 135 and resp.meta.max_gp == 10
     assert [c.key for c in resp.meta.categories] == DEFAULT_CATEGORIES
 
-    top = resp.data[0]
-    assert top.gp == 10 and top.avg_fpts == 50.0 and top.total_fpts == 500.0 and top.team == "DEN"
-    assert set(top.categories) == set(DEFAULT_CATEGORIES) and set(top.category_z) == set(DEFAULT_CATEGORIES)
-    assert top.categories["fg_pct"] == pytest.approx(0.55)
-    assert top.score == pytest.approx(sum(top.category_z.values()), abs=2e-3)
     by_id = {p.id: p for p in resp.data}
+    p1 = by_id[1]
+    assert p1.gp == 10 and p1.avg_fpts == 50.0 and p1.total_fpts == 500.0 and p1.team == "DEN"
+    assert set(p1.categories) == set(DEFAULT_CATEGORIES) and set(p1.category_z) == set(DEFAULT_CATEGORIES)
+    assert p1.categories["fg_pct"] == pytest.approx(0.55)
+    assert p1.score == pytest.approx(sum(p1.category_z.values()), abs=2e-3)
     assert by_id[2].team == ""              # None team is rendered as empty string, as the points path does
     assert "as of 2026-03-04" in resp.message
 
@@ -79,11 +80,23 @@ def test_category_rankings_explicit_categories_and_min_games(stub_pool):
 
 
 @pytest.mark.unit
-def test_season_default_min_games_is_twenty(stub_pool):
+def test_season_default_min_games_is_one_and_explicit_floor_filters(stub_pool):
     resp = asyncio.run(RankingsService.get_rankings(format="categories"))
-    assert resp.meta.min_games == 20
-    assert resp.data == [] and resp.meta.pool_size == 0
-    assert "No Season data" in resp.message
+    assert resp.meta.min_games == 1 and resp.meta.pool_size == 4 and len(resp.data) == 4
+
+    strict = asyncio.run(RankingsService.get_rankings(format="categories", min_games=5))
+    assert {p.id for p in strict.data} == {1, 2, 3} and strict.meta.min_games == 5
+
+    none = asyncio.run(RankingsService.get_rankings(format="categories", min_games=50))
+    assert none.data == [] and "50+ games" in none.message
+
+
+@pytest.mark.unit
+def test_empty_pool_message_names_the_season(monkeypatch):
+    monkeypatch.setattr(RankingsService, "_load_pool", staticmethod(lambda window: (None, [])))
+    resp = asyncio.run(RankingsService.get_rankings(window=7, format="categories"))
+    assert resp.data == [] and resp.message == "No 2025-26 L7 data yet — rankings start after opening night"
+    assert resp.meta.season == "2025-26" and resp.meta.season_day is None and resp.meta.max_gp is None
 
 
 @pytest.mark.unit

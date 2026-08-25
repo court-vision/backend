@@ -2,7 +2,11 @@
 Service for player list operations.
 """
 
+from peewee import fn
+
 from core.logging import get_logger
+from core.season import previous_season
+from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from schemas.common import ApiStatus
@@ -11,6 +15,31 @@ from schemas.players_list import PlayersListResp, PlayersListData, PlayerListIte
 
 class PlayersListService:
     """Service for listing and searching players."""
+
+    @staticmethod
+    def _latest_rows(season: str):
+        """Season-stats rows joined to Player, one per player: the latest as_of_date within `season`."""
+        latest = (
+            PlayerSeasonStats.select(
+                PlayerSeasonStats.player.alias("pid"),
+                fn.MAX(PlayerSeasonStats.as_of_date).alias("max_date"),
+            )
+            .where(PlayerSeasonStats.season == season)
+            .group_by(PlayerSeasonStats.player)
+        ).alias("latest")
+        return (
+            PlayerSeasonStats.select(
+                PlayerSeasonStats,
+                Player.id,
+                Player.espn_id,
+                Player.name,
+                Player.position,
+            )
+            .join(Player, on=(PlayerSeasonStats.player == Player.id))
+            .switch(PlayerSeasonStats)
+            .join(latest, on=((PlayerSeasonStats.player == latest.c.pid)
+                              & (PlayerSeasonStats.as_of_date == latest.c.max_date)))
+        )
 
     @staticmethod
     async def list_players(
@@ -41,33 +70,22 @@ class PlayersListService:
             # Clamp limit
             limit = min(max(1, limit), 100)
 
-            # Get the most recent date with season stats
-            latest_date = (
-                PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
-                .order_by(PlayerSeasonStats.as_of_date.desc())
-                .limit(1)
-                .scalar()
-            )
-
-            if not latest_date:
+            # Each player's latest row in the active season (rows are written only on
+            # days a player's GP changes, so a single as_of_date would miss most of
+            # the league). Before opening night, fall back to last season.
+            season = settings.nba_season
+            query = PlayersListService._latest_rows(season)
+            note = ""
+            if query.count() == 0:
+                season = previous_season(settings.nba_season)
+                query = PlayersListService._latest_rows(season)
+                note = f" (no {settings.nba_season} data yet; showing {season})"
+            if query.count() == 0:
                 return PlayersListResp(
                     status=ApiStatus.SUCCESS,
                     message="No player data available",
                     data=PlayersListData(players=[], total=0, limit=limit, offset=offset),
                 )
-
-            # Build query joining players with their latest season stats
-            query = (
-                PlayerSeasonStats.select(
-                    PlayerSeasonStats,
-                    Player.id,
-                    Player.espn_id,
-                    Player.name,
-                    Player.position,
-                )
-                .join(Player, on=(PlayerSeasonStats.player == Player.id))
-                .where(PlayerSeasonStats.as_of_date == latest_date)
-            )
 
             # Apply filters
             if team:
@@ -86,9 +104,9 @@ class PlayersListService:
             # Get total count before pagination
             total = query.count()
 
-            # Apply pagination and ordering
+            # Apply pagination and ordering (cumulative fpts; the per-day `rank` is a cohort rank)
             query = (
-                query.order_by(PlayerSeasonStats.rank.asc(nulls="last"))
+                query.order_by(PlayerSeasonStats.fpts.desc(), Player.name.asc())
                 .offset(offset)
                 .limit(limit)
             )
@@ -111,7 +129,7 @@ class PlayersListService:
 
             return PlayersListResp(
                 status=ApiStatus.SUCCESS,
-                message=f"Found {total} players",
+                message=f"Found {total} players{note}",
                 data=PlayersListData(
                     players=players,
                     total=total,
