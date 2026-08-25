@@ -1,0 +1,3116 @@
+{
+  "schedule": [
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "1": 0.0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "entries": [
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 3112335,
+              "playerPoolEntry": {
+                "id": 3112335,
+                "keeperValue": 0,
+                "keeperValueFuture": 1,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Nikola",
+                  "fullName": "Nikola Jokic",
+                  "id": 3112335,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Jokic",
+                  "lastNewsDate": 1787352032000,
+                  "proTeamId": 7,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 3,
+              "pendingTransactionIds": null,
+              "playerId": 3202,
+              "playerPoolEntry": {
+                "id": 3202,
+                "keeperValue": 0,
+                "keeperValueFuture": 2,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Kevin",
+                  "fullName": "Kevin Durant",
+                  "id": 3202,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Durant",
+                  "lastNewsDate": 1785943372000,
+                  "proTeamId": 10,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 4684740,
+              "playerPoolEntry": {
+                "id": 4684740,
+                "keeperValue": 0,
+                "keeperValueFuture": 3,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Amen",
+                  "fullName": "Amen Thompson",
+                  "id": 4684740,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Thompson",
+                  "lastNewsDate": 1785944297000,
+                  "proTeamId": 10,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 6,
+              "pendingTransactionIds": null,
+              "playerId": 4066261,
+              "playerPoolEntry": {
+                "id": 4066261,
+                "keeperValue": 0,
+                "keeperValueFuture": 4,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Bam",
+                  "fullName": "Bam Adebayo",
+                  "id": 4066261,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Adebayo",
+                  "lastNewsDate": 1785255409000,
+                  "proTeamId": 14,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 1,
+              "pendingTransactionIds": null,
+              "playerId": 4397688,
+              "playerPoolEntry": {
+                "id": 4397688,
+                "keeperValue": 0,
+                "keeperValueFuture": 5,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Trey",
+                  "fullName": "Trey Murphy III",
+                  "id": 4397688,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Murphy III",
+                  "lastNewsDate": 1785947893000,
+                  "proTeamId": 3,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4433621,
+              "playerPoolEntry": {
+                "id": 4433621,
+                "keeperValue": 0,
+                "keeperValueFuture": 6,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jalen",
+                  "fullName": "Jalen Duren",
+                  "id": 4433621,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Duren",
+                  "lastNewsDate": 1787356633000,
+                  "proTeamId": 8,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 3907497,
+              "playerPoolEntry": {
+                "id": 3907497,
+                "keeperValue": 0,
+                "keeperValueFuture": 7,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Dejounte",
+                  "fullName": "Dejounte Murray",
+                  "id": 3907497,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Murray",
+                  "lastNewsDate": 1785947846000,
+                  "proTeamId": 3,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 5,
+              "pendingTransactionIds": null,
+              "playerId": 4396907,
+              "playerPoolEntry": {
+                "id": 4396907,
+                "keeperValue": 0,
+                "keeperValueFuture": 8,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    5,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Darius",
+                  "fullName": "Darius Garland",
+                  "id": 4396907,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Garland",
+                  "lastNewsDate": 1782327083000,
+                  "proTeamId": 12,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4566434,
+              "playerPoolEntry": {
+                "id": 4566434,
+                "keeperValue": 0,
+                "keeperValueFuture": 9,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Franz",
+                  "fullName": "Franz Wagner",
+                  "id": 4566434,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Wagner",
+                  "lastNewsDate": 1777748709000,
+                  "proTeamId": 19,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4066328,
+              "playerPoolEntry": {
+                "id": 4066328,
+                "keeperValue": 0,
+                "keeperValueFuture": 10,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jarrett",
+                  "fullName": "Jarrett Allen",
+                  "id": 4066328,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Allen",
+                  "lastNewsDate": 1779794713000,
+                  "proTeamId": 5,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 5095151,
+              "playerPoolEntry": {
+                "id": 5095151,
+                "keeperValue": 0,
+                "keeperValueFuture": 11,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Caleb",
+                  "fullName": "Caleb Wilson",
+                  "id": 5095151,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Wilson",
+                  "lastNewsDate": 1784323972000,
+                  "proTeamId": 4,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 5037871,
+              "playerPoolEntry": {
+                "id": 5037871,
+                "keeperValue": 0,
+                "keeperValueFuture": 12,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Dylan",
+                  "fullName": "Dylan Harper",
+                  "id": 5037871,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Harper",
+                  "lastNewsDate": 1781432629000,
+                  "proTeamId": 24,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4397140,
+              "playerPoolEntry": {
+                "id": 4397140,
+                "keeperValue": 0,
+                "keeperValueFuture": 13,
+                "lineupLocked": false,
+                "onTeamId": 10,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Kevin",
+                  "fullName": "Kevin Porter Jr.",
+                  "id": 4397140,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Porter Jr.",
+                  "lastNewsDate": 1782434784000,
+                  "proTeamId": 15,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "rosterForMatchupPeriod": {
+          "entries": []
+        },
+        "rosterForMatchupPeriodDelayed": {
+          "entries": []
+        },
+        "teamId": 10,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "1": 0.0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "entries": [
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 5041939,
+              "playerPoolEntry": {
+                "id": 5041939,
+                "keeperValue": 0,
+                "keeperValueFuture": 1,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Cooper",
+                  "fullName": "Cooper Flagg",
+                  "id": 5041939,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Flagg",
+                  "lastNewsDate": 1782499570000,
+                  "proTeamId": 6,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 1,
+              "pendingTransactionIds": null,
+              "playerId": 4066457,
+              "playerPoolEntry": {
+                "id": 4066457,
+                "keeperValue": 0,
+                "keeperValueFuture": 2,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Austin",
+                  "fullName": "Austin Reaves",
+                  "id": 4066457,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Reaves",
+                  "lastNewsDate": 1782315198000,
+                  "proTeamId": 13,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 3936299,
+              "playerPoolEntry": {
+                "id": 3936299,
+                "keeperValue": 0,
+                "keeperValueFuture": 3,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    5,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jamal",
+                  "fullName": "Jamal Murray",
+                  "id": 3936299,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Murray",
+                  "lastNewsDate": 1787350980000,
+                  "proTeamId": 7,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 4433136,
+              "playerPoolEntry": {
+                "id": 4433136,
+                "keeperValue": 0,
+                "keeperValueFuture": 4,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Walker",
+                  "fullName": "Walker Kessler",
+                  "id": 4433136,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Kessler",
+                  "lastNewsDate": 1782920362000,
+                  "proTeamId": 13,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 3,
+              "pendingTransactionIds": null,
+              "playerId": 4277961,
+              "playerPoolEntry": {
+                "id": 4277961,
+                "keeperValue": 0,
+                "keeperValueFuture": 5,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jaren",
+                  "fullName": "Jaren Jackson Jr.",
+                  "id": 4277961,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Jackson Jr.",
+                  "lastNewsDate": 1782318452000,
+                  "proTeamId": 26,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 5,
+              "pendingTransactionIds": null,
+              "playerId": 4395725,
+              "playerPoolEntry": {
+                "id": 4395725,
+                "keeperValue": 0,
+                "keeperValueFuture": 6,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Tyler",
+                  "fullName": "Tyler Herro",
+                  "id": 4395725,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Herro",
+                  "lastNewsDate": 1782187927000,
+                  "proTeamId": 15,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 6,
+              "pendingTransactionIds": null,
+              "playerId": 4711294,
+              "playerPoolEntry": {
+                "id": 4711294,
+                "keeperValue": 0,
+                "keeperValueFuture": 7,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Matas",
+                  "fullName": "Matas Buzelis",
+                  "id": 4711294,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Buzelis",
+                  "lastNewsDate": 1783447981000,
+                  "proTeamId": 4,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 5105623,
+              "playerPoolEntry": {
+                "id": 5105623,
+                "keeperValue": 0,
+                "keeperValueFuture": 8,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Kel'el",
+                  "fullName": "Kel'el Ware",
+                  "id": 5105623,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Ware",
+                  "lastNewsDate": 1782188149000,
+                  "proTeamId": 15,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4065733,
+              "playerPoolEntry": {
+                "id": 4065733,
+                "keeperValue": 0,
+                "keeperValueFuture": 9,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Ty",
+                  "fullName": "Ty Jerome",
+                  "id": 4065733,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Jerome",
+                  "lastNewsDate": 1785176428000,
+                  "proTeamId": 29,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4903027,
+              "playerPoolEntry": {
+                "id": 4903027,
+                "keeperValue": 0,
+                "keeperValueFuture": 10,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Cedric",
+                  "fullName": "Cedric Coward",
+                  "id": 4903027,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Coward",
+                  "lastNewsDate": 1784516852000,
+                  "proTeamId": 29,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4594327,
+              "playerPoolEntry": {
+                "id": 4594327,
+                "keeperValue": 0,
+                "keeperValueFuture": 11,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Keegan",
+                  "fullName": "Keegan Murray",
+                  "id": 4594327,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Murray",
+                  "lastNewsDate": 1785511579000,
+                  "proTeamId": 23,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4395651,
+              "playerPoolEntry": {
+                "id": 4395651,
+                "keeperValue": 0,
+                "keeperValueFuture": 12,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Coby",
+                  "fullName": "Coby White",
+                  "id": 4395651,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "White",
+                  "lastNewsDate": 1782402175000,
+                  "proTeamId": 30,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4397002,
+              "playerPoolEntry": {
+                "id": 4397002,
+                "keeperValue": 0,
+                "keeperValueFuture": 13,
+                "lineupLocked": false,
+                "onTeamId": 4,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Ayo",
+                  "fullName": "Ayo Dosunmu",
+                  "id": 4397002,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Dosunmu",
+                  "lastNewsDate": 1782186777000,
+                  "proTeamId": 16,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "rosterForMatchupPeriod": {
+          "entries": []
+        },
+        "rosterForMatchupPeriodDelayed": {
+          "entries": []
+        },
+        "teamId": 4,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0
+      },
+      "id": 1,
+      "matchupPeriodId": 1,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "1": 0.0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "entries": [
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 4278073,
+              "playerPoolEntry": {
+                "id": 4278073,
+                "keeperValue": 0,
+                "keeperValueFuture": 1,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    0,
+                    5,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Shai",
+                  "fullName": "Shai Gilgeous-Alexander",
+                  "id": 4278073,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Gilgeous-Alexander",
+                  "lastNewsDate": 1785426551000,
+                  "proTeamId": 25,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 1,
+              "pendingTransactionIds": null,
+              "playerId": 3078576,
+              "playerPoolEntry": {
+                "id": 3078576,
+                "keeperValue": 0,
+                "keeperValueFuture": 2,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Derrick",
+                  "fullName": "Derrick White",
+                  "id": 3078576,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "White",
+                  "lastNewsDate": 1785168813000,
+                  "proTeamId": 2,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 4066320,
+              "playerPoolEntry": {
+                "id": 4066320,
+                "keeperValue": 0,
+                "keeperValueFuture": 3,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Desmond",
+                  "fullName": "Desmond Bane",
+                  "id": 4066320,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Bane",
+                  "lastNewsDate": 1777862947000,
+                  "proTeamId": 19,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 3,
+              "pendingTransactionIds": null,
+              "playerId": 4432158,
+              "playerPoolEntry": {
+                "id": 4432158,
+                "keeperValue": 0,
+                "keeperValueFuture": 4,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Evan",
+                  "fullName": "Evan Mobley",
+                  "id": 4432158,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Mobley",
+                  "lastNewsDate": 1787236731000,
+                  "proTeamId": 5,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 5,
+              "pendingTransactionIds": null,
+              "playerId": 2490149,
+              "playerPoolEntry": {
+                "id": 2490149,
+                "keeperValue": 0,
+                "keeperValueFuture": 5,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "CJ",
+                  "fullName": "CJ McCollum",
+                  "id": 2490149,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "McCollum",
+                  "lastNewsDate": 1782062063000,
+                  "proTeamId": 1,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4066259,
+              "playerPoolEntry": {
+                "id": 4066259,
+                "keeperValue": 0,
+                "keeperValueFuture": 6,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "De'Aaron",
+                  "fullName": "De'Aaron Fox",
+                  "id": 4066259,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Fox",
+                  "lastNewsDate": 1781457904000,
+                  "proTeamId": 24,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 6,
+              "pendingTransactionIds": null,
+              "playerId": 3934719,
+              "playerPoolEntry": {
+                "id": 3934719,
+                "keeperValue": 0,
+                "keeperValueFuture": 7,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "OG",
+                  "fullName": "OG Anunoby",
+                  "id": 3934719,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Anunoby",
+                  "lastNewsDate": 1781456956000,
+                  "proTeamId": 18,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 5174563,
+              "playerPoolEntry": {
+                "id": 5174563,
+                "keeperValue": 0,
+                "keeperValueFuture": 8,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Kyshawn",
+                  "fullName": "Kyshawn George",
+                  "id": 5174563,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "George",
+                  "lastNewsDate": 1783447124000,
+                  "proTeamId": 27,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 3032976,
+              "playerPoolEntry": {
+                "id": 3032976,
+                "keeperValue": 0,
+                "keeperValueFuture": 9,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Rudy",
+                  "fullName": "Rudy Gobert",
+                  "id": 3032976,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Gobert",
+                  "lastNewsDate": 1782405421000,
+                  "proTeamId": 16,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 3934673,
+              "playerPoolEntry": {
+                "id": 3934673,
+                "keeperValue": 0,
+                "keeperValueFuture": 10,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Donte",
+                  "fullName": "Donte DiVincenzo",
+                  "id": 3934673,
+                  "injured": true,
+                  "injuryStatus": "OUT",
+                  "lastName": "DiVincenzo",
+                  "lastNewsDate": 1777225940000,
+                  "proTeamId": 16,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4711272,
+              "playerPoolEntry": {
+                "id": 4711272,
+                "keeperValue": 0,
+                "keeperValueFuture": 11,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Reed",
+                  "fullName": "Reed Sheppard",
+                  "id": 4711272,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Sheppard",
+                  "lastNewsDate": 1785944554000,
+                  "proTeamId": 10,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4395630,
+              "playerPoolEntry": {
+                "id": 4395630,
+                "keeperValue": 0,
+                "keeperValueFuture": 12,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Devin",
+                  "fullName": "Devin Vassell",
+                  "id": 4395630,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Vassell",
+                  "lastNewsDate": 1781479716000,
+                  "proTeamId": 24,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4278067,
+              "playerPoolEntry": {
+                "id": 4278067,
+                "keeperValue": 0,
+                "keeperValueFuture": 13,
+                "lineupLocked": false,
+                "onTeamId": 8,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Nic",
+                  "fullName": "Nic Claxton",
+                  "id": 4278067,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Claxton",
+                  "lastNewsDate": 1782181537000,
+                  "proTeamId": 4,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "rosterForMatchupPeriod": {
+          "entries": []
+        },
+        "rosterForMatchupPeriodDelayed": {
+          "entries": []
+        },
+        "teamId": 8,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "cumulativeScoreLive": {
+          "losses": 0,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "13": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "14": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "15": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "16": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": null,
+              "score": 0.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 0.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 8,
+          "wins": 0
+        },
+        "eliminationMatchupPeriod": 0,
+        "gamesPlayed": 0,
+        "pointsByScoringPeriod": {
+          "1": 0.0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "entries": [
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 5104157,
+              "playerPoolEntry": {
+                "id": 5104157,
+                "keeperValue": 0,
+                "keeperValueFuture": 1,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Victor",
+                  "fullName": "Victor Wembanyama",
+                  "id": 5104157,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Wembanyama",
+                  "lastNewsDate": 1783724068000,
+                  "proTeamId": 24,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 4432816,
+              "playerPoolEntry": {
+                "id": 4432816,
+                "keeperValue": 0,
+                "keeperValueFuture": 2,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    5,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "LaMelo",
+                  "fullName": "LaMelo Ball",
+                  "id": 4432816,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Ball",
+                  "lastNewsDate": 1782396263000,
+                  "proTeamId": 16,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 3,
+              "pendingTransactionIds": null,
+              "playerId": 6583,
+              "playerPoolEntry": {
+                "id": 6583,
+                "keeperValue": 0,
+                "keeperValueFuture": 3,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Anthony",
+                  "fullName": "Anthony Davis",
+                  "id": 6583,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Davis",
+                  "lastNewsDate": 1782311167000,
+                  "proTeamId": 27,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 4593803,
+              "playerPoolEntry": {
+                "id": 4593803,
+                "keeperValue": 0,
+                "keeperValueFuture": 4,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jalen",
+                  "fullName": "Jalen Williams",
+                  "id": 4593803,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Williams",
+                  "lastNewsDate": 1780093329000,
+                  "proTeamId": 25,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 5105565,
+              "playerPoolEntry": {
+                "id": 5105565,
+                "keeperValue": 0,
+                "keeperValueFuture": 5,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    4,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Donovan",
+                  "fullName": "Donovan Clingan",
+                  "id": 5105565,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Clingan",
+                  "lastNewsDate": 1777474638000,
+                  "proTeamId": 22,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 1,
+              "pendingTransactionIds": null,
+              "playerId": 4869342,
+              "playerPoolEntry": {
+                "id": 4869342,
+                "keeperValue": 0,
+                "keeperValueFuture": 6,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Dyson",
+                  "fullName": "Dyson Daniels",
+                  "id": 4869342,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Daniels",
+                  "lastNewsDate": 1782445816000,
+                  "proTeamId": 1,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 6,
+              "pendingTransactionIds": null,
+              "playerId": 4396971,
+              "playerPoolEntry": {
+                "id": 4396971,
+                "keeperValue": 0,
+                "keeperValueFuture": 7,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Naz",
+                  "fullName": "Naz Reid",
+                  "id": 4396971,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Reid",
+                  "lastNewsDate": 1782396584000,
+                  "proTeamId": 30,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4431736,
+              "playerPoolEntry": {
+                "id": 4431736,
+                "keeperValue": 0,
+                "keeperValueFuture": 8,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Toumani",
+                  "fullName": "Toumani Camara",
+                  "id": 4431736,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Camara",
+                  "lastNewsDate": 1785510576000,
+                  "proTeamId": 22,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 11,
+              "pendingTransactionIds": null,
+              "playerId": 4431671,
+              "playerPoolEntry": {
+                "id": 4431671,
+                "keeperValue": 0,
+                "keeperValueFuture": 9,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 3,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Jaden",
+                  "fullName": "Jaden McDaniels",
+                  "id": 4431671,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "McDaniels",
+                  "lastNewsDate": 1782404772000,
+                  "proTeamId": 16,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 13,
+              "pendingTransactionIds": null,
+              "playerId": 4914336,
+              "playerPoolEntry": {
+                "id": 4914336,
+                "keeperValue": 0,
+                "keeperValueFuture": 10,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    1,
+                    2,
+                    5,
+                    6,
+                    7,
+                    8,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Shaedon",
+                  "fullName": "Shaedon Sharpe",
+                  "id": 4914336,
+                  "injured": true,
+                  "injuryStatus": "OUT",
+                  "lastName": "Sharpe",
+                  "lastNewsDate": 1787603014000,
+                  "proTeamId": 22,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 4395724,
+              "playerPoolEntry": {
+                "id": 4395724,
+                "keeperValue": 0,
+                "keeperValueFuture": 11,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Immanuel",
+                  "fullName": "Immanuel Quickley",
+                  "id": 4395724,
+                  "injured": false,
+                  "injuryStatus": "DAY_TO_DAY",
+                  "lastName": "Quickley",
+                  "lastNewsDate": 1777063846000,
+                  "proTeamId": 28,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 12,
+              "pendingTransactionIds": null,
+              "playerId": 3908845,
+              "playerPoolEntry": {
+                "id": 3908845,
+                "keeperValue": 0,
+                "keeperValueFuture": 12,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "John",
+                  "fullName": "John Collins",
+                  "id": 3908845,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Collins",
+                  "lastNewsDate": 1782913454000,
+                  "proTeamId": 8,
+                  "stats": [],
+                  "universeId": 1
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": null,
+              "acquisitionType": null,
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 5,
+              "pendingTransactionIds": null,
+              "playerId": 4683766,
+              "playerPoolEntry": {
+                "id": 4683766,
+                "keeperValue": 0,
+                "keeperValueFuture": 13,
+                "lineupLocked": false,
+                "onTeamId": 6,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    5,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Isaiah",
+                  "fullName": "Isaiah Collier",
+                  "id": 4683766,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Collier",
+                  "lastNewsDate": 1782315619000,
+                  "proTeamId": 26,
+                  "stats": [],
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "rosterForMatchupPeriod": {
+          "entries": []
+        },
+        "rosterForMatchupPeriodDelayed": {
+          "entries": []
+        },
+        "teamId": 6,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0
+      },
+      "id": 2,
+      "matchupPeriodId": 1,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    }
+  ],
+  "status": {
+    "activatedDate": 1787632800014,
+    "createdAsLeagueType": 3,
+    "currentLeagueType": 3,
+    "currentMatchupPeriod": 1,
+    "finalScoringPeriod": 167,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "isExpired": false,
+    "isFull": true,
+    "isPlayoffMatchupEdited": false,
+    "isToBeDeleted": false,
+    "isViewable": false,
+    "isWaiverOrderEdited": false,
+    "latestScoringPeriod": 1,
+    "previousSeasons": [],
+    "standingsUpdateDate": 1787663737906,
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 1,
+    "waiverLastExecutionDate": 1787641249535,
+    "waiverProcessStatus": {}
+  },
+  "teams": [
+    {
+      "abbrev": "RRT",
+      "id": 1,
+      "name": "Ron's Remarkable Team"
+    },
+    {
+      "abbrev": "JST",
+      "id": 2,
+      "name": "Jaeden's Scary Team"
+    },
+    {
+      "abbrev": "JST",
+      "id": 3,
+      "name": "johnny's Supreme Team"
+    },
+    {
+      "abbrev": "BBU",
+      "id": 4,
+      "name": "BIG BAD UGLY"
+    },
+    {
+      "abbrev": "WRT",
+      "id": 5,
+      "name": "\ud83c\udfc0\ud83c\udfc6\ud83d\udcaa\ud83d\udd90\ufe0f"
+    },
+    {
+      "abbrev": "RRT",
+      "id": 6,
+      "name": "We all have some fun"
+    },
+    {
+      "abbrev": "TNT",
+      "id": 7,
+      "name": "10th And Thompson "
+    },
+    {
+      "abbrev": "JFT",
+      "id": 8,
+      "name": "James's Finest Team"
+    },
+    {
+      "abbrev": "KTT",
+      "id": 9,
+      "name": "Pascalifornication"
+    },
+    {
+      "abbrev": "WCO",
+      "id": 10,
+      "name": "Wade County"
+    }
+  ]
+}

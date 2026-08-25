@@ -88,3 +88,39 @@ def test_statline_from_espn_stats_maps_ids():
     line = statline_from_espn_stats({"0": 25.5, "6": 8, "11": 2, "13": 9, "14": 18, "99": 1})
     assert (line.pts, line.reb, line.tov, line.fgm, line.fga) == (25.5, 8, 2, 9, 18)
     assert line.get("fg_pct") == 0.5
+
+
+# ---- Captured ESPN H2H-category league (2026-27 test league, default 8-cat template) ----
+
+
+@pytest.mark.unit
+def test_captured_category_league_parses_as_eight_cat_each_category():
+    s = parse_espn_settings(_load("espn_settings_h2h_category.json"))
+    assert s.scoring_type == "categories" and s.category_win_mode == "each_category"
+    # ESPN's default H2H-category template: no turnovers, categories in ESPN's own order
+    assert [c.key for c in s.categories] == ["pts", "blk", "stl", "ast", "reb", "fg3m", "fg_pct", "ft_pct"]
+    assert all(c.higher_is_better for c in s.categories)
+    assert [c.key for c in s.categories if c.is_rate] == ["fg_pct", "ft_pct"]
+    assert s.point_weights == {} and s.unsupported == [] and s.warnings == []
+    assert s.season == 2027 and s.provider_league_id == "426893737"
+    assert s.matchup_periods["period_count"] == 19 and s.matchup_periods["period_length"] == 1
+    assert s.matchup_periods["playoff_team_count"] == 4 and s.matchup_periods["playoff_period_length"] == 2
+    assert s.roster_slots == {"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1}
+
+
+@pytest.mark.unit
+def test_captured_category_matchup_scaffold_parses_as_all_ties():
+    m = _load("espn_matchup_h2h_category.json")
+    home = m["schedule"][0]["home"]
+    cumulative = home["cumulativeScore"]
+    score = parse_espn_category_score(home)
+    assert score is not None
+    # Before opening night every category scores 0.0 and ties; the derived
+    # makes/attempts ids (fgm/fga/ftm/fta) ride along with result=None and
+    # must neither break parsing nor leak into the category results.
+    for key in ("pts", "blk", "stl", "ast", "reb", "fg3m", "fg_pct", "ft_pct"):
+        assert score.totals[key] == 0.0
+    assert score.raw is not None and score.raw.get("fga", 0.0) == 0.0 and score.raw.get("fta", 0.0) == 0.0
+    tie_count = sum(1 for v in cumulative["scoreByStat"].values() if isinstance(v, dict) and v.get("result") == "TIE")
+    assert tie_count == 8
+    assert (score.wins, score.losses) == (0, 0) and score.ties == cumulative.get("ties", 0)
