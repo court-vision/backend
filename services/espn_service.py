@@ -11,7 +11,12 @@ from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPl
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import TEAM_ABBREV_CORRECTIONS, POSITION_MAP, PRO_TEAM_MAP, STATS_MAP, STAT_ID_MAP, AVG_WINDOW_MAP, json_parsing
 from schemas.common import ApiStatus
-from services.schedule_service import get_remaining_games, get_dates_for_scoring_periods
+from services.schedule_service import (
+    espn_scoring_periods,
+    get_current_matchup,
+    get_espn_matchup_dates,
+    get_remaining_games,
+)
 
 class Player(object):
     '''Player are part of team'''
@@ -84,10 +89,7 @@ def espn_scoring_periods_for(matchup_period_map: dict, current_matchup_period: i
     (e.g. a two-week playoff round "20": [20, 21]). Falls back to the period id
     itself when the key is absent.
     """
-    ids = matchup_period_map.get(str(current_matchup_period)) if matchup_period_map else None
-    if not ids:
-        return [int(current_matchup_period)]
-    return [int(x) for x in ids]
+    return espn_scoring_periods(matchup_period_map, current_matchup_period)
 
 
 class EspnService:
@@ -288,12 +290,12 @@ class EspnService:
             # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
             league_settings = data.get('settings', {})
             matchup_period_map = league_settings.get('scheduleSettings', {}).get('matchupPeriods', {})
-            # NOTE: status.latestScoringPeriod is a DAY index (1..167) while the
-            # matchupPeriods values are WEEK ids; appending it here used to corrupt
-            # the date range for the first ~24 days of a season. Phase 3 resolves
-            # dates from the day index instead.
-            scoring_periods = espn_scoring_periods_for(matchup_period_map, current_matchup_period)
-            matchup_dates = get_dates_for_scoring_periods(scoring_periods)
+            # matchupPeriods values are WEEK ids; status.latestScoringPeriod is a
+            # DAY index. The resolver indexes the weekly ids into our calendar and
+            # falls back to the calendar week containing the day if they disagree.
+            matchup_dates = get_espn_matchup_dates(
+                matchup_period_map, current_matchup_period, latest_scoring_period
+            )
             matchup_start_date = matchup_dates[0] if matchup_dates else None
             matchup_end_date = matchup_dates[1] if matchup_dates else None
 
@@ -477,9 +479,14 @@ class EspnService:
             else:
                 projected_winner = "Tie"
 
+            # Our calendar week containing the period start (what the optimizer indexes by)
+            _week = get_current_matchup(matchup_start_date) if matchup_start_date else None
+            schedule_week = _week["matchup_number"] if _week else None
+
             # Build response
             matchup_data = MatchupData(
                 matchup_period=current_matchup_period,
+                schedule_week=schedule_week,
                 matchup_period_start=matchup_start_date.isoformat() if matchup_start_date else "",
                 matchup_period_end=matchup_end_date.isoformat() if matchup_end_date else "",
                 your_team=MatchupTeamResp(

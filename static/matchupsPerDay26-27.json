@@ -1,0 +1,5392 @@
+{
+    "10/03/2026": [
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MIA"
+        }
+    ],
+    "10/05/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "LAL"
+        }
+    ],
+    "10/06/2026": [
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "DEN"
+        }
+    ],
+    "10/07/2026": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "GSW"
+        }
+    ],
+    "10/08/2026": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "SAC"
+        }
+    ],
+    "10/09/2026": [
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MEM"
+        }
+    ],
+    "10/10/2026": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "SAS"
+        }
+    ],
+    "10/11/2026": [
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "CHI"
+        }
+    ],
+    "10/12/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "BKN"
+        }
+    ],
+    "10/13/2026": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "POR"
+        }
+    ],
+    "10/14/2026": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "PHX"
+        }
+    ],
+    "10/15/2026": [
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "TOR"
+        }
+    ],
+    "10/16/2026": [
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DEN"
+        }
+    ],
+    "10/20/2026": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "OKC"
+        }
+    ],
+    "10/21/2026": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "SAC"
+        }
+    ],
+    "10/22/2026": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "DEN"
+        }
+    ],
+    "10/23/2026": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "POR"
+        }
+    ],
+    "10/24/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "GSW"
+        }
+    ],
+    "10/25/2026": [
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "MEM"
+        }
+    ],
+    "10/26/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "GSW"
+        }
+    ],
+    "10/27/2026": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "POR"
+        }
+    ],
+    "10/28/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "LAL"
+        }
+    ],
+    "10/29/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "MEM"
+        }
+    ],
+    "10/30/2026": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "DEN"
+        }
+    ],
+    "10/31/2026": [
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "OKC"
+        }
+    ],
+    "11/01/2026": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "TOR"
+        }
+    ],
+    "11/02/2026": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "MIA"
+        }
+    ],
+    "11/04/2026": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MIA"
+        }
+    ],
+    "11/05/2026": [
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "MIA"
+        }
+    ],
+    "11/06/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "SAS"
+        }
+    ],
+    "11/07/2026": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "SAS"
+        }
+    ],
+    "11/08/2026": [
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "MIA"
+        }
+    ],
+    "11/09/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "NOP"
+        }
+    ],
+    "11/10/2026": [
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "OKC"
+        }
+    ],
+    "11/11/2026": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "OKC"
+        }
+    ],
+    "11/12/2026": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "CHA"
+        }
+    ],
+    "11/13/2026": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "OKC"
+        }
+    ],
+    "11/14/2026": [
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "CHI"
+        }
+    ],
+    "11/15/2026": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "OKC"
+        }
+    ],
+    "11/16/2026": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "PHX"
+        }
+    ],
+    "11/17/2026": [
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "UTA"
+        }
+    ],
+    "11/18/2026": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "PHX"
+        }
+    ],
+    "11/19/2026": [
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "LAC"
+        }
+    ],
+    "11/20/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "SAC"
+        }
+    ],
+    "11/21/2026": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "BOS"
+        }
+    ],
+    "11/22/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "BOS"
+        }
+    ],
+    "11/23/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "SAS"
+        }
+    ],
+    "11/24/2026": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "DAL"
+        }
+    ],
+    "11/25/2026": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "SAS"
+        }
+    ],
+    "11/27/2026": [
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "GSW"
+        }
+    ],
+    "11/28/2026": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "PHI"
+        }
+    ],
+    "11/29/2026": [
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "MIN"
+        }
+    ],
+    "11/30/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "NOP"
+        }
+    ],
+    "12/01/2026": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "UTA"
+        }
+    ],
+    "12/02/2026": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MIN"
+        }
+    ],
+    "12/03/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "UTA"
+        }
+    ],
+    "12/12/2026": [
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "ATL"
+        }
+    ],
+    "12/13/2026": [
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "NOP"
+        }
+    ],
+    "12/14/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "NOP"
+        }
+    ],
+    "12/15/2026": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "DEN"
+        }
+    ],
+    "12/16/2026": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "LAL"
+        }
+    ],
+    "12/17/2026": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "ATL"
+        }
+    ],
+    "12/18/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "CHI"
+        }
+    ],
+    "12/19/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "LAL"
+        }
+    ],
+    "12/20/2026": [
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "IND"
+        }
+    ],
+    "12/21/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "DEN"
+        }
+    ],
+    "12/22/2026": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "DAL"
+        }
+    ],
+    "12/23/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "GSW"
+        }
+    ],
+    "12/25/2026": [
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "DEN"
+        }
+    ],
+    "12/26/2026": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MEM"
+        }
+    ],
+    "12/27/2026": [
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "MEM"
+        }
+    ],
+    "12/28/2026": [
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MIN"
+        }
+    ],
+    "12/29/2026": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "HOU"
+        }
+    ],
+    "12/30/2026": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "HOU"
+        }
+    ],
+    "12/31/2026": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "NYK"
+        }
+    ],
+    "01/01/2027": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "BOS"
+        }
+    ],
+    "01/02/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "BOS"
+        }
+    ],
+    "01/03/2027": [
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "SAC"
+        }
+    ],
+    "01/04/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "NYK"
+        }
+    ],
+    "01/05/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "DET"
+        }
+    ],
+    "01/06/2027": [
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "NYK"
+        }
+    ],
+    "01/07/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "CHI"
+        }
+    ],
+    "01/08/2027": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "NYK"
+        }
+    ],
+    "01/09/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "BOS"
+        }
+    ],
+    "01/10/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "CHA"
+        }
+    ],
+    "01/11/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "LAL"
+        }
+    ],
+    "01/12/2027": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "SAC"
+        }
+    ],
+    "01/13/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "LAL"
+        }
+    ],
+    "01/14/2027": [
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "LAC"
+        }
+    ],
+    "01/15/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "ORL"
+        }
+    ],
+    "01/16/2027": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "CHA"
+        }
+    ],
+    "01/17/2027": [
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "MIL"
+        }
+    ],
+    "01/18/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "PHX"
+        }
+    ],
+    "01/19/2027": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "LAL"
+        }
+    ],
+    "01/20/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "MIL"
+        }
+    ],
+    "01/21/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "LAL"
+        }
+    ],
+    "01/22/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "WAS"
+        }
+    ],
+    "01/23/2027": [
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MIL"
+        }
+    ],
+    "01/24/2027": [
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "OKC"
+        }
+    ],
+    "01/25/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "SAC"
+        }
+    ],
+    "01/26/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "OKC"
+        }
+    ],
+    "01/27/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "GSW"
+        }
+    ],
+    "01/28/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "MIA"
+        }
+    ],
+    "01/29/2027": [
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "CHA"
+        }
+    ],
+    "01/30/2027": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MEM"
+        }
+    ],
+    "01/31/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "HOU"
+        }
+    ],
+    "02/01/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "SAS"
+        }
+    ],
+    "02/02/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "MIN"
+        }
+    ],
+    "02/03/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "GSW"
+        }
+    ],
+    "02/04/2027": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "MIN"
+        }
+    ],
+    "02/05/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "IND"
+        }
+    ],
+    "02/06/2027": [
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "PHX"
+        }
+    ],
+    "02/07/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "HOU"
+        }
+    ],
+    "02/08/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "LAL"
+        }
+    ],
+    "02/09/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "DET"
+        }
+    ],
+    "02/10/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "LAC"
+        }
+    ],
+    "02/11/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "SAS"
+        }
+    ],
+    "02/12/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DEN"
+        }
+    ],
+    "02/13/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "GSW"
+        }
+    ],
+    "02/14/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "CHI"
+        }
+    ],
+    "02/15/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "DET"
+        }
+    ],
+    "02/16/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "HOU"
+        }
+    ],
+    "02/17/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "CHI"
+        }
+    ],
+    "02/18/2027": [
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "IND"
+        }
+    ],
+    "02/25/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "UTA"
+        }
+    ],
+    "02/26/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "DAL"
+        }
+    ],
+    "02/27/2027": [
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "NOP"
+        }
+    ],
+    "02/28/2027": [
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "POR"
+        }
+    ],
+    "03/01/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "WAS"
+        }
+    ],
+    "03/02/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "LAC"
+        }
+    ],
+    "03/03/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "SAS"
+        }
+    ],
+    "03/04/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "BKN"
+        }
+    ],
+    "03/05/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "SAS"
+        }
+    ],
+    "03/06/2027": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "LAC"
+        }
+    ],
+    "03/07/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "BKN"
+        }
+    ],
+    "03/08/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "HOU"
+        }
+    ],
+    "03/09/2027": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "POR"
+        }
+    ],
+    "03/10/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "NYK"
+        }
+    ],
+    "03/11/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "CLE"
+        }
+    ],
+    "03/12/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "CLE"
+        }
+    ],
+    "03/13/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "LAC"
+        }
+    ],
+    "03/14/2027": [
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "GSW"
+        }
+    ],
+    "03/15/2027": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "ATL"
+        }
+    ],
+    "03/16/2027": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "DEN"
+        }
+    ],
+    "03/17/2027": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "MIA"
+        }
+    ],
+    "03/18/2027": [
+        {
+            "homeTeam": "IND",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MEM"
+        }
+    ],
+    "03/19/2027": [
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MIA"
+        }
+    ],
+    "03/20/2027": [
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "ATL"
+        }
+    ],
+    "03/21/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DAL"
+        }
+    ],
+    "03/22/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "DAL"
+        }
+    ],
+    "03/23/2027": [
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "OKC"
+        }
+    ],
+    "03/24/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MIL"
+        }
+    ],
+    "03/25/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "TOR"
+        }
+    ],
+    "03/26/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "PHI"
+        }
+    ],
+    "03/27/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "SAS"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "TOR"
+        }
+    ],
+    "03/28/2027": [
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "PHI"
+        }
+    ],
+    "03/29/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "DEN"
+        }
+    ],
+    "03/30/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "LAL"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "HOU"
+        }
+    ],
+    "03/31/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "HOU"
+        }
+    ],
+    "04/01/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "LAL"
+        }
+    ],
+    "04/02/2027": [
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "SAS"
+        }
+    ],
+    "04/03/2027": [
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "WAS"
+        }
+    ],
+    "04/04/2027": [
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "DET",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "PHX"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "SAS"
+        }
+    ],
+    "04/05/2027": [
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "MIA"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "WAS"
+        }
+    ],
+    "04/06/2027": [
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "DAL"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "PHX"
+        }
+    ],
+    "04/07/2027": [
+        {
+            "homeTeam": "DET",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "TOR",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "MEM",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "POR",
+            "awayTeam": "DAL"
+        }
+    ],
+    "04/08/2027": [
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "PHI"
+        },
+        {
+            "homeTeam": "MIL",
+            "awayTeam": "NYK"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "NOP"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "GSW"
+        }
+    ],
+    "04/09/2027": [
+        {
+            "homeTeam": "ATL",
+            "awayTeam": "BOS"
+        },
+        {
+            "homeTeam": "CHA",
+            "awayTeam": "BKN"
+        },
+        {
+            "homeTeam": "IND",
+            "awayTeam": "CLE"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "ORL",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "WAS"
+        },
+        {
+            "homeTeam": "CHI",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "OKC",
+            "awayTeam": "GSW"
+        },
+        {
+            "homeTeam": "HOU",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "DEN"
+        },
+        {
+            "homeTeam": "UTA",
+            "awayTeam": "LAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "MIN"
+        },
+        {
+            "homeTeam": "PHX",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "SAC",
+            "awayTeam": "DAL"
+        }
+    ],
+    "04/11/2027": [
+        {
+            "homeTeam": "BOS",
+            "awayTeam": "MIL"
+        },
+        {
+            "homeTeam": "BKN",
+            "awayTeam": "TOR"
+        },
+        {
+            "homeTeam": "CLE",
+            "awayTeam": "ATL"
+        },
+        {
+            "homeTeam": "MIA",
+            "awayTeam": "ORL"
+        },
+        {
+            "homeTeam": "NYK",
+            "awayTeam": "IND"
+        },
+        {
+            "homeTeam": "PHI",
+            "awayTeam": "CHA"
+        },
+        {
+            "homeTeam": "WAS",
+            "awayTeam": "DET"
+        },
+        {
+            "homeTeam": "NOP",
+            "awayTeam": "CHI"
+        },
+        {
+            "homeTeam": "DAL",
+            "awayTeam": "MEM"
+        },
+        {
+            "homeTeam": "MIN",
+            "awayTeam": "HOU"
+        },
+        {
+            "homeTeam": "SAS",
+            "awayTeam": "POR"
+        },
+        {
+            "homeTeam": "DEN",
+            "awayTeam": "OKC"
+        },
+        {
+            "homeTeam": "GSW",
+            "awayTeam": "UTA"
+        },
+        {
+            "homeTeam": "LAC",
+            "awayTeam": "SAC"
+        },
+        {
+            "homeTeam": "LAL",
+            "awayTeam": "PHX"
+        }
+    ]
+}

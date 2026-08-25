@@ -18,6 +18,8 @@ os.environ.setdefault("DATABASE_URL", "postgresql://cv:cv@localhost:5432/cv_test
 os.environ.setdefault("CLERK_JWKS_URL", "https://fake.clerk.dev/.well-known/jwks.json")
 os.environ.setdefault("CLERK_SECRET_KEY", "sk_test_fake")
 os.environ.setdefault("PIPELINE_API_TOKEN", "test-token")
+# Deterministic season for the suite (settings would derive it from today's date)
+os.environ.setdefault("NBA_SEASON", "2025-26")
 
 
 # ---- Time-freezing fixtures ----

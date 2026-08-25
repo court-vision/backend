@@ -1,41 +1,97 @@
+"""
+Fantasy-week calendar for the active season.
+
+Two generated static files per season (see scripts/build_season_calendar.py):
+
+- static/schedule{yy}-{yy}.json — the fantasy weeks: {"schedule": {"1": {startDate,
+  endDate, gameSpan, games: {TRICODE: {"dayIdx": true}}}}}. Week ids match ESPN's
+  weekly scoring-period ids (the All-Star weeks are merged into one 14-day week).
+- static/matchupsPerDay{yy}-{yy}.json — {"MM/DD/YYYY": [{homeTeam, awayTeam}]} for
+  every game date, preseason included.
+
+The season is `settings.nba_season` (derived from today's date unless pinned).
+"""
+
+from __future__ import annotations
+
 import json
-import os
-from datetime import datetime, date, timedelta
-import pytz
-from typing import Optional
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Iterator, Literal, Optional
+
+import pytz
+
+from core.logging import get_logger
+from core.season import espn_year_for, short_key
+from core.settings import settings
+
+STATIC_DIR = Path(__file__).parent.parent / "static"
+CalendarKind = Literal["schedule", "matchupsPerDay"]
+SeasonPhase = Literal["preseason", "regular", "offseason"]
+
+_CACHE: dict[tuple[str, str], dict] = {}
+log = get_logger()
 
 
-# Load schedule data at module level
-_SCHEDULE_DATA: dict = {}
-_SCHEDULE_DATA_V2: dict = {}
-
-def _load_schedule() -> dict:
-    """Load the schedule JSON file."""
-    global _SCHEDULE_DATA
-    if not _SCHEDULE_DATA:
-        schedule_path = Path(__file__).parent.parent / "static" / "schedule25-26.json"
-        with open(schedule_path, "r") as f:
-            _SCHEDULE_DATA = json.load(f)
-    return _SCHEDULE_DATA
+# ---- files -----------------------------------------------------------------
 
 
-def _load_schedule_v2() -> dict:
-    """Load the schedule JSON file."""
-    global _SCHEDULE_DATA_V2
-    if not _SCHEDULE_DATA_V2:
-        schedule_path = Path(__file__).parent.parent / "static" / "matchupsPerDay25-26.json"
-        with open(schedule_path, "r") as f:
-            _SCHEDULE_DATA_V2 = json.load(f)
-    return _SCHEDULE_DATA_V2
+def _season(season: Optional[str]) -> str:
+    return season or settings.nba_season
+
+
+def calendar_path(kind: CalendarKind, season: Optional[str] = None) -> Path:
+    return STATIC_DIR / f"{kind}{short_key(_season(season))}.json"
+
+
+def _load(kind: CalendarKind, season: Optional[str] = None) -> dict:
+    season = _season(season)
+    key = (kind, season)
+    if key not in _CACHE:
+        path = calendar_path(kind, season)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No {kind} calendar for season {season}: expected {path.name} in {STATIC_DIR} "
+                "(run scripts/build_season_calendar.py)"
+            )
+        with open(path, "r") as f:
+            _CACHE[key] = json.load(f)
+    return _CACHE[key]
+
+
+def _load_schedule(season: Optional[str] = None) -> dict:
+    """The fantasy-week file (top-level {"schedule": {...}})."""
+    return _load("schedule", season)
+
+
+def _load_schedule_v2(season: Optional[str] = None) -> dict:
+    """The per-day matchups file."""
+    return _load("matchupsPerDay", season)
+
+
+def reset_cache() -> None:
+    """Forget loaded calendars (tests switch `settings.nba_season` between cases)."""
+    _CACHE.clear()
+
+
+def assert_calendar_available(season: Optional[str] = None) -> None:
+    """Fail fast at startup if the season's calendar files are missing."""
+    _load_schedule(season)
+    _load_schedule_v2(season)
+    log.info("calendar_loaded", season=_season(season), weeks=get_max_week(season))
+
 
 def _parse_date(date_str: str) -> date:
     """Parse date string in MM/DD/YYYY format."""
     return datetime.strptime(date_str, "%m/%d/%Y").date()
 
 
+# ---- today -----------------------------------------------------------------
+
+
 def get_nba_today() -> date:
-    """Public alias of `_get_nba_today` (the ET fantasy day; before 2 AM ET counts as yesterday)."""
+    """The ET fantasy day: before 2 AM ET counts as yesterday."""
     return _get_nba_today()
 
 
@@ -55,95 +111,64 @@ def _get_nba_today() -> date:
     return now_et.date()
 
 
+# ---- weeks -----------------------------------------------------------------
+
+
+def _week_dict(matchup_num: int, matchup_data: dict) -> dict:
+    return {
+        "matchup_number": int(matchup_num),
+        "start_date": _parse_date(matchup_data["startDate"]),
+        "end_date": _parse_date(matchup_data["endDate"]),
+        "game_span": matchup_data["gameSpan"],
+        "games": matchup_data["games"],
+    }
+
+
+def iter_weeks(season: Optional[str] = None) -> Iterator[dict]:
+    """Every fantasy week in order: {matchup_number, start_date, end_date, game_span, games}."""
+    schedule = _load_schedule(season).get("schedule", {})
+    for num, data in sorted(schedule.items(), key=lambda kv: int(kv[0])):
+        yield _week_dict(int(num), data)
+
+
+def get_max_week(season: Optional[str] = None) -> int:
+    schedule = _load_schedule(season).get("schedule", {})
+    return max((int(k) for k in schedule), default=0)
+
+
 def get_current_matchup(current_date: Optional[date] = None) -> Optional[dict]:
     """
     Get the current matchup info based on the provided date.
 
     Args:
-        current_date: The date to check. Defaults to NBA-convention today
-                      (ET-aware, before 6 AM ET counts as yesterday).
+        current_date: The date to check. Defaults to the ET fantasy day
+                      (before 2 AM ET counts as yesterday).
 
     Returns:
-        Dict with matchup info including 'matchup_number', 'start_date', 'end_date',
-        'game_span', 'games', and 'current_day_index', or None if no matchup found.
+        Dict with 'matchup_number', 'start_date', 'end_date', 'game_span',
+        'games', and 'current_day_index', or None outside the calendar.
     """
     if current_date is None:
         current_date = _get_nba_today()
 
-    schedule = _load_schedule().get("schedule", {})
-
-    for matchup_num, matchup_data in schedule.items():
-        start_date = _parse_date(matchup_data["startDate"])
-        end_date = _parse_date(matchup_data["endDate"])
-
-        if start_date <= current_date <= end_date:
-            day_index = (current_date - start_date).days
-            return {
-                "matchup_number": int(matchup_num),
-                "start_date": start_date,
-                "end_date": end_date,
-                "game_span": matchup_data["gameSpan"],
-                "games": matchup_data["games"],
-                "current_day_index": day_index
-            }
-
+    for week in iter_weeks():
+        if week["start_date"] <= current_date <= week["end_date"]:
+            week["current_day_index"] = (current_date - week["start_date"]).days
+            return week
     return None
 
 
 def get_matchup_by_number(matchup_number: int) -> Optional[dict]:
-    """
-    Get matchup info by matchup number.
-
-    Args:
-        matchup_number: The matchup number (1-20 for 2025-26 season).
-
-    Returns:
-        Dict with matchup info or None if not found.
-    """
+    """Matchup info for a week number (1-based), or None if it isn't in the calendar."""
     schedule = _load_schedule().get("schedule", {})
     matchup_data = schedule.get(str(matchup_number))
-
     if matchup_data:
-        return {
-            "matchup_number": matchup_number,
-            "start_date": _parse_date(matchup_data["startDate"]),
-            "end_date": _parse_date(matchup_data["endDate"]),
-            "game_span": matchup_data["gameSpan"],
-            "games": matchup_data["games"]
-        }
+        return _week_dict(int(matchup_number), matchup_data)
     return None
 
 
-def get_team_games_in_matchup(team_abbrev: str, matchup_number: int) -> list[int]:
-    """
-    Get the day indices when a team plays in a given matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        matchup_number: The matchup number.
-
-    Returns:
-        List of day indices (0-indexed from matchup start) when the team plays.
-    """
-    matchup = get_matchup_by_number(matchup_number)
-    if not matchup:
-        return []
-
-    team_games = matchup["games"].get(team_abbrev, {})
-    return sorted([int(day) for day in team_games.keys()])
-
-
 def get_remaining_games(team_abbrev: str, current_date: Optional[date] = None) -> int:
-    """
-    Calculate the number of remaining games for a team in the current matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        current_date: The date to calculate from. Defaults to today.
-
-    Returns:
-        Number of remaining games in the current matchup.
-    """
+    """Number of games on or after `current_date` for a team in the current matchup."""
     if current_date is None:
         current_date = _get_nba_today()
 
@@ -153,89 +178,11 @@ def get_remaining_games(team_abbrev: str, current_date: Optional[date] = None) -
 
     current_day_index = matchup["current_day_index"]
     team_games = matchup["games"].get(team_abbrev, {})
-
-    # Count games on or after the current day
-    remaining = sum(1 for day in team_games.keys() if int(day) >= current_day_index)
-    return remaining
-
-
-def get_total_games_in_matchup(team_abbrev: str, matchup_number: int) -> int:
-    """
-    Get the total number of games for a team in a given matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        matchup_number: The matchup number.
-
-    Returns:
-        Total number of games in the matchup for the team.
-    """
-    matchup = get_matchup_by_number(matchup_number)
-    if not matchup:
-        return 0
-
-    team_games = matchup["games"].get(team_abbrev, {})
-    return len(team_games)
-
-
-def get_remaining_games_for_matchup(
-    team_abbrev: str,
-    matchup_number: int,
-    current_date: Optional[date] = None
-) -> int:
-    """
-    Calculate remaining games for a team in a specific matchup.
-
-    This is useful when you know the matchup number and want to calculate
-    remaining games even if the current date is outside that matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        matchup_number: The matchup number.
-        current_date: The date to calculate from. Defaults to today.
-
-    Returns:
-        Number of remaining games. Returns total games if matchup hasn't started,
-        0 if matchup has ended, otherwise games remaining from current day.
-    """
-    if current_date is None:
-        current_date = _get_nba_today()
-
-    matchup = get_matchup_by_number(matchup_number)
-    if not matchup:
-        return 0
-
-    team_games = matchup["games"].get(team_abbrev, {})
-    if not team_games:
-        return 0
-
-    start_date = matchup["start_date"]
-    end_date = matchup["end_date"]
-
-    # If matchup hasn't started, all games are remaining
-    if current_date < start_date:
-        return len(team_games)
-
-    # If matchup has ended, no games remaining
-    if current_date > end_date:
-        return 0
-
-    # Calculate current day index and count remaining games
-    current_day_index = (current_date - start_date).days
-    remaining = sum(1 for day in team_games.keys() if int(day) >= current_day_index)
-    return remaining
+    return sum(1 for day in team_games.keys() if int(day) >= current_day_index)
 
 
 def get_matchup_dates(matchup_number: int) -> Optional[tuple[date, date]]:
-    """
-    Get the start and end dates for a specific matchup.
-
-    Args:
-        matchup_number: The matchup number (1-20 for 2025-26 season).
-
-    Returns:
-        Tuple of (start_date, end_date) or None if matchup not found.
-    """
+    """(start_date, end_date) for a week number, or None."""
     matchup = get_matchup_by_number(matchup_number)
     if not matchup:
         return None
@@ -244,16 +191,10 @@ def get_matchup_dates(matchup_number: int) -> Optional[tuple[date, date]]:
 
 def get_dates_for_scoring_periods(scoring_periods: list[int]) -> Optional[tuple[date, date]]:
     """
-    Get the combined date range covering all given scoring periods.
+    Combined date range covering the given ESPN *weekly* scoring-period ids.
 
-    Used for playoff matchup periods where ESPN maps one matchup period to
-    multiple scoring periods (e.g., a 2-week playoff round = [21, 22]).
-
-    Args:
-        scoring_periods: List of scoring period numbers to span.
-
-    Returns:
-        Tuple of (earliest start_date, latest end_date) or None if none found.
+    Playoff rounds map one matchup period to several ids (e.g. [22, 23]).
+    Ids outside the calendar are ignored; None when none match.
     """
     schedule = _load_schedule().get("schedule", {})
     starts, ends = [], []
@@ -267,33 +208,116 @@ def get_dates_for_scoring_periods(scoring_periods: list[int]) -> Optional[tuple[
     return (min(starts), max(ends))
 
 
-def get_current_matchup_dates(current_date: Optional[date] = None) -> Optional[tuple[date, date]]:
-    """
-    Get the start and end dates for the current matchup.
+# ---- season bounds ---------------------------------------------------------
 
-    Args:
-        current_date: The date to check. Defaults to today.
 
-    Returns:
-        Tuple of (start_date, end_date) or None if no current matchup.
+@dataclass(frozen=True)
+class SeasonBounds:
+    season: str
+    espn_year: int
+    opening_night: date
+    regular_season_end: date
+    preseason_start: Optional[date]
+    week_count: int
+
+
+def get_season_bounds(season: Optional[str] = None) -> SeasonBounds:
+    season = _season(season)
+    weeks = list(iter_weeks(season))
+    if not weeks:
+        raise ValueError(f"Calendar for {season} has no weeks")
+    per_day = _load_schedule_v2(season)
+    first_day = min((_parse_date(k) for k in per_day), default=None)
+    opening = weeks[0]["start_date"]
+    preseason_start = first_day if first_day is not None and first_day < opening else None
+    return SeasonBounds(
+        season=season,
+        espn_year=espn_year_for(season),
+        opening_night=opening,
+        regular_season_end=weeks[-1]["end_date"],
+        preseason_start=preseason_start,
+        week_count=len(weeks),
+    )
+
+
+def get_season_phase(today: Optional[date] = None, season: Optional[str] = None) -> SeasonPhase:
+    """preseason (from the first preseason game to opening night), regular, or offseason."""
+    today = today or _get_nba_today()
+    b = get_season_bounds(season)
+    if today < b.opening_night:
+        return "preseason" if b.preseason_start is not None and today >= b.preseason_start else "offseason"
+    if today <= b.regular_season_end:
+        return "regular"
+    return "offseason"
+
+
+def season_day(today: Optional[date] = None, season: Optional[str] = None) -> Optional[int]:
+    """1-based day of the regular season (ESPN's scoringPeriodId), None outside it."""
+    today = today or _get_nba_today()
+    b = get_season_bounds(season)
+    if b.opening_night <= today <= b.regular_season_end:
+        return (today - b.opening_night).days + 1
+    return None
+
+
+def date_for_espn_scoring_period(period_id: int, season: Optional[str] = None) -> date:
+    """ESPN's day-granular scoringPeriodId → calendar date (1 = opening night)."""
+    return get_season_bounds(season).opening_night + timedelta(days=int(period_id) - 1)
+
+
+# ---- provider period resolution --------------------------------------------
+
+
+def espn_scoring_periods(matchup_period_map: Optional[dict], current_matchup_period: int) -> list[int]:
+    """ESPN weekly scoring-period ids for a matchup period (falls back to the id itself)."""
+    ids = matchup_period_map.get(str(current_matchup_period)) if matchup_period_map else None
+    if not ids:
+        return [int(current_matchup_period)]
+    return [int(x) for x in ids]
+
+
+def get_espn_matchup_dates(
+    matchup_period_map: Optional[dict],
+    current_matchup_period: int,
+    latest_scoring_period: Optional[int] = None,
+) -> Optional[tuple[date, date]]:
     """
-    matchup = get_current_matchup(current_date)
-    if not matchup:
-        return None
-    return (matchup["start_date"], matchup["end_date"])
+    Date range of an ESPN matchup period.
+
+    Primary: the league's `scheduleSettings.matchupPeriods` weekly ids indexed
+    into our calendar (they match when ESPN merges the All-Star weeks the way
+    the calendar does). Safety net: `status.latestScoringPeriod` is a DAY index,
+    so if that day falls outside the resolved range (or nothing resolved), the
+    calendar week containing that day wins and a warning is logged — the
+    current week stays right even if ESPN's numbering diverges from ours.
+    """
+    ids = espn_scoring_periods(matchup_period_map, current_matchup_period)
+    dates = get_dates_for_scoring_periods(ids)
+
+    if latest_scoring_period:
+        try:
+            today = date_for_espn_scoring_period(int(latest_scoring_period))
+        except (TypeError, ValueError, FileNotFoundError):
+            today = None
+        if today is not None and (dates is None or not (dates[0] <= today <= dates[1])):
+            week = get_current_matchup(today)
+            if week is not None:
+                log.warning(
+                    "espn_period_misaligned",
+                    matchup_period=current_matchup_period, scoring_periods=ids,
+                    latest_scoring_period=latest_scoring_period, day=str(today),
+                    resolved=[str(d) for d in dates] if dates else None,
+                    calendar_week=week["matchup_number"],
+                )
+                return (week["start_date"], week["end_date"])
+    return dates
+
+
+# ---- team schedule helpers -------------------------------------------------
 
 
 def get_remaining_game_days(team_abbrev: str, current_date: Optional[date] = None) -> list[int]:
-    """
-    Get the list of remaining game day indices for a team in the current matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        current_date: The date to calculate from. Defaults to today.
-
-    Returns:
-        List of day indices (0-indexed) for remaining games.
-    """
+    """Remaining game day indices (0-indexed) for a team in the current matchup."""
     if current_date is None:
         current_date = _get_nba_today()
 
@@ -303,105 +327,40 @@ def get_remaining_game_days(team_abbrev: str, current_date: Optional[date] = Non
 
     current_day_index = matchup["current_day_index"]
     team_games = matchup["games"].get(team_abbrev, {})
-
     return sorted([int(day) for day in team_games.keys() if int(day) >= current_day_index])
 
 
 def _find_b2b_pairs(game_days: list[int]) -> list[tuple[int, int]]:
-    """
-    Find consecutive day pairs (back-to-backs) in a list of game days.
-
-    Args:
-        game_days: Sorted list of day indices when team plays.
-
-    Returns:
-        List of (day1, day2) tuples representing back-to-back games.
-    """
-    b2b_pairs = []
-    for i in range(len(game_days) - 1):
-        if game_days[i + 1] - game_days[i] == 1:
-            b2b_pairs.append((game_days[i], game_days[i + 1]))
-    return b2b_pairs
+    """Consecutive day pairs (back-to-backs) in a sorted list of day indices."""
+    return [(game_days[i], game_days[i + 1]) for i in range(len(game_days) - 1)
+            if game_days[i + 1] - game_days[i] == 1]
 
 
 def has_remaining_b2b(team_abbrev: str, current_date: Optional[date] = None) -> bool:
-    """
-    Check if a team has any remaining back-to-back games in the current matchup.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        current_date: The date to check from. Defaults to today.
-
-    Returns:
-        True if the team has at least one remaining B2B sequence, False otherwise.
-    """
-    remaining_days = get_remaining_game_days(team_abbrev, current_date)
-    b2b_pairs = _find_b2b_pairs(remaining_days)
-    return len(b2b_pairs) > 0
+    """True if the team has at least one remaining back-to-back in the current matchup."""
+    return len(_find_b2b_pairs(get_remaining_game_days(team_abbrev, current_date))) > 0
 
 
 def get_b2b_game_count(team_abbrev: str, current_date: Optional[date] = None) -> int:
-    """
-    Count how many remaining games are part of back-to-back sequences.
-
-    A B2B means 2 consecutive days with games. This returns the count of individual
-    game days that are part of remaining B2B sequences.
-
-    Args:
-        team_abbrev: Team abbreviation (e.g., 'LAL', 'GSW').
-        current_date: The date to calculate from. Defaults to today.
-
-    Returns:
-        Number of game days that are part of remaining B2B sequences.
-        Example: If team has B2B on days 3-4 and 6-7, returns 4.
-    """
-    remaining_days = get_remaining_game_days(team_abbrev, current_date)
-    b2b_pairs = _find_b2b_pairs(remaining_days)
-
-    # Collect unique days that are part of B2Bs
-    b2b_days = set()
-    for day1, day2 in b2b_pairs:
+    """Number of remaining game days that are part of a back-to-back (days 3-4 and 6-7 → 4)."""
+    b2b_days: set[int] = set()
+    for day1, day2 in _find_b2b_pairs(get_remaining_game_days(team_abbrev, current_date)):
         b2b_days.add(day1)
         b2b_days.add(day2)
-
     return len(b2b_days)
 
 
 def get_teams_with_b2b(current_date: Optional[date] = None) -> list[str]:
-    """
-    Get list of team abbreviations with remaining B2B games in the current matchup.
-
-    Args:
-        current_date: The date to check from. Defaults to today.
-
-    Returns:
-        List of team abbreviations that have at least one remaining B2B.
-    """
+    """Teams with at least one remaining back-to-back in the current matchup."""
     if current_date is None:
         current_date = _get_nba_today()
 
     matchup = get_current_matchup(current_date)
     if not matchup:
         return []
-
-    teams_with_b2b = []
-    for team_abbrev in matchup["games"].keys():
-        if has_remaining_b2b(team_abbrev, current_date):
-            teams_with_b2b.append(team_abbrev)
-
-    return sorted(teams_with_b2b)
+    return sorted(team for team in matchup["games"].keys() if has_remaining_b2b(team, current_date))
 
 
 def get_upcoming_games_on_date(date: date) -> list[dict]:
-    """
-    Get the upcoming games on a specific date.
-
-    Args:
-        date: The date to check.
-
-    Returns:
-        List of upcoming games on the date.
-    """
-    schedule = _load_schedule_v2()
-    games = schedule.get(date.strftime("%m/%d/%Y"), [])
-    return games
+    """Games on a date from the per-day file ([{homeTeam, awayTeam}]; [] if none)."""
+    return _load_schedule_v2().get(date.strftime("%m/%d/%Y"), [])

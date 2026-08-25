@@ -11,6 +11,7 @@ from core.logging import setup_logging, get_logger
 from core.settings import settings
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db
+from services.schedule_service import assert_calendar_available
 from api.v1.internal import auth, users, teams, lineups, espn, yahoo, matchups, streamers, notifications, api_keys
 from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public, playoffs
 
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI):
     # Initialize database
     init_db()
     log.info("database_initialized")
+
+    # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
+    assert_calendar_available()
 
     yield
 

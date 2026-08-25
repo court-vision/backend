@@ -9,6 +9,8 @@ from typing import Optional
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from core.season import espn_year_for, season_key, validate_season
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -16,12 +18,13 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
-    # ESPN Configuration
-    espn_year: int = 2026
-    espn_league_id: int = 993431466
+    # Season. Both default to the current season derived from today's date
+    # (flips on Aug 1); set NBA_SEASON / ESPN_YEAR to pin them.
+    nba_season: str = ""
+    espn_year: int = 0
 
-    # NBA API
-    nba_season: str = "2025-26"
+    # ESPN Configuration
+    espn_league_id: int = 993431466
 
     # BALLDONTLIE API (for injury data)
     # Get a free key at https://app.balldontlie.io
@@ -95,6 +98,16 @@ class Settings(BaseSettings):
         if lower_v not in {"json", "console"}:
             raise ValueError("log_format must be 'json' or 'console'")
         return lower_v
+
+    @model_validator(mode="after")
+    def derive_season(self) -> "Settings":
+        """NBA_SEASON defaults to today's season; ESPN_YEAR to the season's end year."""
+        if not self.nba_season:
+            self.nba_season = season_key()
+        validate_season(self.nba_season)
+        if not self.espn_year:
+            self.espn_year = espn_year_for(self.nba_season)
+        return self
 
     @model_validator(mode="after")
     def derive_clerk_issuer(self) -> "Settings":

@@ -10,7 +10,7 @@ https://developer.yahoo.com/fantasysports/guide/
 import base64
 import secrets
 import requests
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -25,7 +25,7 @@ from utils.yahoo_helpers import (
     parse_yahoo_team_key,
     YAHOO_POSITION_MAP,
 )
-from services.schedule_service import get_remaining_games
+from services.schedule_service import get_current_matchup, get_remaining_games
 from services.player_service import PlayerService
 from services.player_value_service import PlayerValueService
 from services.scoring.resolver import ResolvedScoring, resolve_scoring
@@ -45,6 +45,18 @@ _oauth_states: dict[str, dict] = {}
 
 class YahooService:
     """Service for Yahoo Fantasy Basketball API integration."""
+
+    @staticmethod
+    def _matchup_dates_from_payload(matchup: Optional[dict]) -> Optional[tuple[date, date]]:
+        """(week_start, week_end) from a Yahoo matchup object (ISO YYYY-MM-DD), or None."""
+        if not isinstance(matchup, dict):
+            return None
+        try:
+            start = date.fromisoformat(str(matchup.get("week_start", ""))[:10])
+            end = date.fromisoformat(str(matchup.get("week_end", ""))[:10])
+        except ValueError:
+            return None
+        return (start, end) if start <= end else None
 
     @staticmethod
     def get_auth_url(user_id: str) -> tuple[str, str]:
@@ -907,10 +919,13 @@ class YahooService:
                     data=None
                 )
 
-            # Get matchup dates from schedule service
-            matchup_dates = get_matchup_dates(matchup_week)
+            # Yahoo sends the matchup's own dates; fall back to our calendar by week number
+            # (Yahoo's week numbering need not match ours, e.g. around the All-Star break).
+            matchup_dates = YahooService._matchup_dates_from_payload(current_matchup) or get_matchup_dates(matchup_week)
             matchup_start = matchup_dates[0].isoformat() if matchup_dates else ""
             matchup_end = matchup_dates[1].isoformat() if matchup_dates else ""
+            _week = get_current_matchup(matchup_dates[0]) if matchup_dates else None
+            schedule_week = _week["matchup_number"] if _week else None
 
             # Fetch our team roster
             our_roster = await YahooService._fetch_roster_for_matchup(
@@ -982,6 +997,7 @@ class YahooService:
 
             matchup_data = MatchupData(
                 matchup_period=matchup_week,
+                schedule_week=schedule_week,
                 matchup_period_start=matchup_start,
                 matchup_period_end=matchup_end,
                 your_team=MatchupTeamResp(

@@ -72,6 +72,7 @@ class MatchupData(BaseModel):
     projected_winner: str                  # Team name of projected winner
     projected_margin: float                # Projected point differential (category leagues: won - lost)
     scoring_period_id: int | None = None   # ESPN scoring period used for this response
+    schedule_week: int | None = None       # Our calendar week containing matchup_period_start (optimizer input)
     scoring_format: ScoringFormat = "points"
     settings_synced: bool = False
     category_comparison: Optional[CategoryComparison] = None

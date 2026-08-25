@@ -205,9 +205,9 @@ docker run -p 8000:8080 --env-file .env cv-backend
 | `CLERK_JWKS_URL` | Yes | — | Clerk JWKS endpoint (`https://<your-clerk-api>.clerk.accounts.dev/.well-known/jwks.json`) |
 | `CLERK_SECRET_KEY` | Yes | — | Clerk Backend API secret key (`sk_...`) |
 | `PIPELINE_API_TOKEN` | Yes | — | Shared bearer token for service-to-service calls (not used by user routes) |
-| `ESPN_YEAR` | No | `2026` | Active ESPN fantasy season year |
+| `ESPN_YEAR` | No | derived (season end year, e.g. `2027`) | ESPN fantasy season year; set to pin |
 | `ESPN_LEAGUE_ID` | No | `993431466` | Default ESPN league ID |
-| `NBA_SEASON` | No | `2025-26` | Active NBA season string |
+| `NBA_SEASON` | No | derived from today (flips Aug 1, e.g. `2026-27`) | NBA season string; selects `static/schedule{yy}-{yy}.json`; set to pin |
 | `BALLDONTLIE_API_KEY` | No | — | [BallDontLie](https://app.balldontlie.io) API key (injury data) |
 | `YAHOO_CLIENT_ID` | No | — | Yahoo OAuth app client ID |
 | `YAHOO_CLIENT_SECRET` | No | — | Yahoo OAuth app client secret |

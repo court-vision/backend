@@ -1,0 +1,24 @@
+{
+    "season": "2026-27",
+    "opening_night": "2026-10-20",
+    "regular_season_end": "2027-04-11",
+    "preseason_start": "2026-10-03",
+    "week_count": 24,
+    "all_star_break": {
+        "start": "2027-02-19",
+        "end": "2027-02-24",
+        "source": "detected"
+    },
+    "merged_week": {
+        "number": 18,
+        "startDate": "02/15/2027",
+        "endDate": "02/28/2027",
+        "gameSpan": 14,
+        "source_weeks": [
+            18,
+            19
+        ]
+    },
+    "generated_from": "backend/static/schedule_raw2026-2027.json",
+    "generated_at": "2026-08-25T23:17:05+00:00"
+}
