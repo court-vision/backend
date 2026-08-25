@@ -569,7 +569,7 @@ class YahooService:
             # Build final player list with stats
             players = []
             for p in parsed_players:
-                normalized_name = p["name"].lower().strip()
+                normalized_name = _normalize_name(p["name"])
                 avg_points = name_to_avg.get(normalized_name) or 0.0
 
                 players.append(PlayerResp(
@@ -725,7 +725,7 @@ class YahooService:
             # Build final player list with stats
             players = []
             for p in parsed_players:
-                normalized_name = p["name"].lower().strip()
+                normalized_name = _normalize_name(p["name"])
                 avg_points = name_to_avg.get(normalized_name) or 0.0
 
                 players.append(PlayerResp(
@@ -1153,7 +1153,7 @@ class YahooService:
             # Build MatchupPlayerResp list
             roster = []
             for p in parsed_players:
-                normalized_name = p["name"].lower().strip()
+                normalized_name = _normalize_name(p["name"])
                 avg_points = name_to_avg.get(normalized_name) or 0.0
                 games_remaining = get_remaining_games(p["team"])
 

@@ -34,6 +34,11 @@ def _parse_date(date_str: str) -> date:
     return datetime.strptime(date_str, "%m/%d/%Y").date()
 
 
+def get_nba_today() -> date:
+    """Public alias of `_get_nba_today` (the ET fantasy day; before 2 AM ET counts as yesterday)."""
+    return _get_nba_today()
+
+
 def _get_nba_today() -> date:
     """Return the current fantasy scheduling date in ET.
 

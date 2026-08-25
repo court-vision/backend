@@ -21,7 +21,7 @@ class LineupInfo(BaseModel):
     Lineup: list[SlimGene] = Field(min_items=1, description="Lineup must have at least one gene")
     Improvement: int = Field(description="Improvement value")
     Timestamp: str = Field(description="Lineup timestamp")
-    Week: int = Field(ge=1, le=20, description="Week must be between 1 and 20")
+    Week: int = Field(ge=1, le=30, description="Fantasy week (1-based; 24 weeks in a season, playoffs may extend)")
     StreamingSlots: int = Field(ge=0, description="Number of streaming slots used")
     Id: int | None = None
 
@@ -30,7 +30,7 @@ class LineupInfo(BaseModel):
 class GenerateLineupReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
     streaming_slots: int = Field(ge=1, le=10, description="Number of roster spots to use for streaming")
-    week: int = Field(ge=1, description="Week must be positive")
+    week: int = Field(ge=1, le=30, description="Fantasy week (1-based); must exist in the season calendar")
     avg_mode: Literal["season", "recent"] = Field(default="season", description="FPTS averaging mode: season avg or decay-weighted last-14-day avg")
 
 class SaveLineupReq(BaseRequest):

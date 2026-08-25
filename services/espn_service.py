@@ -77,6 +77,19 @@ class Player(object):
         id_type = STAT_ID_MAP.get(id[:2])
         return f'{id[2:]}_{id_type}' if id_type else str(scoring_period)
 
+def espn_scoring_periods_for(matchup_period_map: dict, current_matchup_period: int) -> list[int]:
+    """ESPN weekly scoring-period ids covered by a matchup period.
+
+    `scheduleSettings.matchupPeriods` maps matchupPeriodId -> [weekly period ids]
+    (e.g. a two-week playoff round "20": [20, 21]). Falls back to the period id
+    itself when the key is absent.
+    """
+    ids = matchup_period_map.get(str(current_matchup_period)) if matchup_period_map else None
+    if not ids:
+        return [int(current_matchup_period)]
+    return [int(x) for x in ids]
+
+
 class EspnService:
     
     @staticmethod
@@ -275,13 +288,11 @@ class EspnService:
             # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
             league_settings = data.get('settings', {})
             matchup_period_map = league_settings.get('scheduleSettings', {}).get('matchupPeriods', {})
-            scoring_periods = matchup_period_map.get(str(current_matchup_period), [current_matchup_period])
-            # For leagues in week 2 of a 2-week playoff, matchupPeriods may not
-            # include the playoff matchup period key, causing scoring_periods to
-            # fall back to a single-period list covering only week 1. Extend the
-            # list with latestScoringPeriod so the date range reaches week 2.
-            if latest_scoring_period and latest_scoring_period not in scoring_periods:
-                scoring_periods = list(scoring_periods) + [latest_scoring_period]
+            # NOTE: status.latestScoringPeriod is a DAY index (1..167) while the
+            # matchupPeriods values are WEEK ids; appending it here used to corrupt
+            # the date range for the first ~24 days of a season. Phase 3 resolves
+            # dates from the day index instead.
+            scoring_periods = espn_scoring_periods_for(matchup_period_map, current_matchup_period)
             matchup_dates = get_dates_for_scoring_periods(scoring_periods)
             matchup_start_date = matchup_dates[0] if matchup_dates else None
             matchup_end_date = matchup_dates[1] if matchup_dates else None

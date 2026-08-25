@@ -4,12 +4,17 @@ from schemas.lineup import GenerateLineupReq, SaveLineupReq, GetLineupsResp, Sav
 from api.deps import get_db_user, get_owned_lineup, ensure_team_owned
 from db.models.users import User
 from db.models.lineups import Lineup
+from services.schedule_service import get_matchup_by_number
 
 router = APIRouter(prefix="/lineups", tags=["lineup management"])
 
 
 @router.post('/generate', response_model=GenerateLineupResp)
 async def generate_lineup(req: GenerateLineupReq, user: User = Depends(get_db_user)):
+    # The lineup service silently returns an empty plan for a week it doesn't know;
+    # reject unknown weeks here with a clear error instead.
+    if get_matchup_by_number(req.week) is None:
+        raise HTTPException(status_code=422, detail=f"Week {req.week} is not in the season calendar")
     return await LineupService.generate_lineup(user.user_id, req.team_id, req.streaming_slots, req.week, req.avg_mode)
 
 @router.get('', response_model=GetLineupsResp)

@@ -10,11 +10,12 @@ from schemas.streamer import (
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
-from services.player_service import PlayerService
+from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from db.models.nba.players import Player as PlayerModel
 from services.schedule_service import (
     get_current_matchup,
+    get_nba_today,
     get_remaining_games,
     get_remaining_game_days,
     has_remaining_b2b,
@@ -152,10 +153,14 @@ class StreamerService:
                     target_day = current_day_index
                     effective_date = start_date + timedelta(days=target_day)
                 else:
-                    effective_date = date.today()
+                    # ET fantasy day, consistent with get_current_matchup() above
+                    # (date.today() is UTC on Railway and drifts after ~7 PM ET).
+                    effective_date = get_nba_today()
 
-            # Select scoring weights based on mode
-            weights = (
+            # Select scoring weights based on mode (distinct from the league's
+            # point weights below — they were once the same variable, which
+            # made every request 500 with KeyError('games_remaining')).
+            score_weights = (
                 StreamerService.DAILY_WEIGHTS
                 if mode == StreamerMode.DAILY
                 else StreamerService.WEEK_WEIGHTS
@@ -192,15 +197,15 @@ class StreamerService:
             # Fetch last n-day averages from our database
             # Yahoo uses name-based lookup, ESPN uses player ID
             # Score free agents with this league's point weights (default formula if unsynced)
-            weights = PlayerValueService.weights_for_league_info(league_info)
+            point_weights = PlayerValueService.weights_for_league_info(league_info)
             if is_yahoo:
                 player_lookups = [(fa.name, fa.team) for fa in free_agents]
                 last_n_avgs_by_name = PlayerValueService.rolling_avg_by_name(
-                    player_lookups, days=avg_days, weights=weights
+                    player_lookups, days=avg_days, weights=point_weights
                 )
             else:
                 player_ids = [fa.player_id for fa in free_agents]
-                last_n_avgs = PlayerValueService.rolling_avg_by_espn_id(player_ids, days=avg_days, weights=weights)
+                last_n_avgs = PlayerValueService.rolling_avg_by_espn_id(player_ids, days=avg_days, weights=point_weights)
 
             # Build streamer list
             streamers: list[StreamerPlayerResp] = []
@@ -239,8 +244,8 @@ class StreamerService:
                 # Get last n-day average from our database
                 # Yahoo uses name-based lookup, ESPN uses player ID
                 if is_yahoo:
-                    normalized_name = fa.name.lower().strip()
-                    avg_points_last_n = last_n_avgs_by_name.get(normalized_name)
+                    # rolling_avg_by_name keys by the diacritic-stripped name
+                    avg_points_last_n = last_n_avgs_by_name.get(_normalize_name(fa.name))
                 else:
                     avg_points_last_n = last_n_avgs.get(fa.player_id)
 
@@ -250,7 +255,7 @@ class StreamerService:
                     games_remaining=games_remaining,
                     avg_points_last_n=avg_points_last_n,
                     b2b_game_count=b2b_game_count,
-                    weights=weights
+                    weights=score_weights
                 )
 
                 streamers.append(StreamerPlayerResp(
