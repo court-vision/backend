@@ -98,6 +98,14 @@ class LeagueInfo(BaseModel):
     yahoo_token_expiry: str | None = None  # ISO datetime string
     yahoo_team_key: str | None = None  # e.g., "428.l.12345.t.1"
 
+    # View this team as a different scoring format than its league actually uses
+    # (e.g. see a points league as 9-cat). Lives with the team, not the league,
+    # so a settings sync never touches it. None = the league's real format.
+    scoring_preview: Optional[Literal["points", "categories"]] = Field(
+        default=None,
+        description="Override the rendered scoring format for this team only; None uses the league's synced format",
+    )
+
 class AuthResponse(BaseModel):
     """Base authentication response model"""
     access_token: Optional[str] = None
@@ -138,6 +146,8 @@ class LeagueSummary(BaseModel):
     point_weights: dict[str, float] = {}
     settings_synced: bool = False
     settings_synced_at: Optional[str] = None
+    # Set when the team's scoring_preview overrides the league's real format above
+    scoring_preview: Optional[Literal["points", "categories"]] = None
 
 class TeamResponse(BaseModel):
     """Team data response model"""

@@ -109,3 +109,16 @@ def test_league_routes_404_for_foreign_team(authed_client, as_user_42, monkeypat
     _own_team(monkeypatch, None)
     assert authed_client.get("/v1/internal/teams/999/league").status_code == 404
     assert authed_client.post("/v1/internal/teams/999/league/sync").status_code == 404
+
+
+@pytest.mark.api
+def test_get_league_detail_reflects_team_scoring_preview(authed_client, as_user_42, monkeypatch):
+    league = _fake_league(scoring_type="points", categories=[], point_weights={"pts": 1.0})
+    _own_team(monkeypatch, SimpleNamespace(team_id=7, user_id_id=42, league_id=3, league=league,
+                                           league_info='{"scoring_preview": "categories"}'))
+    res = authed_client.get("/v1/internal/teams/7/league")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert data["scoring_type"] == "categories" and data["scoring_preview"] == "categories"
+    assert len(data["categories"]) == 9 and data["point_weights"] == {"pts": 1.0}
+    assert data["unsupported"] == ["espn:99:?"]          # detail fields still come from the league row

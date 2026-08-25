@@ -21,8 +21,9 @@ from db.models.leagues import League
 from db.models.teams import Team
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.league import CategoryDefResp, LeagueDetail, LeagueSummary
-from services.scoring.models import LeagueSettings
+from services.scoring.models import CategoryDef, LeagueSettings
 from services.scoring.providers.espn_settings import parse_espn_settings
+from services.scoring.vocab import DEFAULT_CATEGORIES
 from services.scoring.providers.yahoo_settings import fetch_yahoo_league_settings, parse_yahoo_settings
 from utils.constants import ESPN_FANTASY_ENDPOINT
 
@@ -151,8 +152,66 @@ class LeagueService:
         )
 
     @staticmethod
-    def to_detail(league: League) -> LeagueDetail:
-        summary = LeagueService.to_summary(league)
+    def preview_of(league_info_json: Optional[str]) -> Optional[str]:
+        """A team's `scoring_preview` straight from its stored league_info JSON.
+
+        Tolerant of legacy/partial rows: anything that isn't a recognised value
+        is None, and no full LeagueInfo validation is required.
+        """
+        if not league_info_json:
+            return None
+        try:
+            value = json.loads(league_info_json).get("scoring_preview")
+        except (ValueError, AttributeError):
+            return None
+        return value if value in ("points", "categories") else None
+
+    @staticmethod
+    def apply_preview(summary: Optional[LeagueSummary], preview: Optional[str],
+                      league_info: Optional[LeagueInfo] = None) -> Optional[LeagueSummary]:
+        """Overlay a team's `scoring_preview` on the league summary the UI renders from.
+
+        Mirrors `resolve_scoring(league, preview)`: categories preview uses the
+        league's own categories when it has them, else the standard 9-cat; points
+        preview keeps the league's weights. A preview on a team with no league
+        row yet gets a synthetic summary (when league_info is available) so the
+        UI can still switch format.
+        """
+        if preview not in ("points", "categories"):
+            return summary
+
+        if summary is None:
+            if league_info is None:
+                return None
+            provider, pid, season = LeagueService.provider_league_key(league_info)
+            summary = LeagueSummary(
+                id=0, provider=provider, provider_league_id=pid, season=season,
+                name=league_info.league_name, scoring_type="points",
+            )
+
+        if preview == "categories":
+            if summary.scoring_type != "categories" or not summary.categories:
+                summary.categories = [
+                    CategoryDefResp(**CategoryDef.for_key(k).to_json()) for k in DEFAULT_CATEGORIES
+                ]
+                summary.category_win_mode = summary.category_win_mode or "each_category"
+            summary.scoring_type = "categories"
+        else:
+            summary.scoring_type = "points"
+            summary.categories = []
+            summary.category_win_mode = None
+        summary.settings_synced = True
+        summary.scoring_preview = preview
+        return summary
+
+    @staticmethod
+    def summary_for_team(league: Optional[League], league_info: Optional[LeagueInfo]) -> Optional[LeagueSummary]:
+        preview = getattr(league_info, "scoring_preview", None) if league_info is not None else None
+        return LeagueService.apply_preview(LeagueService.to_summary(league), preview, league_info)
+
+    @staticmethod
+    def to_detail(league: League, preview: Optional[str] = None) -> LeagueDetail:
+        summary = LeagueService.apply_preview(LeagueService.to_summary(league), preview)
         sync = (league.raw_settings or {}).get("_sync", {}) if isinstance(league.raw_settings, dict) else {}
         return LeagueDetail(
             **summary.model_dump(),

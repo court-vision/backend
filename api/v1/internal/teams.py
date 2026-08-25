@@ -56,7 +56,10 @@ async def get_team_league(team: Team = Depends(get_owned_team)):
     """Provider-detected league settings for an owned team (None until synced)."""
     if team.league_id is None:
         return LeagueGetResp(status=ApiStatus.SUCCESS, message="League settings not synced yet", data=None)
-    return LeagueGetResp(status=ApiStatus.SUCCESS, message="League fetched", data=LeagueService.to_detail(team.league))
+    return LeagueGetResp(
+        status=ApiStatus.SUCCESS, message="League fetched",
+        data=LeagueService.to_detail(team.league, LeagueService.preview_of(team.league_info)),
+    )
 
 
 @router.post('/{team_id}/league/sync', response_model=LeagueSyncResp)

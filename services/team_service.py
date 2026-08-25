@@ -27,7 +27,7 @@ class TeamService:
         return TeamResponse(
             team_id=team.team_id,
             league_info=league_info or TeamService.deserialize_league_info(json.loads(team.league_info)),
-            league=LeagueService.to_summary(league),
+            league=LeagueService.summary_for_team(league, league_info or LeagueService.league_info_of(team)),
         )
 
     @staticmethod
@@ -47,6 +47,8 @@ class TeamService:
             "yahoo_refresh_token": league_info.yahoo_refresh_token,
             "yahoo_token_expiry": league_info.yahoo_token_expiry,
             "yahoo_team_key": league_info.yahoo_team_key,
+            # Per-team display override (see LeagueInfo.scoring_preview)
+            "scoring_preview": league_info.scoring_preview,
         }
         return json.dumps(data)
 
@@ -74,6 +76,7 @@ class TeamService:
             yahoo_refresh_token=league_info.get('yahoo_refresh_token'),
             yahoo_token_expiry=league_info.get('yahoo_token_expiry'),
             yahoo_team_key=league_info.get('yahoo_team_key'),
+            scoring_preview=league_info.get('scoring_preview') or None,
         )
 
     @staticmethod
