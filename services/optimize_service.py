@@ -2,8 +2,6 @@
 Service for lineup optimization via features service.
 """
 
-import httpx
-
 from core.logging import get_logger
 from db.models import Team
 from schemas.common import ApiStatus
@@ -15,14 +13,13 @@ from schemas.optimize import (
     RecommendedMove,
     PlayerInput,
 )
+from services import features_client
+from services.features_client import FeaturesRejected, FeaturesUnavailable
 from services.lineup_service import LineupService
-from utils.constants import FEATURES_SERVER_ENDPOINT
 
 
 class OptimizeService:
     """Service for lineup optimization."""
-
-    FEATURES_TIMEOUT = 30.0  # seconds
 
     @staticmethod
     async def optimize_from_team(api_key, request: GenerateLineupRequest) -> OptimizeResp:
@@ -49,31 +46,13 @@ class OptimizeService:
             return OptimizeResp(status=ApiStatus.ERROR, message=str(e), data=None)
 
         try:
-            payload = {
-                "roster_data": [p.model_dump() for p in roster_players],
-                "free_agent_data": [p.model_dump() for p in fa_players],
-                "streaming_slots": request.streaming_slots,
-                "week": request.week,
-            }
-
-            log.info(
-                "calling_features_service_from_team",
-                endpoint=f"{FEATURES_SERVER_ENDPOINT}/generate-lineup",
-                week=request.week,
-                team_id=request.team_id,
-                roster_size=len(roster_players),
-                free_agents=len(fa_players),
-                streaming_slots=request.streaming_slots,
+            payload = LineupService.build_features_payload(
+                roster_players, fa_players, request.streaming_slots, request.week
+            )
+            result = await features_client.request_lineup(
+                payload, caller="optimize_service", team_id=request.team_id,
                 use_recent_stats=request.use_recent_stats,
             )
-
-            async with httpx.AsyncClient(timeout=OptimizeService.FEATURES_TIMEOUT) as client:
-                response = await client.post(
-                    f"{FEATURES_SERVER_ENDPOINT}/generate-lineup",
-                    json=payload,
-                )
-                response.raise_for_status()
-                result = response.json()
 
             optimize_data = OptimizeService._transform_v2_response(result, request.week)
 
@@ -90,20 +69,20 @@ class OptimizeService:
                 data=optimize_data,
             )
 
-        except httpx.TimeoutException:
-            log.error("features_service_timeout", week=request.week)
+        except FeaturesRejected as e:
             return OptimizeResp(
                 status=ApiStatus.ERROR,
-                message="Optimization service timed out. Please try again.",
+                message=e.message,
                 data=None,
+                error_code="LINEUP_SERVICE_REJECTED",
             )
 
-        except httpx.HTTPStatusError as e:
-            log.error("features_service_error", status_code=e.response.status_code, detail=str(e))
+        except FeaturesUnavailable as e:
             return OptimizeResp(
                 status=ApiStatus.ERROR,
-                message="Failed to optimize lineup",
+                message=e.message,
                 data=None,
+                error_code="LINEUP_SERVICE_UNAVAILABLE",
             )
 
         except Exception as e:

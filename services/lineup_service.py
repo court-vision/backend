@@ -1,34 +1,49 @@
 import asyncio
 import hashlib
-import httpx
 import json
+from typing import Literal, Optional
 
+from core.logging import get_logger
 from schemas.lineup import LineupInfo, SlimGene, SlimPlayer
 from schemas.espn import PlayerResp
 from schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp, GenerateLineupResp
 from schemas.common import ApiStatus, FantasyProvider
+from services import features_client
 from services.espn_service import EspnService
+from services.features_client import FeaturesRejected, FeaturesUnavailable
 from services.yahoo_service import YahooService
 from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from services.team_service import TeamService
 from db.models import Lineup, Team
-from utils.constants import FEATURES_SERVER_ENDPOINT, NUM_FREE_AGENTS
+from utils.constants import NUM_FREE_AGENTS
+
+ScoringPreview = Literal["points", "categories"]
 
 
 class LineupService:
 
     @staticmethod
+    def _owned_team(user_id: int, team_id: int) -> Team:
+        """The team row, scoped to its owner. Raises Team.DoesNotExist otherwise."""
+        return Team.select().where(Team.user_id == user_id).where(Team.team_id == team_id).get()
+
+    @staticmethod
     async def fetch_roster_and_fas(
-        user_id: int, team_id: int, use_recent_stats: bool = False
+        user_id: int, team_id: int, use_recent_stats: bool = False,
+        scoring_preview: Optional[ScoringPreview] = None,
     ) -> tuple[list[PlayerResp], list[PlayerResp]]:
         """
         Fetch roster and free agents for a team with optional recent-stats override.
+        `scoring_preview` renders the team under that format for this call only
+        (rehearsals, what-if views); None uses the team's own stored setting.
         Raises Team.DoesNotExist if the team is not found for this user (implicit ownership check).
         Raises ValueError if the provider fetch fails.
         """
-        team = Team.select().where(Team.user_id == user_id).where(Team.team_id == team_id).get()
+        team = LineupService._owned_team(user_id, team_id)
         league_info = TeamService.deserialize_league_info(json.loads(team.league_info))
+        if scoring_preview is not None:
+            league_info.scoring_preview = scoring_preview
 
         if league_info.provider == FantasyProvider.YAHOO:
             team_resp = await YahooService.get_team_data(league_info, 0, team_id)
@@ -47,7 +62,10 @@ class LineupService:
             # fpts for points leagues, the shortest-window category value for category
             # leagues); players we know nothing about keep the provider's number.
             all_players = roster + fas
-            scoring = PlayerValueService.scoring_for(league_info, team_id)
+            # An in-process preview must win over the team's stored setting, so
+            # resolve from league_info (not the team row) when one was given.
+            scoring = PlayerValueService.scoring_for(league_info, None if scoring_preview else team_id)
+            value_kind = PlayerValueService.value_kind_for(scoring)
             if league_info.provider == FantasyProvider.YAHOO:
                 # Yahoo player ids are not ESPN ids: resolve by normalized name instead
                 values = await asyncio.to_thread(
@@ -66,6 +84,7 @@ class LineupService:
                 if valued is not None and valued.value is not None:
                     player.avg_points = valued.value
                     player.value_source = valued.source
+                    player.value_kind = value_kind
 
         return roster, fas
 
@@ -81,26 +100,40 @@ class LineupService:
         except ValueError as e:
             return GenerateLineupResp(status=ApiStatus.ERROR, message=str(e), data=None)
         except Exception as e:
-            print(f"Error in generate_lineup: {e}")
+            get_logger().exception("generate_lineup_failed", team_id=team_id, week=week, error=str(e))
             return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
+    def build_features_payload(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp],
+                               streaming_slots: int, week: int) -> dict:
+        """The `POST /generate-lineup` body the features service expects."""
+        return {
+            "roster_data": [p.model_dump() for p in roster_data],
+            "free_agent_data": [p.model_dump() for p in free_agent_data],
+            "streaming_slots": streaming_slots,
+            "week": week,
+        }
+
+    @staticmethod
     async def generate_lineup_v2(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp], streaming_slots: int, week: int) -> GenerateLineupResp:
+        """Ask the features service for a streaming plan.
+
+        A request the service rejects (e.g. a week outside its calendar) comes back
+        as an ERROR carrying the service's own reason; an unreachable or failing
+        service as an ERROR asking the user to retry. Neither is a 500.
+        """
+        payload = LineupService.build_features_payload(roster_data, free_agent_data, streaming_slots, week)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{FEATURES_SERVER_ENDPOINT}/generate-lineup",
-                    json={
-                        "roster_data": [p.model_dump() for p in roster_data],
-                        "free_agent_data": [p.model_dump() for p in free_agent_data],
-                        "streaming_slots": streaming_slots,
-                        "week": week,
-                    },
-                )
-                response.raise_for_status()
-            return GenerateLineupResp(status=ApiStatus.SUCCESS, message="Lineup generated successfully", data=response.json())
+            result = await features_client.request_lineup(payload, caller="lineup_service")
+            return GenerateLineupResp(status=ApiStatus.SUCCESS, message="Lineup generated successfully", data=result)
+        except FeaturesRejected as e:
+            return GenerateLineupResp(status=ApiStatus.ERROR, message=e.message, data=None,
+                                      error_code="LINEUP_SERVICE_REJECTED")
+        except FeaturesUnavailable as e:
+            return GenerateLineupResp(status=ApiStatus.ERROR, message=e.message, data=None,
+                                      error_code="LINEUP_SERVICE_UNAVAILABLE")
         except Exception as e:
-            print(f"Error in generate_lineup_v2: {e}")
+            get_logger().exception("generate_lineup_v2_failed", week=week, error=str(e))
             return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
