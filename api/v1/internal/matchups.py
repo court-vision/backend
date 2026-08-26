@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from services.matchup_service import MatchupService
 from schemas.matchup import MatchupReq, MatchupResp, MatchupScoreHistoryResp, LiveMatchupResp, DailyMatchupResp, WeeklyMatchupResp, SeasonSummaryResp
 from core.clerk_auth import get_current_user
+from core.responses import respond
 from api.deps import get_owned_team
 from db.models.teams import Team
 
@@ -19,11 +20,12 @@ async def get_current_matchup(
 
     Requires league_info with credentials and team name.
     Returns both teams' rosters, current scores, and projected final scores.
+    No matchup (bye week / offseason) is a 200 with `data: null` and a message.
     """
-    return await MatchupService.get_current_matchup(
+    return respond(await MatchupService.get_current_matchup(
         matchup_req.league_info,
         matchup_req.avg_window
-    )
+    ))
 
 
 @router.get('/current/{team_id}', response_model=MatchupResp)
@@ -41,11 +43,11 @@ async def get_matchup_by_team(
     This endpoint is convenient when you have a saved team and don't want
     to pass all the league credentials again.
     """
-    return await MatchupService.get_matchup_by_team_id(
+    return respond(await MatchupService.get_matchup_by_team_id(
         team.user_id_id,
         team.team_id,
         avg_window
-    )
+    ))
 
 
 @router.get('/live/{team_id}', response_model=LiveMatchupResp)
@@ -60,7 +62,7 @@ async def get_live_matchup(
     Players with no game today have live=null. Includes all roster slots
     (active and bench) so the frontend can render the full matchup layout.
     """
-    return await MatchupService.get_live_matchup_by_team_id(team.user_id_id, team.team_id)
+    return respond(await MatchupService.get_live_matchup_by_team_id(team.user_id_id, team.team_id))
 
 
 @router.get('/history/{team_id}', response_model=MatchupScoreHistoryResp)
@@ -77,7 +79,7 @@ async def get_matchup_score_history(
     Returns historical daily snapshots of both teams' scores for charting
     the score progression over time.
     """
-    return await MatchupService.get_score_history(team.team_id, matchup_period)
+    return respond(await MatchupService.get_score_history(team.team_id, matchup_period))
 
 
 @router.get('/week/{team_id}', response_model=WeeklyMatchupResp)

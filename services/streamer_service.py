@@ -7,6 +7,7 @@ from schemas.streamer import (
     StreamerPlayerResp,
     StreamerMode
 )
+from core.errors import BadRequestError
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
@@ -117,200 +118,194 @@ class StreamerService:
             avg_days: Number of days for rolling average calculation (default 7).
 
         Returns:
-            StreamerResp with ranked list of streaming candidates.
+            StreamerResp with ranked list of streaming candidates; SUCCESS with data=None
+            when no matchup is active today.
+
+        Raises:
+            BadRequestError (TARGET_DAY_OUT_OF_RANGE / LEAGUE_VALIDATION_FAILED) and the
+            provider services' typed AppErrors.
         """
-        try:
-            # Get current matchup info (using today to determine which matchup we're in)
-            matchup = get_current_matchup()
-            if not matchup:
-                return StreamerResp(
-                    status=ApiStatus.ERROR,
-                    message="No active matchup found for the current date",
-                    data=None
-                )
-
-            matchup_number = matchup["matchup_number"]
-            game_span = matchup["game_span"]
-            start_date = matchup["start_date"]
-            current_day_index = matchup["current_day_index"]
-
-            # Determine effective date based on mode
-            if mode == StreamerMode.DAILY and target_day is not None:
-                # Validate target_day is within matchup bounds
-                if target_day >= game_span:
-                    return StreamerResp(
-                        status=ApiStatus.ERROR,
-                        message=f"Day {target_day} is out of bounds. Matchup has {game_span} days (0-{game_span - 1}).",
-                        data=None
-                    )
-                effective_date = start_date + timedelta(days=target_day)
-            else:
-                if mode == StreamerMode.DAILY:
-                    # Default to current day; derive effective_date from start_date+index
-                    # so game_days filtering is consistent with the explicit targetDay path.
-                    # Using date.today() (UTC) would drift from _get_nba_today() (ET) after
-                    # ~7 PM ET (midnight UTC), causing target_day to fall outside game_days.
-                    target_day = current_day_index
-                    effective_date = start_date + timedelta(days=target_day)
-                else:
-                    # ET fantasy day, consistent with get_current_matchup() above
-                    # (date.today() is UTC on Railway and drifts after ~7 PM ET).
-                    effective_date = get_nba_today()
-
-            # Select scoring weights based on mode (distinct from the league's
-            # point weights below — they were once the same variable, which
-            # made every request 500 with KeyError('games_remaining')).
-            score_weights = (
-                StreamerService.DAILY_WEIGHTS
-                if mode == StreamerMode.DAILY
-                else StreamerService.WEEK_WEIGHTS
-            )
-
-            # Get teams with B2B games.
-            # Daily mode only considers B2Bs that include the pickup day itself.
-            if mode == StreamerMode.DAILY:
-                teams_with_b2b = sorted(
-                    team
-                    for team, team_games in matchup["games"].items()
-                    if str(target_day) in team_games and str(target_day + 1) in team_games
-                )
-            else:
-                teams_with_b2b = get_teams_with_b2b(effective_date)
-
-            # Fetch free agents - route by provider
-            # Pass team_id for Yahoo so tokens can be refreshed and persisted
-            is_yahoo = league_info.provider == FantasyProvider.YAHOO
-            if is_yahoo:
-                fa_response = await YahooService.get_free_agents(league_info, fa_count, team_id)
-            else:
-                fa_response = await EspnService.get_free_agents(league_info, fa_count)
-
-            if fa_response.status != ApiStatus.SUCCESS or not fa_response.data:
-                return StreamerResp(
-                    status=ApiStatus.ERROR,
-                    message=f"Failed to fetch free agents: {fa_response.message}",
-                    data=None
-                )
-
-            free_agents = fa_response.data
-
-            # Value free agents from our stored stats under this league's scoring:
-            # fantasy points under its weights, or the category value for H2H-category
-            # leagues (rolling window, then last season's baseline).
-            # Yahoo uses name-based lookup, ESPN uses player ID.
-            scoring = PlayerValueService.scoring_for(league_info, team_id)
-            value_kind = PlayerValueService.value_kind_for(scoring)
-            if is_yahoo:
-                player_lookups = [(fa.name, fa.team) for fa in free_agents]
-                last_n_values = PlayerValueService.avg_points_for(scoring, names=player_lookups, days=avg_days)
-            else:
-                player_ids = [fa.player_id for fa in free_agents]
-                last_n_values = PlayerValueService.avg_points_for(scoring, espn_ids=player_ids, days=avg_days)
-
-            # Build streamer list
-            streamers: list[StreamerPlayerResp] = []
-
-            for fa in free_agents:
-                # Skip injured players if requested
-                if exclude_injured and fa.injured:
-                    continue
-
-                # Get team schedule info
-                team = fa.team
-                game_days = get_remaining_game_days(team, effective_date)
-                games_remaining = get_remaining_games(team, effective_date)
-
-                # Skip players with no remaining games
-                if games_remaining == 0:
-                    continue
-
-                # In daily mode, only include players with a game on the target day
-                if mode == StreamerMode.DAILY and target_day not in game_days:
-                    continue
-
-                if mode == StreamerMode.DAILY:
-                    team_has_b2b, b2b_game_count = StreamerService._get_daily_b2b_metrics(
-                        game_days=game_days,
-                        pickup_day=target_day
-                    )
-                else:
-                    team_has_b2b = has_remaining_b2b(team, effective_date)
-                    b2b_game_count = get_b2b_game_count(team, effective_date)
-
-                # Skip non-B2B teams if b2b_only is set
-                if b2b_only and not team_has_b2b:
-                    continue
-
-                # Our value for the player (Yahoo values are keyed by the diacritic-stripped name)
-                valued = last_n_values.get(_normalize_name(fa.name) if is_yahoo else fa.player_id)
-                avg_points_last_n = valued.value if valued is not None else None
-                avg_source = valued.source if valued is not None else None
-
-                # Calculate streamer score
-                streamer_score = StreamerService._calculate_streamer_score(
-                    has_b2b=team_has_b2b,
-                    games_remaining=games_remaining,
-                    avg_points_last_n=avg_points_last_n,
-                    b2b_game_count=b2b_game_count,
-                    weights=score_weights
-                )
-
-                streamers.append(StreamerPlayerResp(
-                    player_id=fa.player_id,
-                    name=fa.name,
-                    team=team,
-                    valid_positions=fa.valid_positions,
-                    avg_points_last_n=avg_points_last_n,
-                    avg_points_season=fa.avg_points,
-                    avg_source=avg_source,
-                    games_remaining=games_remaining,
-                    has_b2b=team_has_b2b,
-                    b2b_game_count=b2b_game_count,
-                    game_days=game_days,
-                    streamer_score=streamer_score,
-                    injured=fa.injured,
-                    injury_status=None  # Could be enhanced later
-                ))
-
-            # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
-            espn_ids = [s.player_id for s in streamers]
-            if espn_ids:
-                nba_id_map: dict[int, int] = {
-                    row.espn_id: row.id
-                    for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
-                    .where(PlayerModel.espn_id.in_(espn_ids))
-                }
-                for s in streamers:
-                    s.nba_player_id = nba_id_map.get(s.player_id)
-
-            # Week mode: group B2B first, then by score. Daily mode: purely by score.
-            if mode == StreamerMode.WEEK:
-                streamers.sort(key=lambda x: (-x.has_b2b, -x.streamer_score))
-            else:
-                streamers.sort(key=lambda x: -x.streamer_score)
-
+        # Get current matchup info (using today to determine which matchup we're in)
+        matchup = get_current_matchup()
+        if not matchup:
+            # An empty state, not a failure (offseason / All-Star break): 200 with data: null
             return StreamerResp(
                 status=ApiStatus.SUCCESS,
-                message=f"Found {len(streamers)} streaming candidates",
-                data=StreamerData(
-                    matchup_number=matchup_number,
-                    current_day_index=current_day_index,
-                    game_span=game_span,
-                    avg_days=avg_days,
-                    mode=mode,
-                    target_day=target_day if mode == StreamerMode.DAILY else None,
-                    teams_with_b2b=teams_with_b2b,
-                    streamers=streamers,
-                    value_kind=value_kind,
-                )
-            )
-
-        except Exception as e:
-            print(f"Error in find_streamers: {e}")
-            import traceback
-            traceback.print_exc()
-            return StreamerResp(
-                status=ApiStatus.ERROR,
-                message="Internal server error while finding streamers",
+                message="No active matchup for today — streaming picks return with the next matchup week",
                 data=None
             )
+
+        matchup_number = matchup["matchup_number"]
+        game_span = matchup["game_span"]
+        start_date = matchup["start_date"]
+        current_day_index = matchup["current_day_index"]
+
+        # Determine effective date based on mode
+        if mode == StreamerMode.DAILY and target_day is not None:
+            # Validate target_day is within matchup bounds
+            if target_day >= game_span:
+                raise BadRequestError(
+                    "TARGET_DAY_OUT_OF_RANGE",
+                    f"Day {target_day} is out of bounds. Matchup has {game_span} days (0-{game_span - 1}).",
+                )
+            effective_date = start_date + timedelta(days=target_day)
+        else:
+            if mode == StreamerMode.DAILY:
+                # Default to current day; derive effective_date from start_date+index
+                # so game_days filtering is consistent with the explicit targetDay path.
+                # Using date.today() (UTC) would drift from _get_nba_today() (ET) after
+                # ~7 PM ET (midnight UTC), causing target_day to fall outside game_days.
+                target_day = current_day_index
+                effective_date = start_date + timedelta(days=target_day)
+            else:
+                # ET fantasy day, consistent with get_current_matchup() above
+                # (date.today() is UTC on Railway and drifts after ~7 PM ET).
+                effective_date = get_nba_today()
+
+        # Select scoring weights based on mode (distinct from the league's
+        # point weights below — they were once the same variable, which
+        # made every request 500 with KeyError('games_remaining')).
+        score_weights = (
+            StreamerService.DAILY_WEIGHTS
+            if mode == StreamerMode.DAILY
+            else StreamerService.WEEK_WEIGHTS
+        )
+
+        # Get teams with B2B games.
+        # Daily mode only considers B2Bs that include the pickup day itself.
+        if mode == StreamerMode.DAILY:
+            teams_with_b2b = sorted(
+                team
+                for team, team_games in matchup["games"].items()
+                if str(target_day) in team_games and str(target_day + 1) in team_games
+            )
+        else:
+            teams_with_b2b = get_teams_with_b2b(effective_date)
+
+        # Fetch free agents - route by provider
+        # Pass team_id for Yahoo so tokens can be refreshed and persisted
+        is_yahoo = league_info.provider == FantasyProvider.YAHOO
+        if is_yahoo:
+            fa_response = await YahooService.get_free_agents(league_info, fa_count, team_id)
+        else:
+            fa_response = await EspnService.get_free_agents(league_info, fa_count)
+
+        # Provider failures raise (403/400/502/504) before we get here; a non-success envelope is a
+        # league configuration problem, and an empty free-agent pool is simply zero candidates.
+        if fa_response.status != ApiStatus.SUCCESS:
+            raise BadRequestError(fa_response.error_code or "LEAGUE_VALIDATION_FAILED",
+                                  fa_response.message or "Could not fetch free agents")
+
+        free_agents = fa_response.data or []
+
+        # Value free agents from our stored stats under this league's scoring:
+        # fantasy points under its weights, or the category value for H2H-category
+        # leagues (rolling window, then last season's baseline).
+        # Yahoo uses name-based lookup, ESPN uses player ID.
+        scoring = PlayerValueService.scoring_for(league_info, team_id)
+        value_kind = PlayerValueService.value_kind_for(scoring)
+        if is_yahoo:
+            player_lookups = [(fa.name, fa.team) for fa in free_agents]
+            last_n_values = PlayerValueService.avg_points_for(scoring, names=player_lookups, days=avg_days)
+        else:
+            player_ids = [fa.player_id for fa in free_agents]
+            last_n_values = PlayerValueService.avg_points_for(scoring, espn_ids=player_ids, days=avg_days)
+
+        # Build streamer list
+        streamers: list[StreamerPlayerResp] = []
+
+        for fa in free_agents:
+            # Skip injured players if requested
+            if exclude_injured and fa.injured:
+                continue
+
+            # Get team schedule info
+            team = fa.team
+            game_days = get_remaining_game_days(team, effective_date)
+            games_remaining = get_remaining_games(team, effective_date)
+
+            # Skip players with no remaining games
+            if games_remaining == 0:
+                continue
+
+            # In daily mode, only include players with a game on the target day
+            if mode == StreamerMode.DAILY and target_day not in game_days:
+                continue
+
+            if mode == StreamerMode.DAILY:
+                team_has_b2b, b2b_game_count = StreamerService._get_daily_b2b_metrics(
+                    game_days=game_days,
+                    pickup_day=target_day
+                )
+            else:
+                team_has_b2b = has_remaining_b2b(team, effective_date)
+                b2b_game_count = get_b2b_game_count(team, effective_date)
+
+            # Skip non-B2B teams if b2b_only is set
+            if b2b_only and not team_has_b2b:
+                continue
+
+            # Our value for the player (Yahoo values are keyed by the diacritic-stripped name)
+            valued = last_n_values.get(_normalize_name(fa.name) if is_yahoo else fa.player_id)
+            avg_points_last_n = valued.value if valued is not None else None
+            avg_source = valued.source if valued is not None else None
+
+            # Calculate streamer score
+            streamer_score = StreamerService._calculate_streamer_score(
+                has_b2b=team_has_b2b,
+                games_remaining=games_remaining,
+                avg_points_last_n=avg_points_last_n,
+                b2b_game_count=b2b_game_count,
+                weights=score_weights
+            )
+
+            streamers.append(StreamerPlayerResp(
+                player_id=fa.player_id,
+                name=fa.name,
+                team=team,
+                valid_positions=fa.valid_positions,
+                avg_points_last_n=avg_points_last_n,
+                avg_points_season=fa.avg_points,
+                avg_source=avg_source,
+                games_remaining=games_remaining,
+                has_b2b=team_has_b2b,
+                b2b_game_count=b2b_game_count,
+                game_days=game_days,
+                streamer_score=streamer_score,
+                injured=fa.injured,
+                injury_status=None  # Could be enhanced later
+            ))
+
+        # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
+        espn_ids = [s.player_id for s in streamers]
+        if espn_ids:
+            nba_id_map: dict[int, int] = {
+                row.espn_id: row.id
+                for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
+                .where(PlayerModel.espn_id.in_(espn_ids))
+            }
+            for s in streamers:
+                s.nba_player_id = nba_id_map.get(s.player_id)
+
+        # Week mode: group B2B first, then by score. Daily mode: purely by score.
+        if mode == StreamerMode.WEEK:
+            streamers.sort(key=lambda x: (-x.has_b2b, -x.streamer_score))
+        else:
+            streamers.sort(key=lambda x: -x.streamer_score)
+
+        return StreamerResp(
+            status=ApiStatus.SUCCESS,
+            message=f"Found {len(streamers)} streaming candidates",
+            data=StreamerData(
+                matchup_number=matchup_number,
+                current_day_index=current_day_index,
+                game_span=game_span,
+                avg_days=avg_days,
+                mode=mode,
+                target_day=target_day if mode == StreamerMode.DAILY else None,
+                teams_with_b2b=teams_with_b2b,
+                streamers=streamers,
+                value_kind=value_kind,
+            )
+        )
+

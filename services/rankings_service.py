@@ -9,7 +9,6 @@ Player rankings in two formats over the season or a rolling window.
 from datetime import date
 from typing import Optional
 
-from core.logging import get_logger
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.stats.rankings import Rankings
@@ -39,7 +38,6 @@ class RankingsService:
         categories: Optional[list[str]] = None,
         min_games: Optional[int] = None,
     ) -> RankingsResp:
-        log = get_logger()
         try:
             if window is not None and window not in VALID_WINDOWS:
                 return RankingsService._bad_request(
@@ -54,11 +52,8 @@ class RankingsService:
                 return RankingsService._get_rolling_rankings(window)
             return RankingsService._get_season_rankings()
 
-        except ValueError as e:
+        except ValueError as e:                     # an unrankable category key (see _category_defs)
             return RankingsService._bad_request(str(e))
-        except Exception as e:
-            log.error("get_rankings_error", error=str(e), window=window, format=format)
-            return RankingsResp(status=ApiStatus.ERROR, message="Internal server error", data=[])
 
     # ---- points ---------------------------------------------------------------
 

@@ -1,8 +1,8 @@
 """
 ESPN rosters / free agents / matchups carry `avg_points` computed from our stored
 stats under the league's scoring; ESPN's own appliedAverage (or the default-formula
-proxy over its raw averages) is only the last resort. The ESPN HTTP layer and the
-value dispatcher are stubbed.
+proxy over its raw averages) is only the last resort. The ESPN HTTP layer
+(`provider_get`) and the value dispatcher are stubbed.
 """
 
 import asyncio
@@ -23,17 +23,6 @@ LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=555, team_name="My 
                     espn_s2="s2", swid="{swid}")
 CATEGORY = resolve_scoring(None, preview="categories")
 POINTS = resolve_scoring(None)
-
-
-class _Resp:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        return None
 
 
 def _espn_player(pid: int, name: str, applied_avg: float, avg_raw: dict | None = None, pro_team_id: int = 7) -> dict:
@@ -71,7 +60,7 @@ def espn(monkeypatch):
     """Stub ESPN HTTP + scoring resolution; `dispatch` controls what our value service returns."""
     state = {"payload": None, "scoring": POINTS, "values": {}, "calls": []}
 
-    monkeypatch.setattr(espn_service.requests, "get", lambda *a, **k: _Resp(state["payload"]))
+    monkeypatch.setattr(espn_service, "provider_get", lambda *a, **k: state["payload"])
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda li, team_id=None: state["scoring"]))
 
     def fake_avg_points_for(scoring, *, espn_ids=None, names=None, days=14, recent=False):

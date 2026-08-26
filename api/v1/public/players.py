@@ -10,6 +10,7 @@ from services.player_games_service import PlayerGamesService
 from services.trends_service import TrendsService
 from services.ownership_service import OwnershipService
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
+from core.responses import respond
 
 router = APIRouter(prefix="/players", tags=["Players"])
 
@@ -35,14 +36,14 @@ async def list_players(
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ) -> PlayersListResp:
     """List players with optional filters."""
-    return await PlayersListService.list_players(
+    return respond(await PlayersListService.list_players(
         team=team,
         position=position,
         min_games=min_games,
         name=name,
         limit=limit,
         offset=offset,
-    )
+    ))
 
 
 @router.get(
@@ -53,7 +54,8 @@ async def list_players(
     "Use the `window` parameter to get averages over a specific game window.",
     responses={
         200: {"description": "Player stats retrieved successfully"},
-        404: {"description": "Player not found"},
+        400: {"description": "No player identifier given"},
+        404: {"description": "Player not found, or no game stats for the player"},
         429: {"description": "Rate limit exceeded"},
     },
 )
@@ -81,7 +83,7 @@ async def get_player_stats_by_query(
     Game logs are always returned in full regardless of window.
     Advanced stats (net rating, usage, PIE, etc.) are always season-level.
     """
-    return await PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team, window=window)
+    return respond(await PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team, window=window))
 
 
 @router.get(
@@ -98,7 +100,7 @@ async def get_player_stats_by_query(
 @limiter.limit(PUBLIC_RATE_LIMIT)
 async def get_player_stats(request: Request, player_id: int) -> PlayerStatsResp:
     """Get player stats by ID (legacy endpoint for backwards compatibility)."""
-    return await PlayerService.get_player_stats(player_id=player_id)
+    return respond(await PlayerService.get_player_stats(player_id=player_id))
 
 
 @router.get(
@@ -119,7 +121,7 @@ async def get_player_games(
     limit: int = Query(10, ge=1, le=50, description="Number of games to return"),
 ) -> PlayerGamesResp:
     """Get game log for a player."""
-    return await PlayerGamesService.get_player_games(player_id=player_id, limit=limit)
+    return respond(await PlayerGamesService.get_player_games(player_id=player_id, limit=limit))
 
 
 @router.get(
@@ -139,7 +141,7 @@ async def get_player_trends(
     player_id: int = Path(..., description="NBA player ID"),
 ) -> PlayerTrendsResp:
     """Get trend data for a player."""
-    return await TrendsService.get_player_trends(player_id=player_id)
+    return respond(await TrendsService.get_player_trends(player_id=player_id))
 
 
 @router.get(
@@ -160,7 +162,7 @@ async def get_player_percentiles(
     min_games: int = Query(20, ge=1, description="Minimum games played to qualify"),
 ) -> PlayerPercentilesResp:
     """Get percentile ranks for a player's stats vs the league."""
-    return await PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games)
+    return respond(await PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games))
 
 
 @router.get(
@@ -179,7 +181,7 @@ async def get_player_status(
     player_id: int = Path(..., description="NBA player ID"),
 ) -> PlayerStatusResp:
     """Get the most recent injury status for a player."""
-    return await PlayerService.get_player_status(player_id=player_id)
+    return respond(await PlayerService.get_player_status(player_id=player_id))
 
 
 @router.get(
@@ -199,4 +201,4 @@ async def get_player_ownership(
     days: int = Query(14, ge=1, le=30, description="Lookback window in days for trend comparison"),
 ) -> PlayerOwnershipResp:
     """Get current ownership percentage for a player."""
-    return await OwnershipService.get_player_ownership(player_id=player_id, days=days)
+    return respond(await OwnershipService.get_player_ownership(player_id=player_id, days=days))

@@ -17,6 +17,7 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from core.errors import BadRequestError, NotFoundError, ProviderAuthError
 from db.models import Team
 from schemas.common import ApiStatus, FantasyProvider
 from schemas.espn import PlayerResp, TeamDataResp
@@ -294,18 +295,31 @@ def test_yahoo_team_uses_team_scoped_calls_and_revalues_recent_form_by_name(team
 
 
 @pytest.mark.unit
-def test_provider_failure_and_unknown_team_become_error_responses(team, providers):
+def test_provider_failure_and_unknown_team_become_precise_errors(team, providers, monkeypatch):
+    # A provider envelope that isn't a success (and raised nothing itself) -> 400 from generate_lineup
     providers.fas = TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
     with pytest.raises(ValueError):
         asyncio.run(LineupService.fetch_roster_and_fas(42, 15))
-    resp = asyncio.run(LineupService.generate_lineup(42, 15, 2, 3))
-    assert resp.status == ApiStatus.ERROR and "provider" in resp.message
+    with pytest.raises(BadRequestError) as excinfo:
+        asyncio.run(LineupService.generate_lineup(42, 15, 2, 3))
+    assert excinfo.value.status_code == 400 and "provider" in excinfo.value.message
 
+    # A provider's own typed error (rejected ESPN cookies) propagates untouched: 403 PROVIDER_AUTH_EXPIRED
+    async def expired(*args, **kwargs):
+        raise ProviderAuthError("espn")
+
+    monkeypatch.setattr(EspnService, "get_free_agents", staticmethod(expired))
+    with pytest.raises(ProviderAuthError) as excinfo:
+        asyncio.run(LineupService.generate_lineup(42, 15, 2, 3))
+    assert excinfo.value.status_code == 403 and excinfo.value.data["provider"] == "espn"
+
+    # A team the user doesn't own -> 404 TEAM_NOT_FOUND
     team.team = None
     with pytest.raises(Team.DoesNotExist):
         asyncio.run(LineupService.fetch_roster_and_fas(42, 15))
-    resp = asyncio.run(LineupService.generate_lineup(42, 15, 2, 3))
-    assert resp.status == ApiStatus.ERROR and resp.message == "Team not found"
+    with pytest.raises(NotFoundError) as excinfo:
+        asyncio.run(LineupService.generate_lineup(42, 15, 2, 3))
+    assert excinfo.value.status_code == 404 and excinfo.value.error_code == "TEAM_NOT_FOUND"
 
 
 # A minimal ESPN payload so the real EspnService parsing runs (HTTP stubbed).
@@ -328,19 +342,11 @@ FA_PAYLOAD = {"players": [{"id": 4, "player": _espn_player(4, "Streamer", 9.0)},
                           {"id": 5, "player": _espn_player(5, "Nobody", 0.0)}]}
 
 
-class _Resp:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
 @pytest.fixture
 def espn_http(monkeypatch):
-    """Real ESPN parsing over canned payloads; scoring resolves like the resolver minus the DB."""
+    """Real ESPN parsing over canned payloads (provider_get stubbed); scoring resolves like the resolver minus the DB."""
     payloads = iter([ROSTER_PAYLOAD, FA_PAYLOAD])
-    monkeypatch.setattr(espn_service.requests, "get", lambda *a, **k: _Resp(next(payloads)))
+    monkeypatch.setattr(espn_service, "provider_get", lambda *a, **k: next(payloads))
     calls = []
     monkeypatch.setattr(PlayerValueService, "scoring_for",
                         staticmethod(lambda li, team_id=None: (calls.append(("scoring_for", team_id, li.scoring_preview)),

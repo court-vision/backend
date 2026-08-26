@@ -8,9 +8,7 @@ Everything is defensive: values arrive as strings, containers may be dicts or li
 
 from typing import Any
 
-import requests
-
-from core.settings import settings
+from services.providers.http import provider_get
 from services.scoring.models import CategoryDef, CategoryTeamScoreData, LeagueSettings, StatLine
 from services.scoring.vocab import STATS, YAHOO_COMPOSITE_IDS, YAHOO_ID_TO_KEY
 from utils.yahoo_helpers import normalize_position
@@ -29,13 +27,13 @@ YAHOO_SCORING_TYPE_MAP: dict[str, tuple[str, str | None]] = {
 # ---- fetch -----------------------------------------------------------------
 
 def fetch_yahoo_league_settings(access_token: str, league_key: str) -> dict:
-    resp = requests.get(
+    """The league settings payload; a rejected token or a Yahoo outage raises a typed AppError."""
+    return provider_get(
+        "yahoo",
         f"{YAHOO_API_BASE}/league/{league_key}/settings?format=json",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-        timeout=settings.http_timeout,
+        expect_key="fantasy_content",
     )
-    resp.raise_for_status()
-    return resp.json()
 
 
 # ---- helpers for Yahoo's dict-or-list nesting --------------------------------

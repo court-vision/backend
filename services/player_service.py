@@ -14,13 +14,13 @@ from schemas.player import (
     PlayerStatusData,
     PlayerStatusResp,
 )
+from core.errors import BadRequestError, NotFoundError
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.player_injuries import PlayerInjury
-from core.logging import get_logger
 from core.season import previous_season
 from core.settings import settings
 from services.schedule_service import get_season_bounds
@@ -190,154 +190,126 @@ class PlayerService:
         team: Optional[str] = None,
         window: str = "season",
     ) -> PlayerStatsResp:
-        log = get_logger()
-        try:
-            # Step 1: Resolve player from the Player dimension table
-            player = None
-            if espn_id is not None:
-                player = Player.get_or_none(Player.espn_id == espn_id)
-            elif player_id is not None:
-                player = Player.get_or_none(Player.id == player_id)
-            elif name is not None:
-                normalized_name = _normalize_name(name)
-                player = Player.get_or_none(Player.name_normalized == normalized_name)
-            else:
-                return PlayerStatsResp(
-                    status=ApiStatus.ERROR,
-                    message="Must provide either player_id or name",
-                    data=None
-                )
+        """Stats for one player. Raises BadRequestError without an identifier, NotFoundError
+        (PLAYER_NOT_FOUND / PLAYER_STATS_NOT_FOUND) for an unknown player or one with no games."""
+        # Step 1: Resolve player from the Player dimension table
+        player = None
+        if espn_id is not None:
+            player = Player.get_or_none(Player.espn_id == espn_id)
+        elif player_id is not None:
+            player = Player.get_or_none(Player.id == player_id)
+        elif name is not None:
+            normalized_name = _normalize_name(name)
+            player = Player.get_or_none(Player.name_normalized == normalized_name)
+        else:
+            raise BadRequestError("PLAYER_LOOKUP_REQUIRED", "Provide espn_id, player_id, or name")
 
-            if not player:
-                return PlayerStatsResp(
-                    status=ApiStatus.ERROR,
-                    message="Player not found",
-                    data=None
-                )
+        if not player:
+            raise NotFoundError("PLAYER_NOT_FOUND", "Player not found")
 
-            # Step 2: Get all game logs for the player from PlayerGameStats
-            game_logs_query = (
-                PlayerGameStats.select()
-                .where(PlayerGameStats.player_id == player.id)
-                .order_by(PlayerGameStats.game_date.asc())
+        # Step 2: Get all game logs for the player from PlayerGameStats
+        game_logs_query = (
+            PlayerGameStats.select()
+            .where(PlayerGameStats.player_id == player.id)
+            .order_by(PlayerGameStats.game_date.asc())
+        )
+
+        # If team filter is provided, apply it
+        if team is not None:
+            game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team)
+
+        all_logs = list(game_logs_query)
+
+        if not all_logs:
+            raise NotFoundError("PLAYER_STATS_NOT_FOUND", "No game stats found for player")
+
+        # Season scope: player_game_stats has no season column, so slice by the
+        # calendar's opening night. Before the first game of the season, fall
+        # back to last season's games so the panels aren't empty.
+        game_logs_list, season_note = _season_scoped_logs(all_logs)
+
+        # Get player info from Player dimension and most recent game
+        latest_game = game_logs_list[-1]
+        player_name = player.name
+        player_team = latest_game.team_id
+        games_played = len(game_logs_list)
+
+        # Step 3: Apply window to compute averages
+        window_size = _parse_window_size(window)
+        if window_size is not None:
+            windowed_logs = game_logs_list[-window_size:]
+        else:
+            windowed_logs = game_logs_list
+
+        window_games = len(windowed_logs)
+        avg_stats = _compute_avg_stats(windowed_logs)
+
+        # Step 4: Fetch advanced stats from pipeline
+        advanced_stats = _fetch_advanced_stats(player.id)
+
+        # Step 5: Build full game logs (always return all for charts/tables)
+        game_logs = [
+            GameLog(
+                date=str(g.game_date),
+                fpts=g.fpts,
+                pts=g.pts,
+                reb=g.reb,
+                ast=g.ast,
+                stl=g.stl,
+                blk=g.blk,
+                tov=g.tov,
+                min=g.min,
+                fgm=g.fgm,
+                fga=g.fga,
+                fg3m=g.fg3m,
+                fg3a=g.fg3a,
+                ftm=g.ftm,
+                fta=g.fta,
             )
+            for g in game_logs_list
+        ]
 
-            # If team filter is provided, apply it
-            if team is not None:
-                game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team)
+        resolved_player_id = player.id
 
-            all_logs = list(game_logs_query)
+        player_stats = PlayerStats(
+            id=resolved_player_id,
+            name=player_name,
+            team=player_team,
+            games_played=games_played,
+            window=window,
+            window_games=window_games,
+            avg_stats=avg_stats,
+            advanced_stats=advanced_stats,
+            game_logs=game_logs,
+        )
 
-            if not all_logs:
-                return PlayerStatsResp(
-                    status=ApiStatus.ERROR,
-                    message="No game stats found for player",
-                    data=None
-                )
+        return PlayerStatsResp(
+            status=ApiStatus.SUCCESS,
+            message=season_note or "Player stats fetched successfully",
+            data=player_stats
+        )
 
-            # Season scope: player_game_stats has no season column, so slice by the
-            # calendar's opening night. Before the first game of the season, fall
-            # back to last season's games so the panels aren't empty.
-            game_logs_list, season_note = _season_scoped_logs(all_logs)
-
-            # Get player info from Player dimension and most recent game
-            latest_game = game_logs_list[-1]
-            player_name = player.name
-            player_team = latest_game.team_id
-            games_played = len(game_logs_list)
-
-            # Step 3: Apply window to compute averages
-            window_size = _parse_window_size(window)
-            if window_size is not None:
-                windowed_logs = game_logs_list[-window_size:]
-            else:
-                windowed_logs = game_logs_list
-
-            window_games = len(windowed_logs)
-            avg_stats = _compute_avg_stats(windowed_logs)
-
-            # Step 4: Fetch advanced stats from pipeline
-            advanced_stats = _fetch_advanced_stats(player.id)
-
-            # Step 5: Build full game logs (always return all for charts/tables)
-            game_logs = [
-                GameLog(
-                    date=str(g.game_date),
-                    fpts=g.fpts,
-                    pts=g.pts,
-                    reb=g.reb,
-                    ast=g.ast,
-                    stl=g.stl,
-                    blk=g.blk,
-                    tov=g.tov,
-                    min=g.min,
-                    fgm=g.fgm,
-                    fga=g.fga,
-                    fg3m=g.fg3m,
-                    fg3a=g.fg3a,
-                    ftm=g.ftm,
-                    fta=g.fta,
-                )
-                for g in game_logs_list
-            ]
-
-            resolved_player_id = player.id
-
-            player_stats = PlayerStats(
-                id=resolved_player_id,
-                name=player_name,
-                team=player_team,
-                games_played=games_played,
-                window=window,
-                window_games=window_games,
-                avg_stats=avg_stats,
-                advanced_stats=advanced_stats,
-                game_logs=game_logs,
-            )
-
-            return PlayerStatsResp(
-                status=ApiStatus.SUCCESS,
-                message=season_note or "Player stats fetched successfully",
-                data=player_stats
-            )
-
-        except Exception as e:
-            log.error("get_player_stats_error", error=str(e), espn_id=espn_id, player_id=player_id, name=name)
-            return PlayerStatsResp(
-                status=ApiStatus.ERROR,
-                message="Internal server error",
-                data=None
-            )
 
     @staticmethod
     async def get_player_status(player_id: int) -> PlayerStatusResp:
-        log = get_logger()
-        try:
-            injury = PlayerInjury.get_current_status(player_id)
-            if not injury:
-                return PlayerStatusResp(
-                    status=ApiStatus.SUCCESS,
-                    message="No injury record found",
-                    data=None,
-                )
+        injury = PlayerInjury.get_current_status(player_id)
+        if not injury:
             return PlayerStatusResp(
                 status=ApiStatus.SUCCESS,
-                message="Player status fetched successfully",
-                data=PlayerStatusData(
-                    status=injury.status,
-                    injury_type=injury.injury_type,
-                    injury_detail=injury.injury_detail,
-                    expected_return=str(injury.expected_return) if injury.expected_return else None,
-                    report_date=str(injury.report_date),
-                ),
-            )
-        except Exception as e:
-            log.error("get_player_status_error", error=str(e), player_id=player_id)
-            return PlayerStatusResp(
-                status=ApiStatus.ERROR,
-                message="Internal server error",
+                message="No injury record found",
                 data=None,
             )
+        return PlayerStatusResp(
+            status=ApiStatus.SUCCESS,
+            message="Player status fetched successfully",
+            data=PlayerStatusData(
+                status=injury.status,
+                injury_type=injury.injury_type,
+                injury_detail=injury.injury_detail,
+                expected_return=str(injury.expected_return) if injury.expected_return else None,
+                report_date=str(injury.report_date),
+            ),
+        )
 
     @staticmethod
     def get_last_n_day_avg(player_id: int, days: int = 7) -> Optional[float]:
@@ -590,120 +562,97 @@ class PlayerService:
 
     @staticmethod
     async def get_player_percentiles(player_id: int, min_games: int = 20) -> PlayerPercentilesResp:
-        log = get_logger()
-        try:
-            # Verify player exists
-            player = Player.get_or_none(Player.id == player_id)
-            if not player:
-                return PlayerPercentilesResp(
-                    status=ApiStatus.ERROR,
-                    message="Player not found",
-                    data=None,
-                )
+        # Verify player exists
+        player = Player.get_or_none(Player.id == player_id)
+        if not player:
+            raise NotFoundError("PLAYER_NOT_FOUND", "Player not found")
 
-            # Get per-player season averages for all qualifying players
-            stat_fields = {
-                "avg_fpts": fn.AVG(PlayerGameStats.fpts),
-                "avg_points": fn.AVG(PlayerGameStats.pts),
-                "avg_rebounds": fn.AVG(PlayerGameStats.reb),
-                "avg_assists": fn.AVG(PlayerGameStats.ast),
-                "avg_steals": fn.AVG(PlayerGameStats.stl),
-                "avg_blocks": fn.AVG(PlayerGameStats.blk),
-                "avg_turnovers": fn.AVG(PlayerGameStats.tov),
-                "avg_minutes": fn.AVG(PlayerGameStats.min),
-                "avg_fg_pct": Case(
-                    None,
-                    [(fn.SUM(PlayerGameStats.fga) > 0,
-                      fn.SUM(PlayerGameStats.fgm) * 100.0 / fn.SUM(PlayerGameStats.fga))],
-                    0.0,
-                ),
-                "avg_fg3_pct": Case(
-                    None,
-                    [(fn.SUM(PlayerGameStats.fg3a) > 0,
-                      fn.SUM(PlayerGameStats.fg3m) * 100.0 / fn.SUM(PlayerGameStats.fg3a))],
-                    0.0,
-                ),
-                "avg_ft_pct": Case(
-                    None,
-                    [(fn.SUM(PlayerGameStats.fta) > 0,
-                      fn.SUM(PlayerGameStats.ftm) * 100.0 / fn.SUM(PlayerGameStats.fta))],
-                    0.0,
-                ),
-            }
+        # Get per-player season averages for all qualifying players
+        stat_fields = {
+            "avg_fpts": fn.AVG(PlayerGameStats.fpts),
+            "avg_points": fn.AVG(PlayerGameStats.pts),
+            "avg_rebounds": fn.AVG(PlayerGameStats.reb),
+            "avg_assists": fn.AVG(PlayerGameStats.ast),
+            "avg_steals": fn.AVG(PlayerGameStats.stl),
+            "avg_blocks": fn.AVG(PlayerGameStats.blk),
+            "avg_turnovers": fn.AVG(PlayerGameStats.tov),
+            "avg_minutes": fn.AVG(PlayerGameStats.min),
+            "avg_fg_pct": Case(
+                None,
+                [(fn.SUM(PlayerGameStats.fga) > 0,
+                  fn.SUM(PlayerGameStats.fgm) * 100.0 / fn.SUM(PlayerGameStats.fga))],
+                0.0,
+            ),
+            "avg_fg3_pct": Case(
+                None,
+                [(fn.SUM(PlayerGameStats.fg3a) > 0,
+                  fn.SUM(PlayerGameStats.fg3m) * 100.0 / fn.SUM(PlayerGameStats.fg3a))],
+                0.0,
+            ),
+            "avg_ft_pct": Case(
+                None,
+                [(fn.SUM(PlayerGameStats.fta) > 0,
+                  fn.SUM(PlayerGameStats.ftm) * 100.0 / fn.SUM(PlayerGameStats.fta))],
+                0.0,
+            ),
+        }
 
-            def _pool(start, end):
-                q = PlayerGameStats.select(
-                    PlayerGameStats.player_id,
-                    fn.COUNT(PlayerGameStats.id).alias("games"),
-                    *[expr.alias(name) for name, expr in stat_fields.items()],
-                )
-                if start is not None:
-                    q = q.where(PlayerGameStats.game_date >= start)
-                if end is not None:
-                    q = q.where(PlayerGameStats.game_date < end)
-                return list(q.group_by(PlayerGameStats.player_id).dicts())
-
-            # Season-scoped pool (career-to-date otherwise); before opening night use last season.
-            opening = _season_opening_night()
-            all_players = _pool(opening, None)
-            if not all_players and opening is not None:
-                all_players = _pool(date(opening.year - 1, 8, 1), opening)
-            if not all_players:
-                return PlayerPercentilesResp(
-                    status=ApiStatus.ERROR,
-                    message="No qualifying players found",
-                    data=None,
-                )
-
-            # The floor scales with how far into the season we are (half the max GP, at most min_games)
-            min_games = scaled_min_games(min_games, max(int(r["games"]) for r in all_players))
-            all_players = [r for r in all_players if int(r["games"]) >= min_games]
-            if not all_players:
-                return PlayerPercentilesResp(
-                    status=ApiStatus.ERROR,
-                    message="No qualifying players found",
-                    data=None,
-                )
-
-            # Find target player's row
-            target_row = None
-            for row in all_players:
-                if row["player"] == player_id:
-                    target_row = row
-                    break
-
-            if target_row is None:
-                return PlayerPercentilesResp(
-                    status=ApiStatus.ERROR,
-                    message=f"Player does not meet minimum games threshold ({min_games})",
-                    data=None,
-                )
-
-            # Compute percentile for each stat
-            # Percentile = (number of players with lower average / total players) * 100
-            total = len(all_players)
-            invert_stats = {"avg_turnovers"}  # lower is better
-
-            percentiles = {}
-            for stat_name in stat_fields:
-                target_val = float(target_row[stat_name])
-                if stat_name in invert_stats:
-                    # For turnovers, fewer is better, so count players with HIGHER avg
-                    lower_count = sum(1 for r in all_players if float(r[stat_name]) > target_val)
-                else:
-                    lower_count = sum(1 for r in all_players if float(r[stat_name]) < target_val)
-                percentiles[stat_name] = round((lower_count / total) * 100)
-
-            return PlayerPercentilesResp(
-                status=ApiStatus.SUCCESS,
-                message="Percentiles calculated successfully",
-                data=PercentileData(**percentiles),
+        def _pool(start, end):
+            q = PlayerGameStats.select(
+                PlayerGameStats.player_id,
+                fn.COUNT(PlayerGameStats.id).alias("games"),
+                *[expr.alias(name) for name, expr in stat_fields.items()],
             )
+            if start is not None:
+                q = q.where(PlayerGameStats.game_date >= start)
+            if end is not None:
+                q = q.where(PlayerGameStats.game_date < end)
+            return list(q.group_by(PlayerGameStats.player_id).dicts())
 
-        except Exception as e:
-            log.error("get_player_percentiles_error", error=str(e), player_id=player_id)
-            return PlayerPercentilesResp(
-                status=ApiStatus.ERROR,
-                message="Internal server error",
-                data=None,
-            )
+        # Season-scoped pool (career-to-date otherwise); before opening night use last season.
+        opening = _season_opening_night()
+        all_players = _pool(opening, None)
+        if not all_players and opening is not None:
+            all_players = _pool(date(opening.year - 1, 8, 1), opening)
+        if not all_players:
+            # An empty pool is an empty state (pre-season), not a failure
+            return PlayerPercentilesResp(status=ApiStatus.SUCCESS, message="No qualifying players yet — percentiles start after opening night", data=None)
+
+        # The floor scales with how far into the season we are (half the max GP, at most min_games)
+        min_games = scaled_min_games(min_games, max(int(r["games"]) for r in all_players))
+        all_players = [r for r in all_players if int(r["games"]) >= min_games]
+        if not all_players:
+            # An empty pool is an empty state (pre-season), not a failure
+            return PlayerPercentilesResp(status=ApiStatus.SUCCESS, message="No qualifying players yet — percentiles start after opening night", data=None)
+
+        # Find target player's row
+        target_row = None
+        for row in all_players:
+            if row["player"] == player_id:
+                target_row = row
+                break
+
+        if target_row is None:
+            return PlayerPercentilesResp(status=ApiStatus.SUCCESS, message=f"Player does not meet minimum games threshold ({min_games})", data=None)
+
+        # Compute percentile for each stat
+        # Percentile = (number of players with lower average / total players) * 100
+        total = len(all_players)
+        invert_stats = {"avg_turnovers"}  # lower is better
+
+        percentiles = {}
+        for stat_name in stat_fields:
+            target_val = float(target_row[stat_name])
+            if stat_name in invert_stats:
+                # For turnovers, fewer is better, so count players with HIGHER avg
+                lower_count = sum(1 for r in all_players if float(r[stat_name]) > target_val)
+            else:
+                lower_count = sum(1 for r in all_players if float(r[stat_name]) < target_val)
+            percentiles[stat_name] = round((lower_count / total) * 100)
+
+        return PlayerPercentilesResp(
+            status=ApiStatus.SUCCESS,
+            message="Percentiles calculated successfully",
+            data=PercentileData(**percentiles),
+        )
+

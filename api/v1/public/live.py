@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, date
 import pytz
 from fastapi import APIRouter, Request
 
+from core.errors import ProviderError
 from core.logging import get_logger
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from db.models.nba.live_player_stats import LivePlayerStats
@@ -165,13 +166,10 @@ async def get_live_scoreboard(request: Request) -> dict:
     extractor = NBAApiExtractor()
     try:
         games = extractor.get_scoreboard_games(game_date)
-    except Exception as e:
-        log.error("live_scoreboard_error", error=str(e))
-        return {
-            "status": "error",
-            "message": "Failed to fetch live scoreboard",
-            "data": {"game_date": str(game_date), "games": []},
-        }
+    except Exception as exc:
+        # The NBA CDN is a provider like ESPN/Yahoo: a 502 the frontend treats as retryable
+        log.warning("live_scoreboard_error", error=type(exc).__name__, detail=str(exc)[:200])
+        raise ProviderError("nba", "NBA scoreboard unavailable — retry in a minute") from exc
 
     status_labels = {1: "scheduled", 2: "in_progress", 3: "final"}
 

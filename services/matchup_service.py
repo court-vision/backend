@@ -1,5 +1,6 @@
 from datetime import datetime, date as date_type, timedelta
 
+from core.errors import NotFoundError
 from services.espn_service import EspnService
 from services.matchup_days import (
     build_day, comparison_to_schema, make_nba_id_resolver, nba_today as _nba_today, score_stat_row,
@@ -72,17 +73,13 @@ class MatchupService:
             avg_window: Averaging window for projections
 
         Returns:
-            MatchupResp with matchup data or error
+            MatchupResp with matchup data; SUCCESS with data=None when there is no current
+            matchup (bye week / offseason). Provider failures raise typed AppErrors.
         """
-        # Get the team's league info
+        # The team's stored league info (view_team itself raises TEAM_NOT_FOUND for an unknown id)
         team_resp = await TeamService.view_team(team_id)
-
         if team_resp.status != ApiStatus.SUCCESS or not team_resp.data:
-            return MatchupResp(
-                status=ApiStatus.NOT_FOUND,
-                message=f"Team with ID {team_id} not found",
-                data=None
-            )
+            raise NotFoundError("TEAM_NOT_FOUND", f"Team with ID {team_id} not found")
 
         league_info = team_resp.data.league_info
 
@@ -368,76 +365,65 @@ class MatchupService:
 
         Returns:
             MatchupScoreHistoryResp with daily score snapshots for charting
+
+        Raises:
+            NotFoundError (404 SCORE_HISTORY_NOT_FOUND) when nothing has been recorded yet;
+            the frontend treats that 404 as "no history" (nullOn404).
         """
-        try:
-            query = (
+        query = (
+            DailyMatchupScore
+            .select()
+            .where(DailyMatchupScore.team_id == team_id)
+        )
+
+        if matchup_period is not None:
+            query = query.where(DailyMatchupScore.matchup_period == matchup_period)
+        else:
+            # Get the latest matchup period for this team
+            latest = (
                 DailyMatchupScore
-                .select()
+                .select(DailyMatchupScore.matchup_period)
                 .where(DailyMatchupScore.team_id == team_id)
+                .order_by(DailyMatchupScore.matchup_period.desc())
+                .limit(1)
+                .first()
             )
+            if not latest:
+                raise NotFoundError("SCORE_HISTORY_NOT_FOUND", "No score history found for this team")
+            query = query.where(DailyMatchupScore.matchup_period == latest.matchup_period)
 
-            if matchup_period is not None:
-                query = query.where(DailyMatchupScore.matchup_period == matchup_period)
-            else:
-                # Get the latest matchup period for this team
-                latest = (
-                    DailyMatchupScore
-                    .select(DailyMatchupScore.matchup_period)
-                    .where(DailyMatchupScore.team_id == team_id)
-                    .order_by(DailyMatchupScore.matchup_period.desc())
-                    .limit(1)
-                    .first()
-                )
-                if not latest:
-                    return MatchupScoreHistoryResp(
-                        status=ApiStatus.NOT_FOUND,
-                        message="No score history found for this team",
-                        data=None
-                    )
-                query = query.where(DailyMatchupScore.matchup_period == latest.matchup_period)
+        records = list(query.order_by(DailyMatchupScore.day_of_matchup.asc()))
 
-            records = list(query.order_by(DailyMatchupScore.day_of_matchup.asc()))
+        if not records:
+            raise NotFoundError("SCORE_HISTORY_NOT_FOUND", "No score history found for this matchup period")
 
-            if not records:
-                return MatchupScoreHistoryResp(
-                    status=ApiStatus.NOT_FOUND,
-                    message="No score history found for this matchup period",
-                    data=None
-                )
-
-            first_record = records[0]
-            history = [
-                DailyScorePoint(
-                    date=record.date.isoformat(),
-                    day_of_matchup=record.day_of_matchup,
-                    your_score=float(record.current_score),
-                    opponent_score=float(record.opponent_current_score),
-                    your_categories=(record.category_scores or {}).get("you") if record.category_scores else None,
-                    opponent_categories=(record.category_scores or {}).get("opp") if record.category_scores else None,
-                )
-                for record in records
-            ]
-            history_format = "categories" if any(r.category_scores for r in records) else "points"
-
-            return MatchupScoreHistoryResp(
-                status=ApiStatus.SUCCESS,
-                message="Score history retrieved successfully",
-                data=MatchupScoreHistory(
-                    team_id=team_id,
-                    team_name=first_record.team_name,
-                    opponent_team_name=first_record.opponent_team_name,
-                    matchup_period=first_record.matchup_period,
-                    history=history,
-                    scoring_format=history_format,
-                )
+        first_record = records[0]
+        history = [
+            DailyScorePoint(
+                date=record.date.isoformat(),
+                day_of_matchup=record.day_of_matchup,
+                your_score=float(record.current_score),
+                opponent_score=float(record.opponent_current_score),
+                your_categories=(record.category_scores or {}).get("you") if record.category_scores else None,
+                opponent_categories=(record.category_scores or {}).get("opp") if record.category_scores else None,
             )
+            for record in records
+        ]
+        history_format = "categories" if any(r.category_scores for r in records) else "points"
 
-        except Exception as e:
-            return MatchupScoreHistoryResp(
-                status=ApiStatus.ERROR,
-                message=f"Failed to fetch score history: {str(e)}",
-                data=None
+        return MatchupScoreHistoryResp(
+            status=ApiStatus.SUCCESS,
+            message="Score history retrieved successfully",
+            data=MatchupScoreHistory(
+                team_id=team_id,
+                team_name=first_record.team_name,
+                opponent_team_name=first_record.opponent_team_name,
+                matchup_period=first_record.matchup_period,
+                history=history,
+                scoring_format=history_format,
             )
+        )
+
 
     @staticmethod
     async def get_daily_matchup(

@@ -1,7 +1,7 @@
 from datetime import datetime
-import requests
+from core.errors import BadRequestError
 from core.logging import get_logger
-from core.settings import settings
+from services.providers.http import provider_get
 from services.player_value_service import PlayerValueService, ValueResult
 from services.scoring.models import CategoryTeamScoreData, StatLine
 from services.scoring.providers.espn_settings import parse_espn_category_score, statline_from_espn_stats
@@ -108,28 +108,33 @@ class EspnService:
         league_info.year = int(league_info.year)
         league_info.league_id = int(league_info.league_id)
         league_info.team_name = league_info.team_name.strip(" \t\n\r")
-        league_info.espn_s2 = league_info.espn_s2.strip(" \t\n\r")
-        league_info.swid = league_info.swid.strip(" \t\n\r")
+        league_info.espn_s2 = (league_info.espn_s2 or "").strip(" \t\n\r")
+        league_info.swid = (league_info.swid or "").strip(" \t\n\r")
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
 
-        try:
-            response = requests.get(endpoint, params=params, cookies={'espn_s2': league_info.espn_s2, 'SWID': league_info.swid}, timeout=settings.http_timeout)
-            response.raise_for_status()
-            data = response.json()
-            teams = [team['name'] for team in data['teams']]
-            if league_info.team_name in teams:
-                # league_payload is excluded from serialization; LeagueService reuses it for settings sync
-                return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found", league_payload=data)
-            return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=False, message="Team not found in valid league")
-        except requests.exceptions.HTTPError as e:
-            return ValidateLeagueResp(status=ApiStatus.ERROR, valid=False, message=f"Invalid league information {e}")
+        # Rejected cookies (403 PROVIDER_AUTH_EXPIRED), an unknown league (400 LEAGUE_NOT_FOUND) and an
+        # ESPN outage (502/504) raise from provider_get; only "this team isn't in the league" is valid=False.
+        data = provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
+        teams = [team['name'] for team in data['teams']]
+        if league_info.team_name in teams:
+            # league_payload is excluded from serialization; LeagueService reuses it for settings sync
+            return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found", league_payload=data)
+        return ValidateLeagueResp(
+            status=ApiStatus.SUCCESS, valid=False, error_code="TEAM_NAME_NOT_IN_LEAGUE",
+            message=f"Team '{league_info.team_name}' not found in league {league_info.league_id}; teams: {', '.join(teams)}",
+        )
 
     @staticmethod
     def get_roster(team_name, teams):
         for team in teams:
             if team_name.strip() == team['name']:
                 return team['roster']['entries']
+        return None
+
+    @staticmethod
+    def _cookies(league_info: LeagueInfo) -> dict:
+        return {'espn_s2': league_info.espn_s2, 'SWID': league_info.swid}
 
     @staticmethod
     def _scoring_for(league_info: LeagueInfo) -> ResolvedScoring:
@@ -187,58 +192,45 @@ class EspnService:
 
     @staticmethod
     async def get_team_data(league_info: LeagueInfo, fa_count: int = 0) -> TeamDataResp:
-        try:
-            params = {
-                    'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
-                }
+        params = {
+            'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
+        }
+        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+        data = provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
 
-            cookies = {
-                'espn_s2': league_info.espn_s2,
-                'SWID': league_info.swid
-            }
-
-            endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            data = requests.get(endpoint, params=params, cookies=cookies, timeout=settings.http_timeout).json()
-            roster = EspnService.get_roster(league_info.team_name, data['teams'])
-            players = [Player(player, league_info.year) for player in roster]
-
-            return TeamDataResp(
-                status=ApiStatus.SUCCESS,
-                message="Team data fetched successfully",
-                data=EspnService._to_player_resps(players, league_info),
+        roster = EspnService.get_roster(league_info.team_name, data['teams'])
+        if roster is None:
+            raise BadRequestError(
+                "TEAM_NAME_NOT_IN_LEAGUE",
+                f"Team '{league_info.team_name}' not found in league {league_info.league_id}",
             )
-        except Exception as e:
-            print(f"Error in get_team_data: {e}")
-            return TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
+        players = [Player(player, league_info.year) for player in roster]
+
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Team data fetched successfully",
+            data=EspnService._to_player_resps(players, league_info),
+        )
 
     @staticmethod
     async def get_free_agents(league_info: LeagueInfo, fa_count: int) -> TeamDataResp:
-        try:
-            params = {
-                'view': 'kona_player_info',
-                'scoringPeriodId': 0,
-            }
+        params = {
+            'view': 'kona_player_info',
+            'scoringPeriodId': 0,
+        }
+        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
+        headers = {'x-fantasy-filter': json.dumps(filters)}
 
-            filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
-            headers = {'x-fantasy-filter': json.dumps(filters)}
+        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+        data = provider_get("espn", endpoint, params=params, headers=headers,
+                            cookies=EspnService._cookies(league_info), expect_key="players")
+        players = [Player(player, league_info.year) for player in data['players']]
 
-            cookies = {
-                'espn_s2': league_info.espn_s2,
-                'SWID': league_info.swid
-            }
-
-            endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            data = requests.get(endpoint, params=params, headers=headers, cookies=cookies, timeout=settings.http_timeout).json()
-            players = [Player(player, league_info.year) for player in data['players']]
-
-            return TeamDataResp(
-                status=ApiStatus.SUCCESS,
-                message="Free agents fetched successfully",
-                data=EspnService._to_player_resps(players, league_info),
-            )
-        except Exception as e:
-            print(f"Error in get_free_agents: {e}")
-            return TeamDataResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Free agents fetched successfully",
+            data=EspnService._to_player_resps(players, league_info),
+        )
 
     @staticmethod
     def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:
@@ -250,8 +242,7 @@ class EspnService:
         filters = {"players":{"filterSlotIds":{"value":[]},"limit": 750, "sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":2,"sortAsc":True,"value":"STANDARD"}}}
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
-        data = requests.get(endpoint, params=params, headers=headers, timeout=settings.http_timeout).json()
-        data = data['players']
+        data = provider_get("espn", endpoint, params=params, headers=headers, expect_key="players")['players']
         data = [x.get('player', x) for x in data]
 
         cleaned_data = []
@@ -295,287 +286,276 @@ class EspnService:
             avg_window: Averaging window for projections (season, last_7, last_14, last_30)
 
         Returns:
-            MatchupResp with current matchup data including both teams and projections
+            MatchupResp with current matchup data including both teams and projections;
+            SUCCESS with data=None when there is no matchup (bye week / offseason).
+
+        Raises:
+            BadRequestError (TEAM_NAME_NOT_IN_LEAGUE) when the stored team name is not in the
+            league; ProviderAuthError / ProviderError / ProviderTimeout from provider_get.
         """
         scoring = scoring or resolve_scoring(None)
-        try:
-            params = {
-                'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
-            }
+        params = {
+            'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
+        }
 
-            cookies = {
-                'espn_s2': league_info.espn_s2,
-                'SWID': league_info.swid
-            }
+        cookies = {
+            'espn_s2': league_info.espn_s2,
+            'SWID': league_info.swid
+        }
 
-            endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-            response = requests.get(endpoint, params=params, cookies=cookies, timeout=settings.http_timeout)
-            response.raise_for_status()
-            data = response.json()
+        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+        data = provider_get("espn", endpoint, params=params, cookies=cookies, expect_key="teams")
 
-            # Get current matchup period from ESPN
-            status = data.get('status', {})
-            current_matchup_period = status.get('currentMatchupPeriod', 1)
-            latest_scoring_period = status.get('latestScoringPeriod')
+        # Get current matchup period from ESPN
+        status = data.get('status', {})
+        current_matchup_period = status.get('currentMatchupPeriod', 1)
+        latest_scoring_period = status.get('latestScoringPeriod')
 
-            # Resolve matchup period dates via ESPN's scoring period map (handles playoffs).
-            # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
-            league_settings = data.get('settings', {})
-            matchup_period_map = league_settings.get('scheduleSettings', {}).get('matchupPeriods', {})
-            # matchupPeriods values are WEEK ids; status.latestScoringPeriod is a
-            # DAY index. The resolver indexes the weekly ids into our calendar and
-            # falls back to the calendar week containing the day if they disagree.
-            matchup_dates = get_espn_matchup_dates(
-                matchup_period_map, current_matchup_period, latest_scoring_period
-            )
-            matchup_start_date = matchup_dates[0] if matchup_dates else None
-            matchup_end_date = matchup_dates[1] if matchup_dates else None
+        # Resolve matchup period dates via ESPN's scoring period map (handles playoffs).
+        # During playoffs, one matchup period spans multiple scoring periods (e.g., [21, 22]).
+        league_settings = data.get('settings', {})
+        matchup_period_map = league_settings.get('scheduleSettings', {}).get('matchupPeriods', {})
+        # matchupPeriods values are WEEK ids; status.latestScoringPeriod is a
+        # DAY index. The resolver indexes the weekly ids into our calendar and
+        # falls back to the calendar week containing the day if they disagree.
+        matchup_dates = get_espn_matchup_dates(
+            matchup_period_map, current_matchup_period, latest_scoring_period
+        )
+        matchup_start_date = matchup_dates[0] if matchup_dates else None
+        matchup_end_date = matchup_dates[1] if matchup_dates else None
 
-            # Find our team
-            teams = data.get('teams', [])
-            our_team = None
-            our_team_id = None
-            for team in teams:
-                if team.get('name', '').strip() == league_info.team_name.strip():
-                    our_team = team
-                    our_team_id = team.get('id')
-                    break
+        # Find our team
+        teams = data.get('teams', [])
+        our_team = None
+        our_team_id = None
+        for team in teams:
+            if team.get('name', '').strip() == league_info.team_name.strip():
+                our_team = team
+                our_team_id = team.get('id')
+                break
 
-            if not our_team:
-                return MatchupResp(
-                    status=ApiStatus.NOT_FOUND,
-                    message=f"Team '{league_info.team_name}' not found in league",
-                    data=None
-                )
-
-            # Find current matchup from schedule
-            schedule = data.get('schedule', [])
-            current_matchup = None
-            opponent_team_id = None
-
-            for matchup in schedule:
-                if matchup.get('matchupPeriodId') == current_matchup_period:
-                    home_team_id = matchup.get('home', {}).get('teamId')
-                    away_team_id = matchup.get('away', {}).get('teamId')
-
-                    if home_team_id == our_team_id:
-                        current_matchup = matchup
-                        opponent_team_id = away_team_id
-                        break
-                    elif away_team_id == our_team_id:
-                        current_matchup = matchup
-                        opponent_team_id = home_team_id
-                        break
-
-            if not current_matchup:
-                return MatchupResp(
-                    status=ApiStatus.NOT_FOUND,
-                    message="No current matchup found (possibly bye week)",
-                    data=None
-                )
-
-            # Find opponent team
-            opponent_team = None
-            for team in teams:
-                if team.get('id') == opponent_team_id:
-                    opponent_team = team
-                    break
-
-            if not opponent_team:
-                return MatchupResp(
-                    status=ApiStatus.NOT_FOUND,
-                    message="Opponent team not found",
-                    data=None
-                )
-
-            # Extract current scores
-            home_data = current_matchup.get('home', {})
-            away_data = current_matchup.get('away', {})
-
-            is_home = home_data.get('teamId') == our_team_id
-            our_score = home_data.get('totalPoints', 0) if is_home else away_data.get('totalPoints', 0)
-            opponent_score = away_data.get('totalPoints', 0) if is_home else home_data.get('totalPoints', 0)
-
-            your_cat = opp_cat = None
-            if scoring.is_categories:
-                your_cat = parse_espn_category_score(home_data if is_home else away_data) or CategoryTeamScoreData(totals={})
-                opp_cat = parse_espn_category_score(away_data if is_home else home_data) or CategoryTeamScoreData(totals={})
-
-            # Build roster responses
-            stat_key = f"{league_info.year}_{AVG_WINDOW_MAP.get(avg_window, 'total')}"
-            projected_key = f"{league_info.year}_projected"
-
-            window_prefix = {'season': '00', 'last_7': '01', 'last_14': '02', 'last_30': '03'}.get(avg_window, '00')
-
-            def _entry_player(entry: dict) -> dict:
-                return entry.get('playerPoolEntry', {}).get('player', {}) or entry.get('player', {})
-
-            # Our own per-player values for both rosters in one lookup: the category value
-            # for category leagues (so matchup figures agree with the streamer finder and the
-            # optimizer), and the rolling/baseline fpts that stands in when ESPN has no
-            # average yet (opening week) for points leagues.
-            our_values = EspnService._values_for(scoring, [
-                _entry_player(entry).get('id', 0)
-                for team_data in (our_team, opponent_team)
-                for entry in team_data.get('roster', {}).get('entries', [])
-            ])
-
-            def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float, list]:
-                """Build roster list and calculate projected score."""
-                roster_entries = team_data.get('roster', {}).get('entries', [])
-                players = []
-                projected_total = 0.0
-                proj_inputs = []
-
-                team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
-
-                for entry in roster_entries:
-                    player_data = _entry_player(entry)
-
-                    player_id = player_data.get('id', 0)
-                    name = player_data.get('fullName', 'Unknown')
-                    pro_team_id = player_data.get('proTeamId', 0)
-                    team_abbrev = PRO_TEAM_MAP.get(pro_team_id, 'FA')
-                    team_abbrev = team_abbrev_corrections.get(team_abbrev, team_abbrev)
-
-                    position = POSITION_MAP.get(player_data.get('defaultPositionId', 0) - 1, '')
-                    lineup_slot_id = entry.get('lineupSlotId', 0)
-                    lineup_slot = POSITION_MAP.get(lineup_slot_id, '')
-
-                    injured = player_data.get('injured', False)
-                    injury_status = player_data.get('injuryStatus')
-
-                    # Get stats for the selected window
-                    stats = player_data.get('stats', [])
-                    avg_points = 0.0
-                    projected_points = 0.0
-
-                    avg_line = StatLine()
-                    for stat_split in stats:
-                        if stat_split.get('seasonId') == league_info.year:
-                            stat_id = str(stat_split.get('id', ''))
-                            if stat_id.startswith(window_prefix):
-                                avg_points = round(stat_split.get('appliedAverage', 0) or 0, 2)
-                                avg_line = statline_from_espn_stats(stat_split.get('averageStats'))
-                            elif stat_id.startswith('10'):  # Projected
-                                projected_points = round(stat_split.get('appliedTotal', 0), 2)
-                    ours = our_values.get(player_id)
-                    if ours is not None and ours.value is not None and (scoring.is_categories or not avg_points):
-                        avg_points = ours.value
-                    elif not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
-                        # Last resort (no stored stats for this player): value the player with the
-                        # league's point weights (default formula) over ESPN's raw averages.
-                        avg_points = round(scoring.points.score(avg_line), 2)
-                    
-                    # Calculate games remaining for this player using schedule service
-                    games_remaining = get_remaining_games(team_abbrev)
-
-                    # Only add to projection if not on IR and not injured
-                    counts_toward_projection = lineup_slot not in ('IR', '') and not injured
-                    if counts_toward_projection:
-                        projected_total += avg_points * games_remaining
-                    proj_inputs.append((avg_line, games_remaining, counts_toward_projection))
-
-                    players.append(MatchupPlayerResp(
-                        player_id=player_id,
-                        name=name,
-                        team=team_abbrev,
-                        position=position,
-                        lineup_slot=lineup_slot,
-                        avg_points=avg_points,
-                        projected_points=projected_points,
-                        games_remaining=games_remaining,
-                        injured=injured,
-                        injury_status=injury_status
-                    ))
-
-                return players, projected_total, proj_inputs
-
-            our_roster, our_projected, our_inputs = build_roster(our_team)
-            opponent_roster, opponent_projected, opp_inputs = build_roster(opponent_team)
-
-            category_comparison = projected_category_comparison = None
-            your_cat_schema = opp_cat_schema = None
-            if scoring.is_categories and scoring.categories is not None:
-                cats = scoring.categories
-                current_cmp = cats.compare(your_cat.totals, opp_cat.totals)
-                if (your_cat.wins + your_cat.losses + your_cat.ties) == 0:
-                    your_cat.wins, your_cat.losses, your_cat.ties = current_cmp.wins, current_cmp.losses, current_cmp.ties
-                    opp_cat.wins, opp_cat.losses, opp_cat.ties = current_cmp.losses, current_cmp.wins, current_cmp.ties
-                proj_cmp = cats.compare(cats.project(your_cat, our_inputs), cats.project(opp_cat, opp_inputs))
-                category_comparison = EspnService._comparison_schema(current_cmp)
-                projected_category_comparison = EspnService._comparison_schema(proj_cmp)
-                your_cat_schema = CategoryTeamScore(**your_cat.__dict__)
-                opp_cat_schema = CategoryTeamScore(**opp_cat.__dict__)
-                # Scalars keep the frontend contract: categories won now / projected
-                our_score, opponent_score = float(your_cat.wins), float(your_cat.losses)
-                our_final_projection, opponent_final_projection = float(proj_cmp.wins), float(proj_cmp.losses)
-                projected_margin = float(proj_cmp.wins - proj_cmp.losses)
-            else:
-                # Add current scores to projections
-                our_final_projection = our_score + our_projected
-                opponent_final_projection = opponent_score + opponent_projected
-                projected_margin = round(abs(our_final_projection - opponent_final_projection), 2)
-
-            # Determine winner
-            if our_final_projection > opponent_final_projection:
-                projected_winner = our_team.get('name', 'Your Team')
-            elif opponent_final_projection > our_final_projection:
-                projected_winner = opponent_team.get('name', 'Opponent')
-            else:
-                projected_winner = "Tie"
-
-            # Our calendar week containing the period start (what the optimizer indexes by)
-            _week = get_current_matchup(matchup_start_date) if matchup_start_date else None
-            schedule_week = _week["matchup_number"] if _week else None
-
-            # Build response
-            matchup_data = MatchupData(
-                matchup_period=current_matchup_period,
-                schedule_week=schedule_week,
-                matchup_period_start=matchup_start_date.isoformat() if matchup_start_date else "",
-                matchup_period_end=matchup_end_date.isoformat() if matchup_end_date else "",
-                your_team=MatchupTeamResp(
-                    team_name=our_team.get('name', 'Your Team'),
-                    team_id=our_team_id,
-                    current_score=round(our_score, 2),
-                    projected_score=round(our_final_projection, 2),
-                    roster=our_roster,
-                    categories=your_cat_schema,
-                ),
-                opponent_team=MatchupTeamResp(
-                    team_name=opponent_team.get('name', 'Opponent'),
-                    team_id=opponent_team_id,
-                    current_score=round(opponent_score, 2),
-                    projected_score=round(opponent_final_projection, 2),
-                    roster=opponent_roster,
-                    categories=opp_cat_schema,
-                ),
-                projected_winner=projected_winner,
-                projected_margin=projected_margin,
-                scoring_period_id=latest_scoring_period,
-                scoring_format=scoring.format,
-                settings_synced=scoring.settings_synced,
-                category_comparison=category_comparison,
-                projected_category_comparison=projected_category_comparison,
+        if not our_team:
+            raise BadRequestError(
+                "TEAM_NAME_NOT_IN_LEAGUE",
+                f"Team '{league_info.team_name}' not found in league {league_info.league_id}",
             )
 
+        # Find current matchup from schedule
+        schedule = data.get('schedule', [])
+        current_matchup = None
+        opponent_team_id = None
+
+        for matchup in schedule:
+            if matchup.get('matchupPeriodId') == current_matchup_period:
+                home_team_id = matchup.get('home', {}).get('teamId')
+                away_team_id = matchup.get('away', {}).get('teamId')
+
+                if home_team_id == our_team_id:
+                    current_matchup = matchup
+                    opponent_team_id = away_team_id
+                    break
+                elif away_team_id == our_team_id:
+                    current_matchup = matchup
+                    opponent_team_id = home_team_id
+                    break
+
+        if not current_matchup:
+            # An empty state, not a failure (bye week / offseason): 200 with data: null
             return MatchupResp(
                 status=ApiStatus.SUCCESS,
-                message="Matchup data fetched successfully",
-                data=matchup_data
+                message="No current matchup found (possibly bye week)",
+                data=None
             )
 
-        except requests.exceptions.HTTPError as e:
+        # Find opponent team
+        opponent_team = None
+        for team in teams:
+            if team.get('id') == opponent_team_id:
+                opponent_team = team
+                break
+
+        if not opponent_team:
             return MatchupResp(
-                status=ApiStatus.ERROR,
-                message=f"ESPN API error: {str(e)}",
+                status=ApiStatus.SUCCESS,
+                message="Opponent team not found for this matchup period",
                 data=None
             )
-        except Exception as e:
-            print(f"Error in get_matchup_data: {e}")
-            return MatchupResp(
-                status=ApiStatus.ERROR,
-                message=f"Internal server error: {str(e)}",
-                data=None
-            )
+
+        # Extract current scores
+        home_data = current_matchup.get('home', {})
+        away_data = current_matchup.get('away', {})
+
+        is_home = home_data.get('teamId') == our_team_id
+        our_score = home_data.get('totalPoints', 0) if is_home else away_data.get('totalPoints', 0)
+        opponent_score = away_data.get('totalPoints', 0) if is_home else home_data.get('totalPoints', 0)
+
+        your_cat = opp_cat = None
+        if scoring.is_categories:
+            your_cat = parse_espn_category_score(home_data if is_home else away_data) or CategoryTeamScoreData(totals={})
+            opp_cat = parse_espn_category_score(away_data if is_home else home_data) or CategoryTeamScoreData(totals={})
+
+        # Build roster responses
+        stat_key = f"{league_info.year}_{AVG_WINDOW_MAP.get(avg_window, 'total')}"
+        projected_key = f"{league_info.year}_projected"
+
+        window_prefix = {'season': '00', 'last_7': '01', 'last_14': '02', 'last_30': '03'}.get(avg_window, '00')
+
+        def _entry_player(entry: dict) -> dict:
+            return entry.get('playerPoolEntry', {}).get('player', {}) or entry.get('player', {})
+
+        # Our own per-player values for both rosters in one lookup: the category value
+        # for category leagues (so matchup figures agree with the streamer finder and the
+        # optimizer), and the rolling/baseline fpts that stands in when ESPN has no
+        # average yet (opening week) for points leagues.
+        our_values = EspnService._values_for(scoring, [
+            _entry_player(entry).get('id', 0)
+            for team_data in (our_team, opponent_team)
+            for entry in team_data.get('roster', {}).get('entries', [])
+        ])
+
+        def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float, list]:
+            """Build roster list and calculate projected score."""
+            roster_entries = team_data.get('roster', {}).get('entries', [])
+            players = []
+            projected_total = 0.0
+            proj_inputs = []
+
+            team_abbrev_corrections = TEAM_ABBREV_CORRECTIONS
+
+            for entry in roster_entries:
+                player_data = _entry_player(entry)
+
+                player_id = player_data.get('id', 0)
+                name = player_data.get('fullName', 'Unknown')
+                pro_team_id = player_data.get('proTeamId', 0)
+                team_abbrev = PRO_TEAM_MAP.get(pro_team_id, 'FA')
+                team_abbrev = team_abbrev_corrections.get(team_abbrev, team_abbrev)
+
+                position = POSITION_MAP.get(player_data.get('defaultPositionId', 0) - 1, '')
+                lineup_slot_id = entry.get('lineupSlotId', 0)
+                lineup_slot = POSITION_MAP.get(lineup_slot_id, '')
+
+                injured = player_data.get('injured', False)
+                injury_status = player_data.get('injuryStatus')
+
+                # Get stats for the selected window
+                stats = player_data.get('stats', [])
+                avg_points = 0.0
+                projected_points = 0.0
+
+                avg_line = StatLine()
+                for stat_split in stats:
+                    if stat_split.get('seasonId') == league_info.year:
+                        stat_id = str(stat_split.get('id', ''))
+                        if stat_id.startswith(window_prefix):
+                            avg_points = round(stat_split.get('appliedAverage', 0) or 0, 2)
+                            avg_line = statline_from_espn_stats(stat_split.get('averageStats'))
+                        elif stat_id.startswith('10'):  # Projected
+                            projected_points = round(stat_split.get('appliedTotal', 0), 2)
+                ours = our_values.get(player_id)
+                if ours is not None and ours.value is not None and (scoring.is_categories or not avg_points):
+                    avg_points = ours.value
+                elif not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
+                    # Last resort (no stored stats for this player): value the player with the
+                    # league's point weights (default formula) over ESPN's raw averages.
+                    avg_points = round(scoring.points.score(avg_line), 2)
+
+                # Calculate games remaining for this player using schedule service
+                games_remaining = get_remaining_games(team_abbrev)
+
+                # Only add to projection if not on IR and not injured
+                counts_toward_projection = lineup_slot not in ('IR', '') and not injured
+                if counts_toward_projection:
+                    projected_total += avg_points * games_remaining
+                proj_inputs.append((avg_line, games_remaining, counts_toward_projection))
+
+                players.append(MatchupPlayerResp(
+                    player_id=player_id,
+                    name=name,
+                    team=team_abbrev,
+                    position=position,
+                    lineup_slot=lineup_slot,
+                    avg_points=avg_points,
+                    projected_points=projected_points,
+                    games_remaining=games_remaining,
+                    injured=injured,
+                    injury_status=injury_status
+                ))
+
+            return players, projected_total, proj_inputs
+
+        our_roster, our_projected, our_inputs = build_roster(our_team)
+        opponent_roster, opponent_projected, opp_inputs = build_roster(opponent_team)
+
+        category_comparison = projected_category_comparison = None
+        your_cat_schema = opp_cat_schema = None
+        if scoring.is_categories and scoring.categories is not None:
+            cats = scoring.categories
+            current_cmp = cats.compare(your_cat.totals, opp_cat.totals)
+            if (your_cat.wins + your_cat.losses + your_cat.ties) == 0:
+                your_cat.wins, your_cat.losses, your_cat.ties = current_cmp.wins, current_cmp.losses, current_cmp.ties
+                opp_cat.wins, opp_cat.losses, opp_cat.ties = current_cmp.losses, current_cmp.wins, current_cmp.ties
+            proj_cmp = cats.compare(cats.project(your_cat, our_inputs), cats.project(opp_cat, opp_inputs))
+            category_comparison = EspnService._comparison_schema(current_cmp)
+            projected_category_comparison = EspnService._comparison_schema(proj_cmp)
+            your_cat_schema = CategoryTeamScore(**your_cat.__dict__)
+            opp_cat_schema = CategoryTeamScore(**opp_cat.__dict__)
+            # Scalars keep the frontend contract: categories won now / projected
+            our_score, opponent_score = float(your_cat.wins), float(your_cat.losses)
+            our_final_projection, opponent_final_projection = float(proj_cmp.wins), float(proj_cmp.losses)
+            projected_margin = float(proj_cmp.wins - proj_cmp.losses)
+        else:
+            # Add current scores to projections
+            our_final_projection = our_score + our_projected
+            opponent_final_projection = opponent_score + opponent_projected
+            projected_margin = round(abs(our_final_projection - opponent_final_projection), 2)
+
+        # Determine winner
+        if our_final_projection > opponent_final_projection:
+            projected_winner = our_team.get('name', 'Your Team')
+        elif opponent_final_projection > our_final_projection:
+            projected_winner = opponent_team.get('name', 'Opponent')
+        else:
+            projected_winner = "Tie"
+
+        # Our calendar week containing the period start (what the optimizer indexes by)
+        _week = get_current_matchup(matchup_start_date) if matchup_start_date else None
+        schedule_week = _week["matchup_number"] if _week else None
+
+        # Build response
+        matchup_data = MatchupData(
+            matchup_period=current_matchup_period,
+            schedule_week=schedule_week,
+            matchup_period_start=matchup_start_date.isoformat() if matchup_start_date else "",
+            matchup_period_end=matchup_end_date.isoformat() if matchup_end_date else "",
+            your_team=MatchupTeamResp(
+                team_name=our_team.get('name', 'Your Team'),
+                team_id=our_team_id,
+                current_score=round(our_score, 2),
+                projected_score=round(our_final_projection, 2),
+                roster=our_roster,
+                categories=your_cat_schema,
+            ),
+            opponent_team=MatchupTeamResp(
+                team_name=opponent_team.get('name', 'Opponent'),
+                team_id=opponent_team_id,
+                current_score=round(opponent_score, 2),
+                projected_score=round(opponent_final_projection, 2),
+                roster=opponent_roster,
+                categories=opp_cat_schema,
+            ),
+            projected_winner=projected_winner,
+            projected_margin=projected_margin,
+            scoring_period_id=latest_scoring_period,
+            scoring_format=scoring.format,
+            settings_synced=scoring.settings_synced,
+            category_comparison=category_comparison,
+            projected_category_comparison=projected_category_comparison,
+        )
+
+        return MatchupResp(
+            status=ApiStatus.SUCCESS,
+            message="Matchup data fetched successfully",
+            data=matchup_data
+        )
+

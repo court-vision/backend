@@ -3,6 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from core.clerk_auth import get_current_user
+from core.responses import respond
 from schemas.breakout import BreakoutResp
 from schemas.streamer import StreamerReq, StreamerResp
 from services.breakout_service import BreakoutService
@@ -46,7 +47,7 @@ async def find_streamers(req: StreamerReq, _: dict = Depends(get_current_user)) 
     - target_day: Day index for daily mode (0-indexed). If null, uses current day.
     - avg_days: Number of days for rolling average (default 7, range 3-30)
     """
-    return await StreamerService.find_streamers(
+    return respond(await StreamerService.find_streamers(
         league_info=req.league_info,
         fa_count=req.fa_count,
         exclude_injured=req.exclude_injured,
@@ -54,4 +55,4 @@ async def find_streamers(req: StreamerReq, _: dict = Depends(get_current_user)) 
         mode=req.mode,
         target_day=req.target_day,
         avg_days=req.avg_days
-    )
+    ))

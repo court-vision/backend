@@ -13,10 +13,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-import requests
-
 from core.logging import get_logger
-from core.settings import settings
 from db.models.leagues import League
 from db.models.teams import Team
 from schemas.common import FantasyProvider, LeagueInfo
@@ -25,6 +22,7 @@ from services.scoring.models import CategoryDef, LeagueSettings
 from services.scoring.providers.espn_settings import parse_espn_settings
 from services.scoring.vocab import DEFAULT_CATEGORIES
 from services.scoring.providers.yahoo_settings import fetch_yahoo_league_settings, parse_yahoo_settings
+from services.providers.http import provider_get
 from utils.constants import ESPN_FANTASY_ENDPOINT
 
 log = get_logger()
@@ -63,22 +61,22 @@ class LeagueService:
 
             payload = espn_payload
             if payload is None:
-                resp = requests.get(
+                payload = provider_get(
+                    "espn",
                     ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
                     params={"view": "mSettings"},
                     cookies={"espn_s2": league_info.espn_s2, "SWID": league_info.swid},
-                    timeout=settings.http_timeout,
+                    expect_key="settings",
                 )
-                resp.raise_for_status()
-                payload = resp.json()
             parsed = parse_espn_settings(payload)
             if not parsed.provider_league_id:
                 parsed.provider_league_id = str(league_info.league_id)
             if not parsed.season:
                 parsed.season = int(league_info.year)
             return parsed
-        except Exception as exc:  # provider outages must never break team flows
-            log.warning("league_settings_fetch_failed", provider=provider, team_id=team_id, error=str(exc))
+        except Exception as exc:  # provider outages (typed AppErrors included) must never break team flows
+            log.warning("league_settings_fetch_failed", provider=provider, team_id=team_id,
+                        error=str(exc), error_code=getattr(exc, "error_code", None))
             return None
 
     # ---- persistence ---------------------------------------------------------

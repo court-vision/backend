@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from services.lineup_service import LineupService
 from schemas.lineup import GenerateLineupReq, SaveLineupReq, GetLineupsResp, SaveLineupResp, DeleteLineupResp, GenerateLineupResp
 from api.deps import get_db_user, get_owned_lineup, ensure_team_owned
+from core.responses import respond
 from db.models.users import User
 from db.models.lineups import Lineup
 from services.schedule_service import get_matchup_by_number
@@ -15,7 +16,7 @@ async def generate_lineup(req: GenerateLineupReq, user: User = Depends(get_db_us
     # reject unknown weeks here with a clear error instead.
     if get_matchup_by_number(req.week) is None:
         raise HTTPException(status_code=422, detail=f"Week {req.week} is not in the season calendar")
-    return await LineupService.generate_lineup(user.user_id, req.team_id, req.streaming_slots, req.week, req.avg_mode)
+    return respond(await LineupService.generate_lineup(user.user_id, req.team_id, req.streaming_slots, req.week, req.avg_mode))
 
 @router.get('', response_model=GetLineupsResp)
 async def get_lineups(team_id: int, user: User = Depends(get_db_user)):

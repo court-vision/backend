@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BeforeValidator
 
 from core.rate_limit import PUBLIC_RATE_LIMIT, limiter
+from core.responses import respond
 from schemas.rankings import RankingsResp
 from services.rankings_service import RankingsService
 from services.scoring.category_rank import RANKABLE_KEYS
@@ -52,7 +53,8 @@ def parse_categories(csv: Optional[str]) -> Optional[list[str]]:
         "over the last N calendar days. Omit for full-season rankings."
     ),
     responses={
-        200: {"description": "Rankings retrieved successfully"},
+        200: {"description": "Rankings retrieved successfully (an empty list with a message before opening night)"},
+        400: {"description": "Rejected by the rankings service"},
         422: {"description": "Invalid window, format, or category key"},
         429: {"description": "Rate limit exceeded"},
     },
@@ -86,6 +88,6 @@ async def get_rankings(
     ),
 ) -> RankingsResp:
     keys = parse_categories(categories)
-    return await RankingsService.get_rankings(
+    return respond(await RankingsService.get_rankings(
         window=window, format=format, categories=keys, min_games=min_games,
-    )
+    ))

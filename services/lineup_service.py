@@ -2,6 +2,7 @@ import hashlib
 import json
 from typing import Literal, Optional
 
+from core.errors import BadRequestError, NotFoundError
 from core.logging import get_logger
 from schemas.lineup import LineupInfo, SlimGene, SlimPlayer
 from schemas.espn import PlayerResp
@@ -38,7 +39,8 @@ class LineupService:
         `scoring_preview` renders the team under that format for this call only
         (rehearsals, what-if views); None uses the team's own stored setting.
         Raises Team.DoesNotExist if the team is not found for this user (implicit ownership check).
-        Raises ValueError if the provider fetch fails.
+        Raises ValueError when a provider answered with a non-success envelope; provider
+        failures themselves (403/400/502/504 AppErrors) propagate untouched.
         """
         team = LineupService._owned_team(user_id, team_id)
         league_info = TeamService.deserialize_league_info(json.loads(team.league_info))
@@ -90,18 +92,22 @@ class LineupService:
 
     @staticmethod
     async def generate_lineup(user_id: int, team_id: int, streaming_slots: int, week: int, avg_mode: str = "season"):
+        """Fetch the team's roster + free agents and ask the features service for a plan.
+
+        Raises NotFoundError (404 TEAM_NOT_FOUND) for a team the user doesn't own and
+        BadRequestError (400) when a provider envelope came back unusable; provider
+        failures (403/400/502/504) propagate from the provider services, and anything
+        unexpected reaches the 500 handler (and Sentry) instead of an error envelope.
+        """
         try:
             roster_data, free_agent_data = await LineupService.fetch_roster_and_fas(
                 user_id, team_id, use_recent_stats=(avg_mode == "recent")
             )
-            return await LineupService.generate_lineup_v2(roster_data, free_agent_data, streaming_slots, week)
         except Team.DoesNotExist:
-            return GenerateLineupResp(status=ApiStatus.ERROR, message="Team not found", data=None)
+            raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
         except ValueError as e:
-            return GenerateLineupResp(status=ApiStatus.ERROR, message=str(e), data=None)
-        except Exception as e:
-            get_logger().exception("generate_lineup_failed", team_id=team_id, week=week, error=str(e))
-            return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
+            raise BadRequestError("PROVIDER_DATA_UNAVAILABLE", str(e)) from e
+        return await LineupService.generate_lineup_v2(roster_data, free_agent_data, streaming_slots, week)
 
     @staticmethod
     def build_features_payload(roster_data: list[PlayerResp], free_agent_data: list[PlayerResp],
@@ -119,8 +125,9 @@ class LineupService:
         """Ask the features service for a streaming plan.
 
         A request the service rejects (e.g. a week outside its calendar) comes back
-        as an ERROR carrying the service's own reason; an unreachable or failing
-        service as an ERROR asking the user to retry. Neither is a 500.
+        as an ERROR carrying the service's own reason (LINEUP_SERVICE_REJECTED -> 422
+        through core.responses.respond); an unreachable or failing service as an
+        ERROR asking the user to retry (LINEUP_SERVICE_UNAVAILABLE -> 503).
         """
         payload = LineupService.build_features_payload(roster_data, free_agent_data, streaming_slots, week)
         try:
@@ -132,9 +139,6 @@ class LineupService:
         except FeaturesUnavailable as e:
             return GenerateLineupResp(status=ApiStatus.ERROR, message=e.message, data=None,
                                       error_code="LINEUP_SERVICE_UNAVAILABLE")
-        except Exception as e:
-            get_logger().exception("generate_lineup_v2_failed", week=week, error=str(e))
-            return GenerateLineupResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
     def serialize_lineup_info(lineup_info) -> str:
@@ -209,7 +213,7 @@ class LineupService:
             return GetLineupsResp(status=ApiStatus.SUCCESS, message="Lineups fetched successfully", data=LineupService.deserialize_lineups(lineup_data))
 
         except Exception as e:
-            print(f"Error in get_lineups: {e}")
+            get_logger().exception("get_lineups_failed", team_id=team_id, error=str(e))
             return GetLineupsResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
@@ -234,7 +238,7 @@ class LineupService:
             return SaveLineupResp(status=ApiStatus.SUCCESS, message="Lineup saved successfully")
 
         except Exception as e:
-            print(f"Error in save_lineup: {e}")
+            get_logger().exception("save_lineup_failed", team_id=selected_team, error=str(e))
             return SaveLineupResp(status=ApiStatus.ERROR, message="Failed to save lineup", error_code="INTERNAL_ERROR")
 
     @staticmethod
@@ -246,5 +250,5 @@ class LineupService:
             lineup.delete_instance()
             return DeleteLineupResp(status=ApiStatus.SUCCESS, message="Lineup deleted successfully")
         except Exception as e:
-            print(f"Error in remove_lineup: {e}")
+            get_logger().exception("remove_lineup_failed", lineup_id=lineup_id, error=str(e))
             return DeleteLineupResp(status=ApiStatus.ERROR, message="Failed to delete lineup", error_code="INTERNAL_ERROR")
