@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI, APIRouter
 from slowapi.errors import RateLimitExceeded
 
@@ -11,6 +13,7 @@ from core.health import health_response
 from core.logging import setup_logging, get_logger
 from core.settings import settings
 from core.telemetry import init_sentry
+from core.watchdog import start_loop_watchdog
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db
 from services.schedule_service import assert_calendar_available
@@ -41,8 +44,13 @@ async def lifespan(app: FastAPI):
     # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
     assert_calendar_available()
 
+    # A blocked event loop hangs every request with nothing logged; exit so Railway restarts us.
+    watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
+
     yield
 
+    if watchdog is not None:
+        watchdog.stop()
     # Close database connection
     close_db()
     log.info("application_stopped")

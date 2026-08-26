@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     sentry_environment: Optional[str] = None  # defaults to the Railway environment name, else "development"
     sentry_traces_sample_rate: float = 0.0
 
+    # Event-loop watchdog: exit the process (Railway restarts it) when the loop has not
+    # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).
+    loop_watchdog_stall_s: float = 45.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

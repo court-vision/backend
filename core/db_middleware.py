@@ -11,9 +11,14 @@ Blocking DB work that runs in a worker thread (`asyncio.to_thread`) does not
 see this connection; wrap it in `db.connection_context()` — see
 `db.base.run_in_db_thread`.
 
-`PHYSICALLY_CLOSE` selects `manual_close()` (a fresh connection every request,
-never reusing one that may have died with a DB restart) over `close()`
-(return to the pool).
+`PHYSICALLY_CLOSE` selects `manual_close()` (a fresh connection every request)
+over `close()` (return to the pool). It is False: a fresh connection per
+request means a DNS lookup + TCP/TLS handshake + auth on the event-loop thread
+for every request, and psycopg2's `connect_timeout` does not bound the DNS
+step — a hung lookup froze the whole API (2026-08-26). Pooled connections are
+recycled by `stale_timeout`, kept honest by TCP keepalives (`db.base`), and a
+dead one raises `OperationalError`, which `core.middleware` turns into a 503
+and evicts with `manual_close()`.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from db.base import db
 # No DB needed: liveness, health (which probes on its own thread), docs.
 SKIP_PATHS = frozenset({"/health", "/ping", "/", "/docs", "/redoc", "/openapi.json"})
 
-PHYSICALLY_CLOSE = True
+PHYSICALLY_CLOSE = False
 
 
 def release_connection() -> None:

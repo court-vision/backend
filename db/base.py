@@ -19,6 +19,14 @@ db = PooledPostgresqlExtDatabase(
     stale_timeout=300,
     # psycopg2 connect_timeout: a dead/unreachable host fails fast (503) instead of hanging a worker
     connect_timeout=10,
+    # TCP keepalives: a half-open socket (Postgres restart, private-network blip) is detected in
+    # ~60 s instead of blocking a query — and therefore the event loop — for the kernel's
+    # retransmit budget (15+ min). statement_timeout bounds any single query the same way.
+    keepalives=1,
+    keepalives_idle=30,
+    keepalives_interval=10,
+    keepalives_count=3,
+    options="-c statement_timeout=30000 -c idle_in_transaction_session_timeout=30000",
     **parsed_url
 )
 
