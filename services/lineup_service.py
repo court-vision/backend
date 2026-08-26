@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 from typing import Literal, Optional
@@ -15,6 +14,7 @@ from services.yahoo_service import YahooService
 from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from services.team_service import TeamService
+from db.base import run_in_db_thread
 from db.models import Lineup, Team
 from utils.constants import NUM_FREE_AGENTS
 
@@ -68,13 +68,13 @@ class LineupService:
             value_kind = PlayerValueService.value_kind_for(scoring)
             if league_info.provider == FantasyProvider.YAHOO:
                 # Yahoo player ids are not ESPN ids: resolve by normalized name instead
-                values = await asyncio.to_thread(
+                values = await run_in_db_thread(
                     PlayerValueService.avg_points_for, scoring,
                     names=[(p.name, p.team) for p in all_players], days=14, recent=True,
                 )
                 keyed = [(p, _normalize_name(p.name)) for p in all_players]
             else:
-                values = await asyncio.to_thread(
+                values = await run_in_db_thread(
                     PlayerValueService.avg_points_for, scoring,
                     espn_ids=[p.player_id for p in all_players], days=14, recent=True,
                 )

@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from core.logging import get_logger
+from core.logging import get_correlation_id, get_logger
 from utils.constants import FEATURES_SERVER_ENDPOINT
 
 # The optimizer runs a genetic algorithm over the whole week: generous read timeout,
@@ -55,7 +55,12 @@ class FeaturesUnavailable(FeaturesError):
 
 
 def make_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=FEATURES_URL, timeout=FEATURES_TIMEOUT)
+    """A client for the features service that carries the request's correlation id."""
+    headers = {}
+    correlation_id = get_correlation_id()
+    if correlation_id:
+        headers["X-Correlation-ID"] = correlation_id
+    return httpx.AsyncClient(base_url=FEATURES_URL, timeout=FEATURES_TIMEOUT, headers=headers)
 
 
 # Tests monkeypatch this with a factory returning a MockTransport-backed client.

@@ -12,10 +12,10 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
 from core import clerk_auth
+from core.errors import AuthenticationError
 from core.settings import settings
 
 
@@ -72,7 +72,7 @@ def test_token_with_expected_issuer_is_accepted(rsa_keys, trust_test_key):
 @pytest.mark.unit
 def test_token_with_wrong_issuer_is_rejected(rsa_keys, trust_test_key):
     private_pem, _ = rsa_keys
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(AuthenticationError) as exc:
         _verify(_make_token(private_pem, iss="https://evil.example.com"))
     assert exc.value.status_code == 401
 
@@ -80,7 +80,7 @@ def test_token_with_wrong_issuer_is_rejected(rsa_keys, trust_test_key):
 @pytest.mark.unit
 def test_token_without_issuer_is_rejected(rsa_keys, trust_test_key):
     private_pem, _ = rsa_keys
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(AuthenticationError) as exc:
         _verify(_make_token(private_pem))
     assert exc.value.status_code == 401
 
@@ -97,7 +97,7 @@ def test_azp_check_is_disabled_when_allowlist_empty(rsa_keys, trust_test_key, mo
 def test_azp_allowlist_rejects_unknown_party(rsa_keys, trust_test_key, monkeypatch):
     private_pem, _ = rsa_keys
     monkeypatch.setattr(settings, "clerk_authorized_parties", ["http://localhost:3000"])
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(AuthenticationError) as exc:
         _verify(_make_token(private_pem, iss=settings.clerk_issuer, azp="https://evil.example.com"))
     assert exc.value.status_code == 401
 
@@ -108,3 +108,27 @@ def test_azp_allowlist_accepts_listed_party(rsa_keys, trust_test_key, monkeypatc
     monkeypatch.setattr(settings, "clerk_authorized_parties", ["http://localhost:3000"])
     user = _verify(_make_token(private_pem, iss=settings.clerk_issuer, azp="http://localhost:3000"))
     assert user["clerk_user_id"] == "user_abc"
+
+
+@pytest.mark.unit
+def test_missing_credentials_is_401_auth_required():
+    with pytest.raises(AuthenticationError) as exc:
+        clerk_auth.verify_clerk_token(None)
+    assert exc.value.status_code == 401
+    assert exc.value.error_code == "AUTH_REQUIRED"
+
+
+@pytest.mark.unit
+def test_expired_token_is_401_token_expired(rsa_keys, trust_test_key):
+    private_pem, _ = rsa_keys
+    with pytest.raises(AuthenticationError) as exc:
+        _verify(_make_token(private_pem, iss=settings.clerk_issuer, exp=int(time.time()) - 60))
+    assert exc.value.error_code == "TOKEN_EXPIRED"
+
+
+@pytest.mark.unit
+def test_malformed_token_is_401_invalid_token():
+    with pytest.raises(AuthenticationError) as exc:
+        _verify("not-a-jwt")
+    assert exc.value.status_code == 401
+    assert exc.value.error_code == "INVALID_TOKEN"

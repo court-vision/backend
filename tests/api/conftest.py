@@ -5,7 +5,13 @@ Provides a test FastAPI app that:
 - Skips lifespan (no init_db / close_db)
 - Overrides Clerk auth with a fixed fake user payload
 - Has rate limiter attached (required by @limiter.limit decorators)
+- Installs the real exception handlers + CORS (`setup_middleware`) and the
+  `RequestContextMiddleware`, so responses carry the envelope and headers
+  production does
 - Does NOT add DatabaseMiddleware — API tests monkeypatch services instead
+
+Clients use `raise_server_exceptions=False` so an unhandled error is asserted
+as the 500 envelope rather than re-raised into the test.
 """
 
 import pytest
@@ -14,6 +20,8 @@ from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
 from core.clerk_auth import get_current_user, verify_clerk_token
+from core.correlation_middleware import RequestContextMiddleware
+from core.middleware import setup_middleware
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 
 # Fixed fake user for all authenticated test requests
@@ -27,9 +35,9 @@ def make_test_app() -> FastAPI:
     """
     Build a FastAPI app for API tests.
 
-    Wires routers identically to main.py but skips the lifespan handler
-    (no DB init). Auth is overridden via dependency_overrides so Clerk
-    JWT validation is bypassed entirely.
+    Wires routers and middleware identically to main.py but skips the
+    lifespan handler (no DB init) and the DatabaseMiddleware. Auth is
+    overridden via dependency_overrides so Clerk JWT validation is bypassed.
     """
     from fastapi import APIRouter
     from api.v1.internal import (
@@ -40,7 +48,7 @@ def make_test_app() -> FastAPI:
         rankings, players, games,
         teams as public_teams,
         ownership, analytics, schedule,
-        live as live_public,
+        live as live_public, playoffs,
     )
 
     app = FastAPI(title="Court Vision API (test)")
@@ -48,6 +56,10 @@ def make_test_app() -> FastAPI:
     # Rate limiter must be on app.state for @limiter.limit decorators to work
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+    # Same stack as main.py minus the DatabaseMiddleware
+    app.add_middleware(RequestContextMiddleware)
+    setup_middleware(app)
 
     # Override auth — replaces both verify_clerk_token and get_current_user
     # with a no-arg lambda so no HTTPBearer / JWKS validation runs
@@ -64,6 +76,7 @@ def make_test_app() -> FastAPI:
     api_v1_public.include_router(analytics.router)
     api_v1_public.include_router(schedule.router)
     api_v1_public.include_router(live_public.router)
+    api_v1_public.include_router(playoffs.router)
     app.include_router(api_v1_public)
 
     # Internal routes
@@ -92,7 +105,7 @@ def app():
 @pytest.fixture
 def client(app):
     """TestClient for public routes (no auth header needed)."""
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=False)
 
 
 @pytest.fixture
@@ -103,4 +116,8 @@ def authed_client(app):
     The Authorization header satisfies any middleware that checks for its
     presence, though the token value is irrelevant — auth is overridden.
     """
-    return TestClient(app, headers={"Authorization": "Bearer fake-jwt-token"})
+    return TestClient(
+        app,
+        headers={"Authorization": "Bearer fake-jwt-token"},
+        raise_server_exceptions=False,
+    )

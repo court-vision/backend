@@ -12,6 +12,7 @@ import sys
 from contextvars import ContextVar
 from typing import Any, Optional
 
+import sentry_sdk
 import structlog
 
 
@@ -41,22 +42,84 @@ def add_correlation_id(
 
 def add_service_info(
     service_name: str,
+    version: Optional[str] = None,
 ) -> structlog.typing.Processor:
-    """Create a processor that adds service name to all log events."""
+    """Create a processor that adds the service name (and deployed version) to all log events."""
 
     def processor(
         logger: logging.Logger, method_name: str, event_dict: dict[str, Any]
     ) -> dict[str, Any]:
         event_dict["service"] = service_name
+        if version:
+            event_dict["version"] = version
         return event_dict
 
     return processor
+
+
+_SENTRY_LEVELS = {
+    "info": "info",
+    "warning": "warning",
+    "error": "error",
+    "critical": "fatal",
+}
+_BREADCRUMB_SKIP_KEYS = frozenset({"event", "exc_info", "timestamp", "level", "service", "version"})
+_SENTRY_TAG_KEYS = ("pipeline", "run_id", "error_code", "path")
+
+
+def _exception_from(exc_info: Any) -> Optional[BaseException]:
+    if exc_info is True:
+        return sys.exc_info()[1]
+    if isinstance(exc_info, BaseException):
+        return exc_info
+    if isinstance(exc_info, tuple) and len(exc_info) == 3:
+        return exc_info[1]
+    return None
+
+
+def sentry_processor(
+    logger: logging.Logger, method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Feed Sentry from the log stream (no-op until `core.telemetry.init_sentry` ran).
+
+    INFO+ lines become breadcrumbs on the next event; ERROR+ lines carrying
+    `exc_info` (`log.exception(...)`, `log.error(..., exc_info=exc)`) are
+    captured as exceptions tagged with the correlation id.
+    """
+    if not sentry_sdk.is_initialized():
+        return event_dict
+    level = _SENTRY_LEVELS.get(method_name)
+    if level is None:
+        return event_dict
+
+    event = str(event_dict.get("event", ""))
+    exc = _exception_from(event_dict.get("exc_info")) if level in ("error", "fatal") else None
+    if exc is not None:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("log_event", event)
+            cid = event_dict.get("correlation_id") or correlation_id_var.get()
+            if cid:
+                scope.set_tag("correlation_id", cid)
+            for key in _SENTRY_TAG_KEYS:
+                if event_dict.get(key) is not None:
+                    scope.set_tag(key, str(event_dict[key]))
+            sentry_sdk.capture_exception(exc)
+        return event_dict
+
+    sentry_sdk.add_breadcrumb(
+        category="log",
+        level=level,
+        message=event,
+        data={k: v for k, v in event_dict.items() if k not in _BREADCRUMB_SKIP_KEYS},
+    )
+    return event_dict
 
 
 def setup_logging(
     log_level: str = "INFO",
     json_format: bool = True,
     service_name: str = "court-vision-api",
+    version: Optional[str] = None,
 ) -> None:
     """
     Configure structlog for the application.
@@ -65,6 +128,7 @@ def setup_logging(
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         json_format: If True, output JSON logs. If False, use console format.
         service_name: Name of the service to include in logs
+        version: Deployed version (git SHA) to include in logs
     """
     # Configure standard library logging
     logging.basicConfig(
@@ -78,10 +142,11 @@ def setup_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
-        add_service_info(service_name),
+        add_service_info(service_name, version),
         add_correlation_id,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
+        sentry_processor,  # before format_exc_info: needs the raw exc_info
     ]
 
     if json_format:

@@ -3,16 +3,24 @@ Clerk JWT Token Verification Module
 
 This module handles verification of Clerk-issued JWT tokens for API authentication.
 It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
+
+Failures raise `core.errors` exceptions, rendered as the standard envelope:
+missing/invalid/expired tokens are 401 (`AUTH_REQUIRED`, `INVALID_TOKEN`,
+`TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`.
 """
 
 import jwt
 import requests
 from functools import lru_cache
-from fastapi import HTTPException, Depends
+from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
+from core.errors import AppError, AuthenticationError, ServiceUnavailableError
+from core.logging import get_logger
 from core.settings import settings
+
+log = get_logger("auth")
 
 # Format: https://<your-clerk-frontend-api>.clerk.accounts.dev/.well-known/jwks.json
 CLERK_JWKS_URL = settings.clerk_jwks_url
@@ -20,7 +28,8 @@ CLERK_JWKS_URL = settings.clerk_jwks_url
 # Required for fetching user details from Clerk's API
 CLERK_SECRET_KEY = settings.clerk_secret_key.get_secret_value()
 
-security = HTTPBearer()
+# auto_error=False: a missing header is our 401 AUTH_REQUIRED, not FastAPI's 403
+security = HTTPBearer(auto_error=False)
 
 
 @lru_cache(maxsize=1)
@@ -30,21 +39,16 @@ def get_clerk_jwks() -> dict:
     Uses lru_cache to avoid repeated network calls.
     """
     if not CLERK_JWKS_URL:
-        raise HTTPException(
-            status_code=500,
-            detail="CLERK_JWKS_URL environment variable not configured"
-        )
+        log.error("clerk_jwks_url_missing")
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
         response = requests.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
-        print(f"Failed to fetch Clerk JWKS: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to fetch authentication keys"
-        )
+        log.error("clerk_jwks_fetch_failed", error=type(e).__name__, detail=str(e))
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
 
 
 def get_public_key_for_token(token: str):
@@ -54,12 +58,12 @@ def get_public_key_for_token(token: str):
     try:
         unverified_header = jwt.get_unverified_header(token)
     except jwt.exceptions.DecodeError as e:
-        print(f"Failed to decode token header: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token format")
+        log.info("clerk_token_header_invalid", reason=type(e).__name__)
+        raise AuthenticationError("INVALID_TOKEN", "Invalid token format")
 
     kid = unverified_header.get('kid')
     if not kid:
-        raise HTTPException(status_code=401, detail="Token missing key ID")
+        raise AuthenticationError("INVALID_TOKEN", "Token missing key ID")
 
     # Only well-formed tokens get as far as the (cached) JWKS fetch
     jwks = get_clerk_jwks()
@@ -76,7 +80,7 @@ def get_public_key_for_token(token: str):
         if key.get('kid') == kid:
             return jwt.algorithms.RSAAlgorithm.from_jwk(key)
 
-    raise HTTPException(status_code=401, detail="Unable to find appropriate signing key")
+    raise AuthenticationError("INVALID_TOKEN", "Unable to find appropriate signing key")
 
 
 def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
@@ -93,7 +97,7 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         dict with user details including email, or None if fetch fails
     """
     if not CLERK_SECRET_KEY:
-        print("Warning: CLERK_SECRET_KEY not configured, cannot fetch user details")
+        log.warning("clerk_secret_key_missing")
         return None
 
     try:
@@ -131,11 +135,19 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         }
 
     except requests.RequestException as e:
-        print(f"Failed to fetch user from Clerk API: {e}")
+        log.warning("clerk_user_fetch_failed", error=type(e).__name__, detail=str(e))
         return None
 
 
-def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+def _require_token(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
+    if credentials is None or not credentials.credentials:
+        raise AuthenticationError("AUTH_REQUIRED", "Authentication required")
+    return credentials.credentials
+
+
+def verify_clerk_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
     """
     Verify a Clerk JWT token and return the payload.
 
@@ -147,7 +159,7 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     Returns:
         dict with 'clerk_user_id' (sub claim), 'email', and other token claims
     """
-    token = credentials.credentials
+    token = _require_token(credentials)
 
     try:
         public_key = get_public_key_for_token(token)
@@ -166,7 +178,7 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 
         azp = payload.get("azp")
         if settings.clerk_authorized_parties and azp and azp not in settings.clerk_authorized_parties:
-            raise HTTPException(status_code=401, detail="Invalid authorized party")
+            raise AuthenticationError("INVALID_TOKEN", "Invalid authorized party")
 
         clerk_user_id = payload.get("sub")
         email = payload.get("email")  # May be None if not in JWT claims
@@ -185,18 +197,20 @@ def verify_clerk_token(credentials: HTTPAuthorizationCredentials = Depends(secur
         }
 
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise AuthenticationError("TOKEN_EXPIRED", "Token has expired")
     except jwt.InvalidTokenError as e:
-        print(f"Token validation error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except HTTPException:
+        log.info("clerk_token_invalid", reason=type(e).__name__)
+        raise AuthenticationError("INVALID_TOKEN", "Invalid token")
+    except AppError:
         raise
     except Exception as e:
-        print(f"Unexpected authentication error: {e}")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+        log.exception("clerk_auth_unexpected_error", error=type(e).__name__)
+        raise AuthenticationError("INVALID_TOKEN", "Authentication failed")
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
     """
     Wrapper around verify_clerk_token for backward compatibility.
 

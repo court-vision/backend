@@ -14,7 +14,11 @@ import bcrypt
 import os
 import resend
 
+from core.logging import get_logger
+
 resend.api_key = os.environ.get('RESEND_API_KEY')
+
+log = get_logger("security")
 
 # ---------------------- DEPRECATED: Custom JWT Auth ---------------------- #
 # The following JWT-based authentication code has been replaced by Clerk.
@@ -71,7 +75,7 @@ def _send_verification_email_sync(to_email: str, code: str) -> dict:
         response = resend.Emails.send(params)
         return {"success": True, "email_id": response['id']}
     except Exception as e:
-        print(f"Resend API exception: {e}")
+        log.error("resend_send_failed", error=type(e).__name__, detail=str(e))
         return {"success": False, "error": str(e)}
 
 
@@ -80,11 +84,11 @@ async def send_verification_email(to_email: str, code: str) -> dict:
     development_mode = os.environ.get('DEVELOPMENT_MODE', 'false').lower() == 'true'
 
     if development_mode:
-        print(f"DEVELOPMENT MODE: Would send verification email to {to_email} with code: {code}")
+        log.info("verification_email_skipped_development_mode")
         return {"success": True}
 
     if not resend.api_key:
-        print("RESEND_API_KEY environment variable not set or is empty")
+        log.warning("resend_api_key_missing")
         return {"success": False, "error": "Email service not configured"}
 
     return await asyncio.to_thread(_send_verification_email_sync, to_email, code)

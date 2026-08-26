@@ -2,7 +2,8 @@
 Authentication negative tests.
 
 Verifies that:
-- Internal routes reject requests with no Authorization header
+- Internal routes reject requests with no Authorization header (401 AUTH_REQUIRED)
+- Internal routes reject malformed tokens (401 INVALID_TOKEN)
 - Public routes do NOT require authentication
 """
 
@@ -33,9 +34,15 @@ def unauthed_client(unauthed_app):
     "/v1/internal/api-keys/",
 ])
 def test_internal_routes_reject_no_token(unauthed_client, path):
-    """Internal routes must return 401/403 when no token is provided."""
-    res = unauthed_client.get(path)
-    assert res.status_code in (401, 403)
+    """A missing bearer is 401 AUTH_REQUIRED in the standard envelope (not FastAPI's 403)."""
+    res = unauthed_client.get(path, headers={"X-Correlation-ID": "t-auth"})
+    assert res.status_code == 401
+    body = res.json()
+    assert body["status"] == "authentication_error"
+    assert body["error_code"] == "AUTH_REQUIRED"
+    assert body["data"]["correlation_id"] == "t-auth"
+    assert res.headers["X-Correlation-ID"] == "t-auth"
+    assert res.headers["X-Error-Code"] == "AUTH_REQUIRED"
 
 
 @pytest.mark.api
@@ -46,7 +53,8 @@ def test_internal_routes_reject_no_token(unauthed_client, path):
 def test_internal_post_routes_reject_no_token(unauthed_client, path):
     """POST routes that take raw league credentials must still require a signed-in user."""
     res = unauthed_client.post(path, json={})
-    assert res.status_code in (401, 403)
+    assert res.status_code == 401
+    assert res.json()["error_code"] == "AUTH_REQUIRED"
 
 
 @pytest.mark.api
@@ -55,9 +63,12 @@ def test_internal_post_routes_reject_no_token(unauthed_client, path):
     "/v1/internal/api-keys/",
 ])
 def test_internal_routes_reject_invalid_token(unauthed_client, path):
-    """Internal routes must return 401 when token is invalid (not a real Clerk JWT)."""
+    """Internal routes must return 401 INVALID_TOKEN when the token is not a real Clerk JWT."""
     res = unauthed_client.get(path, headers={"Authorization": "Bearer not-a-real-jwt"})
     assert res.status_code == 401
+    body = res.json()
+    assert body["status"] == "authentication_error"
+    assert body["error_code"] == "INVALID_TOKEN"
 
 
 # ---- Public routes do NOT require auth ----

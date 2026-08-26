@@ -150,8 +150,10 @@ def test_rankings_unknown_category_returns_422_listing_allowed_keys(client, monk
     res = client.get("/v1/rankings/?format=categories&categories=pts,dd")
     assert res.status_code == 422
     assert captured == {}
-    detail = res.json()["detail"]
-    assert "dd" in detail and "fg_pct" in detail and "tov" in detail
+    body = res.json()
+    assert body["error_code"] == "HTTP_422"
+    message = body["message"]
+    assert "dd" in message and "fg_pct" in message and "tov" in message
 
 
 @pytest.mark.api

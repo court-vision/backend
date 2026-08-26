@@ -48,6 +48,7 @@ circuitbreaker==2.0.0
 tenacity==9.0.0
 structlog==24.4.0
 slowapi==0.1.9
+sentry-sdk[fastapi]==2.68.1
 
 # Email
 resend==2.19.0

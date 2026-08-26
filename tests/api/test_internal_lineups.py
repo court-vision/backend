@@ -30,7 +30,7 @@ def test_unknown_week_is_422(authed_client, as_user, monkeypatch):
     monkeypatch.setattr(lineup_service.LineupService, "generate_lineup", staticmethod(must_not_run))
     res = authed_client.post("/v1/internal/lineups/generate", json={**BODY, "week": 27})
     assert res.status_code == 422
-    assert "27" in res.json().get("detail", "") or "week" in str(res.json()).lower()
+    assert "27" in res.json()["message"]
 
 
 @pytest.mark.api

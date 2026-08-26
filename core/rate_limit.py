@@ -10,8 +10,9 @@ from fastapi import Request, Response
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from starlette.responses import JSONResponse
 
+from core.errors import RATE_LIMITED_CODE
+from core.middleware import error_json_response
 from schemas.common import ApiStatus
 
 
@@ -32,14 +33,13 @@ limiter = Limiter(key_func=get_rate_limit_key)
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:
-    """Custom handler for rate limit exceeded errors."""
-    return JSONResponse(
+    """429 in the standard envelope (`error_code: RATE_LIMITED`, correlation headers)."""
+    return error_json_response(
+        request,
         status_code=429,
-        content={
-            "status": ApiStatus.RATE_LIMITED.value,
-            "message": f"Rate limit exceeded: {exc.detail}",
-            "data": None,
-        },
+        api_status=ApiStatus.RATE_LIMITED,
+        error_code=RATE_LIMITED_CODE,
+        message=f"Rate limit exceeded: {exc.detail}",
     )
 
 

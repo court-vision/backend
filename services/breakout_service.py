@@ -7,9 +7,9 @@ BreakoutDetectionPipeline) and enriches them with current schedule data.
 This is a pure read service — no computation, just DB read + schedule enrichment.
 """
 
-import asyncio
 from datetime import date
 
+from db.base import run_in_db_thread
 from db.models.nba import BreakoutCandidate, Player
 from schemas.breakout import (
     BreakoutData,
@@ -50,7 +50,7 @@ class BreakoutService:
                 team_id=team_filter,
             )
 
-        rows = await asyncio.to_thread(_query)
+        rows = await run_in_db_thread(_query)
 
         if not rows:
             return BreakoutResp(
@@ -72,7 +72,7 @@ class BreakoutService:
             }
 
         injured_ids = list({row.injured_player_id for row in rows})
-        injured_players = await asyncio.to_thread(_fetch_injured_players, injured_ids)
+        injured_players = await run_in_db_thread(_fetch_injured_players, injured_ids)
 
         candidates = []
         for row in rows:

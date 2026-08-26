@@ -8,7 +8,11 @@ Creates local user records on first API call if they don't exist.
 from datetime import datetime
 from typing import Optional
 from db.models import User
-from fastapi import HTTPException
+
+from core.errors import ServiceUnavailableError
+from core.logging import get_logger
+
+log = get_logger("user_sync")
 
 
 class UserSyncService:
@@ -63,11 +67,11 @@ class UserSyncService:
         # Need to create a new user - email is required
         if not email:
             # This shouldn't happen if CLERK_SECRET_KEY is configured properly
-            print(f"Error: Cannot create user {clerk_user_id} - no email available. "
-                  "Ensure CLERK_SECRET_KEY is set in backend environment.")
-            raise HTTPException(
-                status_code=500,
-                detail="Unable to fetch user email. Please try again or contact support."
+            log.error("user_email_unavailable", clerk_user_id=clerk_user_id,
+                      hint="Ensure CLERK_SECRET_KEY is set in the backend environment")
+            raise ServiceUnavailableError(
+                "USER_EMAIL_UNAVAILABLE",
+                "Unable to fetch user email. Please try again or contact support.",
             )
 
         # Create new user
