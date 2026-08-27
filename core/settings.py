@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).
     loop_watchdog_stall_s: float = 45.0
 
+    # Live matchup overlay: pick the overlay day from the baseline's stored day
+    # watermark (services/matchup_window.py) instead of the old wall-clock rule.
+    # Off until ESPN's period-vs-totals ordering is confirmed in preseason; both
+    # are computed either way and disagreements are logged as
+    # `matchup_window_divergence`.
+    live_window_from_watermark: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

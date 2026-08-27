@@ -40,9 +40,16 @@ class DailyMatchupScore(BaseModel):
     # Category leagues only: {scoring_format, you: {...}, opp: {...}, wins, losses, ties}
     category_scores = BinaryJSONField(null=True)
 
-    # ESPN scoring period this snapshot was captured under.
-    # Used to detect when ESPN flips to a new day (N → N+1).
+    # Day watermark (1 = opening night, the same integer space as ESPN's
+    # status.latestScoringPeriod): the first season day NOT yet included in
+    # current_score. A snapshot at watermark B therefore covers through day
+    # B-1, which is what lets the live overlay pick its day without guessing
+    # at the provider's batch time. See services/matchup_window.py.
     scoring_period_id = SmallIntegerField(null=True)
+    # Where scoring_period_id came from: "provider" (ESPN reports it) or
+    # "calendar" (Yahoo has no such field, so we derive it). NULL on rows
+    # written before this column existed.
+    scoring_period_source = CharField(max_length=16, null=True)
 
     # Audit columns for pipeline tracking
     pipeline_run_id = UUIDField(null=True, index=True)

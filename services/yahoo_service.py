@@ -26,7 +26,7 @@ from utils.yahoo_helpers import (
     parse_yahoo_team_key,
     YAHOO_POSITION_MAP,
 )
-from services.schedule_service import get_current_matchup, get_remaining_games
+from services.schedule_service import get_current_matchup, get_nba_today, get_remaining_games, season_day
 from services.player_service import PlayerService
 from services.player_value_service import PlayerValueService
 from services.scoring.resolver import ResolvedScoring, resolve_scoring
@@ -908,6 +908,13 @@ class YahooService:
             ),
             projected_winner=projected_winner,
             projected_margin=projected_margin,
+            # Yahoo exposes only week_start/week_end -- there is no day-granular
+            # watermark to read. Derive it from our own calendar on the fantasy
+            # day (2 AM ET), which is when a provider's day flips; using the
+            # 6 AM ET game-date rule here would report the previous day all
+            # morning and make every Yahoo baseline look permanently stale.
+            scoring_period_id=season_day(get_nba_today()),
+            scoring_period_source="calendar",
             scoring_format=scoring.format,
             settings_synced=scoring.settings_synced,
             category_comparison=category_comparison,

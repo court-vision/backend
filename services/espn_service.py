@@ -547,6 +547,7 @@ class EspnService:
             projected_winner=projected_winner,
             projected_margin=projected_margin,
             scoring_period_id=latest_scoring_period,
+            scoring_period_source="provider" if latest_scoring_period else "unknown",
             scoring_format=scoring.format,
             settings_synced=scoring.settings_synced,
             category_comparison=category_comparison,

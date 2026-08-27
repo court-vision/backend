@@ -71,7 +71,11 @@ class MatchupData(BaseModel):
     opponent_team: MatchupTeamResp
     projected_winner: str                  # Team name of projected winner
     projected_margin: float                # Projected point differential (category leagues: won - lost)
-    scoring_period_id: int | None = None   # ESPN scoring period used for this response
+    # Day watermark (1 = opening night): the first season day NOT yet included
+    # in the team scores above. ESPN reports it as status.latestScoringPeriod;
+    # Yahoo has none, so it is derived from our calendar -- hence the source.
+    scoring_period_id: int | None = None
+    scoring_period_source: Literal["provider", "calendar", "unknown"] = "unknown"
     schedule_week: int | None = None       # Our calendar week containing matchup_period_start (optimizer input)
     scoring_format: ScoringFormat = "points"
     settings_synced: bool = False
@@ -170,7 +174,10 @@ class LiveMatchupData(BaseModel):
     opponent_team: LiveMatchupTeam
     projected_winner: str
     projected_margin: float
-    game_date: str                 # ET game date used for live stats lookup
+    game_date: str                 # the single day of live stats overlaid on the baseline
+    # Days the stored baseline is missing (the live rows for them have already
+    # been deleted, so the score is knowably short). 0 when fresh.
+    baseline_stale_days: int = 0
     scoring_format: ScoringFormat = "points"
     settings_synced: bool = False
     category_comparison: Optional[CategoryComparison] = None

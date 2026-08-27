@@ -1,6 +1,8 @@
 from datetime import datetime, date as date_type, timedelta
 
 from core.errors import NotFoundError
+from core.logging import get_logger
+from core.settings import settings
 from services.espn_service import EspnService
 from services.matchup_days import (
     build_day, comparison_to_schema, make_nba_id_resolver, nba_today as _nba_today, score_stat_row,
@@ -33,6 +35,11 @@ from schemas.matchup import (
 )
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from db.models.stats.daily_matchup_score import DailyMatchupScore
+from services.matchup_window import (
+    DayWatermark, MatchupWindow, WatermarkSource, resolve_matchup_window,
+)
+
+log = get_logger("matchup")
 
 
 class MatchupService:
@@ -91,6 +98,63 @@ class MatchupService:
         return await EspnService.get_matchup_data(league_info, avg_window, scoring=scoring)
 
     @staticmethod
+    def _watermark_source(value) -> WatermarkSource:
+        """Tolerant of legacy rows and of any value a future writer invents."""
+        try:
+            return WatermarkSource(value or "unknown")
+        except ValueError:
+            return WatermarkSource.UNKNOWN
+
+    @staticmethod
+    def _watermark_window(md, baseline) -> MatchupWindow:
+        """Resolve the overlay day from the stored watermarks."""
+        from services.schedule_service import date_for_espn_scoring_period
+
+        stored = None
+        if baseline is not None:
+            stored = DayWatermark(
+                baseline.scoring_period_id,
+                MatchupService._watermark_source(baseline.scoring_period_source),
+            )
+        return resolve_matchup_window(
+            provider=DayWatermark(
+                md.scoring_period_id,
+                MatchupService._watermark_source(md.scoring_period_source),
+            ),
+            baseline=stored,
+            period_start=date_type.fromisoformat(md.matchup_period_start) if md.matchup_period_start else None,
+            period_end=date_type.fromisoformat(md.matchup_period_end) if md.matchup_period_end else None,
+            day_to_date=date_for_espn_scoring_period,
+            fallback_today=_nba_today(),
+        )
+
+    @staticmethod
+    def _legacy_window(md, baseline) -> MatchupWindow:
+        """The wall-clock rule the watermark replaces, kept for shadow comparison.
+
+        It decides from `baseline.date` -- a US/Central snapshot label written
+        with no cutoff, so it rolls at 1 AM ET -- against a 6 AM ET "today".
+        That five-hour disagreement is what dropped a full day off the score
+        whenever ESPN's batch ran late.
+        """
+        today = _nba_today()
+        game_date = baseline.date if (baseline is not None and baseline.date > today) else today
+        excludes_today = baseline.date <= today if baseline is not None else False
+        include_live = False
+        if excludes_today and md.matchup_period_start and md.matchup_period_end:
+            mp_start = date_type.fromisoformat(md.matchup_period_start)
+            mp_end = date_type.fromisoformat(md.matchup_period_end)
+            include_live = mp_start <= game_date <= mp_end
+        return MatchupWindow(
+            include_live=include_live,
+            overlay_date=game_date if include_live else None,
+            display_date=game_date,
+            seed_zero_baseline=False,
+            stale_days=0,
+            reason="legacy_wall_clock",
+        )
+
+    @staticmethod
     async def get_live_matchup_by_team_id(
         user_id: int,
         team_id: int,
@@ -101,28 +165,20 @@ class MatchupService:
         Fetches the current matchup (ESPN/Yahoo scores + roster) then overlays
         live stats from live_player_stats for each roster player matched by name.
         """
-        import pytz
         from db.models.nba.live_player_stats import LivePlayerStats as LiveStatsModel
 
-        eastern = pytz.timezone("US/Eastern")
-        now_et = datetime.now(eastern)
-
-        # NBA date convention: before 6 AM ET counts as yesterday.
-        # This matches how the live pipeline stores records and ensures
-        # we don't prematurely advance to the next day after midnight.
-        nba_today = (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
-
-        # Step 1: Fetch ESPN — always use the default (current) scoring period.
-        # We trust whatever ESPN returns as the current roster and lineup.
+        # Step 1: Fetch the provider — always the default (current) scoring
+        # period. We trust whatever it returns as the current roster and lineup.
         matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
 
         if matchup.status != ApiStatus.SUCCESS or not matchup.data:
             return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
 
         espn_matchup_period = matchup.data.matchup_period
-        espn_scoring_period = matchup.data.scoring_period_id
 
-        # Step 2: Query the latest DailyMatchupScore baseline for this matchup period.
+        # Step 2: Newest baseline snapshot for this matchup period. Ordering by
+        # date still picks the newest row — watermarks are monotone, and
+        # ordering by watermark would tie on days with no games.
         baseline = (
             DailyMatchupScore
             .select()
@@ -134,74 +190,46 @@ class MatchupService:
             .first()
         )
 
-        # Step 3: Determine base scores and live overlay date.
-        #
-        # Timeline: ESPN batches at ~2 AM ET; our pipeline runs at ~2:30 AM ET (7:30 AM UTC).
-        # baseline.date = D means captured at 4 AM on D, after ESPN's batch,
-        # so it already reflects cumulative scores through end of day D-1.
-        # Games on day D are never in baseline.date = D.
-        #
-        # Live overlay is needed when nba_today >= baseline.date:
-        #   - baseline.date == nba_today: common case, today's games not captured yet.
-        #   - baseline.date < nba_today: baseline is stale (pipeline hasn't run today).
-        #   - baseline.date > nba_today: pipeline already ran for tomorrow
-        #     (4 AM ET window when nba_today=yesterday), baseline already has today → no overlay.
-        #
-        # Example timeline (day N = Friday, games end ~midnight):
-        #   Fri 8 PM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
-        #   Sat 1 AM:  nba_today=Fri, baseline.date=Fri  → overlay Fri live ✓
-        #   Sat 2 AM:  ESPN batch runs (totalPoints updated, lineup flipped)
-        #   Sat 2:15 AM: nba_today=Fri, baseline.date=Fri → overlay Fri live ✓
-        #   Sat 2:30 AM: pipeline runs → baseline.date=Sat (includes Fri games)
-        #   Sat 2:45 AM: nba_today=Fri, baseline.date=Sat → Sat > Fri → no overlay, game_date=Sat ✓
-        #   Sat 6 AM:  nba_today=Sat, baseline.date=Sat  → overlay Sat live (0 until tipoff) ✓
-        # When the pipeline has already run for the next calendar day
-        # (baseline.date > nba_today), advance game_date so the frontend shows
-        # tomorrow's upcoming view instead of staying stuck on yesterday.
-        # This happens in the ~30 min window after ESPN batch + pipeline run,
-        # before the 6 AM ET cutoff advances nba_today naturally.
-        if baseline and baseline.date > nba_today:
-            game_date = baseline.date
-        else:
-            game_date = nba_today
-        if baseline:
+        # Step 3: Which single day of live stats belongs on top of that baseline.
+        # Both rules are evaluated so disagreements surface before the flag is
+        # flipped; services/matchup_window.py explains why the watermark rule
+        # cannot double-count.
+        window = MatchupService._watermark_window(matchup.data, baseline)
+        legacy = MatchupService._legacy_window(matchup.data, baseline)
+        if (window.include_live, window.overlay_date) != (legacy.include_live, legacy.overlay_date):
+            log.warning(
+                "matchup_window_divergence",
+                team_id=team_id,
+                matchup_period=espn_matchup_period,
+                watermark_include_live=window.include_live,
+                watermark_overlay=str(window.overlay_date),
+                watermark_reason=window.reason,
+                legacy_include_live=legacy.include_live,
+                legacy_overlay=str(legacy.overlay_date),
+            )
+        if not settings.live_window_from_watermark:
+            window = legacy
+
+        game_date = window.display_date
+        overlay_date = window.overlay_date
+        include_live = window.include_live
+
+        if window.seed_zero_baseline:
+            # First day of a matchup period with no snapshot yet. H2H scores
+            # reset each period, so a baseline "through day 0" is exactly zero.
+            your_base = opponent_base = 0.0
+        elif baseline is not None:
             your_base = float(baseline.current_score)
             opponent_base = float(baseline.opponent_current_score)
-            # baseline.date = D means captured at ~4 AM ET on day D (after ESPN's
-            # 3 AM batch), so it reflects cumulative scores through end of day D-1.
-            # Games on day D are NOT in the baseline.
-            # We need live overlay whenever nba_today >= baseline.date, i.e. when
-            # today's games couldn't be in the baseline yet.
-            # Using <= (not <) because baseline.date == nba_today is the common case:
-            # the baseline from 4 AM today doesn't include today's games.
-            # Edge: if pipeline already ran for nba_today+1 (baseline.date > nba_today),
-            # the baseline already includes nba_today's games — no overlay needed.
-            baseline_excludes_nba_today = baseline.date <= nba_today
         else:
             your_base = matchup.data.your_team.current_score
             opponent_base = matchup.data.opponent_team.current_score
-            baseline_excludes_nba_today = False
-
-        # Include live overlay only when nba_today's games aren't yet in the
-        # baseline, AND game_date falls within the current ESPN matchup period.
-        # Use the matchup's actual date range (already correctly spanning 2 weeks
-        # for playoff periods) rather than comparing local-schedule week numbers,
-        # which diverge from ESPN's matchup period IDs during playoffs.
-        include_live = False
-        if (
-            baseline_excludes_nba_today
-            and matchup.data.matchup_period_start
-            and matchup.data.matchup_period_end
-        ):
-            mp_start = date_type.fromisoformat(matchup.data.matchup_period_start)
-            mp_end = date_type.fromisoformat(matchup.data.matchup_period_end)
-            include_live = mp_start <= game_date <= mp_end
 
         if include_live:
             all_espn_ids = [
                 p.player_id for p in matchup.data.your_team.roster + matchup.data.opponent_team.roster
             ]
-            live_stats_list = LiveStatsModel.get_live_stats_by_espn_ids(all_espn_ids, game_date)
+            live_stats_list = LiveStatsModel.get_live_stats_by_espn_ids(all_espn_ids, overlay_date)
             espn_id_to_live = {stat.player.espn_id: stat for stat in live_stats_list}
 
             # Name-based fallback for players without espn_id mapping
@@ -211,7 +239,7 @@ class MatchupService:
             ]
             name_to_live: dict[str, object] = {}
             if unresolved_names:
-                fallback_stats = LiveStatsModel.get_live_stats_by_names(unresolved_names, game_date)
+                fallback_stats = LiveStatsModel.get_live_stats_by_names(unresolved_names, overlay_date)
                 name_to_live = {stat.player.name_normalized: stat for stat in fallback_stats}
         else:
             espn_id_to_live = {}
@@ -291,6 +319,12 @@ class MatchupService:
             cats = scoring.categories
 
             def base_categories(side: str, provider_side) -> CategoryTeamScoreData:
+                # The baseline query is scoped to this matchup period, so a
+                # previous period's totals can never leak in here. On a seeded
+                # period start `baseline` is None and this falls through to the
+                # provider's own totals, which are zero before any game in the
+                # period has been played — the category equivalent of the 0.0
+                # points base above.
                 snap = baseline.category_scores if (baseline is not None and baseline.category_scores) else None
                 if snap and isinstance(snap.get(side), dict):
                     totals = {k: v for k, v in snap[side].items() if k in cats.keys}
@@ -345,6 +379,7 @@ class MatchupService:
                 projected_winner=matchup.data.projected_winner,
                 projected_margin=matchup.data.projected_margin,
                 game_date=str(game_date),
+                baseline_stale_days=window.stale_days,
                 scoring_format=scoring.format,
                 settings_synced=scoring.settings_synced,
                 category_comparison=category_comparison,
