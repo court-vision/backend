@@ -18,6 +18,7 @@ from db.models import Team, League
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
 from schemas.espn import ValidateLeagueResp
 from schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
+from services import credential_service
 from services.league_service import LeagueService
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
@@ -38,7 +39,10 @@ class TeamService:
         league = team.league if team.league_id is not None else None
         return TeamResponse(
             team_id=team.team_id,
-            league_info=league_info or TeamService.deserialize_league_info(json.loads(team.league_info)),
+            # Hydrated for now so the response shape is unchanged. Removing
+            # secrets from this path is the second half of the migration and
+            # needs the edit form to stop round-tripping them first.
+            league_info=league_info or TeamService.deserialize_league_info(json.loads(team.league_info), team),
             league=LeagueService.summary_for_team(league, league_info or LeagueService.league_info_of(team)),
         )
 
@@ -65,8 +69,15 @@ class TeamService:
         return json.dumps(data)
 
     @staticmethod
-    def deserialize_league_info(league_info: dict) -> LeagueInfo:
-        """Deserialize JSON dict to LeagueInfo, defaulting to ESPN for backward compatibility."""
+    def deserialize_league_info(league_info: dict, team=None) -> LeagueInfo:
+        """Deserialize JSON dict to LeagueInfo, defaulting to ESPN for backward compatibility.
+
+        Pass `team` wherever the result will be used to call a provider: the
+        credentials may live in the encrypted store rather than in this dict.
+        Omit it on paths that only need the non-secret fields.
+        """
+        if team is not None:
+            league_info = credential_service.hydrate(team, league_info)
         # Default to ESPN for existing records without provider field
         provider_str = league_info.get('provider', 'espn')
         try:
@@ -142,6 +153,9 @@ class TeamService:
             team_identifier=team_identifier,
             league_info=TeamService.serialize_league_info(league_info)
         )
+        # Encrypt the credentials out of league_info. No-op until CREDENTIAL_KEYS
+        # is set, so this is safe to deploy ahead of the variable.
+        credential_service.persist(user_id, team, json.loads(TeamService.serialize_league_info(league_info)))
         # Detect the league's scoring settings from the provider (never raises)
         await LeagueService.sync_for_team(team, league_info, espn_payload=validation_result.league_payload)
 
@@ -173,6 +187,7 @@ class TeamService:
             (Team.user_id == user_id) & (Team.team_id == team_id)
         ).execute()
         team.league_info = serialized
+        credential_service.persist(user_id, team, json.loads(serialized))
         await LeagueService.sync_for_team(team, league_info, espn_payload=validation_result.league_payload)
 
         return TeamUpdateResp(status=ApiStatus.SUCCESS, message="Team updated successfully",
@@ -217,7 +232,11 @@ class TeamService:
                 log.warning("yahoo_token_update_skipped", team_id=team_id, reason="team not found")
                 return False
 
-            # Deserialize, update tokens, re-serialize
+            # Refreshed tokens follow the credentials: the encrypted store when
+            # this team has been migrated, league_info when it has not.
+            if credential_service.update_yahoo_tokens(team, access_token, refresh_token, token_expiry):
+                return True
+
             league_info_dict = json.loads(team.league_info)
             league_info_dict["yahoo_access_token"] = access_token
             league_info_dict["yahoo_refresh_token"] = refresh_token

@@ -16,6 +16,7 @@ from db.models.teams import Team
 from db.models.nba.games import Game
 from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
 from pipelines.extractors import ESPNExtractor
+from services import credential_service
 from services.lineup_check_service import LineupCheckService
 from services.notification_service import NotificationService
 from schemas.common import ApiStatus
@@ -279,7 +280,7 @@ async def check_lineup(
             data=None,
         )
 
-    league_info = json.loads(team.league_info)
+    league_info = credential_service.hydrate(team, json.loads(team.league_info))
     provider = league_info.get("provider", "espn")
 
     if provider != "espn":
@@ -374,7 +375,7 @@ async def send_test_alert(
     if not team:
         return {"status": "not_found", "message": "Team not found"}
 
-    league_info = json.loads(team.league_info)
+    league_info = credential_service.hydrate(team, json.loads(team.league_info))
     provider = league_info.get("provider", "espn")
 
     if provider != "espn":

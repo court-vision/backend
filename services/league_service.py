@@ -222,4 +222,6 @@ class LeagueService:
     @staticmethod
     def league_info_of(team: Team) -> LeagueInfo:
         from services.team_service import TeamService
-        return TeamService.deserialize_league_info(json.loads(team.league_info))
+        # Credential path: this feeds provider calls, so the secrets must be
+        # merged in from the encrypted store when the team has been migrated.
+        return TeamService.deserialize_league_info(json.loads(team.league_info), team)

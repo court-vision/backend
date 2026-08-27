@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).
     loop_watchdog_stall_s: float = 45.0
 
+    # Envelope-encryption keys for stored provider credentials, as
+    # "1:<fernet-key>,2:<fernet-key>" (newest last). Empty disables the
+    # encrypted store and falls back to the legacy plaintext column -- see
+    # core/crypto.py. Not a SecretStr: it is parsed once at import and the
+    # wrapper only makes that awkward without hiding anything (Sentry scrubbing
+    # already covers keys named like this).
+    credential_keys: str = ""
+
     # Live matchup overlay: pick the overlay day from the baseline's stored day
     # watermark (services/matchup_window.py) instead of the old wall-clock rule.
     # Off until ESPN's period-vs-totals ordering is confirmed in preseason; both
