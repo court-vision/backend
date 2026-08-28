@@ -16,7 +16,7 @@ from core.errors import BadRequestError, NotFoundError
 from core.logging import get_logger
 from db.models import Team, League
 from db.base import db_operation, db, run_db
-from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
+from schemas.common import ApiStatus, LeagueInfo, LeagueInfoPublic, FantasyProvider
 from schemas.espn import ValidateLeagueResp
 from schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
 from services import credential_service
@@ -38,14 +38,22 @@ class TeamService:
 
     @staticmethod
     def _to_team_response(team: Team, league_info: LeagueInfo | None = None) -> TeamResponse:
+        """The client-facing view of a team.
+
+        Deliberately does **not** hydrate: credentials never travel to the
+        browser. `LeagueInfoPublic` cannot hold them, and `has_credentials`
+        answers "are they on file" from the connection link without decrypting.
+        """
         league = team.league if team.league_id is not None else None
+        stored = json.loads(team.league_info)
+        info = league_info or TeamService.deserialize_league_info(stored)
+        public = LeagueInfoPublic.from_league_info(
+            info, has_credentials=credential_service.has_credentials(team, stored)
+        )
         return TeamResponse(
             team_id=team.team_id,
-            # Hydrated for now so the response shape is unchanged. Removing
-            # secrets from this path is the second half of the migration and
-            # needs the edit form to stop round-tripping them first.
-            league_info=league_info or TeamService.deserialize_league_info(json.loads(team.league_info), team),
-            league=LeagueService.summary_for_team(league, league_info or LeagueService.league_info_of(team)),
+            league_info=public,
+            league=LeagueService.summary_for_team(league, info),
         )
 
     @staticmethod
@@ -157,12 +165,55 @@ class TeamService:
             credential_service.persist(user_id, team, json.loads(serialized))
 
     @staticmethod
-    def _require_owned_team(user_id: int, team_id: int) -> None:
-        if not Team.select().where((Team.user_id == user_id) & (Team.team_id == team_id)).exists():
+    def _resolve_connection_handle(user_id: int, league_info: LeagueInfo) -> LeagueInfo:
+        """Swap an opaque `yahoo_connection_id` for the tokens it refers to.
+
+        The OAuth callback stores Yahoo tokens server-side and hands the browser
+        only this id, so the add-team request cannot carry the credentials that
+        `_validate_league` needs. Resolution is scoped to the caller: another
+        user's connection id resolves to nothing.
+        """
+        if not league_info.yahoo_connection_id:
+            return league_info
+        secrets = credential_service.load_provider_tokens(user_id, league_info.yahoo_connection_id)
+        if not secrets:
+            raise BadRequestError("YAHOO_CONNECTION_NOT_FOUND",
+                                  "Yahoo connection not found; reconnect your account")
+        merged = league_info.model_copy()
+        for field, value in secrets.items():
+            if value:
+                setattr(merged, field, value)
+        return merged
+
+    @staticmethod
+    def _merge_stored_credentials(user_id: int, team_id: int, incoming: LeagueInfo) -> LeagueInfo:
+        """Fill in any credential the caller left blank from the one on file.
+
+        The edit form no longer receives secrets, so it cannot send them back. A
+        blank credential field therefore means "keep what you have" — under the
+        previous full-overwrite behaviour it would have wiped a user's ESPN
+        cookies the first time they renamed a team.
+
+        Doubles as the ownership check: raises TEAM_NOT_FOUND for a team that is
+        not the caller's, in the same read.
+        """
+        team = Team.get_or_none((Team.user_id == user_id) & (Team.team_id == team_id))
+        if team is None:
             raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
+
+        stored = credential_service.hydrate(team, json.loads(team.league_info))
+        merged = incoming.model_copy()
+        for field in credential_service.ALL_SECRET_FIELDS:
+            if not getattr(merged, field, None) and stored.get(field):
+                setattr(merged, field, stored[field])
+        return merged
 
     @staticmethod
     async def add_team(user_id: int, league_info: LeagueInfo) -> TeamAddResp:
+        league_info = await run_db(
+            "teams.resolve_connection", TeamService._resolve_connection_handle,
+            user_id, league_info,
+        )
         validation_result = await TeamService._validate_league(league_info)
         if not validation_result.valid:
             # Once more with the team name stripped (mobile clients send trailing whitespace)
@@ -198,7 +249,12 @@ class TeamService:
 
     @staticmethod
     async def update_team(user_id: int, team_id: int, league_info: LeagueInfo) -> TeamUpdateResp:
-        await run_db("teams.require_owned", TeamService._require_owned_team, user_id, team_id)
+        # Must precede validation: _validate_league calls the provider, and the
+        # caller may have sent none of the credentials it needs.
+        league_info = await run_db(
+            "teams.merge_credentials", TeamService._merge_stored_credentials,
+            user_id, team_id, league_info,
+        )
         validation_result = await TeamService._validate_league(league_info, team_id)
         if not validation_result.valid:
             raise TeamService._rejected(validation_result)
