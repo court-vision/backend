@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from schemas.common import ApiStatus
+from schemas.common import ApiStatus, LeagueInfo
 
 
 def _fake_user(user_id: int = 42) -> MagicMock:
@@ -43,7 +43,13 @@ def as_user_42(monkeypatch):
 
 def _own_team(monkeypatch, team):
     from api import deps
+    from api.v1.internal import teams as teams_routes
     monkeypatch.setattr(deps, "ensure_team_owned", lambda team_id, user_id: team)
+
+    if team is not None:
+        async def hydrate(_team):
+            return LeagueInfo.model_validate_json(team.league_info)
+        monkeypatch.setattr(teams_routes, "load_owned_league_info", hydrate)
 
 
 @pytest.mark.api
@@ -77,9 +83,12 @@ def test_sync_league_calls_service_and_returns_summary(authed_client, as_user_42
     captured = {}
 
     async def fake_sync(t, league_info, espn_payload=None):
-        captured["team_id"] = t.team_id
+        captured["team_id"] = t if isinstance(t, int) else t.team_id
         captured["league_id"] = league_info.league_id
-        return _fake_league(scoring_type="points", point_weights={"pts": 1.0}, categories=[])
+        from services.league_service import LeagueService
+        return LeagueService.to_summary(
+            _fake_league(scoring_type="points", point_weights={"pts": 1.0}, categories=[])
+        )
 
     monkeypatch.setattr(league_service.LeagueService, "sync_for_team", staticmethod(fake_sync))
     res = authed_client.post("/v1/internal/teams/7/league/sync")
@@ -97,7 +106,10 @@ def test_sync_league_reports_unsynced_stub_as_error_status(authed_client, as_use
     _own_team(monkeypatch, team)
 
     async def fake_sync(t, league_info, espn_payload=None):
-        return _fake_league(settings_synced_at=None, scoring_type="points", categories=[], raw_settings=None)
+        from services.league_service import LeagueService
+        return LeagueService.to_summary(
+            _fake_league(settings_synced_at=None, scoring_type="points", categories=[], raw_settings=None)
+        )
 
     monkeypatch.setattr(league_service.LeagueService, "sync_for_team", staticmethod(fake_sync))
     body = authed_client.post("/v1/internal/teams/7/league/sync").json()

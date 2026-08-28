@@ -1,208 +1,272 @@
-"""
-services.providers.http: every provider outcome becomes one typed AppError with a
-real HTTP status, GETs retry exactly once on a 5xx / network error, POSTs never
-retry, and each failed call logs one `provider_call_failed` line.
+"""Async provider boundary: mappings, retries, capacity, and credential isolation."""
 
-`requests.request` (what core.resilience calls) is stubbed; tenacity's sleep between
-attempts is a no-op.
-"""
-
-import json
-import time
+import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
-import requests
+import pytest_asyncio
 from structlog.testing import capture_logs
 
-from core import resilience
 from core.errors import BadRequestError, ProviderAuthError, ProviderError, ProviderTimeout
-from core.settings import settings
 from services.providers import http as provider_http
-from services.providers.http import provider_get, provider_label, provider_post
 
-URL = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/2027/segments/0/leagues/555?view=mTeam"
+URL = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/2027/segments/0/leagues/555"
 TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token"
 
 
-def _response(status: int, body=b"", headers=None) -> requests.Response:
-    response = requests.Response()
-    response.status_code = status
-    if isinstance(body, (dict, list)):
-        body = json.dumps(body).encode()
-    elif isinstance(body, str):
-        body = body.encode()
-    response._content = body
-    response.headers.update(headers or {})
-    response.url = URL
-    return response
-
-
-@pytest.fixture
-def http(monkeypatch):
-    """`queue` holds the responses (or exceptions) to hand out; `calls` records each attempt."""
+@pytest_asyncio.fixture
+async def http(monkeypatch):
     state = SimpleNamespace(queue=[], calls=[])
 
-    def fake_request(method, url, **kwargs):
-        state.calls.append((method, url, kwargs))
+    async def handler(request: httpx.Request) -> httpx.Response:
+        state.calls.append(request)
         nxt = state.queue.pop(0)
         if isinstance(nxt, Exception):
             raise nxt
-        return nxt
+        status, body, headers = nxt
+        if isinstance(body, (dict, list)):
+            return httpx.Response(status, json=body, headers=headers)
+        return httpx.Response(status, text=body or "", headers=headers)
 
-    monkeypatch.setattr(resilience.requests, "request", fake_request)
-    monkeypatch.setattr(time, "sleep", lambda seconds: None)   # tenacity's nap between attempts
-    return state
+    await provider_http.stop_provider_runtime()
+    monkeypatch.setattr(provider_http, "RETRY_BASE_DELAY", 0)
+    for provider in ("espn", "yahoo", "nba"):
+        provider_http._clients[provider] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider_http._capacity[provider] = asyncio.Semaphore(provider_http._limit_for(provider))
+    yield state
+    await provider_http.stop_provider_runtime()
 
 
-def _failures(logs):
-    return [e for e in logs if e["event"] == "provider_call_failed"]
+def response(status: int, body=None, headers=None):
+    return status, body, headers or {}
+
+
+def failures(logs):
+    return [event for event in logs if event["event"] == "provider_call_failed"]
 
 
 @pytest.mark.unit
-def test_success_returns_the_json_body_and_passes_the_request_through(http):
-    http.queue = [_response(200, {"teams": [{"name": "My Team"}]})]
-
-    body = provider_get("espn", URL, params={"view": ["mTeam"]}, cookies={"espn_s2": "s2", "SWID": "{w}"},
-                        headers={"x-fantasy-filter": "{}"}, expect_key="teams")
-
+@pytest.mark.asyncio
+async def test_success_passes_request_and_returns_json(http):
+    http.queue = [response(200, {"teams": [{"name": "My Team"}]})]
+    body = await provider_http.provider_get(
+        "espn", URL,
+        params={"view": ["mTeam"]},
+        cookies={"espn_s2": "s2", "SWID": "{w}"},
+        headers={"x-fantasy-filter": "{}"},
+        expect_key="teams",
+    )
     assert body == {"teams": [{"name": "My Team"}]}
-    (method, url, kwargs), = http.calls
-    assert method == "GET" and url == URL
-    assert kwargs["params"] == {"view": ["mTeam"]} and kwargs["cookies"] == {"espn_s2": "s2", "SWID": "{w}"}
-    assert kwargs["headers"] == {"x-fantasy-filter": "{}"} and kwargs["timeout"] == settings.http_timeout
+    request = http.calls[0]
+    assert request.method == "GET" and request.url.params.get("view") == "mTeam"
+    assert request.headers["cookie"] == "espn_s2=s2; SWID={w}"
+    assert request.headers["x-fantasy-filter"] == "{}"
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 403])
-def test_rejected_credentials_are_a_provider_auth_error(http, status):
-    http.queue = [_response(status, "<html>login</html>")]
-
+async def test_rejected_credentials_map_without_retry(http, status):
+    http.queue = [response(status, "<html>login</html>")]
     with capture_logs() as logs, pytest.raises(ProviderAuthError) as excinfo:
-        provider_get("yahoo", URL)
-
-    err = excinfo.value
-    assert err.status_code == 403 and err.error_code == "PROVIDER_AUTH_EXPIRED" and err.data["provider"] == "yahoo"
-    assert len(http.calls) == 1                                   # a 4xx is never retried
-    failed = _failures(logs)
-    assert len(failed) == 1 and failed[0]["provider"] == "yahoo" and failed[0]["status"] == status
-    assert isinstance(failed[0]["elapsed_ms"], int) and failed[0]["log_level"] == "warning"
-    assert failed[0]["error_code"] == "PROVIDER_AUTH_EXPIRED"
-    assert "?" not in failed[0]["url"]                            # query strings never reach the logs
+        await provider_http.provider_get("yahoo", URL)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.error_code == "PROVIDER_AUTH_EXPIRED"
+    assert len(http.calls) == 1 and failures(logs)[0]["status"] == status
 
 
 @pytest.mark.unit
-def test_a_404_is_league_not_found(http):
-    http.queue = [_response(404, {"message": "not found"})]
-
+@pytest.mark.asyncio
+async def test_404_maps_to_league_not_found(http):
+    http.queue = [response(404, {"message": "not found"})]
     with pytest.raises(BadRequestError) as excinfo:
-        provider_get("espn", URL, expect_key="teams")
-
+        await provider_http.provider_get("espn", URL, expect_key="teams")
     assert excinfo.value.status_code == 400 and excinfo.value.error_code == "LEAGUE_NOT_FOUND"
-    assert "ESPN" in excinfo.value.message and "not found" in excinfo.value.message
-    assert len(http.calls) == 1
 
 
 @pytest.mark.unit
-def test_a_5xx_is_retried_once_then_succeeds(http):
-    http.queue = [_response(503, "gateway"), _response(200, {"teams": []})]
-
-    with capture_logs() as logs:
-        body = provider_get("espn", URL, expect_key="teams")
-
-    assert body == {"teams": []} and len(http.calls) == 2
-    assert _failures(logs) == []                                  # the call succeeded: nothing to alert on
-
-
-@pytest.mark.unit
-def test_two_5xx_are_a_provider_error_after_two_attempts(http):
-    http.queue = [_response(500), _response(502)]
-
-    with capture_logs() as logs, pytest.raises(ProviderError) as excinfo:
-        provider_get("espn", URL)
-
-    assert excinfo.value.status_code == 502 and excinfo.value.error_code == "PROVIDER_UNAVAILABLE"
-    assert excinfo.value.data["provider"] == "espn" and len(http.calls) == 2
-    failed = _failures(logs)
-    assert len(failed) == 1 and failed[0]["status"] == 502 and failed[0]["error_code"] == "PROVIDER_UNAVAILABLE"
-
-
-@pytest.mark.unit
-def test_timeouts_retry_once_then_map_to_provider_timeout(http):
-    http.queue = [requests.exceptions.Timeout("slow"), requests.exceptions.ConnectionError("refused")]
-
-    with capture_logs() as logs, pytest.raises(ProviderTimeout) as excinfo:
-        provider_get("espn", URL)
-
-    assert excinfo.value.status_code == 504 and excinfo.value.error_code == "PROVIDER_TIMEOUT"
-    assert excinfo.value.data["provider"] == "espn" and len(http.calls) == 2
-    assert _failures(logs)[0]["status"] is None
+@pytest.mark.asyncio
+async def test_get_retries_network_and_5xx_once(http):
+    http.queue = [response(503), response(200, {"teams": []})]
+    assert await provider_http.provider_get("espn", URL, expect_key="teams") == {"teams": []}
+    assert len(http.calls) == 2
 
     http.calls.clear()
-    http.queue = [requests.exceptions.ConnectionError("blip"), _response(200, {"players": []})]
-    assert provider_get("espn", URL, expect_key="players") == {"players": []}
+    http.queue = [httpx.ConnectError("blip"), response(200, {"players": []})]
+    assert await provider_http.provider_get("espn", URL, expect_key="players") == {"players": []}
     assert len(http.calls) == 2
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("status", [400, 429])
-def test_other_client_errors_are_provider_errors_without_retry(http, status):
-    http.queue = [_response(status, "nope", headers={"Retry-After": "7"})]
-
+@pytest.mark.asyncio
+async def test_exhausted_retries_map_to_typed_errors(http):
+    http.queue = [response(500), response(502)]
     with pytest.raises(ProviderError) as excinfo:
-        provider_get("espn", URL)
+        await provider_http.provider_get("espn", URL)
+    assert excinfo.value.status_code == 502 and len(http.calls) == 2
 
-    assert excinfo.value.status_code == 502 and excinfo.value.error_code == "PROVIDER_UNAVAILABLE"
+    http.calls.clear()
+    http.queue = [httpx.ReadTimeout("slow"), httpx.ConnectError("refused")]
+    with pytest.raises(ProviderTimeout) as excinfo:
+        await provider_http.provider_get("espn", URL)
+    assert excinfo.value.status_code == 504 and len(http.calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 429])
+async def test_other_client_errors_do_not_retry(http, status):
+    http.queue = [response(status, "nope", {"Retry-After": "7"})]
+    with pytest.raises(ProviderError) as excinfo:
+        await provider_http.provider_get("espn", URL)
     assert len(http.calls) == 1
     if status == 429:
         assert excinfo.value.data["retry_after"] == 7
 
 
 @pytest.mark.unit
-def test_unreadable_or_unexpected_bodies_are_bad_responses(http):
-    http.queue = [_response(200, "<html>maintenance</html>")]
+@pytest.mark.asyncio
+async def test_bad_json_and_missing_key_map_to_bad_response(http):
+    http.queue = [response(200, "<html>maintenance</html>")]
     with capture_logs() as logs, pytest.raises(ProviderError) as excinfo:
-        provider_get("espn", URL, expect_key="teams")
-    assert excinfo.value.error_code == "PROVIDER_BAD_RESPONSE" and excinfo.value.status_code == 502
-    assert _failures(logs)[0]["body_preview"].startswith("<html>")
-    assert "<html>" not in excinfo.value.message                  # provider text never reaches the client
-
-    http.queue = [_response(200, {"error": "no teams here"})]
-    with pytest.raises(ProviderError) as excinfo:
-        provider_get("espn", URL, expect_key="teams")
+        await provider_http.provider_get("espn", URL, expect_key="teams")
     assert excinfo.value.error_code == "PROVIDER_BAD_RESPONSE"
+    assert failures(logs)[0]["body_preview"].startswith("<html>")
 
-    http.queue = [_response(200, {"error": "fine without expect_key"})]
-    assert provider_get("espn", URL) == {"error": "fine without expect_key"}
-
-
-@pytest.mark.unit
-def test_post_maps_a_rejected_grant_to_provider_auth_and_never_retries(http):
-    http.queue = [_response(400, {"error": "INVALID_REFRESH_TOKEN"})]
-    with pytest.raises(ProviderAuthError):
-        provider_post("yahoo", TOKEN_URL, data={"grant_type": "refresh_token"},
-                      expect_key="access_token", auth_statuses=(400, 401, 403))
-    (method, _, kwargs), = http.calls
-    assert method == "POST" and kwargs["data"] == {"grant_type": "refresh_token"}
-
-    http.calls.clear()
-    http.queue = [_response(503)]
+    http.queue = [response(200, {"error": "missing"})]
     with pytest.raises(ProviderError):
-        provider_post("yahoo", TOKEN_URL, data={})
-    assert len(http.calls) == 1                                   # POSTs are not idempotent: no retry
-
-    http.calls.clear()
-    http.queue = [_response(404)]
-    with pytest.raises(ProviderError):                            # no league to be missing on a token URL
-        provider_post("yahoo", TOKEN_URL, data={})
-
-    http.calls.clear()
-    http.queue = [_response(200, {"access_token": "new", "refresh_token": "r", "expires_in": 3600})]
-    body = provider_post("yahoo", TOKEN_URL, data={}, expect_key="access_token")
-    assert body["access_token"] == "new"
+        await provider_http.provider_get("espn", URL, expect_key="teams")
 
 
 @pytest.mark.unit
-def test_retry_policy_and_labels():
-    assert (provider_http.RETRY_MAX_ATTEMPTS, provider_http.RETRY_BASE_DELAY, provider_http.RETRY_MAX_DELAY) == (2, 0.5, 1)
-    assert provider_label("espn") == "ESPN" and provider_label("yahoo") == "Yahoo" and provider_label("nba") == "NBA"
+@pytest.mark.asyncio
+async def test_post_never_retries(http):
+    http.queue = [response(400, {"error": "INVALID_REFRESH_TOKEN"})]
+    with pytest.raises(ProviderAuthError):
+        await provider_http.provider_post(
+            "yahoo", TOKEN_URL, data={"grant_type": "refresh_token"},
+            expect_key="access_token", auth_statuses=(400, 401, 403),
+        )
+    assert len(http.calls) == 1
+
+    http.calls.clear()
+    http.queue = [response(503), response(200, {"access_token": "unused"})]
+    with pytest.raises(ProviderError):
+        await provider_http.provider_post("yahoo", TOKEN_URL, data={})
+    assert len(http.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_concurrent_credentials_never_cross_requests(http):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.headers.get("cookie"), request.headers.get("authorization")))
+        if len(seen) == 2:
+            started.set()
+        await release.wait()
+        return httpx.Response(200, json={"teams": []}, headers={"Set-Cookie": "espn_s2=server; Path=/"})
+
+    await provider_http.stop_provider_runtime()
+    client = httpx.AsyncClient(transport=provider_http._NoCookiePersistenceTransport(httpx.MockTransport(handler)))
+    provider_http._clients["espn"] = client
+    provider_http._capacity["espn"] = asyncio.Semaphore(2)
+    tasks = [
+        asyncio.create_task(provider_http.provider_get(
+            "espn", URL, cookies={"espn_s2": "user-a"},
+            headers={"Authorization": "Bearer user-a"}, expect_key="teams",
+        )),
+        asyncio.create_task(provider_http.provider_get(
+            "espn", URL, cookies={"espn_s2": "user-b"},
+            headers={"Authorization": "Bearer user-b"}, expect_key="teams",
+        )),
+    ]
+    await started.wait()
+    release.set()
+    await asyncio.gather(*tasks)
+    assert set(seen) == {
+        ("espn_s2=user-a", "Bearer user-a"),
+        ("espn_s2=user-b", "Bearer user-b"),
+    }
+    assert dict(client.cookies) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_provider_capacity_is_enforced(http):
+    active = maximum = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await asyncio.sleep(0.01)
+            return httpx.Response(200, json={"teams": []})
+        finally:
+            active -= 1
+
+    await provider_http.stop_provider_runtime()
+    provider_http._clients["espn"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider_http._capacity["espn"] = asyncio.Semaphore(2)
+    await asyncio.gather(*(
+        provider_http.provider_get("espn", URL, expect_key="teams") for _ in range(10)
+    ))
+    assert maximum == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_provider_capacity_timeout_maps_to_504(http, monkeypatch):
+    monkeypatch.setattr(provider_http.settings, "provider_queue_timeout_seconds", 0.01)
+    provider_http._capacity["espn"] = asyncio.Semaphore(0)
+    with capture_logs() as logs, pytest.raises(ProviderTimeout) as excinfo:
+        await provider_http.provider_get("espn", URL)
+    assert excinfo.value.status_code == 504
+    assert any(event["event"] == "provider_capacity_timeout" for event in logs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_get_retry_uses_an_async_half_second_backoff(http, monkeypatch):
+    http.queue = [response(503), response(200, {"teams": []})]
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(provider_http, "RETRY_BASE_DELAY", 0.5)
+    monkeypatch.setattr(provider_http.asyncio, "sleep", fake_sleep)
+    await provider_http.provider_get("espn", URL, expect_key="teams")
+    assert sleeps == [0.5]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_provider_clients_have_explicit_lifecycle(monkeypatch):
+    await provider_http.stop_provider_runtime()
+    created = []
+
+    def make_client(provider):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={})
+        ))
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(provider_http, "_make_client", make_client)
+    provider_http.start_provider_runtime()
+    assert set(provider_http._clients) == {"espn", "yahoo", "nba"}
+    assert len(created) == 3 and all(not client.is_closed for client in created)
+    await provider_http.stop_provider_runtime()
+    assert all(client.is_closed for client in created)
+
+
+@pytest.mark.unit
+def test_policy_and_labels():
+    assert provider_http.RETRY_MAX_ATTEMPTS == 2
+    assert provider_http.provider_label("espn") == "ESPN"

@@ -5,6 +5,7 @@ Service for NBA team season stats.
 from core.logging import get_logger
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.teams import NBATeamStatsResp, NBATeamStatsData
 
@@ -13,7 +14,8 @@ class NBATeamStatsService:
     """Service for retrieving NBA team season statistics."""
 
     @staticmethod
-    async def get_team_stats(team_abbrev: str) -> NBATeamStatsResp:
+    @db_operation("nba_team.stats")
+    def get_team_stats(team_abbrev: str) -> NBATeamStatsResp:
         """
         Get the latest season stats for an NBA team.
 

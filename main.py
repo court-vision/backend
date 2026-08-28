@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, APIRouter
 from slowapi.errors import RateLimitExceeded
@@ -7,7 +8,6 @@ from slowapi.errors import RateLimitExceeded
 import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
 
 from core.middleware import setup_middleware
-from core.db_middleware import DatabaseMiddleware
 from core.correlation_middleware import RequestContextMiddleware
 from core.health import health_response
 from core.logging import setup_logging, get_logger
@@ -15,9 +15,12 @@ from core.settings import settings
 from core.telemetry import init_sentry
 from core.watchdog import start_loop_watchdog
 from core.rate_limit import limiter, rate_limit_exceeded_handler
-from db.base import init_db, close_db
+from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
+from services.features_client import start_features_runtime, stop_features_runtime
+from services.providers.http import start_provider_runtime, stop_provider_runtime
+from services.providers.blocking import start_blocking_provider_runtime, stop_blocking_provider_runtime
 from services.schedule_service import assert_calendar_available
-from api.v1.internal import auth, users, teams, lineups, espn, yahoo, matchups, streamers, notifications, api_keys
+from api.v1.internal import users, teams, lineups, espn, yahoo, matchups, streamers, notifications, api_keys
 from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public, playoffs
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
@@ -25,6 +28,7 @@ from api.v1.public import rankings, players, games, teams as public_teams, owner
 init_sentry(settings, ignore_errors=[RateLimitExceeded])
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     # Setup structured logging first
     setup_logging(
@@ -37,23 +41,33 @@ async def lifespan(app: FastAPI):
     log.info("application_starting", service=settings.service_name, version=settings.version,
              environment=settings.environment)
 
-    # Initialize database
-    init_db()
-    log.info("database_initialized")
+    watchdog = None
+    try:
+        # Startup migrations are deliberately synchronous before the server
+        # accepts traffic; init_db closes their connection when complete.
+        init_db()
+        start_db_runtime()
+        start_provider_runtime()
+        start_blocking_provider_runtime()
+        start_features_runtime()
+        log.info("database_initialized")
 
-    # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
-    assert_calendar_available()
+        # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
+        assert_calendar_available()
 
-    # A blocked event loop hangs every request with nothing logged; exit so Railway restarts us.
-    watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
-
-    yield
-
-    if watchdog is not None:
-        watchdog.stop()
-    # Close database connection
-    close_db()
-    log.info("application_stopped")
+        # A blocked event loop hangs every request with nothing logged; exit so Railway restarts us.
+        watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
+        yield
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
+        # All lifecycle functions are idempotent, including partial-startup cleanup.
+        await stop_features_runtime()
+        await stop_provider_runtime()
+        await stop_blocking_provider_runtime()
+        await stop_db_runtime()
+        close_db()
+        log.info("application_stopped")
 
 
 app = FastAPI(
@@ -79,7 +93,6 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Add middlewares (order matters - first added = outermost)
 app.add_middleware(RequestContextMiddleware)  # Outermost: correlation id + one http_request log line
-app.add_middleware(DatabaseMiddleware)        # Per-request connection on the loop thread
 setup_middleware(app)                         # Exception handlers + CORS
 
 # API v1 Public routes
@@ -98,7 +111,6 @@ app.include_router(api_v1_public)
 
 # API v1 Internal routes
 api_v1_internal = APIRouter(prefix="/v1/internal")
-api_v1_internal.include_router(auth.router)
 api_v1_internal.include_router(users.router)
 api_v1_internal.include_router(teams.router)
 api_v1_internal.include_router(lineups.router)

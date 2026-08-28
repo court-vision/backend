@@ -233,6 +233,14 @@ def team(monkeypatch):
         return state.team
 
     monkeypatch.setattr(LineupService, "_owned_team", staticmethod(owned))
+
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    # This file is deliberately an in-memory service unit test. The executor's
+    # connection lifecycle is covered separately by the concurrency runtime tests.
+    monkeypatch.setattr(lineup_service, "run_db", direct_run_db)
+    monkeypatch.setattr(espn_service, "run_db", direct_run_db)
     return state
 
 
@@ -346,7 +354,9 @@ FA_PAYLOAD = {"players": [{"id": 4, "player": _espn_player(4, "Streamer", 9.0)},
 def espn_http(monkeypatch):
     """Real ESPN parsing over canned payloads (provider_get stubbed); scoring resolves like the resolver minus the DB."""
     payloads = iter([ROSTER_PAYLOAD, FA_PAYLOAD])
-    monkeypatch.setattr(espn_service, "provider_get", lambda *a, **k: next(payloads))
+    async def provider_get(*args, **kwargs):
+        return next(payloads)
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
     calls = []
     monkeypatch.setattr(PlayerValueService, "scoring_for",
                         staticmethod(lambda li, team_id=None: (calls.append(("scoring_for", team_id, li.scoring_preview)),

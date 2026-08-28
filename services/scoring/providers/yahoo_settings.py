@@ -26,9 +26,9 @@ YAHOO_SCORING_TYPE_MAP: dict[str, tuple[str, str | None]] = {
 
 # ---- fetch -----------------------------------------------------------------
 
-def fetch_yahoo_league_settings(access_token: str, league_key: str) -> dict:
+async def fetch_yahoo_league_settings(access_token: str, league_key: str) -> dict:
     """The league settings payload; a rejected token or a Yahoo outage raises a typed AppError."""
-    return provider_get(
+    return await provider_get(
         "yahoo",
         f"{YAHOO_API_BASE}/league/{league_key}/settings?format=json",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},

@@ -25,6 +25,7 @@ from services.scoring.resolver import ResolvedScoring, resolve_scoring_for_team
 from services.scoring.vocab import DEFAULT_CATEGORIES
 from services import schedule_service
 from core.logging import get_logger
+from db.base import DB_RUNTIME_ERRORS, run_db
 
 
 # Injury statuses that mean the player is out
@@ -51,6 +52,26 @@ def _classify_injury(injury_status: Optional[str]) -> str:
 
 
 class TeamInsightsService:
+
+    @staticmethod
+    def _stored_windows(team_id: int, league_info, roster: list[PlayerResp]):
+        scoring = resolve_scoring_for_team(team_id)
+        weights = scoring.point_weights
+        if league_info.provider == FantasyProvider.YAHOO:
+            lookups = [(player.name, player.team) for player in roster]
+            return (
+                scoring,
+                PlayerValueService.rolling_avg_by_name(lookups, days=7, weights=weights),
+                PlayerValueService.rolling_avg_by_name(lookups, days=14, weights=weights),
+                PlayerValueService.rolling_avg_by_name(lookups, days=30, weights=weights),
+            )
+        espn_ids = [player.player_id for player in roster]
+        return (
+            scoring,
+            PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=7, weights=weights),
+            PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=14, weights=weights),
+            PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=30, weights=weights),
+        )
 
     @staticmethod
     async def get_team_insights(team_id: int) -> TeamInsightsResp:
@@ -100,23 +121,15 @@ class TeamInsightsService:
                         )
 
             # Step 3: Batch stat window lookups
-            scoring = resolve_scoring_for_team(team_id)
-            weights = scoring.point_weights
+            scoring, avgs_l7, avgs_l14, avgs_l30 = await run_db(
+                "team_insights.windows", TeamInsightsService._stored_windows,
+                team_id, league_info, base_roster,
+            )
             if league_info.provider == FantasyProvider.YAHOO:
-                player_lookups = [(p.name, p.team) for p in base_roster]
-                avgs_l7 = PlayerValueService.rolling_avg_by_name(player_lookups, days=7, weights=weights)
-                avgs_l14 = PlayerValueService.rolling_avg_by_name(player_lookups, days=14, weights=weights)
-                avgs_l30 = PlayerValueService.rolling_avg_by_name(player_lookups, days=30, weights=weights)
-
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "name") -> Optional[float]:
                     normalized = _normalize_name(player.name)
                     return avgs.get(normalized)
             else:
-                espn_ids = [p.player_id for p in base_roster]
-                avgs_l7 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=7, weights=weights)
-                avgs_l14 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=14, weights=weights)
-                avgs_l30 = PlayerValueService.rolling_avg_by_espn_id(espn_ids, days=30, weights=weights)
-
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "espn_id") -> Optional[float]:
                     return avgs.get(player.player_id)
 
@@ -140,7 +153,9 @@ class TeamInsightsService:
                 ))
 
             # Step 5: Category strengths (L14 rolling window) and opponent comparison
-            your_lines = _roster_lines(base_roster, league_info.provider)
+            your_lines = await run_db(
+                "team_insights.roster_lines", _roster_lines, base_roster, league_info.provider
+            )
             your_line = StatLine.sum(your_lines) if your_lines else None
             category_strengths = _strengths_from_line(your_line) if your_line is not None else None
             opponent_strengths: Optional[CategoryStrengths] = None
@@ -219,6 +234,8 @@ class TeamInsightsService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("get_team_insights_error", error=str(e), team_id=team_id)
             return TeamInsightsResp(
@@ -293,7 +310,10 @@ async def _opponent_comparison(
             log.warning("team_insights_no_matchup", team_id=team_id, message=matchup.message)
             return None, None
 
-        opp_lines = _roster_lines(matchup.data.opponent_team.roster, provider)
+        opp_lines = await run_db(
+            "team_insights.opponent_lines", _roster_lines,
+            matchup.data.opponent_team.roster, provider,
+        )
         if not opp_lines:
             return None, None
         opp_line = StatLine.sum(opp_lines)
@@ -301,6 +321,8 @@ async def _opponent_comparison(
         cs = _category_scoring(scoring)
         comparison = cs.compare(cs.totals_from_line(your_line), cs.totals_from_line(opp_line))
         return _strengths_from_line(opp_line), comparison_to_schema(comparison)
+    except DB_RUNTIME_ERRORS:
+        raise
     except Exception as e:
         log.warning("team_insights_opponent_comparison_failed", team_id=team_id, error=str(e))
         return None, None

@@ -28,6 +28,16 @@ POOL = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def direct_db_boundary(monkeypatch):
+    from db import base as db_base
+
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(db_base, "run_db", direct_run_db)
+
+
 @pytest.fixture
 def stub_pool(monkeypatch):
     calls = []

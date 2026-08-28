@@ -60,7 +60,14 @@ def espn(monkeypatch):
     """Stub ESPN HTTP + scoring resolution; `dispatch` controls what our value service returns."""
     state = {"payload": None, "scoring": POINTS, "values": {}, "calls": []}
 
-    monkeypatch.setattr(espn_service, "provider_get", lambda *a, **k: state["payload"])
+    async def provider_get(*args, **kwargs):
+        return state["payload"]
+
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
+    monkeypatch.setattr(espn_service, "run_db", direct_run_db)
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda li, team_id=None: state["scoring"]))
 
     def fake_avg_points_for(scoring, *, espn_ids=None, names=None, days=14, recent=False):

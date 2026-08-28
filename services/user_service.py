@@ -3,11 +3,13 @@ from schemas.user import UserUpdateResp, UserDeleteResp
 from schemas.common import ApiStatus
 from core.security import check_password, hash_password
 from db.models import User
+from db.base import db_operation
 
 class UserService:
     
     @staticmethod
-    async def update_user(user_id: int, email: Optional[str], password: Optional[str]) -> UserUpdateResp:
+    @db_operation("users.update")
+    def update_user(user_id: int, email: Optional[str], password: Optional[str]) -> UserUpdateResp:
         try:
             update_data = {}
             if email:
@@ -25,7 +27,8 @@ class UserService:
             return UserUpdateResp(status=ApiStatus.ERROR, message="Failed to update user", error_code="INTERNAL_ERROR")
 
     @staticmethod
-    async def delete_user(user_id: int, password: str) -> UserDeleteResp:
+    @db_operation("users.delete")
+    def delete_user(user_id: int, password: str) -> UserDeleteResp:
         try:
             user_data = User.select().where(User.user_id == user_id).first()
 

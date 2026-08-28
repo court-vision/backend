@@ -22,9 +22,10 @@ from fastapi.responses import JSONResponse
 from core.logging import get_logger
 from core.settings import settings
 from db.base import db
+from db.base import run_db
 from services.schedule_service import get_max_week
 
-DB_TIMEOUT_S = 2.0
+DB_TIMEOUT_S = settings.db_queue_timeout_seconds
 
 _STARTED_AT = time.monotonic()
 _DEGRADED_LOG_INTERVAL_S = 60.0
@@ -32,16 +33,15 @@ _last_degraded_log_at = 0.0
 
 
 def _probe_database() -> float:
-    """`SELECT 1` on this worker thread's own pooled connection; returns latency in ms."""
+    """`SELECT 1` inside the caller's DB-worker connection; returns latency in ms."""
     started = time.perf_counter()
-    with db.connection_context():
-        db.execute_sql("SELECT 1").fetchone()
+    db.execute_sql("SELECT 1").fetchone()
     return (time.perf_counter() - started) * 1000
 
 
 async def database_check(timeout: float = DB_TIMEOUT_S) -> dict[str, Any]:
     try:
-        latency_ms = await asyncio.wait_for(asyncio.to_thread(_probe_database), timeout)
+        latency_ms = await asyncio.wait_for(run_db("health.database", _probe_database), timeout)
     except asyncio.TimeoutError:
         return {"ok": False, "error": f"timeout after {timeout:g}s"}
     except Exception as exc:

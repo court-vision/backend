@@ -1,4 +1,5 @@
 from db.models.nba.playoff_series import PlayoffSeries
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.playoff import PlayoffBracketResp, PlayoffBracketData, PlayoffRound, PlayoffSeriesResp
 
@@ -6,7 +7,8 @@ from schemas.playoff import PlayoffBracketResp, PlayoffBracketData, PlayoffRound
 class PlayoffService:
 
     @staticmethod
-    async def get_bracket(season: str | None = None) -> PlayoffBracketResp:
+    @db_operation("playoffs.bracket")
+    def get_bracket(season: str | None = None) -> PlayoffBracketResp:
         """
         Return the current playoff bracket from nba.playoff_series.
 

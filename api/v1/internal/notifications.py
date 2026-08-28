@@ -7,18 +7,20 @@ Uses Clerk authentication (same as teams, matchups, etc.).
 
 import json
 from datetime import date
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Query
 
-from api.deps import get_db_user
-from db.models.users import User
+from api.deps import UserContext, get_db_user
+from db.base import db_operation, run_db
+from services.providers.blocking import run_blocking_provider
 from db.models.teams import Team
 from db.models.nba.games import Game
 from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
-from pipelines.extractors import ESPNExtractor
 from services import credential_service
 from services.lineup_check_service import LineupCheckService
 from services.notification_service import NotificationService
+from services.providers.http import provider_get
 from schemas.common import ApiStatus
 from schemas.notifications import (
     NotificationPreferenceReq,
@@ -32,16 +34,79 @@ from schemas.notifications import (
     LineupCheckResp,
     LineupCheckResponse,
 )
+from utils.constants import ESPN_FANTASY_ENDPOINT
+from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
-espn_extractor = ESPNExtractor()
 lineup_checker = LineupCheckService()
 
 
+def _parse_espn_roster_with_slots(data: dict, team_name: str) -> list[dict] | None:
+    """Pure parser for the notification-specific roster representation."""
+    target = next(
+        (team for team in data.get("teams", []) if team.get("name", "").strip() == team_name.strip()),
+        None,
+    )
+    if target is None:
+        return None
+    roster = []
+    for entry in target.get("roster", {}).get("entries", []):
+        player = entry.get("playerPoolEntry", {}).get("player", {}) or entry.get("player", {})
+        if not player:
+            continue
+        team = PRO_TEAM_MAP.get(player.get("proTeamId", 0), "FA")
+        roster.append({
+            "name": player.get("fullName", "Unknown"),
+            "team": TEAM_ABBREV_CORRECTIONS.get(team, team),
+            "lineup_slot": POSITION_MAP.get(entry.get("lineupSlotId", 0), ""),
+            "injured": player.get("injured", False),
+            "injury_status": player.get("injuryStatus"),
+        })
+    return roster
+
+
+async def _fetch_espn_roster_with_slots(league_info: dict) -> list[dict] | None:
+    """Fetch notification roster data through the shared async ESPN boundary."""
+    from core.settings import settings
+
+    year = league_info.get("year", settings.espn_year)
+    data = await provider_get(
+        "espn",
+        ESPN_FANTASY_ENDPOINT.format(year, league_info["league_id"]),
+        params={"view": ["mTeam", "mRoster"]},
+        cookies={"espn_s2": league_info.get("espn_s2", ""), "SWID": league_info.get("swid", "")},
+        expect_key="teams",
+    )
+    return _parse_espn_roster_with_slots(data, league_info.get("team_name", ""))
+
+
+def _lineup_check_context(user_id: int, team_id: int) -> dict | None:
+    """Materialize every DB input needed by the on-demand notification flows."""
+    team = Team.get_or_none((Team.team_id == team_id) & (Team.user_id == user_id))
+    if team is None:
+        return None
+    league_info = credential_service.hydrate(team, json.loads(team.league_info))
+    today = date.today()
+    prefs = NotificationPreference.get_or_none(NotificationPreference.user == user_id)
+    return {
+        "league_info": league_info,
+        "team_json": team.league_info,
+        "teams_playing": set(Game.get_teams_playing_on_date(today)),
+        "earliest_game_time": Game.get_earliest_game_time_on_date(today),
+        "prefs": {
+            "email": getattr(prefs, "email", None),
+            "alert_benched_starters": getattr(prefs, "alert_benched_starters", True),
+            "alert_active_non_playing": getattr(prefs, "alert_active_non_playing", True),
+            "alert_injured_active": getattr(prefs, "alert_injured_active", True),
+        },
+    }
+
+
 @router.get("/preferences", response_model=NotificationPreferenceResponse)
-async def get_preferences(user: User = Depends(get_db_user)):
+@db_operation("notifications.get_preferences")
+def get_preferences(user: UserContext = Depends(get_db_user)):
     """Get the current user's notification preferences (or defaults)."""
     user_id = user.user_id
 
@@ -72,9 +137,10 @@ async def get_preferences(user: User = Depends(get_db_user)):
 
 
 @router.put("/preferences", response_model=NotificationPreferenceResponse)
-async def update_preferences(
+@db_operation("notifications.update_preferences")
+def update_preferences(
     req: NotificationPreferenceReq,
-    user: User = Depends(get_db_user),
+    user: UserContext = Depends(get_db_user),
 ):
     """Create or update notification preferences for the current user."""
     user_id = user.user_id
@@ -121,7 +187,8 @@ async def update_preferences(
 
 
 @router.get("/team-preferences", response_model=NotificationTeamPreferenceListResponse)
-async def get_team_preferences(user: User = Depends(get_db_user)):
+@db_operation("notifications.team_preferences")
+def get_team_preferences(user: UserContext = Depends(get_db_user)):
     """List all team-level notification preference overrides for the current user."""
     user_id = user.user_id
 
@@ -152,10 +219,11 @@ async def get_team_preferences(user: User = Depends(get_db_user)):
 
 
 @router.put("/team-preferences/{team_id}", response_model=NotificationTeamPreferenceSingleResponse)
-async def upsert_team_preference(
+@db_operation("notifications.upsert_team_preference")
+def upsert_team_preference(
     team_id: int,
     req: NotificationTeamPreferenceReq,
-    user: User = Depends(get_db_user),
+    user: UserContext = Depends(get_db_user),
 ):
     """Create or update a team-level notification preference override."""
     user_id = user.user_id
@@ -223,9 +291,10 @@ async def upsert_team_preference(
 
 
 @router.delete("/team-preferences/{team_id}")
-async def delete_team_preference(
+@db_operation("notifications.delete_team_preference")
+def delete_team_preference(
     team_id: int,
-    user: User = Depends(get_db_user),
+    user: UserContext = Depends(get_db_user),
 ):
     """Delete a team-level override, reverting that team to global defaults."""
     user_id = user.user_id
@@ -257,7 +326,7 @@ async def delete_team_preference(
 @router.get("/check-lineup/{team_id}", response_model=LineupCheckResponse)
 async def check_lineup(
     team_id: int,
-    user: User = Depends(get_db_user),
+    user: UserContext = Depends(get_db_user),
 ):
     """
     Manually check lineup issues for a specific team.
@@ -265,22 +334,15 @@ async def check_lineup(
     Returns lineup issues without sending a notification.
     Useful for on-demand checking from the frontend.
     """
-    user_id = user.user_id
-
-    # Verify team belongs to user
-    team = (
-        Team.select()
-        .where((Team.team_id == team_id) & (Team.user_id == user_id))
-        .first()
-    )
-    if not team:
+    context = await run_db("notifications.check_context", _lineup_check_context, user.user_id, team_id)
+    if context is None:
         return LineupCheckResponse(
             status=ApiStatus.NOT_FOUND,
             message="Team not found",
             data=None,
         )
 
-    league_info = credential_service.hydrate(team, json.loads(team.league_info))
+    league_info = context["league_info"]
     provider = league_info.get("provider", "espn")
 
     if provider != "espn":
@@ -291,19 +353,11 @@ async def check_lineup(
         )
 
     # Get teams playing today
-    from core.settings import settings
-    today = date.today()
-    teams_playing = Game.get_teams_playing_on_date(today)
-    earliest_game_time = Game.get_earliest_game_time_on_date(today)
+    teams_playing = context["teams_playing"]
+    earliest_game_time = context["earliest_game_time"]
 
-    # Fetch roster
-    roster = espn_extractor.get_roster_with_slots(
-        league_id=league_info["league_id"],
-        team_name=league_info.get("team_name", ""),
-        espn_s2=league_info.get("espn_s2", ""),
-        swid=league_info.get("swid", ""),
-        year=league_info.get("year", settings.espn_year),
-    )
+    # Fetch roster through the shared async ESPN client.
+    roster = await _fetch_espn_roster_with_slots(league_info)
 
     if not roster:
         return LineupCheckResponse(
@@ -312,12 +366,7 @@ async def check_lineup(
             data=None,
         )
 
-    # Get user's prefs
-    prefs = (
-        NotificationPreference.select()
-        .where(NotificationPreference.user == user_id)
-        .first()
-    )
+    prefs = SimpleNamespace(**context["prefs"])
 
     # Check lineup
     issues = lineup_checker.check_lineup(
@@ -355,7 +404,7 @@ async def check_lineup(
 @router.post("/send-test/{team_id}")
 async def send_test_alert(
     team_id: int,
-    user: User = Depends(get_db_user),
+    user: UserContext = Depends(get_db_user),
     email: str = Query(..., description="Email address to send the test alert to"),
 ):
     """
@@ -365,46 +414,28 @@ async def send_test_alert(
     The notification log dedup is also bypassed so you can re-send freely.
     """
     user_id = user.user_id
-
-    # Verify team belongs to user
-    team = (
-        Team.select()
-        .where((Team.team_id == team_id) & (Team.user_id == user_id))
-        .first()
-    )
-    if not team:
+    context = await run_db("notifications.test_context", _lineup_check_context, user_id, team_id)
+    if context is None:
         return {"status": "not_found", "message": "Team not found"}
 
-    league_info = credential_service.hydrate(team, json.loads(team.league_info))
+    league_info = context["league_info"]
     provider = league_info.get("provider", "espn")
 
     if provider != "espn":
         return {"status": "error", "message": "Only ESPN teams are supported"}
 
     # Get today's game context
-    from core.settings import settings as app_settings
-    today = date.today()
-    teams_playing = Game.get_teams_playing_on_date(today)
-    earliest_game_time = Game.get_earliest_game_time_on_date(today)
+    teams_playing = context["teams_playing"]
+    earliest_game_time = context["earliest_game_time"]
 
-    # Fetch roster from ESPN
-    roster = espn_extractor.get_roster_with_slots(
-        league_id=league_info["league_id"],
-        team_name=league_info.get("team_name", ""),
-        espn_s2=league_info.get("espn_s2", ""),
-        swid=league_info.get("swid", ""),
-        year=league_info.get("year", app_settings.espn_year),
-    )
+    # Fetch roster from ESPN through the shared async client.
+    roster = await _fetch_espn_roster_with_slots(league_info)
 
     if not roster:
         return {"status": "error", "message": "Failed to fetch roster from ESPN"}
 
     # Get prefs (for issue type filtering)
-    prefs = (
-        NotificationPreference.select()
-        .where(NotificationPreference.user == user_id)
-        .first()
-    )
+    prefs = SimpleNamespace(**context["prefs"])
 
     # Check lineup issues
     issues = lineup_checker.check_lineup(
@@ -426,9 +457,9 @@ async def send_test_alert(
         fake_user.email = email
 
         notification_svc = NotificationService()
-        result = notification_svc._send_email(
-            to=email,
-            subject=f"Court Vision Test: No lineup issues for {team_name}",
+        result = await run_blocking_provider(
+            "email", "notification_test_email", notification_svc._send_email,
+            to=email, subject=f"Court Vision Test: No lineup issues for {team_name}",
             body=f"Team: {team_name}\nFirst game today: {earliest_game_time or 'No games today'}\n\nNo lineup issues found — your roster looks good!\n\n-- Court Vision",
         )
         return {
@@ -459,12 +490,11 @@ async def send_test_alert(
     test_prefs = _PrefsWithEmail(prefs)
 
     notification_svc = NotificationService()
-    result = notification_svc.send_lineup_alert(
-        user=user_obj,
-        team=team,
-        issues=issues,
-        first_game_time=earliest_game_time,
-        prefs=test_prefs,
+    team_context = SimpleNamespace(league_info=context["team_json"])
+    result = await run_blocking_provider(
+        "email", "notification_test_alert", notification_svc.send_lineup_alert,
+        user=user_obj, team=team_context, issues=issues,
+        first_game_time=earliest_game_time, prefs=test_prefs,
     )
 
     return {
@@ -487,8 +517,9 @@ async def send_test_alert(
 
 
 @router.get("/history")
-async def get_notification_history(
-    user: User = Depends(get_db_user),
+@db_operation("notifications.history")
+def get_notification_history(
+    user: UserContext = Depends(get_db_user),
     limit: int = Query(default=10, ge=1, le=50),
 ):
     """Get recent notification history for the current user."""

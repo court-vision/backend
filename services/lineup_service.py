@@ -15,7 +15,7 @@ from services.yahoo_service import YahooService
 from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from services.team_service import TeamService
-from db.base import run_in_db_thread
+from db.base import db_operation, run_db
 from db.models import Lineup, Team
 from utils.constants import NUM_FREE_AGENTS
 
@@ -30,6 +30,12 @@ class LineupService:
         return Team.select().where(Team.user_id == user_id).where(Team.team_id == team_id).get()
 
     @staticmethod
+    def _owned_league_info(user_id: int, team_id: int):
+        """Materialize provider configuration, including encrypted credentials, in the DB worker."""
+        team = LineupService._owned_team(user_id, team_id)
+        return TeamService.deserialize_league_info(json.loads(team.league_info), team)
+
+    @staticmethod
     async def fetch_roster_and_fas(
         user_id: int, team_id: int, use_recent_stats: bool = False,
         scoring_preview: Optional[ScoringPreview] = None,
@@ -42,8 +48,9 @@ class LineupService:
         Raises ValueError when a provider answered with a non-success envelope; provider
         failures themselves (403/400/502/504 AppErrors) propagate untouched.
         """
-        team = LineupService._owned_team(user_id, team_id)
-        league_info = TeamService.deserialize_league_info(json.loads(team.league_info))
+        league_info = await run_db(
+            "lineups.load_owned_team", LineupService._owned_league_info, user_id, team_id
+        )
         if scoring_preview is not None:
             league_info.scoring_preview = scoring_preview
 
@@ -66,18 +73,23 @@ class LineupService:
             all_players = roster + fas
             # An in-process preview must win over the team's stored setting, so
             # resolve from league_info (not the team row) when one was given.
-            scoring = PlayerValueService.scoring_for(league_info, None if scoring_preview else team_id)
+            scoring = await run_db(
+                "lineups.resolve_scoring",
+                PlayerValueService.scoring_for,
+                league_info,
+                None if scoring_preview else team_id,
+            )
             value_kind = PlayerValueService.value_kind_for(scoring)
             if league_info.provider == FantasyProvider.YAHOO:
                 # Yahoo player ids are not ESPN ids: resolve by normalized name instead
-                values = await run_in_db_thread(
-                    PlayerValueService.avg_points_for, scoring,
+                values = await run_db(
+                    "lineups.recent_values_by_name", PlayerValueService.avg_points_for, scoring,
                     names=[(p.name, p.team) for p in all_players], days=14, recent=True,
                 )
                 keyed = [(p, _normalize_name(p.name)) for p in all_players]
             else:
-                values = await run_in_db_thread(
-                    PlayerValueService.avg_points_for, scoring,
+                values = await run_db(
+                    "lineups.recent_values_by_espn_id", PlayerValueService.avg_points_for, scoring,
                     espn_ids=[p.player_id for p in all_players], days=14, recent=True,
                 )
                 keyed = [(p, p.player_id) for p in all_players]
@@ -197,7 +209,8 @@ class LineupService:
         return result
 
     @staticmethod
-    async def get_lineups(user_id: int, team_id: int) -> GetLineupsResp:
+    @db_operation("lineups.list")
+    def get_lineups(user_id: int, team_id: int) -> GetLineupsResp:
         try:
             lineups_query = (Lineup
                 .select(Lineup.lineup_id, Lineup.lineup_info)
@@ -217,7 +230,8 @@ class LineupService:
             return GetLineupsResp(status=ApiStatus.ERROR, message="Internal server error", data=None)
 
     @staticmethod
-    async def save_lineup(user_id: int, selected_team: int, lineup_info) -> SaveLineupResp:
+    @db_operation("lineups.save")
+    def save_lineup(user_id: int, selected_team: int, lineup_info) -> SaveLineupResp:
         try:
             lineup_hash = LineupService.generate_lineup_hash(lineup_info)
 
@@ -242,7 +256,8 @@ class LineupService:
             return SaveLineupResp(status=ApiStatus.ERROR, message="Failed to save lineup", error_code="INTERNAL_ERROR")
 
     @staticmethod
-    async def remove_lineup(lineup_id: int) -> DeleteLineupResp:
+    @db_operation("lineups.remove")
+    def remove_lineup(lineup_id: int) -> DeleteLineupResp:
         try:
             lineup = Lineup.select().where(Lineup.lineup_id == lineup_id).first()
             if not lineup:

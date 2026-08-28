@@ -9,7 +9,7 @@ This is a pure read service — no computation, just DB read + schedule enrichme
 
 from datetime import date
 
-from db.base import run_in_db_thread
+from db.base import db_operation
 from db.models.nba import BreakoutCandidate, Player
 from schemas.breakout import (
     BreakoutData,
@@ -30,7 +30,8 @@ class BreakoutService:
     """Service for surfacing breakout streamer candidates."""
 
     @staticmethod
-    async def get_breakout_candidates(
+    @db_operation("breakout.candidates")
+    def get_breakout_candidates(
         limit: int = 20,
         team_filter: str | None = None,
     ) -> BreakoutResp:
@@ -50,7 +51,7 @@ class BreakoutService:
                 team_id=team_filter,
             )
 
-        rows = await run_in_db_thread(_query)
+        rows = _query()
 
         if not rows:
             return BreakoutResp(
@@ -72,7 +73,7 @@ class BreakoutService:
             }
 
         injured_ids = list({row.injured_player_id for row in rows})
-        injured_players = await run_in_db_thread(_fetch_injured_players, injured_ids)
+        injured_players = _fetch_injured_players(injured_ids)
 
         candidates = []
         for row in rows:

@@ -16,6 +16,7 @@ from schemas.optimize import (
 from services import features_client
 from services.features_client import FeaturesRejected, FeaturesUnavailable
 from services.lineup_service import LineupService
+from db.base import DB_RUNTIME_ERRORS
 
 
 class OptimizeService:
@@ -85,6 +86,8 @@ class OptimizeService:
                 error_code="LINEUP_SERVICE_UNAVAILABLE",
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("optimization_from_team_error", error=str(e))
             return OptimizeResp(

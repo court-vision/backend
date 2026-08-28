@@ -21,6 +21,7 @@ from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.player_injuries import PlayerInjury
+from db.base import db_operation
 from core.season import previous_season
 from core.settings import settings
 from services.schedule_service import get_season_bounds
@@ -183,7 +184,8 @@ def scaled_min_games(requested: int, max_games: int) -> int:
 class PlayerService:
 
     @staticmethod
-    async def get_player_stats(
+    @db_operation("players.stats")
+    def get_player_stats(
         espn_id: Optional[int] = None,
         player_id: Optional[int] = None,
         name: Optional[str] = None,
@@ -291,7 +293,8 @@ class PlayerService:
 
 
     @staticmethod
-    async def get_player_status(player_id: int) -> PlayerStatusResp:
+    @db_operation("players.status")
+    def get_player_status(player_id: int) -> PlayerStatusResp:
         injury = PlayerInjury.get_current_status(player_id)
         if not injury:
             return PlayerStatusResp(
@@ -561,7 +564,8 @@ class PlayerService:
         return result
 
     @staticmethod
-    async def get_player_percentiles(player_id: int, min_games: int = 20) -> PlayerPercentilesResp:
+    @db_operation("players.percentiles")
+    def get_player_percentiles(player_id: int, min_games: int = 20) -> PlayerPercentilesResp:
         # Verify player exists
         player = Player.get_or_none(Player.id == player_id)
         if not player:
@@ -655,4 +659,3 @@ class PlayerService:
             message="Percentiles calculated successfully",
             data=PercentileData(**percentiles),
         )
-

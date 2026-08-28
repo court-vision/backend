@@ -12,6 +12,7 @@ from typing import Optional
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.stats.rankings import Rankings
+from db.base import db_operation
 from schemas.common import ApiStatus, CategoryDefResp
 from schemas.rankings import RankingsMeta, RankingsPlayer, RankingsResp
 from services.scoring.category_rank import RANKABLE_KEYS, PoolRow, compute_category_scores
@@ -32,7 +33,8 @@ DEFAULT_MIN_GAMES: dict[Optional[int], int] = {None: 1, 30: 1, 14: 1, 7: 1}
 class RankingsService:
 
     @staticmethod
-    async def get_rankings(
+    @db_operation("rankings.list")
+    def get_rankings(
         window: Optional[int] = None,
         format: str = "points",
         categories: Optional[list[str]] = None,

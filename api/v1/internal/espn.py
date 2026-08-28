@@ -9,7 +9,7 @@ router = APIRouter(prefix="/espn", tags=["ESPN data"], dependencies=[Depends(get
 
 @router.post("/validate_league", response_model=ValidateLeagueResp)
 async def validate_league(req: ValidateLeagueReq):
-    return EspnService.check_league(req.league_info)
+    return await EspnService.check_league(req.league_info)
 
 @router.post("/get_roster_data", response_model=TeamDataResp)
 async def get_team_data(req: TeamDataReq):

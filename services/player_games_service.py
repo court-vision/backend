@@ -5,6 +5,7 @@ Service for player game log operations.
 from core.logging import get_logger
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.player_games import PlayerGamesResp, PlayerGamesData, GameLog
 
@@ -13,7 +14,8 @@ class PlayerGamesService:
     """Service for retrieving player game logs."""
 
     @staticmethod
-    async def get_player_games(
+    @db_operation("players.games")
+    def get_player_games(
         player_id: int,
         limit: int = 10,
     ) -> PlayerGamesResp:

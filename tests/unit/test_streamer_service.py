@@ -35,6 +35,10 @@ class _NoRows:
 
 @pytest.fixture
 def stubbed(monkeypatch):
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(ss, "run_db", direct_run_db)
     monkeypatch.setattr(ss, "get_current_matchup", lambda *a, **k: MATCHUP)
     monkeypatch.setattr(ss, "get_nba_today", lambda: date(2026, 11, 4))
     monkeypatch.setattr(ss, "get_remaining_game_days", lambda team, d: [2, 3, 5] if team == "DEN" else [4])

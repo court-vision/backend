@@ -1,12 +1,14 @@
-"""
-Service for NBA team live/upcoming game data.
-"""
+"""NBA team live/upcoming game data with isolated DB and provider boundaries."""
+
+from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytz
 
 from core.logging import get_logger
+from db.base import DB_RUNTIME_ERRORS, run_db
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
 from db.models.nba.players import Player
@@ -22,56 +24,33 @@ from schemas.teams import (
     TopPerformer,
     InjuredPlayer,
 )
+from services.providers.blocking import run_blocking_provider
 
 
 def _get_nba_today() -> date:
-    """Return today's NBA game date in ET (before 6am = yesterday)."""
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)
-    if now_et.hour < 6:
-        return (now_et - timedelta(days=1)).date()
-    return now_et.date()
+    return (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
 
 
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}
 
 
-def _live_top_performers(game_id: str, team_player_ids: set[int], limit: int = 15) -> list[TopPerformer]:
-    """Fetch top performers from live stats for a specific game and team."""
-    rows = list(
-        LivePlayerStats.select(LivePlayerStats, Player)
-        .join(Player)
-        .where(
-            (LivePlayerStats.game_id == game_id)
-            & (LivePlayerStats.player_id.in_(team_player_ids))
-        )
-        .order_by(LivePlayerStats.pts.desc())
-        .limit(limit)
-    )
-    return [
-        TopPerformer(
-            player_id=r.player_id,
-            name=r.player.name,
-            pts=r.pts,
-            reb=r.reb,
-            ast=r.ast,
-            stl=r.stl,
-            blk=r.blk,
-            min=r.min,
-            fgm=r.fgm,
-            fga=r.fga,
-            fg3m=r.fg3m,
-        )
-        for r in rows
-    ]
+def _game_dict(game) -> dict:
+    return {
+        "game_id": game.game_id,
+        "game_date": game.game_date,
+        "home_team": game.home_team_id,
+        "away_team": game.away_team_id,
+        "home_score": game.home_score,
+        "away_score": game.away_score,
+        "status": game.status,
+        "start_time_et": game.start_time_et,
+        "arena": game.arena,
+    }
 
 
 def _get_team_player_ids(team_id: str) -> set[int]:
-    """Get all current player IDs on a team from the latest season stats.
-
-    Uses the team-specific latest date so teams that haven't played recently
-    still return their roster (they have no row for the global latest date).
-    """
     latest_date = (
         PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
         .where(PlayerSeasonStats.team == team_id)
@@ -82,255 +61,220 @@ def _get_team_player_ids(team_id: str) -> set[int]:
     if not latest_date:
         return set()
     return {
-        s.player_id
-        for s in PlayerSeasonStats.select(PlayerSeasonStats.player)
-        .where(
-            (PlayerSeasonStats.team == team_id)
-            & (PlayerSeasonStats.as_of_date == latest_date)
+        row.player_id
+        for row in PlayerSeasonStats.select(PlayerSeasonStats.player).where(
+            (PlayerSeasonStats.team == team_id) & (PlayerSeasonStats.as_of_date == latest_date)
         )
     }
 
 
-def _get_injured_players(team_id: str, player_ids: set[int]) -> list[InjuredPlayer]:
-    """Get injury report for players on a team."""
-    injured = []
-    for injury in PlayerInjury.get_injured_players():
-        if injury.player_id in player_ids:
-            try:
-                player = Player.get_by_id(injury.player_id)
-                injured.append(
-                    InjuredPlayer(
-                        player_id=injury.player_id,
-                        name=player.name,
-                        status=injury.status,
-                        injury_type=injury.injury_type,
-                        expected_return=injury.expected_return.isoformat() if injury.expected_return else None,
-                    )
-                )
-            except Exception:
-                pass
-    return injured
+def _get_injured_players(player_ids: set[int]) -> list[InjuredPlayer]:
+    if not player_ids:
+        return []
+    names = {row.id: row.name for row in Player.select(Player.id, Player.name).where(Player.id.in_(player_ids))}
+    return [
+        InjuredPlayer(
+            player_id=injury.player_id,
+            name=names.get(injury.player_id, "Unknown"),
+            status=injury.status,
+            injury_type=injury.injury_type,
+            expected_return=injury.expected_return.isoformat() if injury.expected_return else None,
+        )
+        for injury in PlayerInjury.get_injured_players()
+        if injury.player_id in player_ids
+    ]
+
+
+def _live_top_performers(game_id: str, player_ids: set[int], limit: int = 15) -> list[TopPerformer]:
+    rows = list(
+        LivePlayerStats.select(LivePlayerStats, Player)
+        .join(Player)
+        .where((LivePlayerStats.game_id == game_id) & (LivePlayerStats.player_id.in_(player_ids)))
+        .order_by(LivePlayerStats.pts.desc())
+        .limit(limit)
+    )
+    return [
+        TopPerformer(
+            player_id=row.player_id,
+            name=row.player.name,
+            pts=row.pts,
+            reb=row.reb,
+            ast=row.ast,
+            stl=row.stl,
+            blk=row.blk,
+            min=row.min,
+            fgm=row.fgm,
+            fga=row.fga,
+            fg3m=row.fg3m,
+        )
+        for row in rows
+    ]
 
 
 class NBATeamLiveGameService:
-    """Service for retrieving live, recent, or upcoming game data for an NBA team."""
+    @staticmethod
+    def _load_context(team_id: str, nba_today: date) -> dict | None:
+        team = NBATeam.get_or_none(NBATeam.id == team_id)
+        if team is None:
+            return None
+        player_ids = _get_team_player_ids(team_id)
+        today_games = Game.get_team_games(team_id=team_id, start_date=nba_today, end_date=nba_today)
+        all_games = [] if today_games else Game.get_team_games(team_id=team_id)
+        return {
+            "team_name": team.name,
+            "player_ids": player_ids,
+            "today_game": _game_dict(today_games[0]) if today_games else None,
+            "all_games": [_game_dict(game) for game in all_games],
+            "injured": _get_injured_players(player_ids),
+        }
+
+    @staticmethod
+    def _latest_live_snapshot(game_id: str):
+        snapshot = LiveGameScoreSnapshot.get_latest_for_game(game_id)
+        if snapshot is None or not LiveGameScoreSnapshot.is_game_live(game_id):
+            return None
+        return SimpleNamespace(
+            home_score=snapshot.home_score,
+            away_score=snapshot.away_score,
+            period=snapshot.period,
+            game_clock=snapshot.game_clock,
+            game_status=snapshot.game_status,
+        )
+
+    @staticmethod
+    def _live_extras(game: dict, status: str, team_id: str, player_ids: set[int]) -> dict:
+        home_performers: list[TopPerformer] = []
+        away_performers: list[TopPerformer] = []
+        if game["game_id"] and status in ("in_progress", "final"):
+            home_performers = _live_top_performers(game["game_id"], _get_team_player_ids(game["home_team"]))
+            away_performers = _live_top_performers(game["game_id"], _get_team_player_ids(game["away_team"]))
+        score_history: list[GameScoreSnapshot] = []
+        if game["game_id"]:
+            score_history = [
+                GameScoreSnapshot(
+                    captured_at=row.captured_at.isoformat(),
+                    period=row.period,
+                    game_clock=row.game_clock,
+                    home_score=row.home_score,
+                    away_score=row.away_score,
+                    game_status=row.game_status,
+                )
+                for row in LiveGameScoreSnapshot.get_snapshots_for_game(game["game_id"])
+            ]
+        return {
+            "home_performers": home_performers,
+            "away_performers": away_performers,
+            "injured": _get_injured_players(player_ids) if status == "scheduled" else [],
+            "score_history": score_history,
+        }
 
     @staticmethod
     async def get_live_game(team_abbrev: str) -> NBATeamLiveGameResp:
-        """
-        Get the most relevant game for a team:
-          1. Today's game (live or scheduled)
-          2. Most recent final game
-          3. Next upcoming game
-
-        For in-progress games, live scores and top performers are fetched
-        from the NBA API directly and from live_player_stats respectively.
-
-        Args:
-            team_abbrev: Team abbreviation (e.g., 'LAL')
-
-        Returns:
-            NBATeamLiveGameResp with game data
-        """
         log = get_logger()
         team_id = team_abbrev.upper()
-
+        nba_today = _get_nba_today()
         try:
-            team = NBATeam.get_or_none(NBATeam.id == team_id)
-            if not team:
+            context = await run_db("nba_team.live_context", NBATeamLiveGameService._load_context, team_id, nba_today)
+            if context is None:
                 return NBATeamLiveGameResp(
-                    status=ApiStatus.NOT_FOUND,
-                    message=f"Team '{team_id}' not found",
-                    data=None,
+                    status=ApiStatus.NOT_FOUND, message=f"Team '{team_id}' not found", data=None
                 )
 
-            nba_today = _get_nba_today()
-            team_player_ids = _get_team_player_ids(team_id)
-
-            # --- Check for today's game ---
-            today_games = Game.get_team_games(team_id=team_id, start_date=nba_today, end_date=nba_today)
-            if today_games:
-                g = today_games[0]
-                is_home = g.home_team_id == team_id
-
-                home_score = g.home_score
-                away_score = g.away_score
-                status = g.status
-                period = None
-                game_clock = None
+            game = context["today_game"]
+            if game is not None:
+                home_score, away_score = game["home_score"], game["away_score"]
+                status = game["status"]
+                period = game_clock = None
                 home_periods: list[int] = []
                 away_periods: list[int] = []
-                home_performers: list[TopPerformer] = []
-                away_performers: list[TopPerformer] = []
-
-                # Overlay live data for in-progress or recently started games
-                if g.status in ("in_progress", "scheduled"):
+                if status in ("in_progress", "scheduled"):
                     try:
                         from pipelines.extractors.nba_api import NBAApiExtractor
-                        extractor = NBAApiExtractor()
-                        box = extractor.get_live_box_score(g.game_id)
+
+                        box = await run_blocking_provider(
+                            "nba", "live_box_score", NBAApiExtractor().get_live_box_score, game["game_id"]
+                        )
                         if box:
-                            # box is already the unwrapped inner game dict
-                            game_data = box
-                            home_team_data = game_data.get("homeTeam", {})
-                            away_team_data = game_data.get("awayTeam", {})
-
-                            home_score = home_team_data.get("score", home_score)
-                            away_score = away_team_data.get("score", away_score)
-                            period = game_data.get("period", period)
-                            game_clock = game_data.get("gameClock", game_clock)
-
-                            status_int = game_data.get("gameStatus", 1)
-                            status = _GAME_STATUS_MAP.get(status_int, status)
-
-                            # Quarter-by-quarter scores from completed periods
-                            home_periods = [
-                                p.get("score", 0)
-                                for p in home_team_data.get("periods", [])
-                            ]
-                            away_periods = [
-                                p.get("score", 0)
-                                for p in away_team_data.get("periods", [])
-                            ]
+                            home = box.get("homeTeam", {})
+                            away = box.get("awayTeam", {})
+                            home_score = home.get("score", home_score)
+                            away_score = away.get("score", away_score)
+                            period = box.get("period")
+                            game_clock = box.get("gameClock")
+                            status = _GAME_STATUS_MAP.get(box.get("gameStatus", 1), status)
+                            home_periods = [row.get("score", 0) for row in home.get("periods", [])]
+                            away_periods = [row.get("score", 0) for row in away.get("periods", [])]
                         else:
-                            # API temporarily unavailable — fall back to most recent snapshot
-                            snapshot = LiveGameScoreSnapshot.get_latest_for_game(g.game_id)
-                            if snapshot and LiveGameScoreSnapshot.is_game_live(g.game_id):
-                                home_score = snapshot.home_score
-                                away_score = snapshot.away_score
-                                period = snapshot.period
-                                game_clock = snapshot.game_clock
-                                status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
-                    except Exception as e:
-                        log.warning("live_box_score_fetch_failed", error=str(e), game_id=g.game_id)
-                        # Fall back to snapshot on exception too
-                        try:
-                            snapshot = LiveGameScoreSnapshot.get_latest_for_game(g.game_id)
-                            if snapshot and LiveGameScoreSnapshot.is_game_live(g.game_id):
-                                home_score = snapshot.home_score
-                                away_score = snapshot.away_score
-                                period = snapshot.period
-                                game_clock = snapshot.game_clock
-                                status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
-                        except Exception:
-                            pass
-
-                # Top performers from live_player_stats
-                if g.game_id and status in ("in_progress", "final"):
-                    home_player_ids = _get_team_player_ids(g.home_team_id)
-                    away_player_ids = _get_team_player_ids(g.away_team_id)
-                    home_performers = _live_top_performers(g.game_id, home_player_ids)
-                    away_performers = _live_top_performers(g.game_id, away_player_ids)
-
-                # Injury report for scheduled games
-                injured: list[InjuredPlayer] = []
-                if status == "scheduled":
-                    injured = _get_injured_players(team_id, team_player_ids)
-
-                # Score history for chart (all snapshots for this game, chronological)
-                score_history: list[GameScoreSnapshot] = []
-                if g.game_id:
-                    try:
-                        snapshots = LiveGameScoreSnapshot.get_snapshots_for_game(g.game_id)
-                        score_history = [
-                            GameScoreSnapshot(
-                                captured_at=s.captured_at.isoformat(),
-                                period=s.period,
-                                game_clock=s.game_clock,
-                                home_score=s.home_score,
-                                away_score=s.away_score,
-                                game_status=s.game_status,
+                            snapshot = await run_db(
+                                "nba_team.live_snapshot", NBATeamLiveGameService._latest_live_snapshot, game["game_id"]
                             )
-                            for s in snapshots
-                        ]
-                    except Exception as e:
-                        log.warning("score_history_fetch_failed", error=str(e), game_id=g.game_id)
+                            if snapshot:
+                                home_score, away_score = snapshot.home_score, snapshot.away_score
+                                period, game_clock = snapshot.period, snapshot.game_clock
+                                status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
+                    except DB_RUNTIME_ERRORS:
+                        raise
+                    except Exception as exc:
+                        log.warning("live_box_score_fetch_failed", error=str(exc), game_id=game["game_id"])
+                        snapshot = await run_db(
+                            "nba_team.live_snapshot", NBATeamLiveGameService._latest_live_snapshot, game["game_id"]
+                        )
+                        if snapshot:
+                            home_score, away_score = snapshot.home_score, snapshot.away_score
+                            period, game_clock = snapshot.period, snapshot.game_clock
+                            status = _GAME_STATUS_MAP.get(snapshot.game_status, status)
 
+                extras = await run_db(
+                    "nba_team.live_extras", NBATeamLiveGameService._live_extras,
+                    game, status, team_id, context["player_ids"],
+                )
                 return NBATeamLiveGameResp(
                     status=ApiStatus.SUCCESS,
-                    message=f"Today's game for {team.name}",
+                    message=f"Today's game for {context['team_name']}",
                     data=NBATeamLiveGameData(
-                        game_id=g.game_id,
-                        game_date=g.game_date.isoformat(),
-                        home_team=g.home_team_id,
-                        away_team=g.away_team_id,
-                        home_score=home_score,
-                        away_score=away_score,
-                        status=status,
-                        period=period,
-                        game_clock=game_clock,
-                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
-                        arena=g.arena,
-                        home_periods=home_periods,
-                        away_periods=away_periods,
-                        home_top_performers=home_performers,
-                        away_top_performers=away_performers,
-                        injured_players=injured,
-                        is_today=True,
-                        is_upcoming=status == "scheduled",
-                        score_history=score_history,
+                        game_id=game["game_id"], game_date=game["game_date"].isoformat(),
+                        home_team=game["home_team"], away_team=game["away_team"],
+                        home_score=home_score, away_score=away_score, status=status,
+                        period=period, game_clock=game_clock,
+                        start_time_et=game["start_time_et"].strftime("%H:%M") if game["start_time_et"] else None,
+                        arena=game["arena"], home_periods=home_periods, away_periods=away_periods,
+                        home_top_performers=extras["home_performers"],
+                        away_top_performers=extras["away_performers"],
+                        injured_players=extras["injured"], is_today=True,
+                        is_upcoming=status == "scheduled", score_history=extras["score_history"],
                     ),
                 )
 
-            # --- No game today: show next upcoming first, then fall back to most recent final ---
-            all_games = Game.get_team_games(team_id=team_id)
-
-            # Next upcoming game (preferred — most actionable for the user)
-            upcoming = [g for g in all_games if g.status == "scheduled" and g.game_date > nba_today]
+            upcoming = [g for g in context["all_games"] if g["status"] == "scheduled" and g["game_date"] > nba_today]
             if upcoming:
-                g = upcoming[0]
-                injured = _get_injured_players(team_id, team_player_ids)
+                game = upcoming[0]
                 return NBATeamLiveGameResp(
-                    status=ApiStatus.SUCCESS,
-                    message=f"Next game for {team.name}",
+                    status=ApiStatus.SUCCESS, message=f"Next game for {context['team_name']}",
                     data=NBATeamLiveGameData(
-                        game_id=g.game_id,
-                        game_date=g.game_date.isoformat(),
-                        home_team=g.home_team_id,
-                        away_team=g.away_team_id,
-                        status=g.status,
-                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
-                        arena=g.arena,
-                        injured_players=injured,
-                        is_today=False,
-                        is_upcoming=True,
+                        game_id=game["game_id"], game_date=game["game_date"].isoformat(),
+                        home_team=game["home_team"], away_team=game["away_team"], status=game["status"],
+                        start_time_et=game["start_time_et"].strftime("%H:%M") if game["start_time_et"] else None,
+                        arena=game["arena"], injured_players=context["injured"], is_today=False, is_upcoming=True,
                     ),
                 )
-
-            # Most recent final (fallback — season may be over)
-            # Note: live_player_stats only stores current-day data, so performers
-            # are intentionally not populated here.
-            past_games = [g for g in all_games if g.status == "final" and g.game_date < nba_today]
-            if past_games:
-                g = past_games[-1]
+            past = [g for g in context["all_games"] if g["status"] == "final" and g["game_date"] < nba_today]
+            if past:
+                game = past[-1]
                 return NBATeamLiveGameResp(
-                    status=ApiStatus.SUCCESS,
-                    message=f"Most recent game for {team.name}",
+                    status=ApiStatus.SUCCESS, message=f"Most recent game for {context['team_name']}",
                     data=NBATeamLiveGameData(
-                        game_id=g.game_id,
-                        game_date=g.game_date.isoformat(),
-                        home_team=g.home_team_id,
-                        away_team=g.away_team_id,
-                        home_score=g.home_score,
-                        away_score=g.away_score,
-                        status=g.status,
-                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
-                        arena=g.arena,
-                        is_today=False,
-                        is_upcoming=False,
+                        game_id=game["game_id"], game_date=game["game_date"].isoformat(),
+                        home_team=game["home_team"], away_team=game["away_team"],
+                        home_score=game["home_score"], away_score=game["away_score"], status=game["status"],
+                        start_time_et=game["start_time_et"].strftime("%H:%M") if game["start_time_et"] else None,
+                        arena=game["arena"], is_today=False, is_upcoming=False,
                     ),
                 )
-
             return NBATeamLiveGameResp(
-                status=ApiStatus.NOT_FOUND,
-                message=f"No games found for {team.name}",
-                data=None,
+                status=ApiStatus.NOT_FOUND, message=f"No games found for {context['team_name']}", data=None
             )
-
-        except Exception as e:
-            log.error("nba_team_live_game_fetch_error", error=str(e), team=team_id)
-            return NBATeamLiveGameResp(
-                status=ApiStatus.ERROR,
-                message="Failed to fetch game data",
-                data=None,
-            )
+        except DB_RUNTIME_ERRORS:
+            raise
+        except Exception as exc:
+            log.error("nba_team_live_game_fetch_error", error=str(exc), team=team_id)
+            return NBATeamLiveGameResp(status=ApiStatus.ERROR, message="Failed to fetch game data", data=None)

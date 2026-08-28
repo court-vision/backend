@@ -10,6 +10,7 @@ from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.ownership import (
     OwnershipTrendingResp,
@@ -23,7 +24,8 @@ class OwnershipService:
     """Service for retrieving ownership trends."""
 
     @staticmethod
-    async def get_trending(
+    @db_operation("ownership.trending")
+    def get_trending(
         days: int = 7,
         min_change: float = 3.0,
         min_ownership: float = 3.0,
@@ -212,7 +214,8 @@ class OwnershipService:
             )
 
     @staticmethod
-    async def get_player_ownership(player_id: int, days: int = 14) -> PlayerOwnershipResp:
+    @db_operation("ownership.player_history")
+    def get_player_ownership(player_id: int, days: int = 14) -> PlayerOwnershipResp:
         """
         Get current ownership percentage for a player.
 

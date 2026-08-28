@@ -9,6 +9,7 @@ from core.settings import get_settings
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.teams import TeamScheduleResp, TeamScheduleData, ScheduleGame
 
@@ -17,7 +18,8 @@ class TeamScheduleService:
     """Service for retrieving NBA team schedules."""
 
     @staticmethod
-    async def get_team_schedule(
+    @db_operation("nba_team.schedule")
+    def get_team_schedule(
         team_abbrev: str,
         upcoming: bool = False,
         limit: int = 20,

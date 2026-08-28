@@ -7,6 +7,7 @@ from db.models.nba.players import Player
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_ownership import PlayerOwnership
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.player_trends import (
     PlayerTrendsResp,
@@ -20,7 +21,8 @@ class TrendsService:
     """Service for retrieving player trends."""
 
     @staticmethod
-    async def get_player_trends(player_id: int) -> PlayerTrendsResp:
+    @db_operation("players.trends")
+    def get_player_trends(player_id: int) -> PlayerTrendsResp:
         """
         Get trend data for a player.
 

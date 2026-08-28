@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional
 
 import httpx
 
 from core.logging import get_correlation_id, get_logger
+from core.settings import settings
 from utils.constants import FEATURES_SERVER_ENDPOINT
 
 # The optimizer runs a genetic algorithm over the whole week: generous read timeout,
@@ -55,16 +57,73 @@ class FeaturesUnavailable(FeaturesError):
 
 
 def make_client() -> httpx.AsyncClient:
-    """A client for the features service that carries the request's correlation id."""
-    headers = {}
+    """Create the process-wide client; per-request headers are added at call time."""
+    limit = settings.features_max_in_flight
+    return httpx.AsyncClient(
+        base_url=FEATURES_URL,
+        timeout=FEATURES_TIMEOUT,
+        limits=httpx.Limits(max_connections=limit, max_keepalive_connections=limit),
+    )
+
+
+# Tests may monkeypatch this with a MockTransport-backed factory. Production
+# leaves it as None and reuses the lifespan-owned client.
+client_factory: Optional[Callable[[], httpx.AsyncClient]] = None
+_client: Optional[httpx.AsyncClient] = None
+_capacity: Optional[asyncio.Semaphore] = None
+
+
+def start_features_runtime() -> None:
+    global _client, _capacity
+    if _client is not None:
+        return
+    _client = make_client()
+    _capacity = asyncio.Semaphore(settings.features_max_in_flight)
+    get_logger("features").info(
+        "features_runtime_started",
+        max_in_flight=settings.features_max_in_flight,
+        queue_timeout_s=settings.provider_queue_timeout_seconds,
+    )
+
+
+async def stop_features_runtime() -> None:
+    global _client, _capacity
+    client, _client, _capacity = _client, None, None
+    if client is not None:
+        await client.aclose()
+
+
+@asynccontextmanager
+async def _request_client():
+    if client_factory is not None:
+        async with client_factory() as client:
+            yield client
+        return
+    if _client is None or _capacity is None:
+        start_features_runtime()
+    assert _client is not None
+    yield _client
+
+
+def _request_headers() -> dict[str, str]:
     correlation_id = get_correlation_id()
-    if correlation_id:
-        headers["X-Correlation-ID"] = correlation_id
-    return httpx.AsyncClient(base_url=FEATURES_URL, timeout=FEATURES_TIMEOUT, headers=headers)
+    return {"X-Correlation-ID": correlation_id} if correlation_id else {}
 
 
-# Tests monkeypatch this with a factory returning a MockTransport-backed client.
-client_factory: Callable[[], httpx.AsyncClient] = make_client
+async def _acquire_capacity() -> asyncio.Semaphore:
+    if _capacity is None:
+        start_features_runtime()
+    assert _capacity is not None
+    try:
+        await asyncio.wait_for(_capacity.acquire(), settings.provider_queue_timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        get_logger("features").warning(
+            "features_capacity_timeout",
+            max_in_flight=settings.features_max_in_flight,
+            queue_timeout_s=settings.provider_queue_timeout_seconds,
+        )
+        raise FeaturesUnavailable(UNAVAILABLE_MESSAGE) from exc
+    return _capacity
 
 
 def _first_value_kind(payload: dict) -> Optional[str]:
@@ -99,21 +158,32 @@ async def post_generate_lineup(payload: dict, **context: Any) -> httpx.Response:
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         started = time.perf_counter()
+        capacity = await _acquire_capacity()
+        retry_error: Optional[Exception] = None
         try:
-            async with client_factory() as client:
-                response = await client.post("/generate-lineup", json=payload)
+            async with _request_client() as client:
+                response = await client.post("/generate-lineup", json=payload, headers=_request_headers())
         except RETRYABLE_ERRORS as exc:
             last_error = exc
+            retry_error = exc
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             if attempt < MAX_ATTEMPTS:
                 log.warning("features_generate_lineup_retry", attempt=attempt, elapsed_ms=elapsed_ms,
                             error=type(exc).__name__, detail=str(exc), **fields)
-                if RETRY_DELAY_SECONDS:
-                    await asyncio.sleep(RETRY_DELAY_SECONDS)
-                continue
-            log.error("features_generate_lineup_unavailable", attempt=attempt, elapsed_ms=elapsed_ms,
-                      error=type(exc).__name__, detail=str(exc), **fields)
-            break
+            else:
+                log.error("features_generate_lineup_unavailable", attempt=attempt, elapsed_ms=elapsed_ms,
+                          error=type(exc).__name__, detail=str(exc), **fields)
+        finally:
+            capacity.release()
+
+        if retry_error is not None:
+            if attempt >= MAX_ATTEMPTS:
+                break
+            # A backoff is not an in-flight service call, so it must not occupy
+            # one of the four shared features permits.
+            if RETRY_DELAY_SECONDS:
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+            continue
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         log.info("features_generate_lineup", attempt=attempt, elapsed_ms=elapsed_ms,
                  status_code=response.status_code, **fields)
@@ -167,7 +237,11 @@ async def request_lineup(payload: dict, **context: Any) -> dict:
 
 async def get_healthz() -> dict:
     """`GET /healthz` → {"status", "schedule_file", "weeks"} (raises on failure)."""
-    async with client_factory() as client:
-        response = await client.get("/healthz")
-        response.raise_for_status()
-        return response.json()
+    capacity = await _acquire_capacity()
+    try:
+        async with _request_client() as client:
+            response = await client.get("/healthz", headers=_request_headers())
+            response.raise_for_status()
+            return response.json()
+    finally:
+        capacity.release()

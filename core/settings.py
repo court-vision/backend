@@ -17,6 +17,9 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str
+    db_pool_max_connections: int = 20
+    db_max_in_flight: int = 16
+    db_queue_timeout_seconds: float = 2.0
 
     # Season. Both default to the current season derived from today's date
     # (flips on Aug 1); set NBA_SEASON / ESPN_YEAR to pin them.
@@ -37,6 +40,14 @@ class Settings(BaseSettings):
     circuit_breaker_threshold: int = 5
     circuit_breaker_timeout: int = 60
     http_timeout: int = 30
+    provider_queue_timeout_seconds: float = 5.0
+    espn_max_in_flight: int = 8
+    yahoo_max_in_flight: int = 8
+    nba_max_in_flight: int = 4
+    features_max_in_flight: int = 4
+    # Outbound email is synchronous and low-volume; it gets its own small
+    # pool so a burst of alerts can never consume the NBA workers.
+    email_max_in_flight: int = 2
 
     # Logging
     log_level: str = "INFO"
@@ -127,6 +138,26 @@ class Settings(BaseSettings):
         if lower_v not in {"json", "console"}:
             raise ValueError("log_format must be 'json' or 'console'")
         return lower_v
+
+    @model_validator(mode="after")
+    def validate_concurrency_limits(self) -> "Settings":
+        limits = {
+            "db_pool_max_connections": self.db_pool_max_connections,
+            "db_max_in_flight": self.db_max_in_flight,
+            "espn_max_in_flight": self.espn_max_in_flight,
+            "yahoo_max_in_flight": self.yahoo_max_in_flight,
+            "nba_max_in_flight": self.nba_max_in_flight,
+            "features_max_in_flight": self.features_max_in_flight,
+            "email_max_in_flight": self.email_max_in_flight,
+        }
+        invalid = [name for name, value in limits.items() if value <= 0]
+        if invalid:
+            raise ValueError(f"concurrency limits must be positive: {', '.join(invalid)}")
+        if self.db_max_in_flight >= self.db_pool_max_connections:
+            raise ValueError("db_max_in_flight must be smaller than db_pool_max_connections")
+        if self.db_queue_timeout_seconds <= 0 or self.provider_queue_timeout_seconds <= 0:
+            raise ValueError("concurrency queue timeouts must be positive")
+        return self
 
     @model_validator(mode="after")
     def derive_season(self) -> "Settings":

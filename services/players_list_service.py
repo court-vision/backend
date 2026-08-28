@@ -9,6 +9,7 @@ from core.season import previous_season
 from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.players_list import PlayersListResp, PlayersListData, PlayerListItem
 
@@ -42,7 +43,8 @@ class PlayersListService:
         )
 
     @staticmethod
-    async def list_players(
+    @db_operation("players.list")
+    def list_players(
         team: str | None = None,
         position: str | None = None,
         min_games: int | None = None,

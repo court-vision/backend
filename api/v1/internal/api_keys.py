@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from core.clerk_auth import verify_clerk_token
 from db.models.api_keys import APIKey
 from db.models.users import User
+from db.base import db_operation
 from schemas.api_keys import ApiKeyListItem, CreateApiKeyRequest, CreateApiKeyData
 from schemas.common import success_response
 
@@ -44,7 +45,8 @@ def _key_to_item(key: APIKey) -> dict:
 
 
 @router.get("/")
-async def list_api_keys(token_data: dict = Depends(verify_clerk_token)):
+@db_operation("api_keys.list")
+def list_api_keys(token_data: dict = Depends(verify_clerk_token)):
     """List all active API keys for the authenticated user."""
     user = _get_user(token_data)
 
@@ -61,7 +63,8 @@ async def list_api_keys(token_data: dict = Depends(verify_clerk_token)):
 
 
 @router.post("/")
-async def create_api_key(
+@db_operation("api_keys.create")
+def create_api_key(
     body: CreateApiKeyRequest,
     token_data: dict = Depends(verify_clerk_token),
 ):
@@ -104,7 +107,8 @@ async def create_api_key(
 
 
 @router.delete("/{key_id}")
-async def revoke_api_key(
+@db_operation("api_keys.revoke")
+def revoke_api_key(
     key_id: str,
     token_data: dict = Depends(verify_clerk_token),
 ):

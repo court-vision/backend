@@ -9,6 +9,8 @@ import pytz
 from services.schedule_service import get_upcoming_games_on_date
 from core.logging import get_logger
 from db.models.nba.games import Game
+from db.base import DB_RUNTIME_ERRORS, run_db
+from services.providers.blocking import run_blocking_provider
 from schemas.common import ApiStatus
 from schemas.games import GamesOnDateResp, GamesOnDateData, GameInfo
 
@@ -29,6 +31,25 @@ class GamesService:
     """Service for retrieving game information."""
 
     @staticmethod
+    def _stored_games(game_date: date) -> list[dict]:
+        return [
+            {
+                "game_id": g.game_id,
+                "game_date": g.game_date.isoformat(),
+                "home_team": g.home_team_id,
+                "away_team": g.away_team_id,
+                "home_score": g.home_score,
+                "away_score": g.away_score,
+                "status": g.status,
+                "arena": g.arena,
+                "period": None,
+                "game_clock": None,
+                "start_time_et": g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
+            }
+            for g in Game.get_games_on_date(game_date)
+        ]
+
+    @staticmethod
     async def get_games_on_date(game_date: date) -> GamesOnDateResp:
         """
         Get all games on a specific date.
@@ -46,25 +67,10 @@ class GamesService:
         log = get_logger()
 
         try:
-            games = Game.get_games_on_date(game_date)
+            stored = await run_db("games.on_date", GamesService._stored_games, game_date)
 
-            if games:
-                game_list = [
-                    GameInfo(
-                        game_id=g.game_id,
-                        game_date=g.game_date.isoformat(),
-                        home_team=g.home_team_id,
-                        away_team=g.away_team_id,
-                        home_score=g.home_score,
-                        away_score=g.away_score,
-                        status=g.status,
-                        arena=g.arena,
-                        period=None,
-                        game_clock=None,
-                        start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
-                    )
-                    for g in games
-                ]
+            if stored:
+                game_list = [GameInfo(**game) for game in stored]
 
                 # For today, overlay live scores/status/period/clock from the
                 # NBA live scoreboard. The DB record may be stale since games
@@ -73,24 +79,23 @@ class GamesService:
                     from pipelines.extractors.nba_api import NBAApiExtractor
                     try:
                         extractor = NBAApiExtractor()
-                        live_games = extractor.get_scoreboard_games(game_date)
+                        live_games = await run_blocking_provider(
+                            "nba", "games_scoreboard", extractor.get_scoreboard_games, game_date
+                        )
                         live_by_id = {g["game_id"]: g for g in live_games}
 
                         game_list = [
                             GameInfo(
-                                game_id=g.game_id,
-                                game_date=g.game_date.isoformat(),
-                                home_team=g.home_team_id,
-                                away_team=g.away_team_id,
-                                home_score=live_by_id[g.game_id]["home_score"] if g.game_id in live_by_id else g.home_score,
-                                away_score=live_by_id[g.game_id]["away_score"] if g.game_id in live_by_id else g.away_score,
-                                status=_GAME_STATUS_MAP.get(live_by_id[g.game_id]["game_status"], g.status) if g.game_id in live_by_id else g.status,
-                                arena=g.arena,
-                                period=live_by_id[g.game_id]["period"] if g.game_id in live_by_id else None,
-                                game_clock=live_by_id[g.game_id]["game_clock"] if g.game_id in live_by_id else None,
-                                start_time_et=g.start_time_et.strftime("%H:%M") if g.start_time_et else None,
+                                **{
+                                    **g,
+                                    "home_score": live_by_id[g["game_id"]]["home_score"] if g["game_id"] in live_by_id else g["home_score"],
+                                    "away_score": live_by_id[g["game_id"]]["away_score"] if g["game_id"] in live_by_id else g["away_score"],
+                                    "status": _GAME_STATUS_MAP.get(live_by_id[g["game_id"]]["game_status"], g["status"]) if g["game_id"] in live_by_id else g["status"],
+                                    "period": live_by_id[g["game_id"]]["period"] if g["game_id"] in live_by_id else None,
+                                    "game_clock": live_by_id[g["game_id"]]["game_clock"] if g["game_id"] in live_by_id else None,
+                                }
                             )
-                            for g in games
+                            for g in stored
                         ]
                     except Exception as e:
                         log.warning("live_scoreboard_overlay_failed", error=str(e), date=game_date.isoformat())
@@ -124,6 +129,8 @@ class GamesService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("games_fetch_error", error=str(e), date=game_date.isoformat())
             return GamesOnDateResp(

@@ -14,6 +14,7 @@ from services.yahoo_service import YahooService
 from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from db.models.nba.players import Player as PlayerModel
+from db.base import run_db
 from services.schedule_service import (
     get_current_matchup,
     get_nba_today,
@@ -43,6 +44,27 @@ class StreamerService:
         "avg_points": 3.0,
         "b2b_games": 8.0,
     }
+
+    @staticmethod
+    def _stored_values(league_info, team_id, free_agents, avg_days, is_yahoo):
+        scoring = PlayerValueService.scoring_for(league_info, team_id)
+        value_kind = PlayerValueService.value_kind_for(scoring)
+        if is_yahoo:
+            lookups = [(player.name, player.team) for player in free_agents]
+            values = PlayerValueService.avg_points_for(scoring, names=lookups, days=avg_days)
+        else:
+            values = PlayerValueService.avg_points_for(
+                scoring, espn_ids=[player.player_id for player in free_agents], days=avg_days
+            )
+        return value_kind, values
+
+    @staticmethod
+    def _nba_ids(espn_ids: list[int]) -> dict[int, int]:
+        return {
+            row.espn_id: row.id
+            for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
+            .where(PlayerModel.espn_id.in_(espn_ids))
+        }
 
     @staticmethod
     def _get_daily_b2b_metrics(game_days: list[int], pickup_day: int) -> tuple[bool, int]:
@@ -202,14 +224,10 @@ class StreamerService:
         # fantasy points under its weights, or the category value for H2H-category
         # leagues (rolling window, then last season's baseline).
         # Yahoo uses name-based lookup, ESPN uses player ID.
-        scoring = PlayerValueService.scoring_for(league_info, team_id)
-        value_kind = PlayerValueService.value_kind_for(scoring)
-        if is_yahoo:
-            player_lookups = [(fa.name, fa.team) for fa in free_agents]
-            last_n_values = PlayerValueService.avg_points_for(scoring, names=player_lookups, days=avg_days)
-        else:
-            player_ids = [fa.player_id for fa in free_agents]
-            last_n_values = PlayerValueService.avg_points_for(scoring, espn_ids=player_ids, days=avg_days)
+        value_kind, last_n_values = await run_db(
+            "streamers.values", StreamerService._stored_values,
+            league_info, team_id, free_agents, avg_days, is_yahoo,
+        )
 
         # Build streamer list
         streamers: list[StreamerPlayerResp] = []
@@ -279,11 +297,7 @@ class StreamerService:
         # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
         espn_ids = [s.player_id for s in streamers]
         if espn_ids:
-            nba_id_map: dict[int, int] = {
-                row.espn_id: row.id
-                for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
-                .where(PlayerModel.espn_id.in_(espn_ids))
-            }
+            nba_id_map = await run_db("streamers.nba_ids", StreamerService._nba_ids, espn_ids)
             for s in streamers:
                 s.nba_player_id = nba_id_map.get(s.player_id)
 
@@ -308,4 +322,3 @@ class StreamerService:
                 value_kind=value_kind,
             )
         )
-

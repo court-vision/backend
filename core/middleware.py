@@ -7,8 +7,7 @@ response. It classifies:
 - `AppError` (core.errors)             -> its status / api_status / error_code
 - `HTTPException` (residual FastAPI)   -> as raised, `error_code = HTTP_{code}`
 - `RequestValidationError`             -> 422 VALIDATION_ERROR, `data.errors`
-- peewee `OperationalError`/`InterfaceError` -> 503 DATABASE_UNAVAILABLE,
-  evicting the dead connection from the pool so the next request reconnects
+- peewee `OperationalError`/`InterfaceError` -> 503 DATABASE_UNAVAILABLE
 - anything else                        -> 500 INTERNAL_ERROR, logged with the
   stack trace; the body never contains exception text
 
@@ -16,9 +15,8 @@ Every error body is the standard envelope with `data.correlation_id`, and every
 error response carries `X-Correlation-ID` and `X-Error-Code` headers (the CORS
 config exposes both to browsers).
 
-The registered handlers are `async` on purpose: FastAPI runs sync handlers in a
-worker thread, and the DB eviction must happen on the thread that owns the
-connection (the event loop thread; see core.db_middleware).
+Peewee connections are opened and released inside `db.base.run_db` workers;
+the event-loop-side error handler only renders the stable response contract.
 """
 
 from __future__ import annotations
@@ -88,17 +86,6 @@ def error_json_response(
     )
 
 
-def _evict_dead_connection() -> None:
-    """Physically close this thread's connection so the pool never hands it out again."""
-    try:
-        from db.base import db
-
-        if not db.is_closed():
-            db.manual_close()
-    except Exception:  # the connection is already gone
-        pass
-
-
 def render_error(request: Request, exc: BaseException) -> JSONResponse:
     log = get_logger("http")
     path = request.url.path
@@ -136,7 +123,6 @@ def render_error(request: Request, exc: BaseException) -> JSONResponse:
 
     if isinstance(exc, DB_ERRORS):
         log.exception("database_unavailable", path=path, error=type(exc).__name__)
-        _evict_dead_connection()
         return error_json_response(
             request,
             status_code=503,

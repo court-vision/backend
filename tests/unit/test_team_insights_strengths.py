@@ -105,6 +105,11 @@ def _fake_matchup(status=ApiStatus.SUCCESS, roster=None, message="ok"):
 def test_opponent_comparison_uses_default_nine_cat_for_points_leagues(monkeypatch):
     from services import team_insights_service
 
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(team_insights_service, "run_db", direct_run_db)
+
     async def fake_matchup(user_id, team_id, avg_window="season"):
         assert (user_id, team_id) == (0, 7)
         return _fake_matchup(roster=[_player(11, "Opp A"), _player(12, "Opp B")])

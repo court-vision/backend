@@ -7,6 +7,7 @@ from db.models.nba.teams import NBATeam
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_injuries import PlayerInjury
+from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.teams import NBATeamRosterResp, NBATeamRosterData, NBATeamRosterPlayer
 
@@ -15,7 +16,8 @@ class NBATeamRosterService:
     """Service for retrieving NBA team roster with per-game stats."""
 
     @staticmethod
-    async def get_team_roster(team_abbrev: str) -> NBATeamRosterResp:
+    @db_operation("nba_team.roster")
+    def get_team_roster(team_abbrev: str) -> NBATeamRosterResp:
         """
         Get the active roster for an NBA team with per-game averages.
 

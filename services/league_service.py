@@ -24,6 +24,7 @@ from services.scoring.vocab import DEFAULT_CATEGORIES
 from services.scoring.providers.yahoo_settings import fetch_yahoo_league_settings, parse_yahoo_settings
 from services.providers.http import provider_get
 from utils.constants import ESPN_FANTASY_ENDPOINT
+from db.base import DB_RUNTIME_ERRORS, run_db
 
 log = get_logger()
 
@@ -57,11 +58,11 @@ class LeagueService:
                 from services.yahoo_service import YahooService
                 token = await YahooService._ensure_valid_token(league_info, team_id)
                 league_key = league_info.yahoo_team_key.rsplit(".t.", 1)[0]
-                return parse_yahoo_settings(fetch_yahoo_league_settings(token, league_key), season=season)
+                return parse_yahoo_settings(await fetch_yahoo_league_settings(token, league_key), season=season)
 
             payload = espn_payload
             if payload is None:
-                payload = provider_get(
+                payload = await provider_get(
                     "espn",
                     ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
                     params={"view": "mSettings"},
@@ -74,6 +75,8 @@ class LeagueService:
             if not parsed.season:
                 parsed.season = int(league_info.year)
             return parsed
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as exc:  # provider outages (typed AppErrors included) must never break team flows
             log.warning("league_settings_fetch_failed", provider=provider, team_id=team_id,
                         error=str(exc), error_code=getattr(exc, "error_code", None))
@@ -114,23 +117,32 @@ class LeagueService:
         return league
 
     @staticmethod
-    async def sync_for_team(team: Team, league_info: LeagueInfo,
-                            espn_payload: Optional[dict] = None) -> Optional[League]:
+    def _persist_for_team(team_id: int, parsed: LeagueSettings | None) -> LeagueSummary:
+        team = Team.get_by_id(team_id)
+        if parsed is not None:
+            league = LeagueService.upsert_league(parsed, synced=True)
+        else:
+            league_info = LeagueService.league_info_of(team)
+            league = LeagueService.upsert_league(LeagueService._stub_settings(league_info), synced=False)
+        if team.league_id != league.id:
+            Team.update(league=league).where(Team.team_id == team_id).execute()
+        return LeagueService.to_summary(league)
+
+    @staticmethod
+    async def sync_for_team(team: Team | int, league_info: LeagueInfo,
+                            espn_payload: Optional[dict] = None) -> Optional[LeagueSummary]:
         """Fetch + upsert the team's league settings and link the team. Never raises."""
         try:
-            parsed = await LeagueService.fetch_settings(league_info, team_id=team.team_id, espn_payload=espn_payload)
-            if parsed is not None:
-                league = LeagueService.upsert_league(parsed, synced=True)
-            else:
-                league = LeagueService.upsert_league(LeagueService._stub_settings(league_info), synced=False)
-            if team.league_id != league.id:
-                Team.update(league=league).where(Team.team_id == team.team_id).execute()
-                team.league = league
-            log.info("league_synced", team_id=team.team_id, league_id=league.id,
-                     scoring_type=league.scoring_type, synced=league.settings_synced_at is not None)
-            return league
+            team_id = team if isinstance(team, int) else team.team_id
+            parsed = await LeagueService.fetch_settings(league_info, team_id=team_id, espn_payload=espn_payload)
+            summary = await run_db("league.sync", LeagueService._persist_for_team, team_id, parsed)
+            log.info("league_synced", team_id=team_id, league_id=summary.id,
+                     scoring_type=summary.scoring_type, synced=summary.settings_synced)
+            return summary
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as exc:
-            log.error("league_sync_failed", team_id=team.team_id, error=str(exc))
+            log.error("league_sync_failed", team_id=team if isinstance(team, int) else team.team_id, error=str(exc))
             return None
 
     # ---- response shaping ----------------------------------------------------

@@ -18,6 +18,7 @@ from schemas.espn import ValidateLeagueResp, PlayerResp, TeamDataResp
 from schemas.matchup import MatchupResp, MatchupData, MatchupTeamResp, MatchupPlayerResp
 from core.errors import BadRequestError, ProviderAuthError, ServiceUnavailableError
 from core.settings import settings
+from db.base import run_db
 from services.providers.http import provider_get, provider_post
 from utils.yahoo_helpers import (
     normalize_team_abbr,
@@ -148,7 +149,7 @@ class YahooService:
         }
 
         # Yahoo answers 400 for a rejected code / refresh token: PROVIDER_AUTH_EXPIRED, not a generic failure
-        token_data = provider_post("yahoo", YAHOO_TOKEN_URL, headers=headers, data=data,
+        token_data = await provider_post("yahoo", YAHOO_TOKEN_URL, headers=headers, data=data,
                                    expect_key="access_token", auth_statuses=(400, 401, 403))
         return {
             "access_token": token_data.get("access_token"),
@@ -187,7 +188,7 @@ class YahooService:
         }
 
         # Yahoo answers 400 for a rejected code / refresh token: PROVIDER_AUTH_EXPIRED, not a generic failure
-        token_data = provider_post("yahoo", YAHOO_TOKEN_URL, headers=headers, data=data,
+        token_data = await provider_post("yahoo", YAHOO_TOKEN_URL, headers=headers, data=data,
                                    expect_key="access_token", auth_statuses=(400, 401, 403))
         return {
             "access_token": token_data.get("access_token"),
@@ -205,6 +206,15 @@ class YahooService:
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
         }
+
+    @staticmethod
+    def _value_players(league_info: LeagueInfo, team_id: int | None, player_lookups: list[tuple[str, str]]):
+        scoring = PlayerValueService.scoring_for(league_info, team_id)
+        return (
+            scoring,
+            PlayerValueService.value_kind_for(scoring),
+            PlayerValueService.avg_points_for(scoring, names=player_lookups),
+        )
 
     @staticmethod
     async def _ensure_valid_token(league_info: LeagueInfo, team_id: int | None = None) -> str:
@@ -281,7 +291,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/team/{team_key}?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         # Check if team exists in response
         team = data.get("fantasy_content", {}).get("team", {})
@@ -316,7 +326,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/users;use_login=1/games;game_codes=nba/leagues?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         leagues = []
         fantasy_content = data.get("fantasy_content", {})
@@ -389,7 +399,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/league/{league_key}/teams?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         teams = []
         fantasy_content = data.get("fantasy_content", {})
@@ -452,7 +462,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/team/{team_key}/roster/players?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         # First pass: collect player info for batch stat lookup
         parsed_players = []
@@ -525,9 +535,9 @@ class YahooService:
         # points under its weights, or the category value for H2H-category leagues
         # (rolling window, then last season's baseline). Same window as ESPN.
         player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-        scoring = PlayerValueService.scoring_for(league_info, team_id)
-        value_kind = PlayerValueService.value_kind_for(scoring)
-        name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
+        scoring, value_kind, name_to_value = await run_db(
+            "yahoo.value_roster", YahooService._value_players, league_info, team_id, player_lookups
+        )
 
         # Build final player list with stats
         players = []
@@ -582,7 +592,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/league/{league_key}/players;status=FA;sort=OR;count={fa_count}?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         # First pass: collect player info for batch stat lookup
         parsed_players = []
@@ -651,9 +661,9 @@ class YahooService:
         # points under its weights, or the category value for H2H-category leagues
         # (rolling window, then last season's baseline). Same window as ESPN.
         player_lookups = [(p["name"], p["team"]) for p in parsed_players]
-        scoring = PlayerValueService.scoring_for(league_info, team_id)
-        value_kind = PlayerValueService.value_kind_for(scoring)
-        name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
+        scoring, value_kind, name_to_value = await run_db(
+            "yahoo.value_free_agents", YahooService._value_players, league_info, team_id, player_lookups
+        )
 
         # Build final player list with stats
         players = []
@@ -709,7 +719,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/team/{team_key}/matchups?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         # Parse Yahoo matchup response to find current matchup and opponent
         fantasy_content = data.get("fantasy_content", {})
@@ -854,7 +864,7 @@ class YahooService:
                 opp_cat.wins, opp_cat.losses, opp_cat.ties = current_cmp.losses, current_cmp.wins, current_cmp.ties
 
             def proj_inputs(roster):
-                lines = PlayerValueService.rolling_lines_by_name([(p.name, p.team) for p in roster], days=7)
+                lines = projected_lines.get(id(roster), {})
                 out = []
                 for p in roster:
                     line = lines.get(_normalize_name(p.name))
@@ -863,6 +873,16 @@ class YahooService:
                         out.append((line, p.games_remaining, counts))
                 return out
 
+            projected_lines = {
+                id(our_roster): await run_db(
+                    "yahoo.matchup_our_lines", PlayerValueService.rolling_lines_by_name,
+                    [(p.name, p.team) for p in our_roster], days=7,
+                ),
+                id(opponent_roster): await run_db(
+                    "yahoo.matchup_opponent_lines", PlayerValueService.rolling_lines_by_name,
+                    [(p.name, p.team) for p in opponent_roster], days=7,
+                ),
+            }
             proj_cmp = cats.compare(cats.project(your_cat, proj_inputs(our_roster)),
                                     cats.project(opp_cat, proj_inputs(opponent_roster)))
             category_comparison = EspnService._comparison_schema(current_cmp)
@@ -950,7 +970,7 @@ class YahooService:
         endpoint = f"{YAHOO_API_BASE}/team/{team_key}/roster/players?format=json"
         headers = YahooService._get_headers(access_token)
 
-        data = provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
+        data = await provider_get("yahoo", endpoint, headers=headers, expect_key="fantasy_content")
 
         # Parse roster
         parsed_players = []
@@ -1037,7 +1057,10 @@ class YahooService:
         # Value players from our stored stats under the league's scoring (see get_team_data)
         player_lookups = [(p["name"], p["team"]) for p in parsed_players]
         scoring = scoring or resolve_scoring(None)
-        name_to_value = PlayerValueService.avg_points_for(scoring, names=player_lookups)
+        name_to_value = await run_db(
+            "yahoo.value_matchup_roster", PlayerValueService.avg_points_for,
+            scoring, names=player_lookups,
+        )
 
         # Build MatchupPlayerResp list
         roster = []
@@ -1061,4 +1084,3 @@ class YahooService:
             ))
 
         return roster
-

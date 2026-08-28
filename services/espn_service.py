@@ -1,6 +1,7 @@
 from datetime import datetime
 from core.errors import BadRequestError
 from core.logging import get_logger
+from db.base import run_db
 from services.providers.http import provider_get
 from services.player_value_service import PlayerValueService, ValueResult
 from services.scoring.models import CategoryTeamScoreData, StatLine
@@ -98,7 +99,7 @@ def espn_scoring_periods_for(matchup_period_map: dict, current_matchup_period: i
 class EspnService:
     
     @staticmethod
-    def check_league(league_info: LeagueInfo) -> ValidateLeagueResp:
+    async def check_league(league_info: LeagueInfo) -> ValidateLeagueResp:
         # Team names + league settings are all validation (and league sync) need.
         params = {
             'view': ['mTeam', 'mSettings']
@@ -115,7 +116,7 @@ class EspnService:
 
         # Rejected cookies (403 PROVIDER_AUTH_EXPIRED), an unknown league (400 LEAGUE_NOT_FOUND) and an
         # ESPN outage (502/504) raise from provider_get; only "this team isn't in the league" is valid=False.
-        data = provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
+        data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
         teams = [team['name'] for team in data['teams']]
         if league_info.team_name in teams:
             # league_payload is excluded from serialization; LeagueService reuses it for settings sync
@@ -196,7 +197,7 @@ class EspnService:
             'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mStandings']
         }
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
+        data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
 
         roster = EspnService.get_roster(league_info.team_name, data['teams'])
         if roster is None:
@@ -209,7 +210,7 @@ class EspnService:
         return TeamDataResp(
             status=ApiStatus.SUCCESS,
             message="Team data fetched successfully",
-            data=EspnService._to_player_resps(players, league_info),
+            data=await run_db("espn.value_roster", EspnService._to_player_resps, players, league_info),
         )
 
     @staticmethod
@@ -222,18 +223,18 @@ class EspnService:
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = provider_get("espn", endpoint, params=params, headers=headers,
+        data = await provider_get("espn", endpoint, params=params, headers=headers,
                             cookies=EspnService._cookies(league_info), expect_key="players")
         players = [Player(player, league_info.year) for player in data['players']]
 
         return TeamDataResp(
             status=ApiStatus.SUCCESS,
             message="Free agents fetched successfully",
-            data=EspnService._to_player_resps(players, league_info),
+            data=await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info),
         )
 
     @staticmethod
-    def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:
+    async def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:
         params = {
             'view': 'kona_player_info',
             'scoringPeriodId': 0,
@@ -242,7 +243,7 @@ class EspnService:
         filters = {"players":{"filterSlotIds":{"value":[]},"limit": 750, "sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":2,"sortAsc":True,"value":"STANDARD"}}}
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
-        data = provider_get("espn", endpoint, params=params, headers=headers, expect_key="players")['players']
+        data = (await provider_get("espn", endpoint, params=params, headers=headers, expect_key="players"))['players']
         data = [x.get('player', x) for x in data]
 
         cleaned_data = []
@@ -304,7 +305,7 @@ class EspnService:
         }
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = provider_get("espn", endpoint, params=params, cookies=cookies, expect_key="teams")
+        data = await provider_get("espn", endpoint, params=params, cookies=cookies, expect_key="teams")
 
         # Get current matchup period from ESPN
         status = data.get('status', {})
@@ -407,11 +408,16 @@ class EspnService:
         # for category leagues (so matchup figures agree with the streamer finder and the
         # optimizer), and the rolling/baseline fpts that stands in when ESPN has no
         # average yet (opening week) for points leagues.
-        our_values = EspnService._values_for(scoring, [
-            _entry_player(entry).get('id', 0)
-            for team_data in (our_team, opponent_team)
-            for entry in team_data.get('roster', {}).get('entries', [])
-        ])
+        our_values = await run_db(
+            "espn.value_matchup_players",
+            EspnService._values_for,
+            scoring,
+            [
+                _entry_player(entry).get('id', 0)
+                for team_data in (our_team, opponent_team)
+                for entry in team_data.get('roster', {}).get('entries', [])
+            ],
+        )
 
         def build_roster(team_data: dict) -> tuple[list[MatchupPlayerResp], float, list]:
             """Build roster list and calculate projected score."""
@@ -559,4 +565,3 @@ class EspnService:
             message="Matchup data fetched successfully",
             data=matchup_data
         )
-

@@ -10,12 +10,14 @@ from datetime import datetime, timedelta, date
 import pytz
 from fastapi import APIRouter, Request
 
-from core.errors import ProviderError
+from core.errors import ProviderError, ProviderTimeout
 from core.logging import get_logger
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from db.models.nba.live_player_stats import LivePlayerStats
 from db.models.nba.players import Player
 from pipelines.extractors.nba_api import NBAApiExtractor
+from db.base import db_operation
+from services.providers.blocking import run_blocking_provider
 
 router = APIRouter(prefix="/live", tags=["Live"])
 log = get_logger("live_api")
@@ -32,7 +34,8 @@ def _get_nba_date() -> date:
 
 @router.get("/players/today")
 @limiter.limit(PUBLIC_RATE_LIMIT)
-async def get_live_players_today(request: Request) -> dict:
+@db_operation("live.players_today")
+def get_live_players_today(request: Request) -> dict:
     """
     Get live stats for all players with games today.
 
@@ -93,7 +96,8 @@ async def get_live_players_today(request: Request) -> dict:
 
 @router.get("/schedule/today")
 @limiter.limit(PUBLIC_RATE_LIMIT)
-async def get_today_schedule(request: Request) -> dict:
+@db_operation("live.schedule_today")
+def get_today_schedule(request: Request) -> dict:
     """
     Get game scheduling info for today's live polling.
 
@@ -165,7 +169,11 @@ async def get_live_scoreboard(request: Request) -> dict:
 
     extractor = NBAApiExtractor()
     try:
-        games = extractor.get_scoreboard_games(game_date)
+        games = await run_blocking_provider(
+            "nba", "scoreboard", extractor.get_scoreboard_games, game_date
+        )
+    except ProviderTimeout:
+        raise
     except Exception as exc:
         # The NBA CDN is a provider like ESPN/Yahoo: a 502 the frontend treats as retryable
         log.warning("live_scoreboard_error", error=type(exc).__name__, detail=str(exc)[:200])
