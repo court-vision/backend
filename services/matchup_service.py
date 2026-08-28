@@ -150,12 +150,9 @@ class MatchupService:
             MatchupResp with matchup data; SUCCESS with data=None when there is no current
             matchup (bye week / offseason). Provider failures raise typed AppErrors.
         """
-        # The team's stored league info (view_team itself raises TEAM_NOT_FOUND for an unknown id)
-        team_resp = await TeamService.view_team(team_id)
-        if team_resp.status != ApiStatus.SUCCESS or not team_resp.data:
-            raise NotFoundError("TEAM_NOT_FOUND", f"Team with ID {team_id} not found")
-
-        league_info = team_resp.data.league_info
+        # Credentials, not the client-facing view: this goes straight to a
+        # provider. Raises TEAM_NOT_FOUND for an unknown id.
+        league_info = await TeamService.credentials_for(team_id)
 
         # Fetch matchup data using the league info - route by provider
         # Pass team_id for Yahoo so tokens can be refreshed and persisted
