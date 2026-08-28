@@ -97,6 +97,10 @@ class LeagueInfo(BaseModel):
     yahoo_refresh_token: str | None = None
     yahoo_token_expiry: str | None = None  # ISO datetime string
     yahoo_team_key: str | None = None  # e.g., "428.l.12345.t.1"
+    # Opaque handle to credentials already stored by the OAuth callback. The
+    # browser never sees Yahoo tokens, so this is what it sends when adding a
+    # team; the server resolves it to the real tokens. Never persisted.
+    yahoo_connection_id: int | None = None
 
     # View this team as a different scoring format than its league actually uses
     # (e.g. see a points league as 9-cat). Lives with the team, not the league,
@@ -149,10 +153,66 @@ class LeagueSummary(BaseModel):
     # Set when the team's scoring_preview overrides the league's real format above
     scoring_preview: Optional[Literal["points", "categories"]] = None
 
+class LeagueInfoPublic(BaseModel):
+    """What a client is allowed to see about a stored team.
+
+    Deliberately a separate model rather than `LeagueInfo` with fields excluded:
+    a model that cannot *represent* a credential cannot leak one, however it is
+    constructed. `LeagueInfo` stays the internal working object that carries
+    secrets to the provider services.
+
+    `yahoo_team_key` is here because it identifies a team, not because it grants
+    anything — it is useless without a token.
+    """
+    provider: FantasyProvider = FantasyProvider.ESPN
+    league_id: int
+    team_name: str
+    league_name: str | None = "N/A"
+    year: int
+    yahoo_team_key: str | None = None
+    scoring_preview: Optional[Literal["points", "categories"]] = None
+
+    # Whether credentials are on file, so the UI can render "stored" without
+    # ever receiving the value. Editing a team leaves the fields blank and the
+    # server keeps what it has -- see TeamService._merge_stored_credentials.
+    has_espn_credentials: bool = False
+    has_yahoo_credentials: bool = False
+
+    @classmethod
+    def from_league_info(
+        cls, league_info: "LeagueInfo", has_credentials: Optional[bool] = None
+    ) -> "LeagueInfoPublic":
+        """Build the public view of a team's league info.
+
+        `has_credentials` lets the caller state what is on file without
+        decrypting it — the stored path knows from the connection link. When
+        omitted (the add/update path, where the caller just supplied them) it is
+        inferred from the values present.
+        """
+        espn_creds = bool(league_info.espn_s2 and league_info.swid)
+        yahoo_creds = bool(league_info.yahoo_refresh_token)
+        if has_credentials is not None:
+            provider = getattr(league_info.provider, "value", league_info.provider)
+            is_yahoo = str(provider) == "yahoo"
+            espn_creds = has_credentials and not is_yahoo
+            yahoo_creds = has_credentials and is_yahoo
+        return cls(
+            provider=league_info.provider,
+            league_id=league_info.league_id,
+            team_name=league_info.team_name,
+            league_name=league_info.league_name,
+            year=league_info.year,
+            yahoo_team_key=league_info.yahoo_team_key,
+            scoring_preview=league_info.scoring_preview,
+            has_espn_credentials=espn_creds,
+            has_yahoo_credentials=yahoo_creds,
+        )
+
+
 class TeamResponse(BaseModel):
     """Team data response model"""
     team_id: int
-    league_info: LeagueInfo
+    league_info: LeagueInfoPublic
     league: Optional[LeagueSummary] = None   # None until league settings have been synced
 
 class LineupResponse(BaseModel):

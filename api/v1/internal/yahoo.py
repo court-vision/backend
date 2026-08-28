@@ -22,6 +22,11 @@ from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
 from schemas.espn import TeamDataReq, TeamDataResp, ValidateLeagueReq, ValidateLeagueResp
 from services.yahoo_service import YahooService
+from services import credential_service
+from services.user_sync_service import UserSyncService
+from api.deps import UserContext, get_db_user
+from core.errors import BadRequestError
+from db.base import run_db
 
 router = APIRouter(prefix="/yahoo", tags=["Yahoo Fantasy"])
 log = get_logger("yahoo_api")
@@ -60,13 +65,6 @@ class YahooLeaguesResponse(BaseResponse):
 class YahooTeamsResponse(BaseResponse):
     """Response containing teams in a Yahoo league."""
     teams: Optional[list[YahooTeamResponse]] = None
-
-
-class YahooTokenResponse(BaseResponse):
-    """Response containing Yahoo OAuth tokens."""
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
-    token_expiry: Optional[str] = None
 
 
 def _manage_teams_redirect(**params: str) -> RedirectResponse:
@@ -126,28 +124,70 @@ async def yahoo_callback(
                     error_code=getattr(exc, "error_code", None))
         return _manage_teams_redirect(yahoo_error="oauth_failed")
 
-    # Tokens travel to the frontend via URL params (it then calls /yahoo/leagues)
+    # Tokens are stored server-side and the redirect carries only an opaque,
+    # user-scoped connection id. They used to travel as query parameters, which
+    # put long-lived Yahoo refresh tokens into browser history, the Referer
+    # header, and every proxy and access log on the path.
+    # `state_data["user_id"]` is the Clerk id — get_auth_url is called with
+    # clerk_user_id, not the numeric usr.users key.
+    connection_id = await run_db(
+        "yahoo.store_tokens", _store_tokens_for_clerk_user,
+        state_data.get("user_id"), "yahoo",
+        {
+            "yahoo_access_token": tokens.get("access_token", ""),
+            "yahoo_refresh_token": tokens.get("refresh_token", ""),
+            "yahoo_token_expiry": tokens.get("token_expiry", ""),
+        },
+    )
+    if connection_id is None:
+        # CREDENTIAL_KEYS unset: nothing can be stored, so the flow cannot
+        # complete without putting tokens in the URL. Refuse rather than regress.
+        log.error("yahoo_oauth_store_unavailable")
+        return _manage_teams_redirect(yahoo_error="oauth_storage_unavailable")
+
     return _manage_teams_redirect(
         yahoo_connected="true",
-        yahoo_access_token=tokens.get("access_token", ""),
-        yahoo_refresh_token=tokens.get("refresh_token", ""),
-        yahoo_token_expiry=tokens.get("token_expiry", ""),
+        yahoo_connection=str(connection_id),
     )
+
+
+def _store_tokens_for_clerk_user(clerk_user_id: str, provider: str, secrets: dict):
+    """Resolve the Clerk id to the local user, then store the tokens under it."""
+    user = UserSyncService.get_or_create_user(clerk_user_id)
+    return credential_service.store_provider_tokens(user.user_id, provider, secrets)
+
+
+async def _access_token_for(user_id: int, connection_id: int) -> str:
+    """Resolve an opaque connection id to its access token, scoped to the owner.
+
+    A connection id is a small integer, so ownership is the access control: a
+    row belonging to someone else resolves to nothing, not to their token.
+    """
+    secrets = await run_db(
+        "yahoo.load_tokens", credential_service.load_provider_tokens, user_id, connection_id
+    )
+    token = (secrets or {}).get("yahoo_access_token")
+    if not token:
+        raise BadRequestError("YAHOO_CONNECTION_NOT_FOUND",
+                              "Yahoo connection not found; reconnect your account")
+    return token
 
 
 # ---------------------- League/Team Discovery Endpoints ---------------------- #
 
 @router.get("/leagues", response_model=YahooLeaguesResponse)
 async def get_user_leagues(
-    access_token: str = Query(..., description="Yahoo access token"),
-    current_user: dict = Depends(get_current_user)
+    connection_id: int = Query(..., description="Opaque Yahoo connection id from the OAuth callback"),
+    user: UserContext = Depends(get_db_user),
 ):
     """
     Get all Yahoo fantasy basketball leagues for the authenticated user.
 
-    Call this after OAuth to discover the user's leagues. A rejected token is a
+    Takes the connection id issued by the callback rather than the access token
+    itself, so no Yahoo credential ever appears in a URL. A rejected token is a
     403 PROVIDER_AUTH_EXPIRED; a Yahoo outage a 502/504.
     """
+    access_token = await _access_token_for(user.user_id, connection_id)
     leagues = await YahooService.get_user_leagues(access_token)
     return YahooLeaguesResponse(
         status=ApiStatus.SUCCESS,
@@ -158,15 +198,16 @@ async def get_user_leagues(
 
 @router.get("/teams", response_model=YahooTeamsResponse)
 async def get_league_teams(
-    access_token: str = Query(..., description="Yahoo access token"),
+    connection_id: int = Query(..., description="Opaque Yahoo connection id from the OAuth callback"),
     league_key: str = Query(..., description="Yahoo league key"),
-    current_user: dict = Depends(get_current_user)
+    user: UserContext = Depends(get_db_user),
 ):
     """
     Get all teams in a specific Yahoo league.
 
     Use this to let the user select which team they own.
     """
+    access_token = await _access_token_for(user.user_id, connection_id)
     teams = await YahooService.get_user_teams(access_token, league_key)
     return YahooTeamsResponse(
         status=ApiStatus.SUCCESS,
@@ -212,20 +253,10 @@ async def get_free_agents(
 
 
 # ---------------------- Token Management ---------------------- #
-
-@router.post("/refresh_token", response_model=YahooTokenResponse)
-async def refresh_token(
-    refresh_token: str = Query(..., description="Yahoo refresh token"),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Refresh an expired Yahoo access token (403 PROVIDER_AUTH_EXPIRED when Yahoo rejects it).
-    """
-    tokens = await YahooService.refresh_access_token(refresh_token)
-    return YahooTokenResponse(
-        status=ApiStatus.SUCCESS,
-        message="Token refreshed successfully",
-        access_token=tokens.get("access_token"),
-        refresh_token=tokens.get("refresh_token"),
-        token_expiry=tokens.get("token_expiry")
-    )
+#
+# `POST /refresh_token` was removed on 2026-08-28. It took a Yahoo refresh token
+# — the longest-lived credential in the system — as a *query parameter*, and
+# returned a fresh access and refresh token in the body. Nothing called it: token
+# refresh happens inside YahooService._ensure_valid_token during ordinary calls,
+# and the refreshed pair is persisted through credential_service. It was pure
+# attack surface.

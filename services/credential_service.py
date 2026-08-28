@@ -68,6 +68,73 @@ def _external_account_id(provider: str, secrets: dict) -> str:
     return ""
 
 
+def store_provider_tokens(user_id: int, provider: str, secrets: dict) -> Optional[int]:
+    """Put freshly-obtained credentials straight into the encrypted store.
+
+    Used by the OAuth callback so tokens never travel to the browser. The
+    returned connection id is an opaque, user-scoped handle: it identifies a row
+    the caller already owns and grants nothing on its own, unlike the tokens it
+    replaces in the redirect URL.
+
+    Returns None when the store is disabled, in which case the caller must fall
+    back to its previous behaviour.
+    """
+    if not crypto.is_enabled() or not secrets:
+        return None
+
+    from db.models.provider_connections import ProviderConnection
+
+    account = _external_account_id(provider, secrets)
+    ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
+    expires_at = secrets.get("yahoo_token_expiry") or None
+
+    connection = ProviderConnection.get_or_none(
+        (ProviderConnection.user == user_id)
+        & (ProviderConnection.provider == provider)
+        & (ProviderConnection.external_account_id == account)
+    )
+    if connection is None:
+        connection = ProviderConnection.create(
+            user=user_id, provider=provider, external_account_id=account,
+            secret_ciphertext=ciphertext, key_version=key_version, expires_at=expires_at,
+        )
+    else:
+        connection.secret_ciphertext = ciphertext
+        connection.key_version = key_version
+        connection.expires_at = expires_at
+        connection.save()
+    return connection.id
+
+
+def load_provider_tokens(user_id: int, connection_id: int) -> Optional[dict]:
+    """Decrypt a connection's secrets, but only for the user who owns it.
+
+    The user scoping is the access control: a connection id is a small integer,
+    so it must never be usable by anyone other than its owner.
+    """
+    from db.models.provider_connections import ProviderConnection
+
+    connection = ProviderConnection.get_or_none(
+        (ProviderConnection.id == connection_id) & (ProviderConnection.user == user_id)
+    )
+    if connection is None:
+        return None
+    return json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version))
+
+
+def has_credentials(team, payload: dict) -> bool:
+    """Whether this team has credentials on file — without decrypting them.
+
+    The client-facing response needs to say "stored" without ever touching the
+    plaintext, so this answers from the connection link for migrated teams and
+    from the legacy JSON for the rest.
+    """
+    if getattr(team, "provider_connection_id", None):
+        return True
+    _, secrets = split_secrets(payload)
+    return bool(secrets)
+
+
 def persist(user_id: int, team, payload: dict) -> Optional[int]:
     """Move the credentials in `payload` into the encrypted store.
 
