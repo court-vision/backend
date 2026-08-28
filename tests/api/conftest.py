@@ -14,6 +14,8 @@ Clients use `raise_server_exceptions=False` so an unhandled error is asserted
 as the 500 envelope rather than re-raised into the test.
 """
 
+import asyncio
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -31,6 +33,26 @@ FAKE_USER = {
 }
 
 
+@pytest.fixture(autouse=True)
+def execute_mocked_db_operations_without_postgres(monkeypatch):
+    """API tests mock repositories/services and intentionally skip Postgres.
+
+    Preserve the async scheduling boundary while replacing only the runtime's
+    connection wrapper. Dedicated DB-runtime tests exercise the real executor
+    admission/cancellation behavior.
+    """
+    from api import deps
+    from api.v1.internal import lineups
+    from core import health
+
+    async def direct_run_db(operation_name, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(deps, "run_db", direct_run_db)
+    monkeypatch.setattr(lineups, "run_db", direct_run_db)
+    monkeypatch.setattr(health, "run_db", direct_run_db)
+
+
 def make_test_app() -> FastAPI:
     """
     Build a FastAPI app for API tests.
@@ -41,7 +63,7 @@ def make_test_app() -> FastAPI:
     """
     from fastapi import APIRouter
     from api.v1.internal import (
-        auth, users, teams, lineups, espn, yahoo,
+        users, teams, lineups, espn, yahoo,
         matchups, streamers, notifications, api_keys,
     )
     from api.v1.public import (
@@ -81,7 +103,6 @@ def make_test_app() -> FastAPI:
 
     # Internal routes
     api_v1_internal = APIRouter(prefix="/v1/internal")
-    api_v1_internal.include_router(auth.router)
     api_v1_internal.include_router(users.router)
     api_v1_internal.include_router(teams.router)
     api_v1_internal.include_router(lineups.router)
