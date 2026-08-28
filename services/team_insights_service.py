@@ -78,16 +78,8 @@ class TeamInsightsService:
         log = get_logger()
         try:
             # Step 1: Get team info and route to provider for base roster
-            team_view_resp = await TeamService.view_team(team_id)
-            if team_view_resp.status != ApiStatus.SUCCESS or not team_view_resp.data:
-                return TeamInsightsResp(
-                    status=ApiStatus.ERROR,
-                    message="Failed to fetch team data",
-                    data=None,
-                )
-
-            league_info = team_view_resp.data.league_info
-
+            # Credentials, not the client-facing view — this calls a provider.
+            league_info = await TeamService.credentials_for(team_id)
             # Fetch base roster from ESPN or Yahoo
             if league_info.provider == FantasyProvider.YAHOO:
                 roster_resp = await YahooService.get_team_data(league_info, 0, team_id)

@@ -265,6 +265,22 @@ class TeamService:
                               data=response)
 
     @staticmethod
+    @db_operation("teams.credentials")
+    def credentials_for(team_id: int) -> LeagueInfo:
+        """The team's league info **with** credentials, for calling a provider.
+
+        Deliberately separate from `view_team`, which returns the client-facing
+        shape and carries no secrets. Anything that talks to ESPN or Yahoo needs
+        this; anything that answers an HTTP request needs that. Conflating them
+        is what broke production on 2026-08-28 — two services were using
+        `view_team` as a way to load credentials.
+        """
+        team = Team.select().where(Team.team_id == team_id).first()
+        if team is None:
+            raise NotFoundError("TEAM_NOT_FOUND", f"Team with ID {team_id} not found")
+        return TeamService.deserialize_league_info(json.loads(team.league_info), team)
+
+    @staticmethod
     @db_operation("teams.view")
     def view_team(team_id: int) -> TeamViewResp:
         """The stored team (league info + synced league summary). Raises TEAM_NOT_FOUND."""

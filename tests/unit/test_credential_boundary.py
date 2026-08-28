@@ -167,3 +167,69 @@ class TestOpaqueConnectionHandle:
 
     def test_the_handle_is_not_echoed_back_to_the_client(self):
         assert "yahoo_connection_id" not in LeagueInfoPublic.model_fields
+
+
+@pytest.mark.unit
+class TestProviderCallsGetCredentials:
+    """Regression: 2026-08-28 production outage.
+
+    `_to_team_response` was changed to return `LeagueInfoPublic`, but two
+    services were using `view_team()` as a way to *load credentials* before
+    calling ESPN/Yahoo. They got the public model and blew up with
+    `AttributeError: 'LeagueInfoPublic' object has no attribute 'espn_s2'` —
+    which surfaced in the browser as a CORS error, because an unhandled 500
+    escapes to Starlette's outermost handler, outside the CORS middleware.
+
+    The whole suite passed through that, because the API tests stub the service
+    layer and never exercise the wiring between them.
+    """
+
+    def test_public_model_lacks_what_provider_services_read(self):
+        """States the incompatibility that made the failure a hard error."""
+        for field in ("espn_s2", "swid", "yahoo_access_token"):
+            assert not hasattr(LeagueInfoPublic(league_id=1, team_name="t", year=2026), field)
+
+    @pytest.mark.asyncio
+    async def test_matchup_path_receives_credentials(self, monkeypatch):
+        from services import matchup_service as ms
+
+        async def fake_credentials(team_id):
+            return LeagueInfo(**ESPN)
+        monkeypatch.setattr(ms.TeamService, "credentials_for", fake_credentials)
+        monkeypatch.setattr(ms, "run_db", lambda name, fn, *a, **k: _async(None))
+
+        seen = {}
+        async def fake_espn(league_info, avg_window, scoring=None):
+            seen["info"] = league_info
+            return "ok"
+        monkeypatch.setattr(ms.EspnService, "get_matchup_data", fake_espn)
+
+        await ms.MatchupService.get_matchup_by_team_id(1, 21, "season")
+        info = seen["info"]
+        assert getattr(info, "espn_s2", None) == "AEB-SECRET-COOKIE", (
+            "the object handed to the provider carries no credentials — "
+            "this is the 2026-08-28 outage"
+        )
+
+    @pytest.mark.asyncio
+    async def test_team_insights_path_receives_credentials(self, monkeypatch):
+        from services import team_insights_service as tis
+
+        async def fake_credentials(team_id):
+            return LeagueInfo(**ESPN)
+        monkeypatch.setattr(tis.TeamService, "credentials_for", fake_credentials)
+
+        seen = {}
+        async def fake_espn(league_info, count):
+            seen["info"] = league_info
+            raise RuntimeError("stop here — we only care what was passed in")
+        monkeypatch.setattr(tis.EspnService, "get_team_data", fake_espn)
+
+        # get_team_insights swallows provider errors into an error envelope, so
+        # the assertion is on what it handed over, not on what it returned.
+        await tis.TeamInsightsService.get_team_insights(21)
+        assert getattr(seen.get("info"), "espn_s2", None) == "AEB-SECRET-COOKIE"
+
+
+async def _async(value):
+    return value
