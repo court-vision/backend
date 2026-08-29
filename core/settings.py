@@ -21,6 +21,23 @@ class Settings(BaseSettings):
     db_max_in_flight: int = 16
     db_queue_timeout_seconds: float = 2.0
 
+    # CPU-bound request work (category z-scoring, response assembly) runs in its
+    # own small pool -- see core/compute.py. GIL-bound, so this is a
+    # monopolisation limit rather than a throughput setting.
+    cpu_max_in_flight: int = 2
+    cpu_queue_timeout_seconds: float = 5.0
+
+    # Rendered-response cache for the public rankings endpoint (core/cache.py).
+    # Rankings change once a day, after post-game; the TTL only bounds how long
+    # a replica may lag that. 0 disables the cache (kill switch).
+    rankings_cache_ttl_seconds: float = 300.0
+    # ~350 KB per category body: 32 entries is a ~11 MB ceiling, against a real
+    # key space of 8 (2 formats x 4 windows) plus per-caller min_games variants.
+    rankings_cache_max_entries: int = 32
+    # League-scored rankings are cached per league scoring configuration, not per
+    # user, so this bounds distinct league setups rather than sign-ups.
+    league_rankings_cache_max_entries: int = 64
+
     # Season. Both default to the current season derived from today's date
     # (flips on Aug 1); set NBA_SEASON / ESPN_YEAR to pin them.
     nba_season: str = ""
@@ -144,6 +161,7 @@ class Settings(BaseSettings):
         limits = {
             "db_pool_max_connections": self.db_pool_max_connections,
             "db_max_in_flight": self.db_max_in_flight,
+            "cpu_max_in_flight": self.cpu_max_in_flight,
             "espn_max_in_flight": self.espn_max_in_flight,
             "yahoo_max_in_flight": self.yahoo_max_in_flight,
             "nba_max_in_flight": self.nba_max_in_flight,
@@ -155,8 +173,15 @@ class Settings(BaseSettings):
             raise ValueError(f"concurrency limits must be positive: {', '.join(invalid)}")
         if self.db_max_in_flight >= self.db_pool_max_connections:
             raise ValueError("db_max_in_flight must be smaller than db_pool_max_connections")
-        if self.db_queue_timeout_seconds <= 0 or self.provider_queue_timeout_seconds <= 0:
+        timeouts = (
+            self.db_queue_timeout_seconds,
+            self.provider_queue_timeout_seconds,
+            self.cpu_queue_timeout_seconds,
+        )
+        if any(t <= 0 for t in timeouts):
             raise ValueError("concurrency queue timeouts must be positive")
+        if self.rankings_cache_ttl_seconds < 0 or self.rankings_cache_max_entries < 0:
+            raise ValueError("rankings cache settings must not be negative")
         return self
 
     @model_validator(mode="after")

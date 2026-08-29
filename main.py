@@ -7,6 +7,7 @@ from slowapi.errors import RateLimitExceeded
 # Apply NBA API patch early, before any nba_api imports elsewhere
 import utils.patches  # noqa: F401 - imported for side effect (patches nba_api)
 
+from core.compute import start_cpu_runtime, stop_cpu_runtime
 from core.middleware import setup_middleware
 from core.correlation_middleware import RequestContextMiddleware
 from core.health import health_response
@@ -20,7 +21,8 @@ from services.features_client import start_features_runtime, stop_features_runti
 from services.providers.http import start_provider_runtime, stop_provider_runtime
 from services.providers.blocking import start_blocking_provider_runtime, stop_blocking_provider_runtime
 from services.schedule_service import assert_calendar_available
-from api.v1.internal import users, teams, lineups, espn, yahoo, matchups, streamers, notifications, api_keys
+from api.v1.internal import (users, teams, lineups, espn, yahoo, matchups, streamers, notifications,
+                             api_keys, rankings as internal_rankings)
 from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public, playoffs
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
@@ -47,6 +49,7 @@ async def lifespan(app: FastAPI):
         # accepts traffic; init_db closes their connection when complete.
         init_db()
         start_db_runtime()
+        start_cpu_runtime()
         start_provider_runtime()
         start_blocking_provider_runtime()
         start_features_runtime()
@@ -65,6 +68,7 @@ async def lifespan(app: FastAPI):
         await stop_features_runtime()
         await stop_provider_runtime()
         await stop_blocking_provider_runtime()
+        await stop_cpu_runtime()
         await stop_db_runtime()
         close_db()
         log.info("application_stopped")
@@ -120,6 +124,7 @@ api_v1_internal.include_router(matchups.router)
 api_v1_internal.include_router(streamers.router)
 api_v1_internal.include_router(notifications.router)
 api_v1_internal.include_router(api_keys.router)
+api_v1_internal.include_router(internal_rankings.router)
 
 app.include_router(api_v1_internal)
 

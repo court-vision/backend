@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from services.scoring.categories import CategoryScoring
 from services.scoring.models import CategoryDef
@@ -37,13 +37,39 @@ class ResolvedScoring:
     def is_categories(self) -> bool:
         return self.format == "categories"
 
+    @property
+    def fingerprint(self) -> tuple:
+        """Stable identity of what this scoring computes.
+
+        Two resolutions with the same fingerprint produce the same numbers for
+        the same player pool, so a cached response may be shared between them --
+        every team in a league, and every league that happens to score alike.
+        It changes the moment a re-sync changes the weights or the categories,
+        which is what keeps cached rankings from outliving the settings they
+        were computed from.
+        """
+        if self.is_categories and self.category_scoring is not None:
+            return ("categories", tuple(self.category_scoring.keys), self.category_scoring.win_mode)
+        return ("points", tuple(sorted(self.points.weights.items())))
+
 
 def _league_categories(league: Optional["League"]) -> Optional[CategoryScoring]:
     """The league's own categories when it is a synced category league, else None."""
     if league is not None and league.scoring_type == "categories" and league.categories:
-        cats = [CategoryDef.from_json(c) for c in league.categories]
+        cats = [CategoryDef.from_json(_as_json(c)) for c in league.categories]
         return CategoryScoring(cats, league.category_win_mode or "each_category")
     return None
+
+
+def _as_json(category: Any) -> Mapping[str, Any]:
+    """A stored category as a plain mapping.
+
+    `League.categories` holds JSONB dicts; `LeagueDetail.categories` (already
+    loaded by the `get_owned_team` dependency) holds `CategoryDefResp` models.
+    Accepting both is what lets a request resolve scoring from the auth context
+    without a second trip to the database -- see `resolve_scoring`.
+    """
+    return category if isinstance(category, Mapping) else category.model_dump()
 
 
 def _league_weights(league: Optional["League"]) -> dict[str, float]:
@@ -54,6 +80,12 @@ def _league_weights(league: Optional["League"]) -> dict[str, float]:
 
 def resolve_scoring(league: Optional["League"], preview: Optional[str] = None) -> ResolvedScoring:
     """Resolve the league's scoring, or the team's `scoring_preview` override.
+
+    `league` is anything carrying the league's scoring fields: a `League` row, or
+    the `LeagueDetail` that `get_owned_team` has already loaded. Pure either way --
+    no database access -- so the result is safe to hand to `run_cpu`. Note that a
+    `LeagueDetail` has already had its team's preview applied by
+    `LeagueService.to_detail`; do not pass `preview` again for one.
 
     A preview renders the team as the requested format regardless of what the
     league actually uses: `categories` on a points league uses the standard

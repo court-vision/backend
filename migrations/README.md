@@ -32,3 +32,10 @@ Only the schema version table lives in `public` (`_yoyo_migration`, `_yoyo_log`,
   migration so revisions are a new numbered file rather than an edit to the dump.
 - A migration needing `CREATE INDEX CONCURRENTLY` must start with
   `-- transactional: false`.
+- **Dropping a column takes two releases.** Both services write the `nba.*` tables
+  from their own copy of the Peewee models, and only the backend applies
+  migrations — at startup. A drop shipped alongside the code that stopped writing
+  the column will meet the *other* service's previous image still writing it, and
+  that pipeline run fails with `UndefinedColumn`. Ship the code first, confirm a
+  clean run, then ship the drop. `0008__drop_player_season_stats_rank.sql` is the
+  worked example.

@@ -9,6 +9,7 @@ from core.season import previous_season
 from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
+from db.models.stats.rankings import Rankings
 from db.base import db_operation
 from schemas.common import ApiStatus
 from schemas.players_list import PlayersListResp, PlayersListData, PlayerListItem
@@ -16,6 +17,23 @@ from schemas.players_list import PlayersListResp, PlayersListData, PlayerListIte
 
 class PlayersListService:
     """Service for listing and searching players."""
+
+    @staticmethod
+    def _league_ranks(player_ids: list[int]) -> dict[int, int]:
+        """League-wide rank per player, from nba.rankings.
+
+        `player_season_stats.rank` used to fill this field, but it was a rank
+        among the players who happened to have a row written that night, ordered
+        by cumulative season points -- not a rank in any league-wide sense. This
+        reads the real one. Empty (so the field is null) before the season has
+        any data.
+        """
+        if not player_ids:
+            return {}
+        return {
+            row.id: int(row.curr_rank)
+            for row in Rankings.select(Rankings.id, Rankings.curr_rank).where(Rankings.id.in_(player_ids))
+        }
 
     @staticmethod
     def _latest_rows(season: str):
@@ -113,8 +131,11 @@ class PlayersListService:
                 .limit(limit)
             )
 
+            rows = list(query)
+            ranks = PlayersListService._league_ranks([row.player_id for row in rows])
+
             players = []
-            for stats in query:
+            for stats in rows:
                 avg_fpts = stats.fpts / stats.gp if stats.gp > 0 else 0.0
                 players.append(
                     PlayerListItem(
@@ -125,7 +146,7 @@ class PlayersListService:
                         position=stats.player.position,
                         games_played=stats.gp,
                         avg_fpts=round(avg_fpts, 1),
-                        rank=stats.rank,
+                        rank=ranks.get(stats.player_id),
                     )
                 )
 
