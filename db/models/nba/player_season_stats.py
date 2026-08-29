@@ -44,7 +44,6 @@ class PlayerSeasonStats(BaseModel):
         pts, reb, ast, stl, blk, tov: Cumulative counting stats
         min: Total minutes played
         fgm, fga, fg3m, fg3a, ftm, fta: Cumulative shooting stats
-        rank: Fantasy ranking (1 = best)
         rost_pct: ESPN roster ownership percentage
         pipeline_run_id: Reference to the pipeline run that created/updated this record
         created_at: When this record was first created
@@ -91,8 +90,9 @@ class PlayerSeasonStats(BaseModel):
     ftm = IntegerField()
     fta = IntegerField()
 
-    # Rankings and ownership
-    rank = SmallIntegerField(null=True, index=True)
+    # Ownership. There is no rank column: a rank computed per snapshot night
+    # ranks only the players who played that night. nba.rankings holds the
+    # league-wide one (see backend/migrations/0007).
     rost_pct = DecimalField(max_digits=7, decimal_places=4, null=True)
 
     # Audit columns
@@ -108,8 +108,6 @@ class PlayerSeasonStats(BaseModel):
             (("player", "as_of_date"), True),
             # Index for getting latest stats
             (("season", "as_of_date"), False),
-            # Index for rankings
-            (("as_of_date", "rank"), False),
         )
 
     def __repr__(self) -> str:
@@ -196,7 +194,6 @@ class PlayerSeasonStats(BaseModel):
             "fg3a": stats.get("fg3a", 0),
             "ftm": stats.get("ftm", 0),
             "fta": stats.get("fta", 0),
-            "rank": stats.get("rank"),
             "rost_pct": stats.get("rost_pct"),
             "pipeline_run_id": pipeline_run_id,
         }
@@ -215,37 +212,3 @@ class PlayerSeasonStats(BaseModel):
 
         return season_stats
 
-    @classmethod
-    def get_latest_rankings(
-        cls,
-        season: str,
-        limit: int = 100,
-    ) -> list["PlayerSeasonStats"]:
-        """
-        Get the latest player rankings for a season.
-
-        Args:
-            season: Season identifier (e.g., '2024-25')
-            limit: Maximum number of players to return
-
-        Returns:
-            List of PlayerSeasonStats ordered by rank
-        """
-        # Get the most recent date with data for this season
-        latest_date = (
-            cls.select(cls.as_of_date)
-            .where(cls.season == season)
-            .order_by(cls.as_of_date.desc())
-            .limit(1)
-            .scalar()
-        )
-
-        if not latest_date:
-            return []
-
-        return list(
-            cls.select()
-            .where((cls.season == season) & (cls.as_of_date == latest_date))
-            .order_by(cls.rank.asc(nulls="last"))
-            .limit(limit)
-        )

@@ -6,6 +6,7 @@ from core.logging import get_logger
 from db.models.nba.players import Player
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
+from db.models.stats.rankings import Rankings
 from db.models.nba.player_ownership import PlayerOwnership
 from db.base import db_operation
 from schemas.common import ApiStatus
@@ -67,15 +68,19 @@ class TrendsService:
                         games=record.gp,
                     )
 
-            # Get current rank
+            # Current league-wide rank, from nba.rankings. The `rank` column on
+            # player_season_stats used to fill this, but it ranked only the
+            # players who had a row written that night -- a cohort artifact, not
+            # a standing.
+            ranking = Rankings.get_or_none(Rankings.id == player_id)
+            current_rank = int(ranking.curr_rank) if ranking else None
+
             latest_season_stats = (
                 PlayerSeasonStats.select()
                 .where(PlayerSeasonStats.player_id == player_id)
                 .order_by(PlayerSeasonStats.as_of_date.desc())
                 .first()
             )
-
-            current_rank = latest_season_stats.rank if latest_season_stats else None
             current_team = latest_season_stats.team_id if latest_season_stats else None
 
             # Get ownership trend

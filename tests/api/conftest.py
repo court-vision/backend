@@ -53,6 +53,20 @@ def execute_mocked_db_operations_without_postgres(monkeypatch):
     monkeypatch.setattr(health, "run_db", direct_run_db)
 
 
+@pytest.fixture(autouse=True)
+def empty_response_caches():
+    """Rendered-response caches are module-level; a leftover entry from one test
+    would serve another test's stubbed service."""
+    from api.v1.internal.rankings import RESPONSE_CACHE as LEAGUE_CACHE
+    from api.v1.public.rankings import RESPONSE_CACHE as PUBLIC_CACHE
+
+    for cache in (PUBLIC_CACHE, LEAGUE_CACHE):
+        cache.clear()
+    yield
+    for cache in (PUBLIC_CACHE, LEAGUE_CACHE):
+        cache.clear()
+
+
 def make_test_app() -> FastAPI:
     """
     Build a FastAPI app for API tests.
@@ -65,6 +79,7 @@ def make_test_app() -> FastAPI:
     from api.v1.internal import (
         users, teams, lineups, espn, yahoo,
         matchups, streamers, notifications, api_keys,
+        rankings as internal_rankings,
     )
     from api.v1.public import (
         rankings, players, games,
@@ -112,6 +127,7 @@ def make_test_app() -> FastAPI:
     api_v1_internal.include_router(streamers.router)
     api_v1_internal.include_router(notifications.router)
     api_v1_internal.include_router(api_keys.router)
+    api_v1_internal.include_router(internal_rankings.router)
     app.include_router(api_v1_internal)
 
     return app
