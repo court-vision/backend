@@ -4,10 +4,10 @@ Schemas for lineup optimization API.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class PlayerInput(BaseModel):
+class PlayerInput(ApiModel):
     """Player data for optimization input."""
 
     id: int = Field(..., description="ESPN player ID")
@@ -18,7 +18,7 @@ class PlayerInput(BaseModel):
     injury_status: Optional[str] = Field(None, description="Injury status if any")
 
 
-class RecommendedMove(BaseModel):
+class RecommendedMove(ApiModel):
     """A recommended roster move."""
 
     action: str = Field(..., description="Action type: 'add', 'drop', 'stream'")
@@ -28,7 +28,7 @@ class RecommendedMove(BaseModel):
     projected_gain: float = Field(..., description="Projected fpts gain from move")
 
 
-class OptimizedDay(BaseModel):
+class OptimizedDay(ApiModel):
     """Optimized lineup for a single day."""
 
     date: str = Field(..., description="Date (YYYY-MM-DD)")
@@ -37,7 +37,7 @@ class OptimizedDay(BaseModel):
     projected_fpts: float = Field(..., description="Projected fantasy points")
 
 
-class OptimizeData(BaseModel):
+class OptimizeData(ApiModel):
     """Response data for lineup optimization."""
 
     week: int = Field(..., description="Fantasy week")
@@ -59,7 +59,7 @@ class OptimizeResp(BaseResponse):
     data: Optional[OptimizeData] = None
 
 
-class GenerateLineupRequest(BaseModel):
+class GenerateLineupRequest(ApiModel):
     """Request body for lineup generation from a connected team."""
 
     team_id: int = Field(..., description="ID of the user's stored team (from manage-teams)")

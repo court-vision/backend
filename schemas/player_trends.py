@@ -4,24 +4,24 @@ Schemas for player trend API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class TrendPeriod(BaseModel):
+class TrendPeriod(ApiModel):
     """Stats for a trend period."""
 
     avg_fpts: float = Field(..., description="Average fantasy points per game")
     games: int = Field(..., description="Number of games in period")
 
 
-class OwnershipTrend(BaseModel):
+class OwnershipTrend(ApiModel):
     """Ownership trend data."""
 
     current: float = Field(..., description="Current ownership percentage")
     change_7d: float = Field(..., description="Change over last 7 days")
 
 
-class PlayerTrendsData(BaseModel):
+class PlayerTrendsData(ApiModel):
     """Response data for player trends."""
 
     player_id: int = Field(..., description="NBA player ID")

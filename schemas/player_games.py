@@ -4,10 +4,10 @@ Schemas for player game log API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class GameLog(BaseModel):
+class GameLog(ApiModel):
     """Individual game in a player's game log."""
 
     date: str = Field(..., description="Game date (YYYY-MM-DD)")
@@ -29,7 +29,7 @@ class GameLog(BaseModel):
     fta: int = Field(..., description="Free throws attempted")
 
 
-class PlayerGamesData(BaseModel):
+class PlayerGamesData(ApiModel):
     """Response data for a player's game log."""
 
     player_id: int = Field(..., description="NBA player ID")

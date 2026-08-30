@@ -12,7 +12,14 @@ from core.clerk_auth import verify_clerk_token
 from db.models.api_keys import APIKey
 from db.models.users import User
 from db.base import db_operation
-from schemas.api_keys import ApiKeyListItem, CreateApiKeyRequest, CreateApiKeyData
+from schemas.api_keys import (
+    ApiKeyListItem,
+    ApiKeyListResp,
+    CreateApiKeyData,
+    CreateApiKeyRequest,
+    CreateApiKeyResp,
+    RevokeApiKeyResp,
+)
 from schemas.common import success_response
 
 router = APIRouter(prefix="/api-keys", tags=["API Keys"])
@@ -44,7 +51,7 @@ def _key_to_item(key: APIKey) -> dict:
     ).model_dump(mode="json")
 
 
-@router.get("/")
+@router.get("/", response_model=ApiKeyListResp)
 @db_operation("api_keys.list")
 def list_api_keys(token_data: dict = Depends(verify_clerk_token)):
     """List all active API keys for the authenticated user."""
@@ -62,7 +69,7 @@ def list_api_keys(token_data: dict = Depends(verify_clerk_token)):
     )
 
 
-@router.post("/")
+@router.post("/", response_model=CreateApiKeyResp)
 @db_operation("api_keys.create")
 def create_api_key(
     body: CreateApiKeyRequest,
@@ -106,7 +113,7 @@ def create_api_key(
     )
 
 
-@router.delete("/{key_id}")
+@router.delete("/{key_id}", response_model=RevokeApiKeyResp)
 @db_operation("api_keys.revoke")
 def revoke_api_key(
     key_id: str,

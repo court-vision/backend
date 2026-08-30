@@ -22,7 +22,7 @@ async def get_teams(user: UserContext = Depends(get_db_user)):
 
 @router.post('/add', response_model=TeamAddResp)
 async def add_team(team_add_req: TeamAddReq, user: UserContext = Depends(get_db_user)):
-    return respond(await TeamService.add_team(user.user_id, team_add_req.league_info))
+    return respond(await TeamService.add_team(user.user_id, team_add_req.league_info.to_internal()))
 
 @router.delete('/remove', response_model=TeamRemoveResp)
 async def remove_team(team_id: int, user: UserContext = Depends(get_db_user)):
@@ -30,7 +30,7 @@ async def remove_team(team_id: int, user: UserContext = Depends(get_db_user)):
 
 @router.put('/update', response_model=TeamUpdateResp)
 async def update_team(team_update_req: TeamUpdateReq, user: UserContext = Depends(get_db_user)):
-    return respond(await TeamService.update_team(user.user_id, team_update_req.team_id, team_update_req.league_info))
+    return respond(await TeamService.update_team(user.user_id, team_update_req.team_id, team_update_req.league_info.to_internal()))
 
 @router.get('/view', response_model=TeamDataResp)
 async def view_team(team: OwnedTeamContext = Depends(get_owned_team)):

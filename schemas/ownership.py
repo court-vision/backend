@@ -4,10 +4,10 @@ Schemas for ownership trend API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class TrendingPlayer(BaseModel):
+class TrendingPlayer(ApiModel):
     """Player in trending list."""
 
     player_id: int = Field(..., description="NBA player ID")
@@ -21,7 +21,7 @@ class TrendingPlayer(BaseModel):
     )
 
 
-class OwnershipTrendingData(BaseModel):
+class OwnershipTrendingData(ApiModel):
     """Response data for ownership trending."""
 
     days: int = Field(..., description="Lookback period in days")

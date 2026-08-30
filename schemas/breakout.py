@@ -3,10 +3,10 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class BreakoutBeneficiary(BaseModel):
+class BreakoutBeneficiary(ApiModel):
     """The player expected to benefit from the minutes vacuum."""
     player_id: int
     nba_player_id: Optional[int] = None  # NBA (nba_api) player ID for terminal navigation
@@ -20,7 +20,7 @@ class BreakoutBeneficiary(BaseModel):
     has_b2b: bool
 
 
-class BreakoutInjuredPlayer(BaseModel):
+class BreakoutInjuredPlayer(ApiModel):
     """The prominent injured player creating the opportunity."""
     player_id: int
     name: str
@@ -29,7 +29,7 @@ class BreakoutInjuredPlayer(BaseModel):
     expected_return: Optional[date] = None
 
 
-class BreakoutSignals(BaseModel):
+class BreakoutSignals(ApiModel):
     """Evidence supporting this breakout recommendation."""
     depth_rank: int
     projected_min_boost: float
@@ -40,14 +40,14 @@ class BreakoutSignals(BaseModel):
     breakout_score: float
 
 
-class BreakoutCandidateResp(BaseModel):
+class BreakoutCandidateResp(ApiModel):
     """A single breakout streamer recommendation."""
     beneficiary: BreakoutBeneficiary
     injured_player: BreakoutInjuredPlayer
     signals: BreakoutSignals
 
 
-class BreakoutData(BaseModel):
+class BreakoutData(ApiModel):
     as_of_date: date
     candidates: list[BreakoutCandidateResp]
 

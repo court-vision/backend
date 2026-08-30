@@ -1,20 +1,20 @@
 from pydantic import Field
 from typing import Optional
-from .common import BaseRequest, BaseResponse, TeamResponse, LeagueInfo
+from .common import BaseRequest, BaseResponse, TeamResponse, LeagueInfoWrite
 
 # ------------------------------- Team Management Models ------------------------------- #
 
 #                          ------- Incoming -------                           #
 
 class TeamAddReq(BaseRequest):
-    league_info: LeagueInfo
+    league_info: LeagueInfoWrite
 
 class TeamRemoveReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
   
 class TeamUpdateReq(BaseRequest):
     team_id: int = Field(ge=1, description="Team ID must be positive")
-    league_info: LeagueInfo
+    league_info: LeagueInfoWrite
 
 #                          ------- Outgoing -------                           #
 

@@ -2,7 +2,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 from typing import Optional
-from .common import BaseRequest, BaseResponse, LeagueInfo
+from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
 from .espn import ValueKind
 
 
@@ -11,7 +11,7 @@ class StreamerMode(str, Enum):
     DAILY = "daily"
 
 
-class StreamerPlayerResp(BaseModel):
+class StreamerPlayerResp(ApiModel):
     """A streaming candidate player."""
     player_id: int
     nba_player_id: Optional[int] = None  # NBA (nba_api) player ID for terminal navigation
@@ -39,7 +39,7 @@ class StreamerPlayerResp(BaseModel):
     injury_status: Optional[str] = None
 
 
-class StreamerData(BaseModel):
+class StreamerData(ApiModel):
     """Complete streamer search results."""
     matchup_number: int
     current_day_index: int

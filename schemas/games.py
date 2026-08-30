@@ -4,10 +4,10 @@ Schemas for game-related API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class GameInfo(BaseModel):
+class GameInfo(ApiModel):
     """Individual game information."""
 
     game_id: Optional[str] = Field(None, description="NBA game ID")
@@ -23,7 +23,7 @@ class GameInfo(BaseModel):
     start_time_et: Optional[str] = Field(None, description="Scheduled tip-off time in ET (HH:MM format)")
 
 
-class GamesOnDateData(BaseModel):
+class GamesOnDateData(ApiModel):
     """Response data for games on a specific date."""
 
     date: str = Field(..., description="Date queried (YYYY-MM-DD)")

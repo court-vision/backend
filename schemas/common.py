@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal, Optional, Any, Generic, TypeVar
 from enum import Enum
 
@@ -17,7 +17,25 @@ class ApiStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
     SERVER_ERROR = "server_error"
 
-class BaseResponse(BaseModel, Generic[TypeVar('T')]):
+class ApiModel(BaseModel):
+    """Base for every schema in this package.
+
+    `json_schema_serialization_defaults_required`: FastAPI serializes every
+    field of a response model, so a default-bearing field is always present on
+    the wire — the OpenAPI *serialization* schema should say `required`, or
+    every generated client type ends up `field?: X | null` and forces
+    null-checks the runtime never needs. Validation (request) schemas are
+    unaffected: defaults stay optional to send.
+
+    Models used in both directions get split into `-Input`/`-Output` component
+    schemas by FastAPI; generated clients should read the `-Output` variant for
+    response data.
+    """
+
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class BaseResponse(ApiModel, Generic[TypeVar('T')]):
     """
     Base response model that all API responses should extend.
     Provides consistent structure across all endpoints.
@@ -28,8 +46,16 @@ class BaseResponse(BaseModel, Generic[TypeVar('T')]):
     error_code: Optional[str] = None
     timestamp: Optional[str] = None
 
-    class Config:
-        use_enum_values = True
+    # json_schema_serialization_defaults_required: FastAPI always serializes
+    # every field of a response model, so a default-bearing field is in fact
+    # always present on the wire. Without this flag pydantic marks such fields
+    # optional in the OpenAPI schema, and every generated TS type becomes
+    # `data?: X | null` — forcing null-checks the runtime never needs.
+    # `data: X | null` (required, nullable) is the truthful shape.
+    model_config = ConfigDict(
+        use_enum_values=True,
+        json_schema_serialization_defaults_required=True,
+    )
 
 class BaseRequest(BaseModel):
     """
@@ -110,34 +136,34 @@ class LeagueInfo(BaseModel):
         description="Override the rendered scoring format for this team only; None uses the league's synced format",
     )
 
-class AuthResponse(BaseModel):
+class AuthResponse(ApiModel):
     """Base authentication response model"""
     access_token: Optional[str] = None
     user_id: Optional[int] = None
     email: Optional[str] = None
     expires_at: Optional[str] = None
 
-class VerificationResponse(BaseModel):
+class VerificationResponse(ApiModel):
     """Email verification specific response"""
     verification_sent: bool = False
     email: str
     expires_in_seconds: Optional[int] = None
     verification_id: Optional[str] = None
 
-class UserResponse(BaseModel):
+class UserResponse(ApiModel):
     """User data response model"""
     user_id: int
     email: str
     created_at: Optional[str] = None
     last_login: Optional[str] = None
 
-class CategoryDefResp(BaseModel):
+class CategoryDefResp(ApiModel):
     key: str
     label: str
     higher_is_better: bool
     is_rate: bool
 
-class LeagueSummary(BaseModel):
+class LeagueSummary(ApiModel):
     """Provider-detected league settings (scoring format), embedded in team responses."""
     id: int
     provider: FantasyProvider
@@ -153,7 +179,45 @@ class LeagueSummary(BaseModel):
     # Set when the team's scoring_preview overrides the league's real format above
     scoring_preview: Optional[Literal["points", "categories"]] = None
 
-class LeagueInfoPublic(BaseModel):
+class LeagueInfoWrite(BaseModel):
+    """What a client is allowed to *send* about a team.
+
+    The request-side twin of `LeagueInfoPublic`, and separate from `LeagueInfo`
+    for the same reason: a model that cannot represent a Yahoo token cannot
+    accept one. The browser stopped handling raw tokens with the credential
+    boundary (7b) — it sends `yahoo_connection_id`, an opaque handle the OAuth
+    callback issued — but the request schema still advertised the token fields,
+    so a generated client would have typed them right back into the UI.
+
+    Pydantic silently drops unknown fields, so a legacy client posting raw
+    tokens loses them rather than erroring; post-7b no shipped client does.
+    ESPN cookies stay accepted here: the browser legitimately collects them
+    (empty string = "keep what is stored" on update).
+    """
+
+    provider: FantasyProvider = FantasyProvider.ESPN
+    league_id: int = Field(ge=1, description="League ID must be positive")
+    team_name: str = Field(min_length=1, description="Team name cannot be empty")
+    league_name: str | None = "N/A"
+    year: int = Field(ge=2020, le=2030, description="Year must be between 2020 and 2030")
+
+    espn_s2: str | None = ""
+    swid: str | None = ""
+
+    yahoo_connection_id: int | None = None
+    yahoo_team_key: str | None = None
+
+    scoring_preview: Optional[Literal["points", "categories"]] = Field(
+        default=None,
+        description="Override the rendered scoring format for this team only; None uses the league's synced format",
+    )
+
+    def to_internal(self) -> "LeagueInfo":
+        """The internal working object the services expect. Token fields stay None."""
+        return LeagueInfo(**self.model_dump())
+
+
+class LeagueInfoPublic(ApiModel):
     """What a client is allowed to see about a stored team.
 
     Deliberately a separate model rather than `LeagueInfo` with fields excluded:
@@ -209,13 +273,13 @@ class LeagueInfoPublic(BaseModel):
         )
 
 
-class TeamResponse(BaseModel):
+class TeamResponse(ApiModel):
     """Team data response model"""
     team_id: int
     league_info: LeagueInfoPublic
     league: Optional[LeagueSummary] = None   # None until league settings have been synced
 
-class LineupResponse(BaseModel):
+class LineupResponse(ApiModel):
     """Lineup data response model"""
     lineup_id: int
     lineup_data: dict
@@ -230,7 +294,7 @@ class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=20, ge=1, le=100, description="Number of items per page")
 
-class PaginatedResponse(BaseModel):
+class PaginatedResponse(ApiModel):
     """Paginated response wrapper"""
     items: list[Any]
     total: int
@@ -242,13 +306,13 @@ class PaginatedResponse(BaseModel):
 
 # ------------------------------- Validation Models ------------------------------- #
 
-class ValidationError(BaseModel):
+class ValidationError(ApiModel):
     """Individual validation error"""
     field: str
     message: str
     value: Optional[Any] = None
 
-class ValidationErrorResponse(BaseModel):
+class ValidationErrorResponse(ApiModel):
     """Validation error response"""
     errors: list[ValidationError]
     message: str = "Validation failed"

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-from .common import BaseRequest, BaseResponse, LeagueInfo
+from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
 
 # ------------------------------- ESPN Data Models ------------------------------- #
 
@@ -11,7 +11,7 @@ ValueKind = Literal["fpts", "cat_value"]
 class ValidateLeagueReq(BaseRequest):
     league_info: LeagueInfo
 
-class PlayerResp(BaseModel):
+class PlayerResp(ApiModel):
     player_id: int
     name: str
     avg_points: float

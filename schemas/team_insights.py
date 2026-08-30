@@ -1,18 +1,18 @@
 from pydantic import BaseModel, Field
 from typing import Optional
-from .common import BaseResponse
+from .common import ApiModel, BaseResponse
 from .espn import ValueKind
 from .matchup import CategoryComparison, ScoringFormat
 
 
-class PlayerScheduleInfo(BaseModel):
+class PlayerScheduleInfo(ApiModel):
     """Schedule info for a player's NBA team in the current matchup."""
     game_days: list[int]       # Day indices within matchup (0-indexed)
     games_remaining: int
     has_b2b: bool
 
 
-class EnrichedRosterPlayer(BaseModel):
+class EnrichedRosterPlayer(ApiModel):
     """Roster player with schedule and multi-window stat data."""
     # Base fields (from PlayerResp)
     player_id: int
@@ -31,7 +31,7 @@ class EnrichedRosterPlayer(BaseModel):
     avg_fpts_l30: Optional[float] = None
 
 
-class CategoryStrengths(BaseModel):
+class CategoryStrengths(ApiModel):
     """Team per-game totals per stat category over the trailing window.
 
     Counting stats are the sum of each rostered player's per-game average over
@@ -53,7 +53,7 @@ class CategoryStrengths(BaseModel):
     window_days: int           # Rolling window the totals are computed over
 
 
-class ScheduleOverview(BaseModel):
+class ScheduleOverview(ApiModel):
     """Current matchup week schedule context."""
     matchup_number: int
     matchup_start: str         # ISO date
@@ -65,7 +65,7 @@ class ScheduleOverview(BaseModel):
     day_game_counts: list[int] # Per-day count of roster players with games
 
 
-class RosterHealthSummary(BaseModel):
+class RosterHealthSummary(ApiModel):
     """Counts of players by health status."""
     total_players: int
     healthy: int
@@ -74,7 +74,7 @@ class RosterHealthSummary(BaseModel):
     game_time_decision: int    # GTD
 
 
-class TeamInsightsData(BaseModel):
+class TeamInsightsData(ApiModel):
     """Complete team insights response."""
     roster: list[EnrichedRosterPlayer]
     category_strengths: Optional[CategoryStrengths] = None

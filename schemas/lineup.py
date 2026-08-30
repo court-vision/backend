@@ -1,23 +1,23 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-from .common import BaseRequest, BaseResponse, LineupResponse
+from .common import ApiModel, BaseRequest, BaseResponse, LineupResponse
 
 # ------------------------------- Lineup Models ------------------------------- #
 
 #                          ------ Sub-Models ------                           #
 
-class SlimPlayer(BaseModel):
+class SlimPlayer(ApiModel):
     Name: str = Field(min_length=1, description="Player name cannot be empty")
     AvgPoints: float = Field(ge=0, description="Average points must be non-negative")
     Team: str = Field(min_length=1, description="Team name cannot be empty")
 
-class SlimGene(BaseModel):
+class SlimGene(ApiModel):
     Day: int = Field(ge=0, le=13, description="Day must be between 0 and 13 (for all-star week)")
     Additions: list[SlimPlayer] = Field(default_factory=list)
     Removals: list[SlimPlayer] = Field(default_factory=list)
     Roster: dict[str, SlimPlayer] = Field(default_factory=dict)
 
-class LineupInfo(BaseModel):
+class LineupInfo(ApiModel):
     Lineup: list[SlimGene] = Field(min_items=1, description="Lineup must have at least one gene")
     Improvement: int = Field(description="Improvement value")
     Timestamp: str = Field(description="Lineup timestamp")

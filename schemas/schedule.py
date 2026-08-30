@@ -1,16 +1,16 @@
 from pydantic import BaseModel
 from typing import Literal, Optional
-from .common import BaseResponse
+from .common import ApiModel, BaseResponse
 
 
-class ScheduleWeek(BaseModel):
+class ScheduleWeek(ApiModel):
     week: int
     start_date: str
     end_date: str
     game_span: int
 
 
-class SeasonInfo(BaseModel):
+class SeasonInfo(ApiModel):
     """The active season as the calendar sees it (frontend copy/phase come from here)."""
     key: str                                   # "2026-27"
     label: str                                 # "2026–27"
@@ -23,7 +23,7 @@ class SeasonInfo(BaseModel):
     week_count: int
 
 
-class ScheduleWeeksData(BaseModel):
+class ScheduleWeeksData(ApiModel):
     weeks: list[ScheduleWeek]
     current_week: Optional[int] = None
     season: SeasonInfo

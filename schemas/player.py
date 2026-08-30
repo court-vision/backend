@@ -1,9 +1,9 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from .common import BaseResponse
+from .common import ApiModel, BaseResponse
 
 
-class GameLog(BaseModel):
+class GameLog(ApiModel):
     date: str
     fpts: int
     pts: int
@@ -21,7 +21,7 @@ class GameLog(BaseModel):
     fta: int
 
 
-class AvgStats(BaseModel):
+class AvgStats(ApiModel):
     avg_fpts: float
     avg_points: float
     avg_rebounds: float
@@ -47,7 +47,7 @@ class AvgStats(BaseModel):
     avg_fta: float
 
 
-class AdvancedStatsData(BaseModel):
+class AdvancedStatsData(ApiModel):
     """Advanced stats from pipeline - always season-level."""
     off_rating: Optional[float] = None
     def_rating: Optional[float] = None
@@ -64,7 +64,7 @@ class AdvancedStatsData(BaseModel):
     plus_minus: Optional[float] = None
 
 
-class PlayerStats(BaseModel):
+class PlayerStats(ApiModel):
     id: int
     name: str
     team: str
@@ -80,7 +80,7 @@ class PlayerStatsResp(BaseResponse):
     data: PlayerStats | None = None
 
 
-class PercentileData(BaseModel):
+class PercentileData(ApiModel):
     avg_fpts: int
     avg_points: int
     avg_rebounds: int
@@ -98,7 +98,7 @@ class PlayerPercentilesResp(BaseResponse):
     data: PercentileData | None = None
 
 
-class PlayerStatusData(BaseModel):
+class PlayerStatusData(ApiModel):
     status: Optional[str]          # "Out"/"Doubtful"/"Questionable"/"Probable"/"Available"
     injury_type: Optional[str]
     injury_detail: Optional[str]
@@ -110,7 +110,7 @@ class PlayerStatusResp(BaseResponse):
     data: Optional[PlayerStatusData] = None
 
 
-class PlayerOwnershipData(BaseModel):
+class PlayerOwnershipData(ApiModel):
     current_ownership: float       # 0–100
     prev_ownership: Optional[float]
     change: Optional[float]        # percentage point delta
