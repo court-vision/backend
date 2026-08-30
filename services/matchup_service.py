@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date as date_type, datetime
 from types import SimpleNamespace
 
 from core.logging import get_logger
