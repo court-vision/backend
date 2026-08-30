@@ -21,8 +21,7 @@ from schemas.espn import ValidateLeagueResp
 from schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
 from services import credential_service
 from services.league_service import LeagueService
-from services.espn_service import EspnService
-from services.yahoo_service import YahooService
+from services.providers import get_provider_adapter
 
 LEAGUE_VALIDATION_FAILED = "LEAGUE_VALIDATION_FAILED"
 
@@ -122,9 +121,7 @@ class TeamService:
         league; provider failures (rejected cookies/token, unknown league, outage)
         raise typed AppErrors from the provider services.
         """
-        if league_info.provider == FantasyProvider.YAHOO:
-            return await YahooService.check_league(league_info, team_id)
-        return await EspnService.check_league(league_info)
+        return await get_provider_adapter(league_info.provider).validate_league(league_info, team_id)
 
     @staticmethod
     def _rejected(validation: ValidateLeagueResp) -> BadRequestError:

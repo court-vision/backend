@@ -212,6 +212,7 @@ docker run -p 8000:8080 --env-file .env cv-backend
 | `YAHOO_CLIENT_ID` | No | — | Yahoo OAuth app client ID |
 | `YAHOO_CLIENT_SECRET` | No | — | Yahoo OAuth app client secret |
 | `YAHOO_REDIRECT_URI` | No | `http://localhost:8000/v1/internal/yahoo/callback` | Yahoo OAuth redirect URI |
+| `REDIS_URL` | On Railway | — | Shared Redis storage for rate-limit counters (local development falls back to memory) |
 | `FRONTEND_URL` | No | `http://localhost:3000` | Frontend URL (used for OAuth redirects) |
 | `RESEND_API_KEY` | No | — | [Resend](https://resend.com) API key for email notifications |
 | `NOTIFICATION_FROM_EMAIL` | No | `alerts@courtvision.dev` | From address for notification emails |

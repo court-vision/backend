@@ -9,6 +9,8 @@ from schemas.streamer import (
 )
 from core.errors import BadRequestError
 from schemas.common import ApiStatus, LeagueInfo, FantasyProvider
+from services.providers import get_provider_adapter
+# Compatibility exports for callers that patch provider clients here.
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.player_service import PlayerService, _normalize_name
@@ -204,13 +206,9 @@ class StreamerService:
         else:
             teams_with_b2b = get_teams_with_b2b(effective_date)
 
-        # Fetch free agents - route by provider
-        # Pass team_id for Yahoo so tokens can be refreshed and persisted
-        is_yahoo = league_info.provider == FantasyProvider.YAHOO
-        if is_yahoo:
-            fa_response = await YahooService.get_free_agents(league_info, fa_count, team_id)
-        else:
-            fa_response = await EspnService.get_free_agents(league_info, fa_count)
+        adapter = get_provider_adapter(league_info.provider)
+        is_yahoo = adapter.uses_name_identity
+        fa_response = await adapter.get_free_agents(league_info, fa_count, team_id=team_id)
 
         # Provider failures raise (403/400/502/504) before we get here; a non-success envelope is a
         # league configuration problem, and an empty free-agent pool is simply zero candidates.

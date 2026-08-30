@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends
 from services.team_service import TeamService
-from services.espn_service import EspnService
-from services.yahoo_service import YahooService
+from services.providers import get_provider_adapter
 from services.team_insights_service import TeamInsightsService
 from schemas.team import TeamAddReq, TeamUpdateReq, TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp
 from schemas.espn import TeamDataResp
@@ -36,11 +35,8 @@ async def update_team(team_update_req: TeamUpdateReq, user: UserContext = Depend
 async def view_team(team: OwnedTeamContext = Depends(get_owned_team)):
     league_info = await load_owned_league_info(team)
 
-    # Route to correct provider service
-    # Pass team_id for Yahoo so tokens can be refreshed and persisted
-    if league_info.provider == FantasyProvider.YAHOO:
-        return respond(await YahooService.get_team_data(league_info, 0, team.team_id))
-    return respond(await EspnService.get_team_data(league_info, 0))
+    adapter = get_provider_adapter(league_info.provider)
+    return respond(await adapter.get_team(league_info, team_id=team.team_id))
 
 
 @router.get('/{team_id}/insights', response_model=TeamInsightsResp)

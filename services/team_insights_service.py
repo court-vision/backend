@@ -13,6 +13,8 @@ from schemas.espn import PlayerResp
 from schemas.matchup import CategoryComparison
 from schemas.common import ApiStatus, FantasyProvider
 from services.team_service import TeamService
+from services.providers import get_provider_adapter
+# Compatibility exports for callers that patch provider clients here.
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.matchup_service import MatchupService
@@ -80,11 +82,8 @@ class TeamInsightsService:
             # Step 1: Get team info and route to provider for base roster
             # Credentials, not the client-facing view — this calls a provider.
             league_info = await TeamService.credentials_for(team_id)
-            # Fetch base roster from ESPN or Yahoo
-            if league_info.provider == FantasyProvider.YAHOO:
-                roster_resp = await YahooService.get_team_data(league_info, 0, team_id)
-            else:
-                roster_resp = await EspnService.get_team_data(league_info, 0)
+            adapter = get_provider_adapter(league_info.provider)
+            roster_resp = await adapter.get_team(league_info, team_id=team_id)
 
             if roster_resp.status != ApiStatus.SUCCESS or not roster_resp.data:
                 return TeamInsightsResp(

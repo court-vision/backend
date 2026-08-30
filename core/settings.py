@@ -6,7 +6,7 @@ with validation and type coercion.
 """
 
 from typing import Optional
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from core.season import espn_year_for, season_key, validate_season
@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # League-scored rankings are cached per league scoring configuration, not per
     # user, so this bounds distinct league setups rather than sign-ups.
     league_rankings_cache_max_entries: int = 64
+
+    # Shared fixed-window counters for SlowAPI. Railway injects REDIS_URL when
+    # a Redis service is linked; RATE_LIMIT_STORAGE_URI is the explicit alias.
+    # Local development may omit it and uses the limits in-memory backend.
+    rate_limit_storage_uri: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("RATE_LIMIT_STORAGE_URI", "REDIS_URL"),
+    )
 
     # Season. Both default to the current season derived from today's date
     # (flips on Aug 1); set NBA_SEASON / ESPN_YEAR to pin them.
@@ -204,6 +212,15 @@ class Settings(BaseSettings):
     def derive_sentry_environment(self) -> "Settings":
         if not self.sentry_environment:
             self.sentry_environment = self.environment
+        return self
+
+    @model_validator(mode="after")
+    def require_shared_rate_limits_on_railway(self) -> "Settings":
+        if self.railway_environment_name and not self.rate_limit_storage_uri:
+            raise ValueError(
+                "REDIS_URL or RATE_LIMIT_STORAGE_URI is required on Railway so rate limits "
+                "are shared across replicas"
+            )
         return self
 
     @property
