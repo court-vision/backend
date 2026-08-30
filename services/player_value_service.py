@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
+from core.nba_calendar import nba_date_et
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.players import Player
@@ -115,7 +116,7 @@ class PlayerValueService:
                 result[rec.player.espn_id] = StatLine.from_row(rec, gp=float(rec.gp or 0))
             return result
 
-        cutoff = date.today() - timedelta(days=days)
+        cutoff = nba_date_et() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.espn_id)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
@@ -161,7 +162,7 @@ class PlayerValueService:
                     result[n] = StatLine.from_row(rec, gp=float(rec.gp or 0))
             return result
 
-        cutoff = date.today() - timedelta(days=days)
+        cutoff = nba_date_et() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
@@ -211,7 +212,7 @@ class PlayerValueService:
         if not espn_ids:
             return {}
         scorer = PlayerValueService._scorer(weights)
-        today = date.today()
+        today = nba_date_et()
         cutoff = today - timedelta(days=days)
         rate = math.log(2) / half_life
         query = (
@@ -235,7 +236,7 @@ class PlayerValueService:
         scorer = PlayerValueService._scorer(weights)
         name_team = {_normalize(n): t for n, t in players}
         names = list(name_team.keys())
-        today = date.today()
+        today = nba_date_et()
         cutoff = today - timedelta(days=days)
         rate = math.log(2) / half_life
         query = (

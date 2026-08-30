@@ -23,6 +23,7 @@ from schemas.matchup import (
     DailyMatchupTeam,
     MatchupData,
 )
+from core.nba_calendar import nba_date_et
 from services.scoring.models import CategoryComparisonData, StatLine
 from services.scoring.resolver import ResolvedScoring
 
@@ -32,8 +33,7 @@ STAT_FIELDS = ("pts", "reb", "ast", "stl", "blk", "tov", "min", "fgm", "fga", "f
 
 def nba_today() -> date:
     """NBA date convention: before 6 AM ET counts as the previous day."""
-    now_et = datetime.now(EASTERN)
-    return (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+    return nba_date_et()
 
 
 def make_nba_id_resolver(all_roster: Iterable[Any]) -> Callable[[Any], Optional[int]]:

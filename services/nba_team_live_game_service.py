@@ -27,10 +27,7 @@ from schemas.teams import (
 from services.providers.blocking import run_blocking_provider
 
 
-def _get_nba_today() -> date:
-    eastern = pytz.timezone("US/Eastern")
-    now_et = datetime.now(eastern)
-    return (now_et - timedelta(days=1)).date() if now_et.hour < 6 else now_et.date()
+from core.nba_calendar import nba_date_et as _get_nba_today  # noqa: E402
 
 
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}

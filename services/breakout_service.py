@@ -9,6 +9,7 @@ This is a pure read service — no computation, just DB read + schedule enrichme
 
 from datetime import date
 
+from core.nba_calendar import nba_date_et
 from db.base import db_operation
 from db.models.nba import BreakoutCandidate, Player
 from schemas.breakout import (
@@ -58,7 +59,7 @@ class BreakoutService:
                 status=ApiStatus.SUCCESS,
                 message="No breakout candidates found. Run the breakout-detection pipeline first.",
                 data=BreakoutData(
-                    as_of_date=date.today(),
+                    as_of_date=nba_date_et(),
                     candidates=[],
                 ),
             )

@@ -24,13 +24,7 @@ router = APIRouter(prefix="/live", tags=["Live"])
 log = get_logger("live_api")
 
 
-def _get_nba_date() -> date:
-    """Return today's NBA game date in ET (before 6am = yesterday)."""
-    eastern = pytz.timezone("US/Eastern")
-    now_et = datetime.now(eastern)
-    if now_et.hour < 6:
-        return (now_et - timedelta(days=1)).date()
-    return now_et.date()
+from core.nba_calendar import nba_date_et as _get_nba_date  # noqa: E402
 
 
 @router.get("/players/today", response_model=LivePlayersResp)
