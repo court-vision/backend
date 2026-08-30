@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import pytz
 
 from core.logging import get_logger
-from core.nba_calendar import nba_date_et
 from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
@@ -55,18 +54,41 @@ class OwnershipService:
         log = get_logger()
 
         try:
-            # snapshot_date is written on the shared ET rule (the ownership
-            # pipeline stamps ctx.game_date()); read it back on the same rule.
-            # This was a Central-time read against what is now an Eastern-time
-            # writer -- off by one day for an hour every morning.
-            yesterday = nba_date_et() - timedelta(days=1)
-            past_date = yesterday - timedelta(days=days)
+            # "Current" is the newest snapshot that exists, full stop -- not a
+            # computed date. The pipeline stamps snapshot_date on the game-date
+            # rule and lands overnight (~1-4 AM ET), so any wall-clock formula
+            # here has a window where it is wrong: the old Central-calendar
+            # read pointed at a not-yet-written row until the pipeline landed,
+            # and a game-date read (nba_date_et() - 1) stays a day behind from
+            # the moment it lands until 6 AM ET. Selecting the max, the way the
+            # past-date lookup below already handles gaps, is right at every
+            # hour and survives a night the pipeline misses entirely.
+            current_date = (
+                PlayerOwnership.select(PlayerOwnership.snapshot_date)
+                .order_by(PlayerOwnership.snapshot_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            if current_date is None:
+                return OwnershipTrendingResp(
+                    status=ApiStatus.SUCCESS,
+                    message="No ownership snapshots yet",
+                    data=OwnershipTrendingData(
+                        days=days,
+                        min_ownership=min_ownership,
+                        sort_by=sort_by,
+                    ),
+                )
+            # The lookback is measured from the snapshot we are actually
+            # serving, so the window stays `days` long even while a wall-clock
+            # anchor would disagree with it.
+            past_date = current_date - timedelta(days=days)
 
             # Get current and past ownership data
             current_data = {
                 row.player_id: float(row.rost_pct)
                 for row in PlayerOwnership.select().where(
-                    PlayerOwnership.snapshot_date == yesterday
+                    PlayerOwnership.snapshot_date == current_date
                 )
             }
             # Find the closest available snapshot at or before past_date to handle
