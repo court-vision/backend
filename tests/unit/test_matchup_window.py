@@ -327,3 +327,19 @@ class TestServiceWiring:
         legacy = MatchupService._legacy_window(md, row)
         window = MatchupService._watermark_window(md, row)
         assert (window.include_live, window.overlay_date) != (legacy.include_live, legacy.overlay_date)
+
+
+@pytest.mark.unit
+def test_the_watermark_rule_is_the_default():
+    """live_window_from_watermark ships ON.
+
+    The overlay day comes from the stored watermark, not the legacy wall-clock
+    rule. Safe to default without the opening-night probe because the write
+    side enforces the period/totals pairing (data-platform's
+    daily_matchup_scores skips snapshots whose watermark outran their totals).
+    An env override (LIVE_WINDOW_FROM_WATERMARK=false) is the rollback lever —
+    this test pins the *default*, so a code-level revert is a deliberate act.
+    """
+    from core.settings import Settings
+
+    assert Settings(_env_file=None).live_window_from_watermark is True
