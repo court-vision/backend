@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal, Optional, Any, Generic, TypeVar
 from enum import Enum
 
@@ -28,8 +28,16 @@ class BaseResponse(BaseModel, Generic[TypeVar('T')]):
     error_code: Optional[str] = None
     timestamp: Optional[str] = None
 
-    class Config:
-        use_enum_values = True
+    # json_schema_serialization_defaults_required: FastAPI always serializes
+    # every field of a response model, so a default-bearing field is in fact
+    # always present on the wire. Without this flag pydantic marks such fields
+    # optional in the OpenAPI schema, and every generated TS type becomes
+    # `data?: X | null` — forcing null-checks the runtime never needs.
+    # `data: X | null` (required, nullable) is the truthful shape.
+    model_config = ConfigDict(
+        use_enum_values=True,
+        json_schema_serialization_defaults_required=True,
+    )
 
 class BaseRequest(BaseModel):
     """
@@ -152,6 +160,44 @@ class LeagueSummary(BaseModel):
     settings_synced_at: Optional[str] = None
     # Set when the team's scoring_preview overrides the league's real format above
     scoring_preview: Optional[Literal["points", "categories"]] = None
+
+class LeagueInfoWrite(BaseModel):
+    """What a client is allowed to *send* about a team.
+
+    The request-side twin of `LeagueInfoPublic`, and separate from `LeagueInfo`
+    for the same reason: a model that cannot represent a Yahoo token cannot
+    accept one. The browser stopped handling raw tokens with the credential
+    boundary (7b) — it sends `yahoo_connection_id`, an opaque handle the OAuth
+    callback issued — but the request schema still advertised the token fields,
+    so a generated client would have typed them right back into the UI.
+
+    Pydantic silently drops unknown fields, so a legacy client posting raw
+    tokens loses them rather than erroring; post-7b no shipped client does.
+    ESPN cookies stay accepted here: the browser legitimately collects them
+    (empty string = "keep what is stored" on update).
+    """
+
+    provider: FantasyProvider = FantasyProvider.ESPN
+    league_id: int = Field(ge=1, description="League ID must be positive")
+    team_name: str = Field(min_length=1, description="Team name cannot be empty")
+    league_name: str | None = "N/A"
+    year: int = Field(ge=2020, le=2030, description="Year must be between 2020 and 2030")
+
+    espn_s2: str | None = ""
+    swid: str | None = ""
+
+    yahoo_connection_id: int | None = None
+    yahoo_team_key: str | None = None
+
+    scoring_preview: Optional[Literal["points", "categories"]] = Field(
+        default=None,
+        description="Override the rendered scoring format for this team only; None uses the league's synced format",
+    )
+
+    def to_internal(self) -> "LeagueInfo":
+        """The internal working object the services expect. Token fields stay None."""
+        return LeagueInfo(**self.model_dump())
+
 
 class LeagueInfoPublic(BaseModel):
     """What a client is allowed to see about a stored team.

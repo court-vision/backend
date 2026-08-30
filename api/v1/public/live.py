@@ -18,6 +18,7 @@ from db.models.nba.players import Player
 from pipelines.extractors.nba_api import NBAApiExtractor
 from db.base import db_operation
 from services.providers.blocking import run_blocking_provider
+from schemas.live import LivePlayersResp, LiveScheduleResp, ScoreboardResp
 
 router = APIRouter(prefix="/live", tags=["Live"])
 log = get_logger("live_api")
@@ -32,7 +33,7 @@ def _get_nba_date() -> date:
     return now_et.date()
 
 
-@router.get("/players/today")
+@router.get("/players/today", response_model=LivePlayersResp)
 @limiter.limit(PUBLIC_RATE_LIMIT)
 @db_operation("live.players_today")
 def get_live_players_today(request: Request) -> dict:
@@ -94,7 +95,7 @@ def get_live_players_today(request: Request) -> dict:
     }
 
 
-@router.get("/schedule/today")
+@router.get("/schedule/today", response_model=LiveScheduleResp)
 @limiter.limit(PUBLIC_RATE_LIMIT)
 @db_operation("live.schedule_today")
 def get_today_schedule(request: Request) -> dict:
@@ -155,7 +156,7 @@ def get_today_schedule(request: Request) -> dict:
     }
 
 
-@router.get("/scoreboard")
+@router.get("/scoreboard", response_model=ScoreboardResp)
 @limiter.limit(PUBLIC_RATE_LIMIT)
 async def get_live_scoreboard(request: Request) -> dict:
     """
