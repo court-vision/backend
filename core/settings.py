@@ -125,10 +125,16 @@ class Settings(BaseSettings):
 
     # Live matchup overlay: pick the overlay day from the baseline's stored day
     # watermark (services/matchup_window.py) instead of the old wall-clock rule.
-    # Off until ESPN's period-vs-totals ordering is confirmed in preseason; both
-    # are computed either way and disagreements are logged as
-    # `matchup_window_divergence`.
-    live_window_from_watermark: bool = False
+    # ON since 2026-08-30: the ordering question the opening-night probe was
+    # built to answer (does ESPN advance latestScoringPeriod before totalPoints
+    # absorbs the day?) stopped mattering when the write side started enforcing
+    # the pairing — data-platform's daily_matchup_scores refuses to store a
+    # watermark whose totals haven't moved, so a baseline can never claim
+    # coverage it lacks. Both rules are still computed on every request and
+    # disagreements logged as `matchup_window_divergence`; the probe stays
+    # deployed as confirmation. Flip via LIVE_WINDOW_FROM_WATERMARK=false if
+    # opening week says otherwise.
+    live_window_from_watermark: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
