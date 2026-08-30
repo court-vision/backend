@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import UserContext, get_db_user
+from core.nba_calendar import nba_date_et
 from db.base import db_operation, run_db
 from services.providers.blocking import run_blocking_provider
 from db.models.teams import Team
@@ -88,7 +89,7 @@ def _lineup_check_context(user_id: int, team_id: int) -> dict | None:
     if team is None:
         return None
     league_info = credential_service.hydrate(team, json.loads(team.league_info))
-    today = date.today()
+    today = nba_date_et()
     prefs = NotificationPreference.get_or_none(NotificationPreference.user == user_id)
     return {
         "league_info": league_info,

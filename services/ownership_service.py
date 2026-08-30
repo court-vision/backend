@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from core.logging import get_logger
+from core.nba_calendar import nba_date_et
 from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
@@ -54,8 +55,11 @@ class OwnershipService:
         log = get_logger()
 
         try:
-            central_tz = pytz.timezone("US/Central")
-            yesterday = datetime.now(central_tz).date() - timedelta(days=1)
+            # snapshot_date is written on the shared ET rule (the ownership
+            # pipeline stamps ctx.game_date()); read it back on the same rule.
+            # This was a Central-time read against what is now an Eastern-time
+            # writer -- off by one day for an hour every morning.
+            yesterday = nba_date_et() - timedelta(days=1)
             past_date = yesterday - timedelta(days=days)
 
             # Get current and past ownership data

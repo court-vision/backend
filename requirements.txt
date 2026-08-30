@@ -38,6 +38,7 @@ curl_cffi==0.7.4
 
 # Auth / Security
 bcrypt==5.0.0
+cv-core @ https://github.com/court-vision/cv-core/archive/refs/tags/v0.1.0.tar.gz
 cryptography==46.0.3
 PyJWT==2.8.0
 cffi==2.0.0

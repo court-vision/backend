@@ -101,8 +101,11 @@ def _get_nba_today() -> date:
     Before 2 AM ET counts as yesterday — aligns with when ESPN's batch update
     runs (~2 AM ET), after which the new fantasy day becomes active.
 
-    Note: for NBA *game* dates (live stats, scoreboard), games_service uses a
-    separate 6 AM ET rule so late-night games stay on the correct game date.
+    DO NOT collapse this onto core.nba_calendar.nba_date_et. That is the NBA
+    *game*-date rule (6 AM ET); this is the ESPN *fantasy*-day rule (2 AM ET),
+    and they deliberately disagree for four hours a night. Conflating them is
+    not hypothetical: it dropped a full day off live matchup scores whenever
+    ESPN's batch ran late (see matchup_service's cutover notes).
     """
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)

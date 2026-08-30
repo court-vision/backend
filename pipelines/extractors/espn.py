@@ -19,7 +19,7 @@ from core.resilience import (
     ServerError,
 )
 from pipelines.extractors.base import BaseExtractor
-from pipelines.transformers.names import normalize_name
+from pipelines.transformers import normalize_name
 from utils.espn_helpers import TEAM_ABBREV_CORRECTIONS, POSITION_MAP, PRO_TEAM_MAP
 
 

@@ -15,6 +15,7 @@ from schemas.player import (
     PlayerStatusResp,
 )
 from core.errors import BadRequestError, NotFoundError
+from core.nba_calendar import nba_date_et
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
@@ -339,7 +340,7 @@ class PlayerService:
             return round(float(record.fpts), 1) if record else None
 
         # Fallback for non-standard windows
-        cutoff_date = date.today() - timedelta(days=days)
+        cutoff_date = nba_date_et() - timedelta(days=days)
         games = list(
             PlayerGameStats.select().where(
                 (PlayerGameStats.player_id == player_id)
@@ -397,7 +398,7 @@ class PlayerService:
             return result
 
         # Fallback for non-standard windows
-        cutoff_date = date.today() - timedelta(days=days)
+        cutoff_date = nba_date_et() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.espn_id)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
@@ -443,7 +444,7 @@ class PlayerService:
         if not espn_ids:
             return {}
 
-        today = date.today()
+        today = nba_date_et()
         cutoff_date = today - timedelta(days=days)
         decay_rate = math.log(2) / half_life
 
@@ -538,7 +539,7 @@ class PlayerService:
             return result
 
         # Fallback for non-standard windows
-        cutoff_date = date.today() - timedelta(days=days)
+        cutoff_date = nba_date_et() - timedelta(days=days)
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))

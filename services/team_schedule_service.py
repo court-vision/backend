@@ -5,6 +5,7 @@ Service for NBA team schedule operations.
 from datetime import date
 
 from core.logging import get_logger
+from core.nba_calendar import nba_date_et
 from core.settings import get_settings
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
@@ -54,7 +55,7 @@ class TeamScheduleService:
             from services.schedule_service import get_matchup_by_number
             settings = get_settings()
             if upcoming:
-                start_date = date.today()
+                start_date = nba_date_et()
             else:
                 matchup_1 = get_matchup_by_number(1)
                 start_date = matchup_1["start_date"] if matchup_1 else None

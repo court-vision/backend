@@ -15,13 +15,8 @@ from schemas.common import ApiStatus
 from schemas.games import GamesOnDateResp, GamesOnDateData, GameInfo
 
 
-def _get_nba_today() -> date:
-    """Return today's NBA game date in ET (before 6am = yesterday)."""
-    eastern = pytz.timezone("US/Eastern")
-    now_et = datetime.now(eastern)
-    if now_et.hour < 6:
-        return (now_et - timedelta(days=1)).date()
-    return now_et.date()
+# The shared 6 AM ET rule; the alias keeps this module's historical name.
+from core.nba_calendar import nba_date_et as _get_nba_today  # noqa: E402
 
 
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}
