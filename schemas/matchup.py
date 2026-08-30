@@ -238,7 +238,7 @@ class DailyMatchupTeam(ApiModel):
 class DailyMatchupData(ApiModel):
     """Response data for daily matchup drill-down."""
     date: str                                  # ISO date string (YYYY-MM-DD)
-    day_type: str                              # "past", "today", "future"
+    day_type: Literal["past", "today", "future"]
     day_of_week: str                           # "Mon", "Tue", etc.
     day_index: int                             # 0-indexed from matchup start
     matchup_period: int
