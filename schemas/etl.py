@@ -1,10 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional
-from .common import BaseRequest, BaseResponse
+from .common import ApiModel, BaseRequest, BaseResponse
 
 # ------------------------------- ETL Models ------------------------------- #
 
-class FPTSPlayer(BaseModel):
+class FPTSPlayer(ApiModel):
     rank: int
     player_id: int
     player_name: str

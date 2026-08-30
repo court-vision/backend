@@ -2,10 +2,10 @@ from pydantic import BaseModel
 from typing import Optional
 from enum import Enum
 
-from .common import ApiStatus
+from .common import ApiModel, ApiStatus
 
 
-class PipelineResult(BaseModel):
+class PipelineResult(ApiModel):
     """Result of a single pipeline execution"""
 
     status: ApiStatus
@@ -20,7 +20,7 @@ class PipelineResult(BaseModel):
         use_enum_values = True
 
 
-class PipelineResponse(BaseModel):
+class PipelineResponse(ApiModel):
     """Response for a single pipeline trigger"""
 
     status: ApiStatus
@@ -31,7 +31,7 @@ class PipelineResponse(BaseModel):
         use_enum_values = True
 
 
-class AllPipelinesResponse(BaseModel):
+class AllPipelinesResponse(ApiModel):
     """Response for triggering all pipelines"""
 
     status: ApiStatus
@@ -54,7 +54,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
-class PipelineJobInfo(BaseModel):
+class PipelineJobInfo(ApiModel):
     """Summary info for a pipeline job."""
 
     job_id: str
@@ -72,7 +72,7 @@ class PipelineJobInfo(BaseModel):
         use_enum_values = True
 
 
-class PipelineJobResult(BaseModel):
+class PipelineJobResult(ApiModel):
     """Result of a single pipeline within a job."""
 
     pipeline_name: str
@@ -92,7 +92,7 @@ class PipelineJobDetail(PipelineJobInfo):
     error: Optional[str] = None
 
 
-class JobCreatedResponse(BaseModel):
+class JobCreatedResponse(ApiModel):
     """Response when a job is created (fire-and-forget)."""
 
     status: ApiStatus
@@ -103,7 +103,7 @@ class JobCreatedResponse(BaseModel):
         use_enum_values = True
 
 
-class JobStatusResponse(BaseModel):
+class JobStatusResponse(ApiModel):
     """Response for job status queries."""
 
     status: ApiStatus
@@ -114,7 +114,7 @@ class JobStatusResponse(BaseModel):
         use_enum_values = True
 
 
-class JobListResponse(BaseModel):
+class JobListResponse(ApiModel):
     """Response for listing jobs."""
 
     status: ApiStatus
@@ -125,7 +125,7 @@ class JobListResponse(BaseModel):
         use_enum_values = True
 
 
-class LiveStatsData(BaseModel):
+class LiveStatsData(ApiModel):
     """Data payload for the live stats trigger endpoint."""
 
     pipeline_name: str
@@ -136,7 +136,7 @@ class LiveStatsData(BaseModel):
     duration_seconds: Optional[float] = None
 
 
-class LiveStatsResponse(BaseModel):
+class LiveStatsResponse(ApiModel):
     """Response for the live stats trigger endpoint.
 
     The all_games_complete field is read by the cron-runner's live loop

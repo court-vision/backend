@@ -8,13 +8,13 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
 # ------------------------------- Request Models ------------------------------- #
 
 
-class NotificationPreferenceReq(BaseModel):
+class NotificationPreferenceReq(ApiModel):
     """Request model for creating/updating notification preferences."""
     lineup_alerts_enabled: bool = True
     alert_benched_starters: bool = True
@@ -27,7 +27,7 @@ class NotificationPreferenceReq(BaseModel):
 # ------------------------------- Response Data Models ------------------------------- #
 
 
-class NotificationPreferenceResp(BaseModel):
+class NotificationPreferenceResp(ApiModel):
     """Notification preference data."""
     lineup_alerts_enabled: bool = False
     alert_benched_starters: bool = True
@@ -37,7 +37,7 @@ class NotificationPreferenceResp(BaseModel):
     email: Optional[str] = None
 
 
-class NotificationTeamPreferenceReq(BaseModel):
+class NotificationTeamPreferenceReq(ApiModel):
     """Request model — all fields optional; only supplied fields are overridden."""
     lineup_alerts_enabled: Optional[bool] = None
     alert_benched_starters: Optional[bool] = None
@@ -47,7 +47,7 @@ class NotificationTeamPreferenceReq(BaseModel):
     email: Optional[str] = None
 
 
-class NotificationTeamPreferenceResp(BaseModel):
+class NotificationTeamPreferenceResp(ApiModel):
     """Team-level notification preference override data."""
     team_id: int
     has_override: bool
@@ -59,7 +59,7 @@ class NotificationTeamPreferenceResp(BaseModel):
     email: Optional[str] = None
 
 
-class LineupIssueResp(BaseModel):
+class LineupIssueResp(ApiModel):
     """Single lineup issue."""
     issue_type: str
     player_name: str
@@ -69,7 +69,7 @@ class LineupIssueResp(BaseModel):
     injury_status: Optional[str] = None
 
 
-class LineupCheckResp(BaseModel):
+class LineupCheckResp(ApiModel):
     """Lineup check result for a team."""
     team_name: str
     issues: list[LineupIssueResp]

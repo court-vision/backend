@@ -3,7 +3,7 @@ from typing import Annotated, List, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, Field
 
-from .common import BaseResponse, CategoryDefResp
+from .common import ApiModel, BaseResponse, CategoryDefResp
 
 
 def _coerce_int(value):
@@ -19,7 +19,7 @@ def _coerce_int(value):
 RollingWindow = Annotated[Literal[7, 14, 30], BeforeValidator(_coerce_int)]
 
 
-class RankingsPlayer(BaseModel):
+class RankingsPlayer(ApiModel):
     id: int
     rank: int
     player_name: str
@@ -48,7 +48,7 @@ class RankingsPlayer(BaseModel):
     score: Optional[float] = Field(default=None, description="Sum of category z-scores; the ranking key")
 
 
-class RankingsScoring(BaseModel):
+class RankingsScoring(ApiModel):
     """What the ranking was scored by.
 
     `points` rankings are not universal: the stored `fpts` columns every points
@@ -81,7 +81,7 @@ class RankingsScoring(BaseModel):
     )
 
 
-class RankingsMeta(BaseModel):
+class RankingsMeta(ApiModel):
     format: str                                 # points | categories
     window: Optional[int] = None                # 7 | 14 | 30, None for full season
     as_of: Optional[date] = None                # date the underlying snapshot runs through

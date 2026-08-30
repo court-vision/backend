@@ -4,10 +4,10 @@ Schemas for team-related API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class ScheduleGame(BaseModel):
+class ScheduleGame(ApiModel):
     """Individual game in a team's schedule."""
 
     date: str = Field(..., description="Game date (YYYY-MM-DD)")
@@ -20,7 +20,7 @@ class ScheduleGame(BaseModel):
     opponent_def_rating: Optional[float] = Field(None, description="Opponent's defensive rating (points allowed per 100 possessions)")
 
 
-class TeamScheduleData(BaseModel):
+class TeamScheduleData(ApiModel):
     """Response data for a team's schedule."""
 
     team: str = Field(..., description="Team abbreviation")
@@ -38,7 +38,7 @@ class TeamScheduleResp(BaseResponse):
 
 # ── NBA Team Stats ────────────────────────────────────────────────────────────
 
-class NBATeamStatsData(BaseModel):
+class NBATeamStatsData(ApiModel):
     """Season-to-date stats for an NBA team."""
 
     team: str
@@ -77,7 +77,7 @@ class NBATeamStatsResp(BaseResponse):
 
 # ── NBA Team Roster ───────────────────────────────────────────────────────────
 
-class NBATeamRosterPlayer(BaseModel):
+class NBATeamRosterPlayer(ApiModel):
     """Player on an NBA team roster with per-game averages."""
 
     player_id: int
@@ -97,7 +97,7 @@ class NBATeamRosterPlayer(BaseModel):
     injury_status: Optional[str] = None
 
 
-class NBATeamRosterData(BaseModel):
+class NBATeamRosterData(ApiModel):
     """Roster data for an NBA team."""
 
     team: str
@@ -114,7 +114,7 @@ class NBATeamRosterResp(BaseResponse):
 
 # ── NBA Team Live Game ────────────────────────────────────────────────────────
 
-class GameScoreSnapshot(BaseModel):
+class GameScoreSnapshot(ApiModel):
     """Score snapshot for an NBA game at a specific point in time."""
 
     captured_at: str          # ISO 8601 datetime (UTC)
@@ -125,7 +125,7 @@ class GameScoreSnapshot(BaseModel):
     game_status: int          # 1=scheduled, 2=in_progress, 3=final
 
 
-class TopPerformer(BaseModel):
+class TopPerformer(ApiModel):
     """Top performer in a game."""
 
     player_id: int
@@ -141,7 +141,7 @@ class TopPerformer(BaseModel):
     fg3m: int
 
 
-class InjuredPlayer(BaseModel):
+class InjuredPlayer(ApiModel):
     """Player with an injury status."""
 
     player_id: int
@@ -151,7 +151,7 @@ class InjuredPlayer(BaseModel):
     expected_return: Optional[str] = None
 
 
-class NBATeamLiveGameData(BaseModel):
+class NBATeamLiveGameData(ApiModel):
     """Current, most recent, or upcoming game for an NBA team."""
 
     game_id: Optional[str] = None

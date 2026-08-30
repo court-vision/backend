@@ -19,10 +19,10 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class LivePlayerItem(BaseModel):
+class LivePlayerItem(ApiModel):
     """One player's current box score from nba.live_player_stats."""
 
     espn_id: Optional[int] = None
@@ -50,7 +50,7 @@ class LivePlayerItem(BaseModel):
     last_updated: Optional[str] = None
 
 
-class LivePlayersData(BaseModel):
+class LivePlayersData(ApiModel):
     game_date: str
     player_count: int
     players: list[LivePlayerItem]
@@ -62,7 +62,7 @@ class LivePlayersResp(BaseResponse):
     data: Optional[LivePlayersData] = None
 
 
-class LiveScheduleData(BaseModel):
+class LiveScheduleData(ApiModel):
     """First-tip info for the cron-runner's live loop.
 
     `first_game_et` / `wake_at_et` are ISO datetimes with offset; both are None
@@ -81,7 +81,7 @@ class LiveScheduleResp(BaseResponse):
     data: Optional[LiveScheduleData] = None
 
 
-class ScoreboardGameItem(BaseModel):
+class ScoreboardGameItem(ApiModel):
     game_id: str
     game_status: int
     game_status_label: str  # scheduled | in_progress | final | unknown
@@ -89,7 +89,7 @@ class ScoreboardGameItem(BaseModel):
     game_clock: Optional[str] = None
 
 
-class ScoreboardData(BaseModel):
+class ScoreboardData(ApiModel):
     game_date: str
     game_count: int
     games: list[ScoreboardGameItem]

@@ -1,9 +1,9 @@
 from pydantic import BaseModel
 from typing import Optional
-from .common import BaseResponse
+from .common import ApiModel, BaseResponse
 
 
-class PlayoffSeriesResp(BaseModel):
+class PlayoffSeriesResp(ApiModel):
     series_id: str
     conference: str           # "East", "West", "Finals"
     round_num: int            # 1-4
@@ -20,13 +20,13 @@ class PlayoffSeriesResp(BaseModel):
     updated_at: Optional[str]
 
 
-class PlayoffRound(BaseModel):
+class PlayoffRound(ApiModel):
     round_num: int
     round_name: str           # "First Round", "Conference Semifinals", etc.
     series: list[PlayoffSeriesResp]
 
 
-class PlayoffBracketData(BaseModel):
+class PlayoffBracketData(ApiModel):
     season: str               # "2025-26"
     rounds: list[PlayoffRound]
 

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-from .common import BaseRequest, BaseResponse, LeagueInfo
+from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
 
 
 # ------------------------------- Category Scoring Models ------------------------------- #
@@ -8,7 +8,7 @@ from .common import BaseRequest, BaseResponse, LeagueInfo
 ScoringFormat = Literal["points", "categories"]
 
 
-class CategoryScoreItem(BaseModel):
+class CategoryScoreItem(ApiModel):
     """One category in a head-to-head comparison."""
     key: str
     label: str
@@ -19,14 +19,14 @@ class CategoryScoreItem(BaseModel):
     is_rate: bool
 
 
-class CategoryComparison(BaseModel):
+class CategoryComparison(ApiModel):
     items: list[CategoryScoreItem]
     wins: int
     losses: int
     ties: int
 
 
-class CategoryTeamScore(BaseModel):
+class CategoryTeamScore(ApiModel):
     """A team's per-category totals (rates as 0-1 fractions) and record."""
     totals: dict[str, float]
     raw: Optional[dict[str, float]] = None    # fgm/fga/ftm/fta/fg3m/fg3a when known
@@ -38,7 +38,7 @@ class CategoryTeamScore(BaseModel):
 
 # ------------------------------- Matchup Data Models ------------------------------- #
 
-class MatchupPlayerResp(BaseModel):
+class MatchupPlayerResp(ApiModel):
     """Player data within a matchup context"""
     player_id: int
     name: str
@@ -52,7 +52,7 @@ class MatchupPlayerResp(BaseModel):
     injury_status: Optional[str] = None
 
 
-class MatchupTeamResp(BaseModel):
+class MatchupTeamResp(ApiModel):
     """Team data within a matchup"""
     team_name: str
     team_id: int                           # ESPN fantasy team ID
@@ -62,7 +62,7 @@ class MatchupTeamResp(BaseModel):
     categories: Optional[CategoryTeamScore] = None   # category leagues only
 
 
-class MatchupData(BaseModel):
+class MatchupData(ApiModel):
     """Complete matchup data structure"""
     matchup_period: int                    # Week/matchup period number
     matchup_period_start: str              # ISO date string
@@ -102,7 +102,7 @@ class MatchupResp(BaseResponse):
 
 # ------------------------------- Daily Score History Models ------------------------------- #
 
-class DailyScorePoint(BaseModel):
+class DailyScorePoint(ApiModel):
     """Single day's score snapshot for chart visualization"""
     date: str                              # ISO date string
     day_of_matchup: int                    # 0-indexed day within matchup
@@ -112,7 +112,7 @@ class DailyScorePoint(BaseModel):
     opponent_categories: Optional[dict[str, float]] = None
 
 
-class MatchupScoreHistory(BaseModel):
+class MatchupScoreHistory(ApiModel):
     """Historical score data for a matchup period"""
     team_id: int
     team_name: str
@@ -129,7 +129,7 @@ class MatchupScoreHistoryResp(BaseResponse):
 
 # ------------------------------- Live Matchup Models ------------------------------- #
 
-class PlayerLiveStats(BaseModel):
+class PlayerLiveStats(ApiModel):
     """Live in-game stat overlay for a player (from live_player_stats table)."""
     nba_player_id: int
     live_fpts: float                  # scored with the league's point weights
@@ -157,7 +157,7 @@ class LiveMatchupPlayer(MatchupPlayerResp):
     live: Optional[PlayerLiveStats] = None
 
 
-class LiveMatchupTeam(BaseModel):
+class LiveMatchupTeam(ApiModel):
     team_name: str
     team_id: int
     current_score: float           # From ESPN/Yahoo (live, correct custom scoring)
@@ -166,7 +166,7 @@ class LiveMatchupTeam(BaseModel):
     categories: Optional[CategoryTeamScore] = None
 
 
-class LiveMatchupData(BaseModel):
+class LiveMatchupData(ApiModel):
     matchup_period: int
     matchup_period_start: str
     matchup_period_end: str
@@ -189,7 +189,7 @@ class LiveMatchupResp(BaseResponse):
 
 # ------------------------------- Daily Matchup Models ------------------------------- #
 
-class DailyMatchupPlayerStats(BaseModel):
+class DailyMatchupPlayerStats(ApiModel):
     """Player stats for a single past day. No lineup_slot since we don't snapshot rosters."""
     player_id: int                             # ESPN player ID (from roster)
     name: str
@@ -213,7 +213,7 @@ class DailyMatchupPlayerStats(BaseModel):
     fta: Optional[int] = None
 
 
-class DailyMatchupFuturePlayer(BaseModel):
+class DailyMatchupFuturePlayer(ApiModel):
     """Player info for a future day. Shows whether they have a game."""
     player_id: int
     name: str
@@ -226,7 +226,7 @@ class DailyMatchupFuturePlayer(BaseModel):
     injury_status: Optional[str] = None
 
 
-class DailyMatchupTeam(BaseModel):
+class DailyMatchupTeam(ApiModel):
     """Team data for a daily matchup view."""
     team_name: str
     team_id: int
@@ -235,7 +235,7 @@ class DailyMatchupTeam(BaseModel):
     categories: Optional[dict[str, float]] = None   # category leagues: day totals per category
 
 
-class DailyMatchupData(BaseModel):
+class DailyMatchupData(ApiModel):
     """Response data for daily matchup drill-down."""
     date: str                                  # ISO date string (YYYY-MM-DD)
     day_type: str                              # "past", "today", "future"
@@ -257,7 +257,7 @@ class DailyMatchupResp(BaseResponse):
 
 # ------------------------------- Weekly Matchup Models ------------------------------- #
 
-class WeeklyMatchupData(BaseModel):
+class WeeklyMatchupData(ApiModel):
     """All days in the current matchup period, computed in a single ESPN call."""
     matchup_period: int
     days: list[DailyMatchupData]
@@ -270,7 +270,7 @@ class WeeklyMatchupResp(BaseResponse):
 
 # ------------------------------- Season Summary Models ------------------------------- #
 
-class WeekResult(BaseModel):
+class WeekResult(ApiModel):
     matchup_period: int
     opponent_team_name: str
     points_for: float
@@ -281,7 +281,7 @@ class WeekResult(BaseModel):
     categories_tied: Optional[int] = None
 
 
-class SeasonSummaryData(BaseModel):
+class SeasonSummaryData(ApiModel):
     team_id: int
     team_name: str
     wins: int

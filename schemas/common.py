@@ -17,7 +17,25 @@ class ApiStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
     SERVER_ERROR = "server_error"
 
-class BaseResponse(BaseModel, Generic[TypeVar('T')]):
+class ApiModel(BaseModel):
+    """Base for every schema in this package.
+
+    `json_schema_serialization_defaults_required`: FastAPI serializes every
+    field of a response model, so a default-bearing field is always present on
+    the wire — the OpenAPI *serialization* schema should say `required`, or
+    every generated client type ends up `field?: X | null` and forces
+    null-checks the runtime never needs. Validation (request) schemas are
+    unaffected: defaults stay optional to send.
+
+    Models used in both directions get split into `-Input`/`-Output` component
+    schemas by FastAPI; generated clients should read the `-Output` variant for
+    response data.
+    """
+
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class BaseResponse(ApiModel, Generic[TypeVar('T')]):
     """
     Base response model that all API responses should extend.
     Provides consistent structure across all endpoints.
@@ -118,34 +136,34 @@ class LeagueInfo(BaseModel):
         description="Override the rendered scoring format for this team only; None uses the league's synced format",
     )
 
-class AuthResponse(BaseModel):
+class AuthResponse(ApiModel):
     """Base authentication response model"""
     access_token: Optional[str] = None
     user_id: Optional[int] = None
     email: Optional[str] = None
     expires_at: Optional[str] = None
 
-class VerificationResponse(BaseModel):
+class VerificationResponse(ApiModel):
     """Email verification specific response"""
     verification_sent: bool = False
     email: str
     expires_in_seconds: Optional[int] = None
     verification_id: Optional[str] = None
 
-class UserResponse(BaseModel):
+class UserResponse(ApiModel):
     """User data response model"""
     user_id: int
     email: str
     created_at: Optional[str] = None
     last_login: Optional[str] = None
 
-class CategoryDefResp(BaseModel):
+class CategoryDefResp(ApiModel):
     key: str
     label: str
     higher_is_better: bool
     is_rate: bool
 
-class LeagueSummary(BaseModel):
+class LeagueSummary(ApiModel):
     """Provider-detected league settings (scoring format), embedded in team responses."""
     id: int
     provider: FantasyProvider
@@ -199,7 +217,7 @@ class LeagueInfoWrite(BaseModel):
         return LeagueInfo(**self.model_dump())
 
 
-class LeagueInfoPublic(BaseModel):
+class LeagueInfoPublic(ApiModel):
     """What a client is allowed to see about a stored team.
 
     Deliberately a separate model rather than `LeagueInfo` with fields excluded:
@@ -255,13 +273,13 @@ class LeagueInfoPublic(BaseModel):
         )
 
 
-class TeamResponse(BaseModel):
+class TeamResponse(ApiModel):
     """Team data response model"""
     team_id: int
     league_info: LeagueInfoPublic
     league: Optional[LeagueSummary] = None   # None until league settings have been synced
 
-class LineupResponse(BaseModel):
+class LineupResponse(ApiModel):
     """Lineup data response model"""
     lineup_id: int
     lineup_data: dict
@@ -276,7 +294,7 @@ class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=20, ge=1, le=100, description="Number of items per page")
 
-class PaginatedResponse(BaseModel):
+class PaginatedResponse(ApiModel):
     """Paginated response wrapper"""
     items: list[Any]
     total: int
@@ -288,13 +306,13 @@ class PaginatedResponse(BaseModel):
 
 # ------------------------------- Validation Models ------------------------------- #
 
-class ValidationError(BaseModel):
+class ValidationError(ApiModel):
     """Individual validation error"""
     field: str
     message: str
     value: Optional[Any] = None
 
-class ValidationErrorResponse(BaseModel):
+class ValidationErrorResponse(ApiModel):
     """Validation error response"""
     errors: list[ValidationError]
     message: str = "Validation failed"

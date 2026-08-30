@@ -4,10 +4,10 @@ Schemas for player list API responses.
 
 from typing import Optional
 from pydantic import BaseModel, Field
-from schemas.common import BaseResponse
+from schemas.common import ApiModel, BaseResponse
 
 
-class PlayerListItem(BaseModel):
+class PlayerListItem(ApiModel):
     """Individual player in the players list."""
 
     id: int = Field(..., description="NBA player ID")
@@ -20,7 +20,7 @@ class PlayerListItem(BaseModel):
     rank: Optional[int] = Field(None, description="Current fantasy ranking")
 
 
-class PlayersListData(BaseModel):
+class PlayersListData(ApiModel):
     """Response data for player list."""
 
     players: list[PlayerListItem] = Field(default_factory=list, description="List of players")
