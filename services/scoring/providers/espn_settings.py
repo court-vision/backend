@@ -11,6 +11,10 @@ from services.scoring.models import CategoryDef, CategoryTeamScoreData, LeagueSe
 from services.scoring.vocab import ESPN_ID_TO_KEY, RATE_KEYS, STATS
 from utils.espn_helpers import POSITION_MAP, STATS_MAP
 
+# ESPN player position ids (defaultPositionId space, used by rosterSettings.positionLimits).
+# Not the lineup-slot ids POSITION_MAP covers.
+POSITION_ID_MAP: dict[int, str] = {1: "PG", 2: "SG", 3: "SF", 4: "PF", 5: "C"}
+
 ESPN_SCORING_TYPE_MAP: dict[str, tuple[str, str | None]] = {
     "H2H_POINTS": ("points", None),
     "H2H_CATEGORY": ("categories", "each_category"),
@@ -67,6 +71,27 @@ def parse_espn_settings(payload: dict[str, Any]) -> LeagueSettings:
         if name and count:
             slots[name] = int(count)
 
+    limits: dict[str, int] = {}
+    for pos_id, cap in (roster.get("positionLimits") or {}).items():
+        try:
+            name = POSITION_ID_MAP.get(int(pos_id))
+            cap = int(cap)
+        except (TypeError, ValueError):
+            continue
+        # -1 = unlimited (omitted). An explicit 0 is a real "none allowed" rule and is kept.
+        if name and cap >= 0:
+            limits[name] = cap
+
+    draft = settings.get("draftSettings", {}) or {}
+    draft_settings = {
+        "type": draft.get("type"),
+        "date": draft.get("date"),
+        "pick_order": draft.get("pickOrder") or [],
+        "time_per_selection": draft.get("timePerSelection"),
+        "keeper_count": draft.get("keeperCount"),
+        "auction_budget": draft.get("auctionBudget"),
+    } if draft else {}
+
     league_id = payload.get("id")
     season = payload.get("seasonId")
     return LeagueSettings(
@@ -86,10 +111,13 @@ def parse_espn_settings(payload: dict[str, Any]) -> LeagueSettings:
             "playoff_team_count": sched.get("playoffTeamCount"),
         },
         roster_slots=slots,
+        position_limits=limits,
+        draft_settings=draft_settings,
         raw_settings={
             "scoringSettings": scoring,
             "scheduleSettings": sched,
             "rosterSettings": roster,
+            "draftSettings": draft,
         },
         unsupported=unsupported,
         warnings=warnings,

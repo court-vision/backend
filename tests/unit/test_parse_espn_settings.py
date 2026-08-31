@@ -31,6 +31,12 @@ def test_points_league_sample_yields_exact_default_weights():
     assert isinstance(s.matchup_periods["period_count"], int) and s.matchup_periods["period_count"] >= 18
     assert s.matchup_periods["playoff_period_length"] in (1, 2)
     assert s.season == 2026 and s.provider_league_id.isdigit()
+    # ESPN default position caps: only C is limited (-1 = unlimited, omitted)
+    assert s.position_limits == {"C": 4}
+    assert s.draft_settings["type"] == "SNAKE" and s.draft_settings["auction_budget"] == 200
+    assert len(s.draft_settings["pick_order"]) == 10 and s.draft_settings["time_per_selection"] == 60
+    assert s.draft_settings["keeper_count"] == 0 and isinstance(s.draft_settings["date"], int)
+    assert "draftSettings" in s.raw_settings
 
 
 def _category_settings(scoring_type: str = "H2H_CATEGORY") -> dict:
@@ -53,6 +59,8 @@ def test_category_league_items_become_ordered_categories_with_turnover_inverted(
     assert next(c for c in s.categories if c.key == "pts").higher_is_better is True
     assert s.point_weights == {}
     assert next(c for c in s.categories if c.key == "fg_pct").is_rate
+    # Synthetic payload carries neither positionLimits nor draftSettings
+    assert s.position_limits == {} and s.draft_settings == {}
 
 
 @pytest.mark.unit
@@ -69,6 +77,15 @@ def test_unknown_scoring_type_falls_back_to_points_with_warning():
     payload = _category_settings("SOMETHING_NEW")
     s = parse_espn_settings(payload)
     assert s.scoring_type == "points" and any("SOMETHING_NEW" in w for w in s.warnings)
+
+
+@pytest.mark.unit
+def test_position_limits_keep_zero_caps_and_drop_unlimited():
+    payload = _category_settings()
+    # id 0 is not a real position; -1 = unlimited; an explicit 0 is a real "none allowed" rule
+    payload["settings"]["rosterSettings"]["positionLimits"] = {"0": 0, "1": -1, "4": 3, "5": 0, "junk": 2}
+    s = parse_espn_settings(payload)
+    assert s.position_limits == {"PF": 3, "C": 0}
 
 
 @pytest.mark.unit
@@ -106,6 +123,8 @@ def test_captured_category_league_parses_as_eight_cat_each_category():
     assert s.matchup_periods["period_count"] == 19 and s.matchup_periods["period_length"] == 1
     assert s.matchup_periods["playoff_team_count"] == 4 and s.matchup_periods["playoff_period_length"] == 2
     assert s.roster_slots == {"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1}
+    assert s.position_limits == {"C": 4}
+    assert s.draft_settings["type"] == "SNAKE" and len(s.draft_settings["pick_order"]) == 10
 
 
 @pytest.mark.unit

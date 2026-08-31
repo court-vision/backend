@@ -126,6 +126,8 @@ class LeagueSettings:
     point_weights: dict[str, float] = field(default_factory=dict)
     matchup_periods: dict = field(default_factory=dict)
     roster_slots: dict[str, int] = field(default_factory=dict)
+    position_limits: dict[str, int] = field(default_factory=dict)   # hard caps, e.g. {"C": 4}; 0 = none allowed
+    draft_settings: dict = field(default_factory=dict)
     raw_settings: dict = field(default_factory=dict)
     unsupported: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

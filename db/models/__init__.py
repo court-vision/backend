@@ -4,11 +4,14 @@ from .verifications import Verification
 from .leagues import League
 from .teams import Team
 from .lineups import Lineup
+from .drafts import DraftPick, DraftSession
 
 __all__ = [
     'User',
     'Verification',
     'League',
     'Team',
-    'Lineup'
+    'Lineup',
+    'DraftSession',
+    'DraftPick'
 ]

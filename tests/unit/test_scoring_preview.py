@@ -25,7 +25,7 @@ def _league(scoring_type="points", categories=None, weights=None, synced=True, w
         id=1, provider="espn", provider_league_id="123", season=2026, name="L",
         scoring_type=scoring_type, categories=categories or [], point_weights=weights or {},
         category_win_mode=win_mode, settings_synced_at=datetime(2026, 8, 24) if synced else None,
-        raw_settings={}, matchup_periods={}, roster_slots={},
+        raw_settings={}, matchup_periods={}, roster_slots={}, position_limits={}, draft_settings={},
     )
 
 

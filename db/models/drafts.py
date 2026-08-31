@@ -1,0 +1,81 @@
+from datetime import datetime
+
+from peewee import (
+    AutoField,
+    BooleanField,
+    CharField,
+    DateTimeField,
+    DecimalField,
+    ForeignKeyField,
+    IntegerField,
+)
+from playhouse.postgres_ext import BinaryJSONField
+
+from db.base import BaseModel
+from db.models.leagues import League
+from db.models.nba.players import Player
+from db.models.teams import Team
+from db.models.users import User
+
+
+class DraftSession(BaseModel):
+    """One draft-room session. The board itself is derived state and never stored;
+    a session plus its picks is the complete record of a draft."""
+
+    id = AutoField()
+    user = ForeignKeyField(User, column_name="user_id", backref="draft_sessions")
+    team = ForeignKeyField(Team, column_name="team_id", null=True, backref="draft_sessions")   # null for mock drafts
+    league = ForeignKeyField(League, column_name="league_id", null=True, backref="draft_sessions")
+    kind = CharField(max_length=16, default="manual")       # live | manual | mock | import
+    status = CharField(max_length=16, default="active")     # active | completed | abandoned
+    draft_type = CharField(max_length=16, default="snake")  # snake | auction
+    pick_order = BinaryJSONField(default=list)              # provider team ids in first-round order
+    my_slot = IntegerField(null=True)                       # 1-based slot of the user's team
+    rounds = IntegerField(null=True)
+    keepers = BinaryJSONField(default=list)                 # pre-designated keepers [{player_id?, espn_player_id?, name, slot?}]
+    started_at = DateTimeField(null=True)
+    completed_at = DateTimeField(null=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    class Meta:
+        table_name = "draft_sessions"
+        schema = "usr"
+
+    def __repr__(self):
+        return (
+            f"<DraftSession(id={self.id}, user_id={self.user_id}, kind='{self.kind}', "
+            f"status='{self.status}', draft_type='{self.draft_type}')>"
+        )
+
+
+class DraftPick(BaseModel):
+    """One pick in a session. `player` may lag resolution (sync/import can see an
+    ESPN id or name before the NBA-id lookup lands), so the provider identity
+    rides along."""
+
+    id = AutoField()
+    session = ForeignKeyField(DraftSession, column_name="session_id", backref="picks")
+    overall_pick = IntegerField()
+    round = IntegerField(null=True)                         # null for auction drafts
+    slot = IntegerField(null=True)                          # drafting team's slot in pick_order
+    player = ForeignKeyField(Player, column_name="player_id", null=True, backref="draft_picks")
+    espn_player_id = IntegerField(null=True)
+    player_name = CharField(max_length=255, null=True)
+    by_me = BooleanField(default=False)
+    source = CharField(max_length=16, default="manual")     # manual | espn_sync | import
+    bid = DecimalField(max_digits=7, decimal_places=2, null=True)   # auction (v2)
+    created_at = DateTimeField(default=datetime.utcnow)
+
+    class Meta:
+        table_name = "draft_picks"
+        schema = "usr"
+        indexes = (
+            (("session", "overall_pick"), True),
+        )
+
+    def __repr__(self):
+        return (
+            f"<DraftPick(id={self.id}, session_id={self.session_id}, "
+            f"overall_pick={self.overall_pick}, player_name='{self.player_name}')>"
+        )

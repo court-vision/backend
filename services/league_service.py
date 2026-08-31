@@ -109,6 +109,8 @@ class LeagueService:
         league.point_weights = parsed.point_weights
         league.matchup_periods = parsed.matchup_periods
         league.roster_slots = parsed.roster_slots
+        league.position_limits = parsed.position_limits
+        league.draft_settings = parsed.draft_settings
         league.raw_settings = {**(parsed.raw_settings or {}),
                                "_sync": {"unsupported": parsed.unsupported, "warnings": parsed.warnings}}
         league.settings_synced_at = now
@@ -227,6 +229,8 @@ class LeagueService:
             **summary.model_dump(),
             matchup_periods=dict(league.matchup_periods or {}),
             roster_slots=dict(league.roster_slots or {}),
+            position_limits=dict(league.position_limits or {}),
+            draft_settings=dict(league.draft_settings or {}),
             unsupported=list(sync.get("unsupported", [])),
             warnings=list(sync.get("warnings", [])),
         )

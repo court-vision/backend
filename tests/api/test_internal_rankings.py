@@ -33,7 +33,8 @@ def _league(**overrides):
     base = dict(
         id=3, provider="espn", provider_league_id="993431466", season=2027, name="Dunk Dynasty",
         scoring_type="points", category_win_mode=None, categories=[], point_weights={"pts": 2.0},
-        matchup_periods={}, roster_slots={}, raw_settings={"_sync": {"unsupported": [], "warnings": []}},
+        matchup_periods={}, roster_slots={}, position_limits={}, draft_settings={},
+        raw_settings={"_sync": {"unsupported": [], "warnings": []}},
         settings_synced_at=datetime(2026, 8, 24, 12, 0, 0),
     )
     base.update(overrides)

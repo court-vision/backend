@@ -24,6 +24,8 @@ class League(BaseModel):
     point_weights = BinaryJSONField(default=dict)       # {canonical_stat_key: float}
     matchup_periods = BinaryJSONField(default=dict)
     roster_slots = BinaryJSONField(default=dict)        # {"PG": 1, ..., "UT": 3, "BE": 3, "IR": 1}
+    position_limits = BinaryJSONField(default=dict)     # hard per-position roster caps {"C": 4}; unlimited omitted, 0 = none allowed
+    draft_settings = BinaryJSONField(default=dict)      # {type, date, pick_order, time_per_selection, keeper_count, auction_budget}
     raw_settings = BinaryJSONField(null=True)
     settings_synced_at = DateTimeField(null=True)
     created_at = DateTimeField(default=datetime.utcnow)
