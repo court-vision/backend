@@ -13,6 +13,7 @@ from slowapi.errors import RateLimitExceeded
 
 from core.errors import RATE_LIMITED_CODE
 from core.middleware import error_json_response
+from core.settings import settings
 from schemas.common import ApiStatus
 
 
@@ -28,8 +29,19 @@ def get_rate_limit_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-# Create limiter with custom key function
-limiter = Limiter(key_func=get_rate_limit_key)
+# Redis is mandatory in deployed Railway environments (validated by Settings).
+# The memory backend remains convenient for local development and isolated tests.
+_storage_uri = (
+    settings.rate_limit_storage_uri.get_secret_value()
+    if settings.rate_limit_storage_uri
+    else "memory://"
+)
+limiter = Limiter(
+    key_func=get_rate_limit_key,
+    storage_uri=_storage_uri,
+    in_memory_fallback_enabled=False,
+    key_prefix="courtvision",
+)
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:

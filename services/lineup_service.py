@@ -9,9 +9,8 @@ from schemas.espn import PlayerResp
 from schemas.lineup import GetLineupsResp, SaveLineupResp, DeleteLineupResp, GenerateLineupResp
 from schemas.common import ApiStatus, FantasyProvider
 from services import features_client
-from services.espn_service import EspnService
 from services.features_client import FeaturesRejected, FeaturesUnavailable
-from services.yahoo_service import YahooService
+from services.providers import get_provider_adapter
 from services.player_service import PlayerService, _normalize_name
 from services.player_value_service import PlayerValueService
 from services.team_service import TeamService
@@ -54,12 +53,9 @@ class LineupService:
         if scoring_preview is not None:
             league_info.scoring_preview = scoring_preview
 
-        if league_info.provider == FantasyProvider.YAHOO:
-            team_resp = await YahooService.get_team_data(league_info, 0, team_id)
-            fa_resp = await YahooService.get_free_agents(league_info, NUM_FREE_AGENTS, team_id)
-        else:
-            team_resp = await EspnService.get_team_data(league_info)
-            fa_resp = await EspnService.get_free_agents(league_info, NUM_FREE_AGENTS)
+        adapter = get_provider_adapter(league_info.provider)
+        team_resp = await adapter.get_team(league_info, team_id=team_id)
+        fa_resp = await adapter.get_free_agents(league_info, NUM_FREE_AGENTS, team_id=team_id)
 
         if team_resp.status != ApiStatus.SUCCESS or fa_resp.status != ApiStatus.SUCCESS:
             raise ValueError("Failed to fetch roster or free agent data from provider")
@@ -80,19 +76,12 @@ class LineupService:
                 None if scoring_preview else team_id,
             )
             value_kind = PlayerValueService.value_kind_for(scoring)
-            if league_info.provider == FantasyProvider.YAHOO:
-                # Yahoo player ids are not ESPN ids: resolve by normalized name instead
-                values = await run_db(
-                    "lineups.recent_values_by_name", PlayerValueService.avg_points_for, scoring,
-                    names=[(p.name, p.team) for p in all_players], days=14, recent=True,
-                )
-                keyed = [(p, _normalize_name(p.name)) for p in all_players]
-            else:
-                values = await run_db(
-                    "lineups.recent_values_by_espn_id", PlayerValueService.avg_points_for, scoring,
-                    espn_ids=[p.player_id for p in all_players], days=14, recent=True,
-                )
-                keyed = [(p, p.player_id) for p in all_players]
+            identity = "name" if adapter.uses_name_identity else "espn_id"
+            values = await run_db(
+                f"lineups.recent_values_by_{identity}", PlayerValueService.avg_points_for, scoring,
+                **adapter.player_value_keys(all_players), days=14, recent=True,
+            )
+            keyed = [(player, adapter.player_value_key(player)) for player in all_players]
             for player, key in keyed:
                 valued = values.get(key)
                 if valued is not None and valued.value is not None:

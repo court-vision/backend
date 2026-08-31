@@ -110,7 +110,8 @@ async def yahoo_callback(
         log.info("yahoo_oauth_denied", error=error)
         return _manage_teams_redirect(yahoo_error=error_description or error)
 
-    if not state or not YahooService.validate_state(state):
+    state_data = YahooService.validate_state(state) if state else None
+    if not state_data:
         log.warning("yahoo_oauth_invalid_state")
         return _manage_teams_redirect(yahoo_error="invalid_state")
     if not code:
