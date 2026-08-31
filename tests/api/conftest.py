@@ -79,13 +79,14 @@ def make_test_app() -> FastAPI:
     from api.v1.internal import (
         users, teams, lineups, espn, yahoo,
         matchups, streamers, notifications, api_keys,
-        rankings as internal_rankings,
+        rankings as internal_rankings, sqlmate as internal_sqlmate,
     )
     from api.v1.public import (
         rankings, players, games,
         teams as public_teams,
         ownership, analytics, schedule,
         live as live_public, playoffs,
+        sqlmate as public_sqlmate,
     )
 
     app = FastAPI(title="Court Vision API (test)")
@@ -114,6 +115,7 @@ def make_test_app() -> FastAPI:
     api_v1_public.include_router(schedule.router)
     api_v1_public.include_router(live_public.router)
     api_v1_public.include_router(playoffs.router)
+    api_v1_public.include_router(public_sqlmate.router)
     app.include_router(api_v1_public)
 
     # Internal routes
@@ -128,6 +130,7 @@ def make_test_app() -> FastAPI:
     api_v1_internal.include_router(notifications.router)
     api_v1_internal.include_router(api_keys.router)
     api_v1_internal.include_router(internal_rankings.router)
+    api_v1_internal.include_router(internal_sqlmate.router)
     app.include_router(api_v1_internal)
 
     return app

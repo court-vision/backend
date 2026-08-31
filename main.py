@@ -18,12 +18,14 @@ from core.watchdog import start_loop_watchdog
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
 from services.features_client import start_features_runtime, stop_features_runtime
+from services.sqlmate_client import start_sqlmate_runtime, stop_sqlmate_runtime
 from services.providers.http import start_provider_runtime, stop_provider_runtime
 from services.providers.blocking import start_blocking_provider_runtime, stop_blocking_provider_runtime
 from services.schedule_service import assert_calendar_available
 from api.v1.internal import (users, teams, lineups, espn, yahoo, matchups, streamers, notifications,
-                             api_keys, rankings as internal_rankings)
-from api.v1.public import rankings, players, games, teams as public_teams, ownership, analytics, schedule, live as live_public, playoffs
+                             api_keys, rankings as internal_rankings, sqlmate as internal_sqlmate)
+from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
+                           schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
 # No SENTRY_DSN (dev, tests) -> nothing happens.
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI):
         start_provider_runtime()
         start_blocking_provider_runtime()
         start_features_runtime()
+        start_sqlmate_runtime()
         log.info("database_initialized")
 
         # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
@@ -66,6 +69,7 @@ async def lifespan(app: FastAPI):
             watchdog.stop()
         # All lifecycle functions are idempotent, including partial-startup cleanup.
         await stop_features_runtime()
+        await stop_sqlmate_runtime()
         await stop_provider_runtime()
         await stop_blocking_provider_runtime()
         await stop_cpu_runtime()
@@ -110,6 +114,7 @@ api_v1_public.include_router(analytics.router)
 api_v1_public.include_router(schedule.router)
 api_v1_public.include_router(live_public.router)
 api_v1_public.include_router(playoffs.router)
+api_v1_public.include_router(public_sqlmate.router)
 
 app.include_router(api_v1_public)
 
@@ -125,6 +130,7 @@ api_v1_internal.include_router(streamers.router)
 api_v1_internal.include_router(notifications.router)
 api_v1_internal.include_router(api_keys.router)
 api_v1_internal.include_router(internal_rankings.router)
+api_v1_internal.include_router(internal_sqlmate.router)
 
 app.include_router(api_v1_internal)
 

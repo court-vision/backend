@@ -6,6 +6,7 @@ with validation and type coercion.
 """
 
 from typing import Optional
+from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -70,6 +71,12 @@ class Settings(BaseSettings):
     yahoo_max_in_flight: int = 8
     nba_max_in_flight: int = 4
     features_max_in_flight: int = 4
+    # SQLMate is reached only over Railway private networking in deployed
+    # environments. The browser talks to the public/internal proxy routes on
+    # this API instead of connecting to SQLMate directly.
+    sqlmate_internal_url: str = "http://localhost:8081"
+    sqlmate_max_in_flight: int = 4
+    sqlmate_timeout_seconds: float = 30.0
     # Outbound email is synchronous and low-volume; it gets its own small
     # pool so a burst of alerts can never consume the NBA workers.
     email_max_in_flight: int = 2
@@ -180,6 +187,7 @@ class Settings(BaseSettings):
             "yahoo_max_in_flight": self.yahoo_max_in_flight,
             "nba_max_in_flight": self.nba_max_in_flight,
             "features_max_in_flight": self.features_max_in_flight,
+            "sqlmate_max_in_flight": self.sqlmate_max_in_flight,
             "email_max_in_flight": self.email_max_in_flight,
         }
         invalid = [name for name, value in limits.items() if value <= 0]
@@ -191,11 +199,26 @@ class Settings(BaseSettings):
             self.db_queue_timeout_seconds,
             self.provider_queue_timeout_seconds,
             self.cpu_queue_timeout_seconds,
+            self.sqlmate_timeout_seconds,
         )
         if any(t <= 0 for t in timeouts):
             raise ValueError("concurrency queue timeouts must be positive")
         if self.rankings_cache_ttl_seconds < 0 or self.rankings_cache_max_entries < 0:
             raise ValueError("rankings cache settings must not be negative")
+        return self
+
+    @model_validator(mode="after")
+    def require_private_sqlmate_on_railway(self) -> "Settings":
+        """A deployed API must never proxy SQLMate through a public hostname."""
+        if not self.railway_environment_name:
+            return self
+
+        parsed = urlsplit(self.sqlmate_internal_url)
+        hostname = parsed.hostname or ""
+        if parsed.scheme != "http" or not hostname.endswith(".railway.internal"):
+            raise ValueError(
+                "SQLMATE_INTERNAL_URL must use an http://*.railway.internal private domain on Railway"
+            )
         return self
 
     @model_validator(mode="after")

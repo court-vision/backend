@@ -32,6 +32,7 @@ def unauthed_client(unauthed_app):
 @pytest.mark.parametrize("path", [
     "/v1/internal/teams/",
     "/v1/internal/api-keys/",
+    "/v1/internal/sqlmate/users/get_tables",
 ])
 def test_internal_routes_reject_no_token(unauthed_client, path):
     """A missing bearer is 401 AUTH_REQUIRED in the standard envelope (not FastAPI's 403)."""

@@ -57,4 +57,5 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) 
 
 # Rate limit constants for easy reference
 PUBLIC_RATE_LIMIT = "100/minute"
+SQLMATE_QUERY_RATE_LIMIT = "30/minute"
 API_KEY_RATE_LIMIT = "1000/minute"
