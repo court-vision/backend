@@ -27,6 +27,7 @@ def _fake_league(**overrides) -> SimpleNamespace:
         categories=[{"key": "pts", "label": "PTS", "higher_is_better": True, "is_rate": False},
                     {"key": "tov", "label": "TO", "higher_is_better": False, "is_rate": False}],
         point_weights={}, matchup_periods={"periods": {"1": [1]}}, roster_slots={"PG": 1},
+        position_limits={"C": 4}, draft_settings={"type": "SNAKE"},
         raw_settings={"_sync": {"unsupported": ["espn:99:?"], "warnings": []}},
         settings_synced_at=datetime(2026, 8, 24, 12, 0, 0),
     )
@@ -72,6 +73,7 @@ def test_get_league_returns_detail(authed_client, as_user_42, monkeypatch):
     assert [c["key"] for c in data["categories"]] == ["pts", "tov"]
     assert data["settings_synced"] is True and data["unsupported"] == ["espn:99:?"]
     assert data["roster_slots"] == {"PG": 1} and data["matchup_periods"]["periods"]["1"] == [1]
+    assert data["position_limits"] == {"C": 4} and data["draft_settings"] == {"type": "SNAKE"}
 
 
 @pytest.mark.api
