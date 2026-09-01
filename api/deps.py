@@ -21,6 +21,7 @@ from db.models.users import User
 from db.models.teams import Team
 from db.models.lineups import Lineup
 from db.models.leagues import League
+from db.models.drafts import DraftSession
 from schemas.common import LeagueInfo
 from schemas.league import LeagueDetail
 from services.league_service import LeagueService
@@ -47,6 +48,32 @@ class OwnedLineupContext:
     lineup_id: int
     team_id: int
     user_id: int
+
+
+@dataclass(frozen=True)
+class OwnedDraftSessionContext:
+    """A draft session the caller owns, detached, with its league already loaded.
+
+    Carrying the league here is what lets a board request resolve its scoring
+    without a second trip to the database — the `get_owned_team` bargain.
+    """
+
+    session_id: int
+    user_id: int
+    team_id: Optional[int]
+    league_id: Optional[int]
+    league: Optional[LeagueDetail]
+    kind: str
+    status: str
+    draft_type: str
+    pick_order: tuple[int, ...]
+    my_slot: Optional[int]
+    rounds: Optional[int]
+
+    @property
+    def league_size(self) -> Optional[int]:
+        """Teams in the draft, from the pick order (None until one is known)."""
+        return len(self.pick_order) or None
 
 
 def _get_or_create_user_context(clerk_user_id: str | None, email: str | None) -> UserContext:
@@ -145,6 +172,53 @@ async def get_owned_lineup(lineup_id: int, user: UserContext = Depends(get_db_us
 # Kept as the repository seam used by ownership tests and small maintenance
 # scripts; the returned value is detached by `get_owned_lineup`.
 _find_owned_lineup = _owned_lineup
+
+
+def _owned_session(session_id: int, user_id: int) -> Optional[OwnedDraftSessionContext]:
+    """Ownership is `session.user_id == user`; someone else's session is a 404,
+    not a 403 (the established idiom for teams and lineups)."""
+    session = (
+        DraftSession.select(DraftSession, League)
+        .join(League, JOIN.LEFT_OUTER)
+        .where((DraftSession.id == session_id) & (DraftSession.user == user_id))
+        .first()
+    )
+    if session is None:
+        return None
+
+    league = None
+    if session.league_id is not None:
+        # A team's `scoring_preview` overrides the league's real format; a mock
+        # session has no team and therefore no preview.
+        preview = None
+        if session.team_id is not None:
+            team = Team.get_or_none(Team.team_id == session.team_id)
+            preview = LeagueService.preview_of(team.league_info) if team is not None else None
+        league = LeagueService.to_detail(session.league, preview)
+
+    order = tuple(int(t) for t in (session.pick_order or []) if isinstance(t, (int, float)))
+    return OwnedDraftSessionContext(
+        session_id=session.id,
+        user_id=user_id,
+        team_id=session.team_id,
+        league_id=session.league_id,
+        league=league,
+        kind=session.kind,
+        status=session.status,
+        draft_type=session.draft_type,
+        pick_order=order,
+        my_slot=session.my_slot,
+        rounds=session.rounds,
+    )
+
+
+async def get_owned_session(
+    session_id: int, user: UserContext = Depends(get_db_user)
+) -> OwnedDraftSessionContext:
+    session = await run_db("auth.owned_session", _owned_session, session_id, user.user_id)
+    if session is None:
+        raise NotFoundError("DRAFT_SESSION_NOT_FOUND", "Draft session not found")
+    return session
 
 
 def _hydrate_owned_league_info(team_id: int, user_id: int) -> LeagueInfo:
