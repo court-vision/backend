@@ -50,6 +50,7 @@ from db.models.nba.players import Player
 from schemas.common import ApiStatus, CategoryDefResp
 from schemas.draft import DraftBoardMeta, DraftBoardResp, DraftBoardRow
 from services.player_value_service import PlayerValueService
+from services.rankings_service import GAME_ONLY_KEYS
 from services.scoring.category_rank import PoolRow, compute_category_scores
 from services.scoring.category_value import category_value, rankable_categories
 from services.scoring.models import StatLine
@@ -252,6 +253,11 @@ class DraftBoardService:
                 position_limits=DraftBoardService._position_limits(scoring),
                 categories=[CategoryDefResp(**c.to_json()) for c in cat_defs],
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
+                # dd/td weights score 0 against aggregate lines; name them rather
+                # than imply the league's weights were fully applied (the
+                # RankingsService._league_scoring rule).
+                unsupported=([k for k in GAME_ONLY_KEYS if k in scoring.points.weights]
+                             if not scoring.is_categories else []),
             ),
         )
 

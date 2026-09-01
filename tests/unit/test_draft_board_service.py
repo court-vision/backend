@@ -127,6 +127,19 @@ def test_points_league_values_ranks_and_market_join(stub_inputs):
     assert meta.projection_count == 3 and meta.baseline_count == 3
     assert meta.projections_as_of == date(2026, 9, 2) and meta.market_as_of == date(2026, 9, 1)
     assert meta.settings_synced is True and meta.categories == []
+    assert meta.unsupported == []
+
+
+@pytest.mark.unit
+def test_game_only_weights_are_disclosed_not_silently_dropped(stub_inputs):
+    """dd/td bonuses score 0 against aggregate lines; the meta must say so
+    rather than imply the league's weights were fully applied."""
+    resp = _board(resolve_scoring(_league(point_weights={"pts": 1.0, "dd": 3.0, "td": 5.0})))
+
+    assert resp.meta.unsupported == ["dd", "td"]
+    # The honored part of the formula still scores: values are the pts line alone.
+    by_id = {r.player_id: r for r in resp.data}
+    assert by_id[1].value == 30.0 and by_id[2].value == 22.0
 
 
 @pytest.mark.unit

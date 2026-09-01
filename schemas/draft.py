@@ -72,6 +72,13 @@ class DraftBoardMeta(ApiModel):
     position_limits: dict[str, int] = {}        # the league's hard per-position caps, as stored ({"C": 4})
     categories: list[CategoryDefResp] = []      # empty for points leagues
     settings_synced: Optional[bool] = None      # whether the league's settings were read from the provider
+    unsupported: list[str] = Field(
+        default=[],
+        description=(
+            "League scoring keys the board cannot honor: dd/td are per-game bonuses, and the "
+            "aggregate projection and season-baseline lines the board is valued from cannot carry them"
+        ),
+    )
 
 
 class DraftBoardResp(BaseResponse):
