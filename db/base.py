@@ -1,6 +1,5 @@
 import asyncio
 import contextvars
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
@@ -15,8 +14,13 @@ from core.logging import get_logger
 from core.errors import DatabaseUnavailableError
 from core.settings import settings
 
-# Get database credentials from environment variables
-DATABASE_URL = os.getenv('DATABASE_URL')
+# One source of truth for the connection string. `Settings` reads the process
+# environment first (how Railway supplies it) and falls back to backend/.env
+# (how local dev does). Reading os.getenv here instead meant `.env` was silently
+# ignored: the documented local run path crashed on `parse(None)`, and the only
+# way to boot was to export a URL by hand — which is how a laptop ends up
+# talking to production.
+DATABASE_URL = settings.database_url
 parsed_url = parse(DATABASE_URL)
 db_name = parsed_url.pop('database')
 
