@@ -3,9 +3,10 @@ Draft Market Table
 
 Draft-market snapshots: ESPN's editorial draft rank and auction value plus the
 crowd averages from real ESPN drafts (average draft position and average auction
-price). One row per (player, season, source, as_of_date); keeping snapshots per
-date makes September rank drift (risers/fallers) queryable. There is no
-positional rank on the wire — derive it at read time. Written by the
+price), plus the position fields the draft room needs (primary position,
+eligibility, injury). One row per (player, season, source, as_of_date); keeping
+snapshots per date makes September rank drift (risers/fallers) queryable. There
+is no positional rank on the wire — derive it at read time. Written by the
 data-platform preseason-market pipeline; backend reads.
 """
 
@@ -20,8 +21,10 @@ from peewee import (
     DecimalField,
     ForeignKeyField,
     IntegerField,
+    SmallIntegerField,
     UUIDField,
 )
+from playhouse.postgres_ext import BinaryJSONField
 
 from db.base import BaseModel
 from db.models.nba.players import Player
@@ -36,6 +39,13 @@ class DraftMarket(BaseModel):
         auction_value: editorial auction value
         adp: ownership.averageDraftPosition (mean across real ESPN drafts)
         auction_value_avg: ownership.auctionValueAverage
+        default_position_id: ESPN primary position, 1-based (1=PG ... 5=C) — the
+            id space usr.leagues.position_limits is keyed by, and what ESPN counts
+            hard position caps against
+        eligible_slot_ids: ESPN eligibleSlots, 0-based lineup-slot ids
+            (0=PG ... 4=C, 5=G, 6=F, 11=UT). Complete and authoritative: a pure
+            centre is simply not F-eligible. Never mix with the id space above.
+        injury_status: raw ESPN injuryStatus (ACTIVE, OUT, DAY_TO_DAY, ...)
     """
 
     id = AutoField(primary_key=True)
@@ -53,6 +63,11 @@ class DraftMarket(BaseModel):
     auction_value = DecimalField(max_digits=6, decimal_places=1, null=True)
     adp = DecimalField(max_digits=6, decimal_places=2, null=True)
     auction_value_avg = DecimalField(max_digits=7, decimal_places=2, null=True)
+
+    # Position fields (null on snapshots written before the pipeline captured them)
+    default_position_id = SmallIntegerField(null=True)
+    eligible_slot_ids = BinaryJSONField(null=True)
+    injury_status = CharField(max_length=20, null=True)
 
     # Audit columns
     pipeline_run_id = UUIDField(null=True, index=True)
@@ -87,6 +102,9 @@ class DraftMarket(BaseModel):
         auction_value: float | None = None,
         adp: float | None = None,
         auction_value_avg: float | None = None,
+        default_position_id: int | None = None,
+        eligible_slot_ids: list[int] | None = None,
+        injury_status: str | None = None,
         source: str = "espn",
         pipeline_run_id: UUID | None = None,
     ) -> "DraftMarket":
@@ -96,6 +114,9 @@ class DraftMarket(BaseModel):
             "auction_value": auction_value,
             "adp": adp,
             "auction_value_avg": auction_value_avg,
+            "default_position_id": default_position_id,
+            "eligible_slot_ids": eligible_slot_ids,
+            "injury_status": injury_status,
         }
         market, created = cls.get_or_create(
             player_id=player_id,

@@ -79,3 +79,18 @@ class DraftPick(BaseModel):
             f"<DraftPick(id={self.id}, session_id={self.session_id}, "
             f"overall_pick={self.overall_pick}, player_name='{self.player_name}')>"
         )
+
+
+# One pick per resolved player per session: the race-settling backstop for the
+# duplicate check in DraftService.add_pick (migration 0013). Partial on purpose —
+# a pick recorded before its player reached nba.players has no player_id and
+# carries only a provider identity, which the service compares instead.
+DraftPick.add_index(
+    DraftPick.index(
+        DraftPick.session,
+        DraftPick.player,
+        unique=True,
+        where=DraftPick.player.is_null(False),
+        name="draft_picks_session_player_uq",
+    )
+)
