@@ -176,6 +176,15 @@ Create a `.env` file in `backend/` (see [Key Environment Variables](#key-environ
 cp secrets.env .env   # if a template exists, otherwise create from scratch
 ```
 
+`.env` is read directly by `core/settings.py` — you do not need to export anything
+into your shell. A real environment variable still wins over the file, which is how
+Railway supplies configuration in a deployment.
+
+**Point `DATABASE_URL` at the dev database, never production.** On Railway the dev
+database is the `Postgres-ZxBc` service (staging environment); the `Postgres` service
+is production. Local dev writes real rows and applies pending migrations on startup,
+so the two must not be confused.
+
 ### 4. Start the server
 
 ```bash
@@ -201,7 +210,7 @@ docker run -p 8000:8080 --env-file .env cv-backend
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection URL (`postgresql://user:pass@host/dbname`) |
+| `DATABASE_URL` | Yes | — | PostgreSQL connection URL (`postgresql://user:pass@host/dbname`). Read from `.env` or the environment; use the **dev** database locally (Railway `Postgres-ZxBc`), never production |
 | `CLERK_JWKS_URL` | Yes | — | Clerk JWKS endpoint (`https://<your-clerk-api>.clerk.accounts.dev/.well-known/jwks.json`) |
 | `CLERK_SECRET_KEY` | Yes | — | Clerk Backend API secret key (`sk_...`) |
 | `PIPELINE_API_TOKEN` | Yes | — | Shared bearer token for service-to-service calls (not used by user routes) |
