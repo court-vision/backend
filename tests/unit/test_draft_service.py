@@ -2,21 +2,31 @@
 Draft-session arithmetic and league prefill — the pure half of DraftService.
 
 The DB half (create/list/update, pick resolution) is covered at the API layer
-with the service stubbed; what is worth pinning here is the maths a draft room
-is wrong about in ways nobody notices: snake reversal, which pick number a new
-pick takes after an undo, and how many rounds a league actually drafts.
+with the service stubbed and against a real schema in
+tests/integration/test_draft_sessions_integration.py; what is worth pinning
+here is the maths a draft room is wrong about in ways nobody notices: snake
+reversal, which pick number a new pick takes after an undo, how many rounds a
+league actually drafts, and when two picks name the same player.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
+from peewee import IntegrityError
+
 from core.errors import BadRequestError, ConflictError
 from services.draft_service import (
+    DraftService,
     _session_resp,
+    check_length_holds_picks,
+    check_slot_in_range,
+    duplicate_pick_of,
     league_prefill,
     next_pick_for_slot,
     next_unused_pick,
+    pick_geometry,
+    resolve_lagging_picks,
     round_of,
     resolve_overall_pick,
     rounds_from_roster_slots,
@@ -223,3 +233,102 @@ def test_a_session_without_a_pick_order_reports_no_seats_rather_than_guessing():
     assert resp.league_size is None and resp.total_picks is None
     assert resp.my_next_pick is None and resp.picks_until_my_turn is None
     assert resp.next_overall_pick == 3
+
+
+# ---- one player, one pick --------------------------------------------------
+
+
+def _pick(overall, player_id=None, espn_player_id=None, player_name=None):
+    return SimpleNamespace(overall_pick=overall, player_id=player_id,
+                           espn_player_id=espn_player_id, player_name=player_name)
+
+
+@pytest.mark.unit
+def test_a_player_already_in_the_draft_is_found_at_his_pick():
+    existing = [_pick(1, player_id=203999, espn_player_id=3112335, player_name="Nikola Jokic"),
+                _pick(2, player_id=1629029)]
+    assert duplicate_pick_of(existing, 203999, 3112335, "Nikola Jokic") == 1
+    assert duplicate_pick_of(existing, 1630162, None, "Somebody Else") is None
+
+
+@pytest.mark.unit
+def test_a_pick_recorded_before_the_player_synced_still_collides_with_him():
+    """Pick 3 went in off an ESPN id and pick 4 off a name while neither player
+    was in nba.players. The same players recorded again, resolved now, are dups."""
+    existing = [_pick(3, espn_player_id=4433134), _pick(4, player_name="Cooper Flagg")]
+    assert duplicate_pick_of(existing, 1642258, 4433134, "Victor Wembanyama") == 3
+    assert duplicate_pick_of(existing, 1642259, None, "  cooper flagg ") == 4
+
+
+@pytest.mark.unit
+def test_two_resolved_players_who_share_a_name_are_not_the_same_pick():
+    existing = [_pick(5, player_id=1628991, player_name="Jaren Jackson")]
+    assert duplicate_pick_of(existing, 1630000, None, "Jaren Jackson") is None
+    # ...but an unresolved pick with only that name is, until an id says otherwise.
+    assert duplicate_pick_of([_pick(6, player_name="Jaren Jackson")], 1630000, None, "Jaren Jackson") == 6
+
+
+@pytest.mark.unit
+def test_a_racing_insert_is_named_by_the_index_it_tripped():
+    player = IntegrityError('duplicate key value violates unique constraint "draft_picks_session_player_uq"')
+    number = IntegrityError('duplicate key value violates unique constraint "draft_picks_session_overall_uq"')
+    assert DraftService._pick_conflict(player, 7, "Star").error_code == "DRAFT_PLAYER_ALREADY_DRAFTED"
+    assert DraftService._pick_conflict(number, 7, "Star").error_code == "DRAFT_PICK_ALREADY_EXISTS"
+
+
+@pytest.mark.unit
+def test_lagging_picks_resolve_by_espn_id_then_by_an_unambiguous_name(monkeypatch):
+    from services import draft_service as module
+
+    players = [
+        SimpleNamespace(id=9, espn_id=109, name_normalized="rookie"),
+        SimpleNamespace(id=21, espn_id=121, name_normalized="jaren jackson"),
+        SimpleNamespace(id=22, espn_id=122, name_normalized="jaren jackson"),
+    ]
+
+    class _Query(list):
+        def where(self, *_args):
+            return self
+
+    monkeypatch.setattr(module.Player, "select", classmethod(lambda cls, *fields: _Query(players)))
+    picks = [
+        _pick(1, espn_player_id=109, player_name="Somebody Else"),   # the ESPN id outranks the name
+        _pick(2, player_name=" Rookie "),
+        _pick(3, player_name="Jaren Jackson"),                      # two players: left alone
+        _pick(4, player_id=5, espn_player_id=109),                  # already resolved: untouched
+    ]
+    assert resolve_lagging_picks(picks) == 2
+    assert [p.player_id for p in picks] == [9, 9, None, 5]
+    # Nothing to resolve, nothing queried.
+    monkeypatch.setattr(module.Player, "select", classmethod(lambda cls, *f: pytest.fail("queried")))
+    assert resolve_lagging_picks([_pick(4, player_id=5)]) == 0
+
+
+# ---- the shape a session must keep ------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_slot_must_be_a_seat_the_pick_order_has():
+    check_slot_in_range(3, 10)
+    check_slot_in_range(None, 10)
+    check_slot_in_range(8, None)          # no pick order yet: nothing to be outside of
+    with pytest.raises(BadRequestError) as exc:
+        check_slot_in_range(8, 4)
+    assert exc.value.error_code == "DRAFT_SLOT_OUT_OF_RANGE"
+
+
+@pytest.mark.unit
+def test_a_draft_cannot_be_resized_shorter_than_its_recorded_picks():
+    check_length_holds_picks(52, [1, 2, 52])
+    check_length_holds_picks(None, [60])  # no known length: nothing to be past
+    check_length_holds_picks(52, [])
+    with pytest.raises(BadRequestError) as exc:
+        check_length_holds_picks(52, [1, 2, 60])
+    assert exc.value.error_code == "DRAFT_SHORTER_THAN_PICKS"
+
+
+@pytest.mark.unit
+def test_a_picks_round_and_slot_follow_the_header():
+    assert pick_geometry(11, 10, "snake") == (2, 10)
+    assert pick_geometry(11, 10, "auction") == (None, None)
+    assert pick_geometry(11, None, "snake") == (None, None)

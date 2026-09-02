@@ -138,11 +138,14 @@ async def get_draft_session(session: OwnedDraftSessionContext = Depends(get_owne
     description=(
         "Partial update — only the fields present in the body are written. Used for confirming or "
         "correcting `my_slot`, editing pre-designated `keepers`, and closing the room "
-        "(`status: completed`, which stamps `completed_at` the first time)."
+        "(`status: completed`, which stamps `completed_at` the first time).\n\n"
+        "Changing `draft_type` or `pick_order` re-derives the round and slot of every recorded "
+        "pick. A change that would leave the session inconsistent — a slot outside the new pick "
+        "order, or a draft resized shorter than the picks already recorded — is refused."
     ),
     responses={
         200: {"description": "Session updated"},
-        400: {"description": "Slot outside the draft"},
+        400: {"description": "Slot outside the draft, or a draft resized shorter than its recorded picks"},
         404: {"description": "No such session, or it does not belong to the caller"},
         422: {"description": "Empty or invalid update"},
     },
@@ -184,13 +187,15 @@ async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(ge
         "Appends a pick. `overall_pick` defaults to the session's lowest unused number, so the "
         "normal path is to post the player alone; passing it explicitly is how a correction lands "
         "in a hole an undo left. The player is resolved NBA id → ESPN id → normalized name, and a "
-        "pick whose player is not in `nba.players` yet is still recorded with the provider identity."
+        "pick whose player is not in `nba.players` yet is still recorded with the provider identity. "
+        "A player already in the session cannot be recorded a second time — undo the earlier pick "
+        "to correct it."
     ),
     responses={
         200: {"description": "Pick recorded"},
         400: {"description": "Pick past the end of the draft"},
         404: {"description": "No such session/player, or the session does not belong to the caller"},
-        409: {"description": "That pick number is already recorded"},
+        409: {"description": "That pick number is already recorded, or that player already is"},
         422: {"description": "A pick that identifies no player"},
     },
 )

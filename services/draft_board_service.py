@@ -65,6 +65,7 @@ from schemas.draft import (
     DraftRecommendation,
     RecommendationComponent,
 )
+from services.draft_service import resolve_lagging_picks
 from services.player_value_service import PlayerValueService
 from services.rankings_service import GAME_ONLY_KEYS
 from services.scoring.category_rank import PoolRow, compute_category_scores
@@ -215,11 +216,19 @@ class DraftBoardService:
         session_picked: set[int] = set()
         session_mine: set[int] = set()
         if session_id is not None:
-            rows = (
-                DraftPick.select(DraftPick.player, DraftPick.by_me)
-                .where((DraftPick.session == session_id) & (DraftPick.player.is_null(False)))
+            picks = list(
+                DraftPick.select(
+                    DraftPick.player, DraftPick.by_me, DraftPick.espn_player_id, DraftPick.player_name
+                ).where(DraftPick.session == session_id)
             )
-            for pick in rows:
+            # A pick recorded before its player reached nba.players carries
+            # only the provider identity. Resolve it here, or the player would
+            # be back on the board — and missing from the cap count — from the
+            # day he synced, with nothing rewriting the row behind him.
+            resolve_lagging_picks(picks)
+            for pick in picks:
+                if pick.player_id is None:
+                    continue
                 session_picked.add(pick.player_id)
                 if pick.by_me:
                     session_mine.add(pick.player_id)

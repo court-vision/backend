@@ -11,8 +11,9 @@ field the user must supply is `my_slot`: `draft_settings.pick_order` holds ESPN
 team ids, and nothing maps them back to `usr.teams`, so the room asks.
 
 Errors are raised, not returned (`core.responses`' rule): a missing session or
-player is a `NotFoundError`, a pick number already taken a `ConflictError`, and
-anything the session's own shape forbids a `BadRequestError`.
+player is a `NotFoundError`, a pick number already taken — or a player already
+drafted — a `ConflictError`, and anything the session's own shape forbids a
+`BadRequestError`.
 """
 
 from __future__ import annotations
@@ -49,6 +50,11 @@ NON_DRAFTABLE_SLOTS = frozenset({"IR", ""})
 # How far past the next pick we look for the caller's next turn. A round of a
 # 30-team league is 30 picks; two rounds is a generous ceiling for a snake.
 _MY_TURN_SEARCH_LIMIT = 200
+
+# The partial unique index migration 0013 puts on (session_id, player_id). Its
+# name in a driver error is how a racing duplicate player is told from a taken
+# pick number, which has its own index.
+PLAYER_UNIQUE_INDEX = "draft_picks_session_player_uq"
 
 
 # ---- pure draft arithmetic -------------------------------------------------
@@ -146,6 +152,46 @@ def resolve_overall_pick(
     return overall
 
 
+def pick_geometry(
+    overall_pick: int, league_size: Optional[int], draft_type: str
+) -> tuple[Optional[int], Optional[int]]:
+    """(round, slot) of a pick — both None without a pick order, or in an auction.
+
+    Derived, never authored: a pick's round and slot follow from its number
+    and the session header, so a header change re-derives them (see
+    `DraftService.update_session`).
+    """
+    if not league_size:
+        return None, None
+    return (
+        round_of(overall_pick, league_size, draft_type),
+        slot_of(overall_pick, league_size, draft_type),
+    )
+
+
+def check_slot_in_range(my_slot: Optional[int], league_size: Optional[int]) -> None:
+    """A confirmed slot must be a seat the pick order actually has.
+
+    Checked against the *resulting* session on every write, not just when the
+    slot itself is in the request: shrinking the pick order under a confirmed
+    slot would otherwise leave a seat whose turn can never come up.
+    """
+    if my_slot is not None and league_size and my_slot > league_size:
+        raise BadRequestError(
+            "DRAFT_SLOT_OUT_OF_RANGE", f"Slot {my_slot} is outside a {league_size}-team draft"
+        )
+
+
+def check_length_holds_picks(total_picks: Optional[int], used: Iterable[int]) -> None:
+    """A draft cannot be resized shorter than the picks already recorded in it."""
+    last = max((int(p) for p in used), default=0)
+    if total_picks is not None and last > total_picks:
+        raise BadRequestError(
+            "DRAFT_SHORTER_THAN_PICKS",
+            f"Pick {last} is already recorded; a {total_picks}-pick draft cannot hold it",
+        )
+
+
 def league_prefill(league: Optional[League]) -> dict:
     """Draft-room defaults from a synced league: type, order, rounds, keepers."""
     if league is None:
@@ -172,6 +218,87 @@ def league_prefill(league: Optional[League]) -> dict:
         "rounds": rounds_from_roster_slots(getattr(league, "roster_slots", None)),
         "keeper_count": keeper_count,
     }
+
+
+# ---- player identity -------------------------------------------------------
+
+
+def _normalize_name(name: Optional[str]) -> str:
+    """The `nba.players.name_normalized` rule, so names compare the way lookups do."""
+    return str(name).lower().strip() if name else ""
+
+
+def duplicate_pick_of(
+    existing: Iterable,
+    player_id: Optional[int],
+    espn_player_id: Optional[int],
+    player_name: Optional[str],
+) -> Optional[int]:
+    """The overall pick already holding this player, or None.
+
+    Each existing pick is compared at the strongest identity the two share:
+    NBA id when both have one, else ESPN id, else normalized name. That is
+    what lets a pick recorded before the player reached `nba.players` (ESPN id
+    or name only) still collide with the same player recorded after he did —
+    while two resolved players who happen to share a name stay distinct.
+    """
+    name_key = _normalize_name(player_name)
+    for pick in existing:
+        if player_id is not None and pick.player_id is not None:
+            same = pick.player_id == player_id
+        elif espn_player_id is not None and pick.espn_player_id is not None:
+            same = pick.espn_player_id == espn_player_id
+        else:
+            same = bool(name_key) and _normalize_name(pick.player_name) == name_key
+        if same:
+            return pick.overall_pick
+    return None
+
+
+def resolve_lagging_picks(picks: Iterable) -> int:
+    """Fill in `player_id`, in memory, on picks whose player has since been synced.
+
+    A pick may be recorded with only an ESPN id or a name — the lag
+    `usr.draft_picks` was shaped to carry. Once `nba.players` has the player,
+    every reader must count the pick as his: the board would otherwise offer
+    him again (and leave him out of the caller's cap count) from the day he
+    synced. Resolution is ESPN id first, then a normalized name that matches
+    exactly one player. Nothing is written; returns how many picks resolved.
+    """
+    lagging = [
+        p for p in picks
+        if p.player_id is None and (p.espn_player_id is not None or _normalize_name(p.player_name))
+    ]
+    if not lagging:
+        return 0
+    espn_ids = {p.espn_player_id for p in lagging if p.espn_player_id is not None}
+    names = {_normalize_name(p.player_name) for p in lagging} - {""}
+    clauses = []
+    if espn_ids:
+        clauses.append(Player.espn_id.in_(list(espn_ids)))
+    if names:
+        clauses.append(Player.name_normalized.in_(list(names)))
+    where = clauses[0]
+    for clause in clauses[1:]:
+        where = where | clause
+
+    by_espn: dict[int, int] = {}
+    by_name: dict[str, set[int]] = {}
+    for rec in Player.select(Player.id, Player.espn_id, Player.name_normalized).where(where):
+        if rec.espn_id is not None:
+            by_espn[rec.espn_id] = rec.id
+        by_name.setdefault(rec.name_normalized, set()).add(rec.id)
+
+    resolved = 0
+    for pick in lagging:
+        player_id = by_espn.get(pick.espn_player_id) if pick.espn_player_id is not None else None
+        if player_id is None:
+            candidates = by_name.get(_normalize_name(pick.player_name), set())
+            player_id = next(iter(candidates)) if len(candidates) == 1 else None
+        if player_id is not None:
+            pick.player_id = player_id
+            resolved += 1
+    return resolved
 
 
 # ---- response shaping ------------------------------------------------------
@@ -260,11 +387,7 @@ class DraftService:
         pick_order = list(req.pick_order) if req.pick_order is not None else prefill["pick_order"]
         rounds = req.rounds if req.rounds is not None else prefill["rounds"]
 
-        if req.my_slot is not None and pick_order and req.my_slot > len(pick_order):
-            raise BadRequestError(
-                "DRAFT_SLOT_OUT_OF_RANGE",
-                f"Slot {req.my_slot} is outside a {len(pick_order)}-team draft",
-            )
+        check_slot_in_range(req.my_slot, len(pick_order) or None)
 
         session = DraftSession.create(
             user_id=user_id,
@@ -343,22 +466,19 @@ class DraftService:
         # are nullable and an explicit null clears them; the rest are NOT NULL
         # columns, where a null means "leave it alone".
         touched = [DraftSession.updated_at]
+        reshaped = False    # pick order or draft type changed: picks re-derive
 
         if "pick_order" in fields and req.pick_order is not None:
             session.pick_order = list(req.pick_order)
             touched.append(DraftSession.pick_order)
+            reshaped = True
         if "my_slot" in fields:
-            order = session.pick_order or []
-            if req.my_slot is not None and order and req.my_slot > len(order):
-                raise BadRequestError(
-                    "DRAFT_SLOT_OUT_OF_RANGE",
-                    f"Slot {req.my_slot} is outside a {len(order)}-team draft",
-                )
             session.my_slot = req.my_slot
             touched.append(DraftSession.my_slot)
         if "draft_type" in fields and req.draft_type is not None:
             session.draft_type = req.draft_type
             touched.append(DraftSession.draft_type)
+            reshaped = True
         if "rounds" in fields:
             session.rounds = req.rounds
             touched.append(DraftSession.rounds)
@@ -372,10 +492,34 @@ class DraftService:
             if req.status == "completed" and session.completed_at is None:
                 session.completed_at = datetime.utcnow()
                 touched.append(DraftSession.completed_at)
-        session.updated_at = datetime.utcnow()
-        session.save(only=touched)
 
-        picks = DraftService._picks_of(session_id)
+        with db.atomic():
+            picks = DraftService._picks_of(session_id)
+            # It is the resulting session that has to hold together, whichever
+            # fields the request carried: a pick order shrunk under a confirmed
+            # slot, or a draft resized shorter than the picks already in it,
+            # would leave a room whose own numbers disagree.
+            league_size = len(session.pick_order or []) or None
+            check_slot_in_range(session.my_slot, league_size)
+            check_length_holds_picks(total_picks_of(session), (p.overall_pick for p in picks))
+            # A pick's round and slot are derived from its number, the pick
+            # order and the draft type. When either of the latter changes, every
+            # recorded pick is re-derived in the same transaction — otherwise a
+            # snake turned auction would still show rounds, and a resized order
+            # would credit picks to seats that no longer exist.
+            if reshaped:
+                # One UPDATE per pick rather than bulk_update: its single CASE
+                # statement has no column to type NULLs against, and turning a
+                # snake into an auction makes every value NULL. This runs once
+                # per header change, over at most a draft's worth of rows.
+                for pick in picks:
+                    pick.round, pick.slot = pick_geometry(
+                        pick.overall_pick, league_size, session.draft_type
+                    )
+                    pick.save(only=[DraftPick.round, DraftPick.slot])
+            session.updated_at = datetime.utcnow()
+            session.save(only=touched)
+
         return DraftSessionResponse(
             status=ApiStatus.SUCCESS,
             message="Draft session updated",
@@ -398,31 +542,46 @@ class DraftService:
         league_size = len(session.pick_order or []) or None
 
         with db.atomic():
-            used = {
-                row.overall_pick
-                for row in DraftPick.select(DraftPick.overall_pick).where(DraftPick.session == session_id)
-            }
-            overall = resolve_overall_pick(used, req.overall_pick, total_picks_of(session))
+            existing = list(
+                DraftPick.select(
+                    DraftPick.overall_pick, DraftPick.player, DraftPick.espn_player_id, DraftPick.player_name
+                ).where(DraftPick.session == session_id)
+            )
+            overall = resolve_overall_pick(
+                (p.overall_pick for p in existing), req.overall_pick, total_picks_of(session)
+            )
             player = DraftService._resolve_player(req)
+            player_id = player.id if player is not None else None
+            espn_player_id = req.espn_player_id or (player.espn_id if player is not None else None)
+            player_name = req.player_name or (player.name if player is not None else None)
+            # One player, one pick. Recorded twice he would inflate pick_count
+            # while the board, which collapses picks to a set of ids, could only
+            # hide him once; a correction goes through undo, not a second entry.
+            held_at = duplicate_pick_of(existing, player_id, espn_player_id, player_name)
+            if held_at is not None:
+                raise ConflictError(
+                    "DRAFT_PLAYER_ALREADY_DRAFTED",
+                    f"{player_name or 'That player'} is already recorded at pick {held_at}",
+                )
+            pick_round, pick_slot = pick_geometry(overall, league_size, session.draft_type)
             try:
                 pick = DraftPick.create(
                     session_id=session_id,
                     overall_pick=overall,
-                    round=round_of(overall, league_size, session.draft_type) if league_size else None,
-                    slot=slot_of(overall, league_size, session.draft_type) if league_size else None,
-                    player_id=player.id if player is not None else None,
-                    espn_player_id=req.espn_player_id or (player.espn_id if player is not None else None),
-                    player_name=req.player_name or (player.name if player is not None else None),
+                    round=pick_round,
+                    slot=pick_slot,
+                    player_id=player_id,
+                    espn_player_id=espn_player_id,
+                    player_name=player_name,
                     by_me=req.by_me,
                     source=req.source,
                     bid=req.bid,
                 )
             except IntegrityError as exc:
-                # Two clicks landing together: the read above is advisory, the
-                # unique (session_id, overall_pick) index is what decides.
-                raise ConflictError(
-                    "DRAFT_PICK_ALREADY_EXISTS", f"Pick {overall} is already recorded"
-                ) from exc
+                # Two clicks landing together: the reads above are advisory,
+                # the unique indexes are what decide — and which one fired
+                # says whether the number or the player was taken.
+                raise DraftService._pick_conflict(exc, overall, player_name) from exc
             # The first recorded pick is when the draft actually started.
             if session.started_at is None:
                 session.started_at = datetime.utcnow()
@@ -474,11 +633,25 @@ class DraftService:
 
     @staticmethod
     def _picks_of(session_id: int) -> list[DraftPick]:
-        return list(
+        picks = list(
             DraftPick.select()
             .where(DraftPick.session == session_id)
             .order_by(DraftPick.overall_pick)
         )
+        # A pick recorded before its player reached nba.players reports him
+        # once he has, without waiting for anything to rewrite the row.
+        resolve_lagging_picks(picks)
+        return picks
+
+    @staticmethod
+    def _pick_conflict(exc: IntegrityError, overall: int, player_name: Optional[str]) -> ConflictError:
+        """The 409 for whichever unique index a racing insert tripped."""
+        if PLAYER_UNIQUE_INDEX in str(exc):
+            return ConflictError(
+                "DRAFT_PLAYER_ALREADY_DRAFTED",
+                f"{player_name or 'That player'} is already recorded in this draft",
+            )
+        return ConflictError("DRAFT_PICK_ALREADY_EXISTS", f"Pick {overall} is already recorded")
 
     @staticmethod
     def _pick_numbers_by_session(session_ids: list[int]) -> dict[int, list[int]]:

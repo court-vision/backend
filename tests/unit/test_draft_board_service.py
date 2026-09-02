@@ -676,8 +676,8 @@ def test_fetch_projections_win_over_the_baseline_and_carry_projected_games(fake_
 @pytest.mark.unit
 def test_fetch_splits_a_sessions_picks_into_everyones_and_mine(fake_tables):
     fake_tables["picks"] = [
-        SimpleNamespace(player_id=1, by_me=True),
-        SimpleNamespace(player_id=2, by_me=False),
+        SimpleNamespace(player_id=1, by_me=True, espn_player_id=101, player_name="Star"),
+        SimpleNamespace(player_id=2, by_me=False, espn_player_id=None, player_name=None),
     ]
 
     inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
@@ -686,6 +686,24 @@ def test_fetch_splits_a_sessions_picks_into_everyones_and_mine(fake_tables):
     assert inputs.session_mine == frozenset({1})
     # No session id, no pick query at all.
     assert DraftBoardService._fetch_inputs(frozenset(), None).session_picked == frozenset()
+
+
+@pytest.mark.unit
+def test_fetch_counts_a_pick_recorded_before_its_player_was_synced(fake_tables):
+    """Pick 1 was recorded off ESPN id 109 and pick 2 off a name while nba.players
+    had neither; the sync has since landed them as players 9 and 2. Both picks
+    are theirs — off the board, and the first one counted against my caps."""
+    fake_tables["picks"] = [
+        SimpleNamespace(player_id=None, by_me=True, espn_player_id=109, player_name=None),
+        SimpleNamespace(player_id=None, by_me=False, espn_player_id=None, player_name="Guard"),
+        SimpleNamespace(player_id=None, by_me=False, espn_player_id=999, player_name="Nobody Yet"),
+    ]
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
+
+    assert inputs.session_picked == frozenset({9, 2})
+    assert inputs.session_mine == frozenset({9})
+    assert inputs.positions[9] == "F"          # fetched for the cap check like any drafted player
 
 
 @pytest.mark.unit
