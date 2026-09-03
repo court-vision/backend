@@ -450,3 +450,19 @@ def test_two_keepers_swapping_numbers_is_a_valid_plan():
         [_kpick(18, player_id=9), _kpick(23, player_id=10)],
     )
     assert moves == {18: 23, 23: 18}
+
+
+@pytest.mark.unit
+def test_a_finished_draft_reports_no_next_turn_rather_than_a_round_it_never_plays():
+    """Found by the replay: a 13-round, 4-team draft ends at 52, but the search
+    ran on and answered 54 — seat 3's pick in a fourteenth round."""
+    assert next_pick_for_slot(52, slot=3, league_size=4, last=52) is None
+    assert next_pick_for_slot(52, slot=3, league_size=4) == 54       # unbounded, as before
+    # A turn inside the draft is unaffected by the bound (seat 3 picks 3, 6,
+    # 11, 14, ... 51 — the capture's own sequence).
+    assert next_pick_for_slot(48, slot=3, league_size=4, last=52) == 51
+
+    session = _session(pick_order=[2, 1, 4, 3], my_slot=3, rounds=13)
+    done = _session_resp(session, used_picks=list(range(1, 53)), keeper_count=0)
+    assert done.my_next_pick is None and done.picks_until_my_turn is None
+    assert done.next_overall_pick == 53 and done.total_picks == 52

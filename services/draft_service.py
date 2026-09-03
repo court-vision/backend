@@ -123,16 +123,25 @@ def next_pick_for_slot(
     league_size: Optional[int],
     draft_type: str = "snake",
     skip: Iterable[int] = (),
+    last: Optional[int] = None,
 ) -> Optional[int]:
     """The first pick at or after `from_pick` that belongs to `slot`.
 
     `skip` holds picks already spent — a keeper's — which are not a turn on
     the clock however much they belong to the slot.
+
+    `last` is the final pick of the draft, when its length is known. Without
+    it the search runs on into rounds the draft does not have and reports a
+    turn past the end: a finished 13-round draft would answer "your next pick
+    is 54", in a round nobody plays.
     """
     if draft_type != "snake" or not slot or not league_size:
         return None
     spent = {int(p) for p in skip}
-    for overall in range(max(1, from_pick), max(1, from_pick) + _MY_TURN_SEARCH_LIMIT):
+    ceiling = max(1, from_pick) + _MY_TURN_SEARCH_LIMIT
+    if last is not None:
+        ceiling = min(ceiling, last + 1)
+    for overall in range(max(1, from_pick), ceiling):
         if overall not in spent and slot_of(overall, league_size, draft_type) == slot:
             return overall
     return None
@@ -467,7 +476,10 @@ def _session_resp(
     # clock two rounds ago. Keeper picks are spent before the draft starts and
     # never move the front — see `draft_front`.
     front = draft_front(used, spent)
-    my_next = next_pick_for_slot(front, session.my_slot, league_size, session.draft_type, skip=spent)
+    total_picks = (league_size * session.rounds) if (league_size and session.rounds) else None
+    my_next = next_pick_for_slot(
+        front, session.my_slot, league_size, session.draft_type, skip=spent, last=total_picks
+    )
     until = (
         my_next - front - sum(1 for k in spent if front <= k < my_next)
         if my_next is not None else None
@@ -486,7 +498,7 @@ def _session_resp(
         keepers=_keepers_of(session),
         league_size=league_size,
         keeper_count=keeper_count,
-        total_picks=(league_size * session.rounds) if (league_size and session.rounds) else None,
+        total_picks=total_picks,
         pick_count=len(used),
         next_overall_pick=next_overall,
         my_next_pick=my_next,
