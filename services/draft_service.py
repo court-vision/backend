@@ -10,6 +10,11 @@ team's synced league: draft type, pick order, rounds, keeper allowance. The one
 field the user must supply is `my_slot`: `draft_settings.pick_order` holds ESPN
 team ids, and nothing maps them back to `usr.teams`, so the room asks.
 
+A keeper is a pick spent before the draft starts. Recorded with `source:
+keeper` at the pick its round costs, it leaves the board like any pick but
+never counts as the draft front (`draft_front`), so whose-turn arithmetic steps
+over it the way a real keeper draft skips a kept slot.
+
 Errors are raised, not returned (`core.responses`' rule): a missing session or
 player is a `NotFoundError`, a pick number already taken — or a player already
 drafted — a `ConflictError`, and anything the session's own shape forbids a
@@ -19,6 +24,7 @@ drafted — a `ConflictError`, and anything the session's own shape forbids a
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Iterable, Mapping, Optional
 
 from peewee import JOIN, IntegrityError
@@ -112,15 +118,56 @@ def next_unused_pick(used: Iterable[int]) -> int:
 
 
 def next_pick_for_slot(
-    from_pick: int, slot: Optional[int], league_size: Optional[int], draft_type: str = "snake"
+    from_pick: int,
+    slot: Optional[int],
+    league_size: Optional[int],
+    draft_type: str = "snake",
+    skip: Iterable[int] = (),
 ) -> Optional[int]:
-    """The first pick at or after `from_pick` that belongs to `slot`."""
+    """The first pick at or after `from_pick` that belongs to `slot`.
+
+    `skip` holds picks already spent — a keeper's — which are not a turn on
+    the clock however much they belong to the slot.
+    """
     if draft_type != "snake" or not slot or not league_size:
         return None
+    spent = {int(p) for p in skip}
     for overall in range(max(1, from_pick), max(1, from_pick) + _MY_TURN_SEARCH_LIMIT):
-        if slot_of(overall, league_size, draft_type) == slot:
+        if overall not in spent and slot_of(overall, league_size, draft_type) == slot:
             return overall
     return None
+
+
+def pick_for_slot(
+    round_number: Optional[int],
+    slot: Optional[int],
+    league_size: Optional[int],
+    draft_type: str = "snake",
+) -> Optional[int]:
+    """The overall pick `slot` makes in `round_number` — what a keeper costs."""
+    if (
+        draft_type != "snake"
+        or not round_number or round_number < 1
+        or not slot or not league_size or slot > league_size
+    ):
+        return None
+    base = (round_number - 1) * league_size
+    return base + (slot if round_number % 2 == 1 else league_size - slot + 1)
+
+
+def draft_front(used: Iterable[int], keeper_picks: Iterable[int] = ()) -> int:
+    """Where the draft is: one past the last pick actually made on the clock.
+
+    Keeper picks are spent before the draft starts, so they neither move the
+    front forward nor can the front land on one — it steps over them the way
+    a real keeper draft skips a kept slot.
+    """
+    spent = {int(p) for p in keeper_picks}
+    played = [int(p) for p in used if int(p) not in spent]
+    front = (max(played) + 1) if played else 1
+    while front in spent:
+        front += 1
+    return front
 
 
 def total_picks_of(session: DraftSession) -> Optional[int]:
@@ -255,6 +302,65 @@ def duplicate_pick_of(
     return None
 
 
+def matching_keeper(keepers: Iterable, pick) -> Optional[object]:
+    """The designated keeper a pick records, by the same identity rule as
+    `duplicate_pick_of`: strongest id the two share."""
+    for keeper in keepers:
+        if keeper.player_id is not None and pick.player_id is not None:
+            same = keeper.player_id == pick.player_id
+        elif keeper.espn_player_id is not None and pick.espn_player_id is not None:
+            same = keeper.espn_player_id == pick.espn_player_id
+        else:
+            name = _normalize_name(keeper.name)
+            same = bool(name) and _normalize_name(pick.player_name) == name
+        if same:
+            return keeper
+    return None
+
+
+def plan_keeper_moves(keepers: Iterable, picks: Iterable) -> dict[int, int]:
+    """`{current overall_pick: new overall_pick}` for recorded keeper picks.
+
+    A keeper's pick number is derived from the session header, so an edit that
+    changes the slot, the pick order, the draft type or the keeper's round
+    moves it — and leaving the row where it was would make the response and the
+    clock arithmetic disagree (the response prices the keeper afresh on every
+    read). Rather than let that drift, the rows move with the header.
+
+    Raised, not silently skipped: a recorded keeper the edit leaves unpriceable
+    (its designation gone, its round cleared, the slot unset) has no home, and
+    a target another pick already holds cannot be taken.
+    """
+    picks = list(picks)
+    keeper_picks = [p for p in picks if p.source == "keeper"]
+    if not keeper_picks:
+        return {}
+    keepers = list(keepers)
+
+    moves: dict[int, int] = {}
+    for pick in keeper_picks:
+        keeper = matching_keeper(keepers, pick)
+        target = getattr(keeper, "overall_pick", None) if keeper is not None else None
+        if target is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_PICK_UNPRICED",
+                f"Pick {pick.overall_pick} is a keeper this change leaves without a pick number"
+                " — undo it first, or keep a round and slot it can be priced from",
+            )
+        if target != pick.overall_pick:
+            moves[pick.overall_pick] = target
+
+    # A target is free only if nothing holds it, or the holder is itself moving.
+    held = {p.overall_pick for p in picks} - set(moves)
+    for current, target in moves.items():
+        if target in held:
+            raise BadRequestError(
+                "DRAFT_KEEPER_PICK_CONFLICT",
+                f"Keeper at pick {current} would move to {target}, which is already recorded",
+            )
+    return moves
+
+
 def resolve_lagging_picks(picks: Iterable) -> int:
     """Fill in `player_id`, in memory, on picks whose player has since been synced.
 
@@ -305,7 +411,27 @@ def resolve_lagging_picks(picks: Iterable) -> int:
 
 
 def _keepers_of(session: DraftSession) -> list[DraftKeeper]:
-    return [DraftKeeper(**k) for k in (session.keepers or []) if isinstance(k, dict)]
+    """Keepers as stored, each stamped with the pick it consumes — once the
+    session has a slot and a pick order, and the keeper a round to cost."""
+    order = [t for t in (session.pick_order or []) if isinstance(t, (int, float))]
+    league_size = len(order) or None
+    keepers: list[DraftKeeper] = []
+    for raw in session.keepers or []:
+        if not isinstance(raw, dict):
+            continue
+        fields = {k: v for k, v in raw.items() if k != "overall_pick"}
+        keepers.append(DraftKeeper(
+            **fields,
+            overall_pick=pick_for_slot(
+                fields.get("round"), session.my_slot, league_size, session.draft_type
+            ),
+        ))
+    return keepers
+
+
+def _stored_keepers(keepers: Iterable[DraftKeeper]) -> list[dict]:
+    """What a keeper row keeps: identity and round. Its pick is derived on read."""
+    return [k.model_dump(exclude_none=True, exclude={"overall_pick"}) for k in keepers]
 
 
 def _pick_resp(pick: DraftPick) -> DraftPickResp:
@@ -328,17 +454,24 @@ def _session_resp(
     used_picks: Iterable[int],
     picks: Optional[list[DraftPick]] = None,
     keeper_count: Optional[int] = None,
+    keeper_picks: Iterable[int] = (),
 ) -> DraftSessionResp:
     used = sorted({int(p) for p in used_picks})
+    spent = frozenset(int(p) for p in keeper_picks)
     order = [int(t) for t in (session.pick_order or []) if isinstance(t, (int, float))]
     league_size = len(order) or None
     next_overall = next_unused_pick(used)
     # Where the draft actually is, which is not where the next pick *number*
     # is: an undo mid-draft leaves a hole, and `next_overall` is that hole. My
     # turn is counted from the front, or a correction would say I am on the
-    # clock two rounds ago.
-    front = (used[-1] + 1) if used else 1
-    my_next = next_pick_for_slot(front, session.my_slot, league_size, session.draft_type)
+    # clock two rounds ago. Keeper picks are spent before the draft starts and
+    # never move the front — see `draft_front`.
+    front = draft_front(used, spent)
+    my_next = next_pick_for_slot(front, session.my_slot, league_size, session.draft_type, skip=spent)
+    until = (
+        my_next - front - sum(1 for k in spent if front <= k < my_next)
+        if my_next is not None else None
+    )
 
     return DraftSessionResp(
         id=session.id,
@@ -357,7 +490,7 @@ def _session_resp(
         pick_count=len(used),
         next_overall_pick=next_overall,
         my_next_pick=my_next,
-        picks_until_my_turn=(my_next - front) if my_next is not None else None,
+        picks_until_my_turn=until,
         picks=[_pick_resp(p) for p in (picks or [])],
         started_at=session.started_at,
         completed_at=session.completed_at,
@@ -398,7 +531,7 @@ class DraftService:
             pick_order=pick_order,
             my_slot=req.my_slot,
             rounds=rounds,
-            keepers=[k.model_dump(exclude_none=True) for k in req.keepers],
+            keepers=_stored_keepers(req.keepers),
         )
 
         prefilled = league is not None and (req.pick_order is None or req.rounds is None)
@@ -425,12 +558,13 @@ class DraftService:
                 status=ApiStatus.SUCCESS, message="No draft sessions yet", data=[]
             )
 
-        counts = DraftService._pick_numbers_by_session([s.id for s in sessions])
+        by_session = DraftService._picks_by_session([s.id for s in sessions])
         data = [
             _session_resp(
                 s,
-                used_picks=counts.get(s.id, ()),
+                used_picks=[n for n, _ in by_session.get(s.id, ())],
                 keeper_count=league_prefill(s.league if s.league_id is not None else None)["keeper_count"],
+                keeper_picks=[n for n, source in by_session.get(s.id, ()) if source == "keeper"],
             )
             for s in sessions
         ]
@@ -453,6 +587,7 @@ class DraftService:
                 used_picks=[p.overall_pick for p in picks],
                 picks=picks,
                 keeper_count=DraftService._keeper_count_of(session),
+                keeper_picks=[p.overall_pick for p in picks if p.source == "keeper"],
             ),
         )
 
@@ -483,7 +618,7 @@ class DraftService:
             session.rounds = req.rounds
             touched.append(DraftSession.rounds)
         if "keepers" in fields and req.keepers is not None:
-            session.keepers = [k.model_dump(exclude_none=True) for k in req.keepers]
+            session.keepers = _stored_keepers(req.keepers)
             touched.append(DraftSession.keepers)
         if "status" in fields and req.status is not None:
             session.status = req.status
@@ -507,7 +642,13 @@ class DraftService:
             # recorded pick is re-derived in the same transaction — otherwise a
             # snake turned auction would still show rounds, and a resized order
             # would credit picks to seats that no longer exist.
-            if reshaped:
+            # A recorded keeper sits at the pick its round costs, and that
+            # number is derived from the header too — so an edit that reprices
+            # it has to move the row, or the response and the clock disagree.
+            moves = plan_keeper_moves(_keepers_of(session), picks)
+            if moves:
+                DraftService._move_picks(picks, moves)
+            if reshaped or moves:
                 # One UPDATE per pick rather than bulk_update: its single CASE
                 # statement has no column to type NULLs against, and turning a
                 # snake into an auction makes every value NULL. This runs once
@@ -528,6 +669,7 @@ class DraftService:
                 used_picks=[p.overall_pick for p in picks],
                 picks=picks,
                 keeper_count=DraftService._keeper_count_of(session),
+                keeper_picks=[p.overall_pick for p in picks if p.source == "keeper"],
             ),
         )
 
@@ -562,6 +704,15 @@ class DraftService:
                 raise ConflictError(
                     "DRAFT_PLAYER_ALREADY_DRAFTED",
                     f"{player_name or 'That player'} is already recorded at pick {held_at}",
+                )
+            # `keeper` is not a free-form label: it takes the pick out of the
+            # draft front, so an unchecked one would let a client mark any
+            # future number pre-spent and skew every whose-turn answer after
+            # it. It has to name a keeper this session designated, at the pick
+            # that keeper's round actually costs.
+            if req.source == "keeper":
+                DraftService._check_keeper_pick(
+                    session, overall, player_id, espn_player_id, player_name
                 )
             pick_round, pick_slot = pick_geometry(overall, league_size, session.draft_type)
             try:
@@ -644,6 +795,51 @@ class DraftService:
         return picks
 
     @staticmethod
+    def _move_picks(picks: list[DraftPick], moves: dict[int, int]) -> None:
+        """Renumber picks through a scratch range, so no intermediate write
+        collides with the unique (session_id, overall_pick) index — two keepers
+        swapping numbers would otherwise trip it halfway through."""
+        moving = [(p, moves[p.overall_pick]) for p in picks if p.overall_pick in moves]
+        scratch = max((p.overall_pick for p in picks), default=0) + 1000
+        for offset, (pick, _target) in enumerate(moving):
+            pick.overall_pick = scratch + offset
+            pick.save(only=[DraftPick.overall_pick])
+        for pick, target in moving:
+            pick.overall_pick = target
+            pick.save(only=[DraftPick.overall_pick])
+
+    @staticmethod
+    def _check_keeper_pick(
+        session: DraftSession,
+        overall: int,
+        player_id: Optional[int],
+        espn_player_id: Optional[int],
+        player_name: Optional[str],
+    ) -> None:
+        """A `keeper` pick must be one this session designated, at its own number."""
+        probe = SimpleNamespace(
+            player_id=player_id, espn_player_id=espn_player_id, player_name=player_name
+        )
+        keeper = matching_keeper(_keepers_of(session), probe)
+        if keeper is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_NOT_DESIGNATED",
+                f"{player_name or 'That player'} is not one of this draft's keepers"
+                " — designate the keeper first, or record an ordinary pick",
+            )
+        if keeper.overall_pick is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_UNPRICED",
+                f"{player_name or 'That keeper'} has no pick number yet"
+                " — it needs a round, and the session needs a slot and a pick order",
+            )
+        if overall != keeper.overall_pick:
+            raise BadRequestError(
+                "DRAFT_KEEPER_WRONG_PICK",
+                f"That keeper costs pick {keeper.overall_pick}, not {overall}",
+            )
+
+    @staticmethod
     def _pick_conflict(exc: IntegrityError, overall: int, player_name: Optional[str]) -> ConflictError:
         """The 409 for whichever unique index a racing insert tripped."""
         if PLAYER_UNIQUE_INDEX in str(exc):
@@ -654,16 +850,17 @@ class DraftService:
         return ConflictError("DRAFT_PICK_ALREADY_EXISTS", f"Pick {overall} is already recorded")
 
     @staticmethod
-    def _pick_numbers_by_session(session_ids: list[int]) -> dict[int, list[int]]:
+    def _picks_by_session(session_ids: list[int]) -> dict[int, list[tuple[int, str]]]:
+        """Session id -> [(overall_pick, source)]: enough to place the front."""
         if not session_ids:
             return {}
-        by_session: dict[int, list[int]] = {}
+        by_session: dict[int, list[tuple[int, str]]] = {}
         rows = (
-            DraftPick.select(DraftPick.session, DraftPick.overall_pick)
+            DraftPick.select(DraftPick.session, DraftPick.overall_pick, DraftPick.source)
             .where(DraftPick.session.in_(session_ids))
         )
         for row in rows:
-            by_session.setdefault(row.session_id, []).append(row.overall_pick)
+            by_session.setdefault(row.session_id, []).append((row.overall_pick, row.source))
         return by_session
 
     @staticmethod

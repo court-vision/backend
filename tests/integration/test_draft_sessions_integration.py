@@ -148,3 +148,89 @@ async def test_a_pick_recorded_before_its_player_synced_is_his_once_he_has(user,
     detail = await DraftService.get_session(session.id)
     assert detail.data.picks[0].player_id == 9
     assert _stored(session.id)[0].player_id is None
+
+
+async def test_a_keeper_pick_is_spent_before_the_draft_and_never_the_front(user, players):
+    """Seat 3 of a four-team snake keeps Star in round two: pick 6 (4 + (4-3+1)).
+    Recording it up front takes him off the board without moving the draft."""
+    session = await _session(user, keepers=[{"player_id": 1, "name": "Star", "round": 2}])
+    assert session.keepers[0].overall_pick == 6
+
+    await DraftService.add_pick(
+        session.id, DraftPickCreate(player_id=1, by_me=True, source="keeper", overall_pick=6)
+    )
+    await DraftService.add_pick(session.id, DraftPickCreate(player_id=2))        # pick 1, on the clock
+    detail = (await DraftService.get_session(session.id)).data
+    assert [(p.overall_pick, p.source) for p in detail.picks] == [(1, "manual"), (6, "keeper")]
+    assert (detail.next_overall_pick, detail.my_next_pick, detail.picks_until_my_turn) == (2, 3, 1)
+
+    # Once the front reaches the kept pick it steps over it, and my next turn is round three's.
+    for name in ("P2", "P3", "P4", "P5"):
+        await DraftService.add_pick(session.id, DraftPickCreate(player_name=name))  # picks 2..5
+    detail = (await DraftService.get_session(session.id)).data
+    assert (detail.next_overall_pick, detail.my_next_pick, detail.picks_until_my_turn) == (7, 11, 4)
+    listed = (await DraftService.list_sessions(user.user_id)).data[0]
+    assert (listed.my_next_pick, listed.picks_until_my_turn) == (11, 4)
+
+    board = DraftBoardService._fetch_inputs(frozenset(), session.id)
+    assert board.session_mine == frozenset({1}) and 2 in board.session_picked
+
+
+async def test_a_keeper_source_must_name_a_designated_keeper_at_its_own_pick(user, players):
+    """`source: keeper` takes a pick out of the draft front, so it is not a
+    label a client can spend freely: it has to be a keeper this session
+    designated, at the number that keeper's round costs."""
+    session = await _session(user, keepers=[{"player_id": 1, "name": "Star", "round": 2}])
+    assert session.keepers[0].overall_pick == 6
+
+    # Not designated at all.
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.add_pick(
+            session.id, DraftPickCreate(player_id=2, source="keeper", overall_pick=40)
+        )
+    assert exc.value.error_code == "DRAFT_KEEPER_NOT_DESIGNATED"
+
+    # Designated, but parked on someone else's number — the attack that would
+    # make every later whose-turn answer skip pick 40.
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.add_pick(
+            session.id, DraftPickCreate(player_id=1, source="keeper", overall_pick=40)
+        )
+    assert exc.value.error_code == "DRAFT_KEEPER_WRONG_PICK"
+
+    assert _stored(session.id) == []
+    # At its own number it is accepted.
+    await DraftService.add_pick(
+        session.id, DraftPickCreate(player_id=1, source="keeper", overall_pick=6)
+    )
+    assert [(p.overall_pick, p.source) for p in _stored(session.id)] == [(6, "keeper")]
+
+
+async def test_repricing_a_keeper_moves_its_recorded_pick_with_the_header(user, players):
+    """Seat 3 of four keeps in round two: pick 6. Moving to seat 2 reprices it
+    to 7, and the recorded row moves too — otherwise the response would say 7
+    while the clock still skipped 6."""
+    session = await _session(user, keepers=[{"player_id": 1, "name": "Star", "round": 2}])
+    await DraftService.add_pick(
+        session.id, DraftPickCreate(player_id=1, source="keeper", overall_pick=6)
+    )
+
+    resp = await DraftService.update_session(session.id, DraftSessionUpdate(my_slot=2))
+    assert resp.data.keepers[0].overall_pick == 7
+    assert [(p.overall_pick, p.source) for p in _stored(session.id)] == [(7, "keeper")]
+    # The front is unmoved by a keeper wherever it sits.
+    assert resp.data.next_overall_pick == 1
+
+    # An edit that leaves a recorded keeper unpriceable is refused whole.
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(session.id, DraftSessionUpdate(my_slot=None))
+    assert exc.value.error_code == "DRAFT_KEEPER_PICK_UNPRICED"
+    assert DraftSession.get_by_id(session.id).my_slot == 2
+    assert [p.overall_pick for p in _stored(session.id)] == [7]
+
+    # ...and one that would land it on an occupied pick is refused too.
+    await DraftService.add_pick(session.id, DraftPickCreate(player_id=2, overall_pick=6))
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(session.id, DraftSessionUpdate(my_slot=3))
+    assert exc.value.error_code == "DRAFT_KEEPER_PICK_CONFLICT"
+    assert sorted(p.overall_pick for p in _stored(session.id)) == [6, 7]
