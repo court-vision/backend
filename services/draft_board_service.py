@@ -176,6 +176,7 @@ class BoardInputs:
     market_as_of: Optional[date] = None
     market_only: list[MarketOnlyRow] = field(default_factory=list)  # ranked, unvaluable players
     positions: dict[int, Optional[str]] = field(default_factory=dict)   # nba_api coarse position
+    names: dict[int, tuple[str, Optional[int]]] = field(default_factory=dict)   # id -> (name, espn_id)
     session_picked: frozenset[int] = frozenset()        # drafted by anyone, from usr.draft_picks
     session_mine: frozenset[int] = frozenset()          # drafted by the caller
 
@@ -294,7 +295,7 @@ class DraftBoardService:
             last_season_gp=last_season_gp, projected_gp=projected_gp,
             projections_as_of=projections_as_of,
             market=market, market_as_of=market_as_of, market_only=market_only,
-            positions=positions,
+            positions=positions, names=names,
             session_picked=frozenset(session_picked), session_mine=frozenset(session_mine),
         )
 
@@ -452,6 +453,22 @@ class DraftBoardService:
             )
             for entry in inputs.market_only if entry.id in mine
         ]
+        # A drafted player neither the pool nor the market snapshot carries —
+        # synced, but with no projection, no qualifying baseline and no ESPN
+        # rank — would otherwise be off the board AND absent from the roster,
+        # leaving the zone unable to place a pick the session records. His
+        # identity was already fetched for the cap check.
+        placed = {entry.player_id for entry in roster}
+        for pid in sorted(mine - placed):
+            name, espn_id = inputs.names.get(pid, (None, None))
+            if name is None:
+                continue
+            roster.append(DraftRosterEntry(
+                player_id=pid, name=name, team=None,
+                primary_position=primary.get(pid), positions=eligible.get(pid),
+                value=None, value_source="baseline",
+                injury_status=DraftBoardService._injury_of(inputs.market.get(pid, {})),
+            ))
 
         available = len(rows)
         if rows:

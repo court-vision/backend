@@ -25,9 +25,11 @@ from services.draft_service import (
     duplicate_pick_of,
     league_prefill,
     next_pick_for_slot,
+    matching_keeper,
     next_unused_pick,
     pick_for_slot,
     pick_geometry,
+    plan_keeper_moves,
     resolve_lagging_picks,
     round_of,
     resolve_overall_pick,
@@ -377,3 +379,74 @@ def test_the_session_prices_its_keepers_and_counts_the_front_past_them():
     # A keeper without a round, or a session without a slot, has no pick to price.
     assert _session_resp(_session(keepers=[{"name": "Kept"}]), used_picks=[]).keepers[0].overall_pick is None
     assert _session_resp(_session(my_slot=None, keepers=[{"name": "K", "round": 2}]), used_picks=[]).keepers[0].overall_pick is None
+
+
+# ---- a keeper pick has to be a keeper --------------------------------------
+
+
+def _keeper(player_id=None, espn_player_id=None, name=None, round=None, overall_pick=None):
+    return SimpleNamespace(player_id=player_id, espn_player_id=espn_player_id,
+                           name=name, round=round, overall_pick=overall_pick)
+
+
+def _kpick(overall, source="keeper", player_id=None, espn_player_id=None, player_name=None):
+    return SimpleNamespace(overall_pick=overall, source=source, player_id=player_id,
+                           espn_player_id=espn_player_id, player_name=player_name)
+
+
+@pytest.mark.unit
+def test_a_recorded_pick_is_matched_to_its_keeper_by_the_strongest_shared_id():
+    keepers = [_keeper(player_id=9, name="Kept", overall_pick=18),
+               _keeper(espn_player_id=555, name="Lagging", overall_pick=23)]
+    assert matching_keeper(keepers, _kpick(18, player_id=9)).overall_pick == 18
+    assert matching_keeper(keepers, _kpick(23, espn_player_id=555)).overall_pick == 23
+    assert matching_keeper(keepers, _kpick(23, player_name=" lagging ")).overall_pick == 23
+    assert matching_keeper(keepers, _kpick(4, player_id=11)) is None
+
+
+@pytest.mark.unit
+def test_repricing_a_keeper_moves_its_recorded_pick():
+    """Slot 3 → slot 4 in a ten-team draft moves a round-two keeper from 18 to 17.
+    The response reprices on read, so the row has to move with it."""
+    moves = plan_keeper_moves(
+        [_keeper(player_id=9, name="Kept", round=2, overall_pick=17)],
+        [_kpick(18, player_id=9), _kpick(1, source="manual", player_id=1)],
+    )
+    assert moves == {18: 17}
+    # Nothing to do when the number still matches.
+    assert plan_keeper_moves([_keeper(player_id=9, overall_pick=18)], [_kpick(18, player_id=9)]) == {}
+    # ...and no keeper picks at all is not a query.
+    assert plan_keeper_moves([], [_kpick(3, source="manual")]) == {}
+
+
+@pytest.mark.unit
+def test_an_edit_that_strands_a_recorded_keeper_is_refused():
+    # The keeper lost its round (or its designation, or the session its slot),
+    # so the recorded pick has nowhere to sit.
+    with pytest.raises(BadRequestError) as exc:
+        plan_keeper_moves([_keeper(player_id=9, name="Kept", round=None)], [_kpick(18, player_id=9)])
+    assert exc.value.error_code == "DRAFT_KEEPER_PICK_UNPRICED"
+
+    with pytest.raises(BadRequestError) as exc:
+        plan_keeper_moves([], [_kpick(18, player_id=9)])
+    assert exc.value.error_code == "DRAFT_KEEPER_PICK_UNPRICED"
+
+
+@pytest.mark.unit
+def test_a_keeper_cannot_move_onto_a_pick_someone_already_holds():
+    with pytest.raises(BadRequestError) as exc:
+        plan_keeper_moves(
+            [_keeper(player_id=9, overall_pick=17)],
+            [_kpick(18, player_id=9), _kpick(17, source="manual", player_id=1)],
+        )
+    assert exc.value.error_code == "DRAFT_KEEPER_PICK_CONFLICT"
+
+
+@pytest.mark.unit
+def test_two_keepers_swapping_numbers_is_a_valid_plan():
+    """Both targets are held only by picks that are themselves moving."""
+    moves = plan_keeper_moves(
+        [_keeper(player_id=9, overall_pick=23), _keeper(player_id=10, overall_pick=18)],
+        [_kpick(18, player_id=9), _kpick(23, player_id=10)],
+    )
+    assert moves == {18: 23, 23: 18}

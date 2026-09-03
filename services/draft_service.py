@@ -24,6 +24,7 @@ drafted — a `ConflictError`, and anything the session's own shape forbids a
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Iterable, Mapping, Optional
 
 from peewee import JOIN, IntegrityError
@@ -299,6 +300,65 @@ def duplicate_pick_of(
         if same:
             return pick.overall_pick
     return None
+
+
+def matching_keeper(keepers: Iterable, pick) -> Optional[object]:
+    """The designated keeper a pick records, by the same identity rule as
+    `duplicate_pick_of`: strongest id the two share."""
+    for keeper in keepers:
+        if keeper.player_id is not None and pick.player_id is not None:
+            same = keeper.player_id == pick.player_id
+        elif keeper.espn_player_id is not None and pick.espn_player_id is not None:
+            same = keeper.espn_player_id == pick.espn_player_id
+        else:
+            name = _normalize_name(keeper.name)
+            same = bool(name) and _normalize_name(pick.player_name) == name
+        if same:
+            return keeper
+    return None
+
+
+def plan_keeper_moves(keepers: Iterable, picks: Iterable) -> dict[int, int]:
+    """`{current overall_pick: new overall_pick}` for recorded keeper picks.
+
+    A keeper's pick number is derived from the session header, so an edit that
+    changes the slot, the pick order, the draft type or the keeper's round
+    moves it — and leaving the row where it was would make the response and the
+    clock arithmetic disagree (the response prices the keeper afresh on every
+    read). Rather than let that drift, the rows move with the header.
+
+    Raised, not silently skipped: a recorded keeper the edit leaves unpriceable
+    (its designation gone, its round cleared, the slot unset) has no home, and
+    a target another pick already holds cannot be taken.
+    """
+    picks = list(picks)
+    keeper_picks = [p for p in picks if p.source == "keeper"]
+    if not keeper_picks:
+        return {}
+    keepers = list(keepers)
+
+    moves: dict[int, int] = {}
+    for pick in keeper_picks:
+        keeper = matching_keeper(keepers, pick)
+        target = getattr(keeper, "overall_pick", None) if keeper is not None else None
+        if target is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_PICK_UNPRICED",
+                f"Pick {pick.overall_pick} is a keeper this change leaves without a pick number"
+                " — undo it first, or keep a round and slot it can be priced from",
+            )
+        if target != pick.overall_pick:
+            moves[pick.overall_pick] = target
+
+    # A target is free only if nothing holds it, or the holder is itself moving.
+    held = {p.overall_pick for p in picks} - set(moves)
+    for current, target in moves.items():
+        if target in held:
+            raise BadRequestError(
+                "DRAFT_KEEPER_PICK_CONFLICT",
+                f"Keeper at pick {current} would move to {target}, which is already recorded",
+            )
+    return moves
 
 
 def resolve_lagging_picks(picks: Iterable) -> int:
@@ -582,7 +642,13 @@ class DraftService:
             # recorded pick is re-derived in the same transaction — otherwise a
             # snake turned auction would still show rounds, and a resized order
             # would credit picks to seats that no longer exist.
-            if reshaped:
+            # A recorded keeper sits at the pick its round costs, and that
+            # number is derived from the header too — so an edit that reprices
+            # it has to move the row, or the response and the clock disagree.
+            moves = plan_keeper_moves(_keepers_of(session), picks)
+            if moves:
+                DraftService._move_picks(picks, moves)
+            if reshaped or moves:
                 # One UPDATE per pick rather than bulk_update: its single CASE
                 # statement has no column to type NULLs against, and turning a
                 # snake into an auction makes every value NULL. This runs once
@@ -638,6 +704,15 @@ class DraftService:
                 raise ConflictError(
                     "DRAFT_PLAYER_ALREADY_DRAFTED",
                     f"{player_name or 'That player'} is already recorded at pick {held_at}",
+                )
+            # `keeper` is not a free-form label: it takes the pick out of the
+            # draft front, so an unchecked one would let a client mark any
+            # future number pre-spent and skew every whose-turn answer after
+            # it. It has to name a keeper this session designated, at the pick
+            # that keeper's round actually costs.
+            if req.source == "keeper":
+                DraftService._check_keeper_pick(
+                    session, overall, player_id, espn_player_id, player_name
                 )
             pick_round, pick_slot = pick_geometry(overall, league_size, session.draft_type)
             try:
@@ -718,6 +793,51 @@ class DraftService:
         # once he has, without waiting for anything to rewrite the row.
         resolve_lagging_picks(picks)
         return picks
+
+    @staticmethod
+    def _move_picks(picks: list[DraftPick], moves: dict[int, int]) -> None:
+        """Renumber picks through a scratch range, so no intermediate write
+        collides with the unique (session_id, overall_pick) index — two keepers
+        swapping numbers would otherwise trip it halfway through."""
+        moving = [(p, moves[p.overall_pick]) for p in picks if p.overall_pick in moves]
+        scratch = max((p.overall_pick for p in picks), default=0) + 1000
+        for offset, (pick, _target) in enumerate(moving):
+            pick.overall_pick = scratch + offset
+            pick.save(only=[DraftPick.overall_pick])
+        for pick, target in moving:
+            pick.overall_pick = target
+            pick.save(only=[DraftPick.overall_pick])
+
+    @staticmethod
+    def _check_keeper_pick(
+        session: DraftSession,
+        overall: int,
+        player_id: Optional[int],
+        espn_player_id: Optional[int],
+        player_name: Optional[str],
+    ) -> None:
+        """A `keeper` pick must be one this session designated, at its own number."""
+        probe = SimpleNamespace(
+            player_id=player_id, espn_player_id=espn_player_id, player_name=player_name
+        )
+        keeper = matching_keeper(_keepers_of(session), probe)
+        if keeper is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_NOT_DESIGNATED",
+                f"{player_name or 'That player'} is not one of this draft's keepers"
+                " — designate the keeper first, or record an ordinary pick",
+            )
+        if keeper.overall_pick is None:
+            raise BadRequestError(
+                "DRAFT_KEEPER_UNPRICED",
+                f"{player_name or 'That keeper'} has no pick number yet"
+                " — it needs a round, and the session needs a slot and a pick order",
+            )
+        if overall != keeper.overall_pick:
+            raise BadRequestError(
+                "DRAFT_KEEPER_WRONG_PICK",
+                f"That keeper costs pick {keeper.overall_pick}, not {overall}",
+            )
 
     @staticmethod
     def _pick_conflict(exc: IntegrityError, overall: int, player_name: Optional[str]) -> ConflictError:

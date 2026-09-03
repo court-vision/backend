@@ -382,6 +382,26 @@ def test_the_roster_lists_my_drafted_players_with_what_the_roster_zone_needs(mon
     assert {r.player_id for r in resp.data}.isdisjoint({1, 3, 9})
 
 
+@pytest.mark.unit
+def test_a_drafted_player_nothing_can_value_is_still_on_the_roster(monkeypatch):
+    """Player 7 is synced but has no projection, no baseline row and no ESPN
+    rank. He is off the board because he is drafted; the roster zone still has
+    to be able to place him, so he comes through on his identity alone."""
+    inputs = _inputs(names={7: ("Unranked Guy", 707), 1: ("P1", 101)},
+                     positions={1: "C", 7: "F"})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()), mine=[1, 7])
+
+    assert [(r.player_id, r.name, r.value, r.value_source) for r in resp.roster] == [
+        (1, "P1", 30.0, "projection"), (7, "Unranked Guy", None, "baseline"),
+    ]
+    # A drafted id we know nothing at all about cannot be invented.
+    inputs.names = {}
+    assert [r.player_id for r in _board(resolve_scoring(_league()), mine=[1, 7]).roster] == [1]
+
+
 # ---- session picks ---------------------------------------------------------
 
 
