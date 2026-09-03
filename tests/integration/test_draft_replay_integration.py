@@ -26,7 +26,7 @@ from datetime import date, datetime
 
 import pytest
 
-from core.errors import ConflictError
+from core.errors import BadRequestError, ConflictError
 from db.models.drafts import DraftPick
 from db.models.leagues import League
 from db.models.nba.draft_market import DraftMarket
@@ -305,3 +305,37 @@ async def test_the_centre_cap_closes_as_the_replay_fills_it(team, league, board_
     assert not any(r.primary_position == "C" for r in board.recommendations)
     # Everyone else is still draftable.
     assert not any(r.cap_blocked for r in board.data if r.primary_position != "C")
+
+
+async def test_a_room_opened_without_a_slot_comes_alive_when_one_is_set(team, board_players, replay):
+    """The room can be created without a seat — the field is skippable, and an
+    unsynced league has no pick order to choose one from. Everything that
+    depends on the slot stays quiet until it is set, and starts working the
+    moment it is, mid-draft and all. This is what the room's slot editor drives.
+    """
+    session = (await DraftService.create_session(
+        team.user_id, DraftSessionCreate(team_id=team.team_id)
+    )).data
+    assert session.my_slot is None
+    # The draft still runs; it just cannot say which of the seats is yours.
+    assert session.my_next_pick is None and session.picks_until_my_turn is None
+
+    for pick in replay["picks"][:8]:
+        await _record(session.id, pick, board_players, replay)
+    quiet = (await DraftService.get_session(session.id)).data
+    assert quiet.pick_count == 8 and quiet.my_next_pick is None
+
+    live = (await DraftService.update_session(
+        session.id, DraftSessionUpdate(my_slot=MY_SLOT)
+    )).data
+    assert live.my_slot == MY_SLOT
+    # From the front (pick 9), seat 3's next turn in the captured order.
+    assert live.my_next_pick == min(n for n in _mine(replay) if n >= 9)
+    assert live.picks_until_my_turn == live.my_next_pick - 9
+
+    # ...and a seat the pick order does not have is still refused.
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(
+            session.id, DraftSessionUpdate(my_slot=replay["league_size"] + 1)
+        )
+    assert exc.value.error_code == "DRAFT_SLOT_OUT_OF_RANGE"
