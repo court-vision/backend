@@ -354,6 +354,34 @@ def test_a_drafted_market_only_row_leaves_the_board(monkeypatch):
     assert 9 not in [r.player_id for r in resp.data]
 
 
+# ---- the roster ------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_roster_lists_my_drafted_players_with_what_the_roster_zone_needs(monkeypatch):
+    """Player 1 is a projected centre ESPN slots at C/UT, player 9 a market-only
+    rookie — both mine, both placed, each with the fields caps, lineup slots
+    and stacking count on."""
+    market = _espn_market(**{"1": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12],
+                                   "injury_status": "DAY_TO_DAY"},
+                             "9": {"overall_rank": 25, "default_position_id": 4}})
+    inputs = _inputs(market=market,
+                     market_only=[MarketOnlyRow(id=9, name="Rookie", espn_id=109, position="F")])
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()), picked=[3], mine=[1, 9])
+
+    assert [(r.player_id, r.name, r.team, r.primary_position, r.positions, r.value_source, r.injury_status)
+            for r in resp.roster] == [
+        (1, "P1", "DEN", "C", ["C", "UT"], "projection", "DAY_TO_DAY"),
+        (9, "Rookie", None, "PF", None, "market", None),
+    ]
+    assert resp.roster[0].value == 30.0 and resp.roster[1].value is None
+    # Drafted by someone else is not on my roster; nor is anyone on the board.
+    assert {r.player_id for r in resp.data}.isdisjoint({1, 3, 9})
+
+
 # ---- session picks ---------------------------------------------------------
 
 

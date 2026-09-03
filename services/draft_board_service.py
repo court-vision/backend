@@ -63,6 +63,7 @@ from schemas.draft import (
     DraftBoardResp,
     DraftBoardRow,
     DraftRecommendation,
+    DraftRosterEntry,
     RecommendationComponent,
 )
 from services.draft_service import resolve_lagging_picks
@@ -387,7 +388,8 @@ class DraftBoardService:
                     score=z_sum,
                 ))
             candidates.append({
-                "id": row.id, "name": row.name, "value": value,
+                "id": row.id, "name": row.name, "value": value, "team": row.team,
+                "source": inputs.source.get(row.id, "baseline"),
                 "season_value": round(value * gp, VALUE_DECIMALS),
                 "position": primary.get(row.id),
                 "available": row.id not in removed,
@@ -432,6 +434,25 @@ class DraftBoardService:
             candidates, scoring, session, mine, primary
         )
 
+        # The caller's drafted players, with what the roster zone needs to place
+        # them. Big-board order; the session's picks say when each was taken.
+        roster = [
+            DraftRosterEntry(
+                player_id=c["id"], name=c["name"], team=c["team"],
+                primary_position=c["position"], positions=c["slots"],
+                value=c["value"], value_source=c["source"], injury_status=c["injury"],
+            )
+            for c in candidates if c["id"] in mine
+        ] + [
+            DraftRosterEntry(
+                player_id=entry.id, name=entry.name, team=None,
+                primary_position=primary.get(entry.id), positions=eligible.get(entry.id),
+                value=None, value_source="market",
+                injury_status=DraftBoardService._injury_of(inputs.market.get(entry.id, {})),
+            )
+            for entry in inputs.market_only if entry.id in mine
+        ]
+
         available = len(rows)
         if rows:
             message = f"Draft board fetched successfully ({available} available of {len(entries) + len(inputs.market_only)})"
@@ -442,6 +463,7 @@ class DraftBoardService:
             message=message,
             data=rows,
             recommendations=recommendations,
+            roster=roster,
             meta=DraftBoardMeta(
                 season=inputs.season,
                 format=scoring.format,

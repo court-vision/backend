@@ -21,10 +21,12 @@ from services.draft_service import (
     _session_resp,
     check_length_holds_picks,
     check_slot_in_range,
+    draft_front,
     duplicate_pick_of,
     league_prefill,
     next_pick_for_slot,
     next_unused_pick,
+    pick_for_slot,
     pick_geometry,
     resolve_lagging_picks,
     round_of,
@@ -332,3 +334,46 @@ def test_a_picks_round_and_slot_follow_the_header():
     assert pick_geometry(11, 10, "snake") == (2, 10)
     assert pick_geometry(11, 10, "auction") == (None, None)
     assert pick_geometry(11, None, "snake") == (None, None)
+
+
+# ---- keepers: picks spent before the draft starts -----------------------------
+
+
+@pytest.mark.unit
+def test_a_keeper_costs_its_slots_pick_in_that_round():
+    # Slot 3 of a 10-team snake picks 3, 18, 23, ...
+    assert pick_for_slot(1, 3, 10) == 3
+    assert pick_for_slot(2, 3, 10) == 18
+    assert pick_for_slot(3, 3, 10) == 23
+    assert pick_for_slot(2, 3, 10, "auction") is None
+    assert pick_for_slot(None, 3, 10) is None       # no round assigned yet
+    assert pick_for_slot(2, None, 10) is None       # no slot confirmed yet
+    assert pick_for_slot(2, 11, 10) is None         # no such seat
+
+
+@pytest.mark.unit
+def test_the_front_ignores_keeper_picks_and_steps_over_them():
+    assert draft_front([]) == 1
+    assert draft_front([1, 2, 3]) == 4
+    assert draft_front([1, 2, 23], keeper_picks={23}) == 3     # a keeper at 23 has not moved the draft
+    assert draft_front([1, 2, 3], keeper_picks={4}) == 5       # the front skips a spent pick
+    assert draft_front([23], keeper_picks={23}) == 1
+
+
+@pytest.mark.unit
+def test_my_next_turn_skips_the_pick_my_keeper_spent():
+    assert next_pick_for_slot(4, 3, 10, skip={18}) == 23
+
+
+@pytest.mark.unit
+def test_the_session_prices_its_keepers_and_counts_the_front_past_them():
+    session = _session(keepers=[{"player_id": 9, "name": "Kept", "round": 2}])
+    resp = _session_resp(session, used_picks=[1, 2, 3, 4, 18], keeper_count=1, keeper_picks=[18])
+
+    assert resp.keepers[0].overall_pick == 18       # slot 3, round two
+    assert resp.next_overall_pick == 5 and resp.pick_count == 5
+    assert resp.my_next_pick == 23                  # 18 is spent; my next turn on the clock is 23
+    assert resp.picks_until_my_turn == 17           # 23 - 5, less the spent 18 in between
+    # A keeper without a round, or a session without a slot, has no pick to price.
+    assert _session_resp(_session(keepers=[{"name": "Kept"}]), used_picks=[]).keepers[0].overall_pick is None
+    assert _session_resp(_session(my_slot=None, keepers=[{"name": "K", "round": 2}]), used_picks=[]).keepers[0].overall_pick is None

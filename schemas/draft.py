@@ -11,7 +11,7 @@ from .common import ApiModel, BaseRequest, BaseResponse, CategoryDefResp
 DraftKind = Literal["live", "manual", "mock", "import"]
 DraftStatus = Literal["active", "completed", "abandoned"]
 DraftType = Literal["snake", "auction"]
-PickSource = Literal["manual", "espn_sync", "import"]
+PickSource = Literal["manual", "espn_sync", "import", "keeper"]
 
 
 # ------------------------------- Sessions ------------------------------- #
@@ -26,6 +26,13 @@ class DraftKeeper(ApiModel):
     espn_player_id: Optional[int] = None
     name: Optional[str] = None
     round: Optional[int] = Field(default=None, ge=1, description="Round the keeper costs, when the league assigns one")
+    overall_pick: Optional[int] = Field(
+        default=None,
+        description=(
+            "Computed on read, ignored on input: the pick this keeper consumes — the caller's "
+            "slot in `round`, once the session has a slot and a pick order."
+        ),
+    )
 
 
 class DraftSessionCreate(BaseRequest):
@@ -70,7 +77,13 @@ class DraftPickCreate(BaseRequest):
     player_name: Optional[str] = Field(default=None, max_length=255)
     overall_pick: Optional[int] = Field(default=None, ge=1, description="Defaults to the session's next unused pick")
     by_me: bool = Field(default=False, description="Drafted by the caller (counts against position caps and fills the roster zone)")
-    source: PickSource = "manual"
+    source: PickSource = Field(
+        default="manual",
+        description=(
+            "`keeper` records a pick spent before the draft started (at the pick its round costs): "
+            "it leaves the board like any pick but never counts as the draft front"
+        ),
+    )
     bid: Optional[float] = Field(default=None, ge=0, description="Auction price (v2; ignored by snake drafts)")
 
     @model_validator(mode="after")
@@ -240,6 +253,21 @@ class DraftBoardRow(ApiModel):
     score: Optional[float] = Field(default=None, description="Sum of category z-scores; what `value` is mapped from")
 
 
+class DraftRosterEntry(ApiModel):
+    """A player the caller has drafted, with what the roster zone needs to place
+    him: primary position for caps, eligible slots for the lineup, NBA team for
+    stacking. The session's picks say when he was taken."""
+
+    player_id: int
+    name: str
+    team: Optional[str] = None
+    primary_position: Optional[str] = None
+    positions: Optional[List[str]] = None
+    value: Optional[float] = None
+    value_source: Literal["projection", "baseline", "market"] = "baseline"
+    injury_status: Optional[str] = None
+
+
 class DraftBoardMeta(ApiModel):
     season: str                                 # season the board is for, e.g. "2026-27"
     format: str                                 # points | categories
@@ -310,5 +338,9 @@ class DraftBoardResp(BaseResponse):
             "Best available for the caller's next pick, best first. Cap-blocked players and rows "
             "with no value are never recommended. Empty when nothing can be valued."
         ),
+    )
+    roster: List[DraftRosterEntry] = Field(
+        default=[],
+        description="The caller's drafted players (session picks plus `mine`), in big-board order",
     )
     meta: Optional[DraftBoardMeta] = None

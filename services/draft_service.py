@@ -10,6 +10,11 @@ team's synced league: draft type, pick order, rounds, keeper allowance. The one
 field the user must supply is `my_slot`: `draft_settings.pick_order` holds ESPN
 team ids, and nothing maps them back to `usr.teams`, so the room asks.
 
+A keeper is a pick spent before the draft starts. Recorded with `source:
+keeper` at the pick its round costs, it leaves the board like any pick but
+never counts as the draft front (`draft_front`), so whose-turn arithmetic steps
+over it the way a real keeper draft skips a kept slot.
+
 Errors are raised, not returned (`core.responses`' rule): a missing session or
 player is a `NotFoundError`, a pick number already taken — or a player already
 drafted — a `ConflictError`, and anything the session's own shape forbids a
@@ -112,15 +117,56 @@ def next_unused_pick(used: Iterable[int]) -> int:
 
 
 def next_pick_for_slot(
-    from_pick: int, slot: Optional[int], league_size: Optional[int], draft_type: str = "snake"
+    from_pick: int,
+    slot: Optional[int],
+    league_size: Optional[int],
+    draft_type: str = "snake",
+    skip: Iterable[int] = (),
 ) -> Optional[int]:
-    """The first pick at or after `from_pick` that belongs to `slot`."""
+    """The first pick at or after `from_pick` that belongs to `slot`.
+
+    `skip` holds picks already spent — a keeper's — which are not a turn on
+    the clock however much they belong to the slot.
+    """
     if draft_type != "snake" or not slot or not league_size:
         return None
+    spent = {int(p) for p in skip}
     for overall in range(max(1, from_pick), max(1, from_pick) + _MY_TURN_SEARCH_LIMIT):
-        if slot_of(overall, league_size, draft_type) == slot:
+        if overall not in spent and slot_of(overall, league_size, draft_type) == slot:
             return overall
     return None
+
+
+def pick_for_slot(
+    round_number: Optional[int],
+    slot: Optional[int],
+    league_size: Optional[int],
+    draft_type: str = "snake",
+) -> Optional[int]:
+    """The overall pick `slot` makes in `round_number` — what a keeper costs."""
+    if (
+        draft_type != "snake"
+        or not round_number or round_number < 1
+        or not slot or not league_size or slot > league_size
+    ):
+        return None
+    base = (round_number - 1) * league_size
+    return base + (slot if round_number % 2 == 1 else league_size - slot + 1)
+
+
+def draft_front(used: Iterable[int], keeper_picks: Iterable[int] = ()) -> int:
+    """Where the draft is: one past the last pick actually made on the clock.
+
+    Keeper picks are spent before the draft starts, so they neither move the
+    front forward nor can the front land on one — it steps over them the way
+    a real keeper draft skips a kept slot.
+    """
+    spent = {int(p) for p in keeper_picks}
+    played = [int(p) for p in used if int(p) not in spent]
+    front = (max(played) + 1) if played else 1
+    while front in spent:
+        front += 1
+    return front
 
 
 def total_picks_of(session: DraftSession) -> Optional[int]:
@@ -305,7 +351,27 @@ def resolve_lagging_picks(picks: Iterable) -> int:
 
 
 def _keepers_of(session: DraftSession) -> list[DraftKeeper]:
-    return [DraftKeeper(**k) for k in (session.keepers or []) if isinstance(k, dict)]
+    """Keepers as stored, each stamped with the pick it consumes — once the
+    session has a slot and a pick order, and the keeper a round to cost."""
+    order = [t for t in (session.pick_order or []) if isinstance(t, (int, float))]
+    league_size = len(order) or None
+    keepers: list[DraftKeeper] = []
+    for raw in session.keepers or []:
+        if not isinstance(raw, dict):
+            continue
+        fields = {k: v for k, v in raw.items() if k != "overall_pick"}
+        keepers.append(DraftKeeper(
+            **fields,
+            overall_pick=pick_for_slot(
+                fields.get("round"), session.my_slot, league_size, session.draft_type
+            ),
+        ))
+    return keepers
+
+
+def _stored_keepers(keepers: Iterable[DraftKeeper]) -> list[dict]:
+    """What a keeper row keeps: identity and round. Its pick is derived on read."""
+    return [k.model_dump(exclude_none=True, exclude={"overall_pick"}) for k in keepers]
 
 
 def _pick_resp(pick: DraftPick) -> DraftPickResp:
@@ -328,17 +394,24 @@ def _session_resp(
     used_picks: Iterable[int],
     picks: Optional[list[DraftPick]] = None,
     keeper_count: Optional[int] = None,
+    keeper_picks: Iterable[int] = (),
 ) -> DraftSessionResp:
     used = sorted({int(p) for p in used_picks})
+    spent = frozenset(int(p) for p in keeper_picks)
     order = [int(t) for t in (session.pick_order or []) if isinstance(t, (int, float))]
     league_size = len(order) or None
     next_overall = next_unused_pick(used)
     # Where the draft actually is, which is not where the next pick *number*
     # is: an undo mid-draft leaves a hole, and `next_overall` is that hole. My
     # turn is counted from the front, or a correction would say I am on the
-    # clock two rounds ago.
-    front = (used[-1] + 1) if used else 1
-    my_next = next_pick_for_slot(front, session.my_slot, league_size, session.draft_type)
+    # clock two rounds ago. Keeper picks are spent before the draft starts and
+    # never move the front — see `draft_front`.
+    front = draft_front(used, spent)
+    my_next = next_pick_for_slot(front, session.my_slot, league_size, session.draft_type, skip=spent)
+    until = (
+        my_next - front - sum(1 for k in spent if front <= k < my_next)
+        if my_next is not None else None
+    )
 
     return DraftSessionResp(
         id=session.id,
@@ -357,7 +430,7 @@ def _session_resp(
         pick_count=len(used),
         next_overall_pick=next_overall,
         my_next_pick=my_next,
-        picks_until_my_turn=(my_next - front) if my_next is not None else None,
+        picks_until_my_turn=until,
         picks=[_pick_resp(p) for p in (picks or [])],
         started_at=session.started_at,
         completed_at=session.completed_at,
@@ -398,7 +471,7 @@ class DraftService:
             pick_order=pick_order,
             my_slot=req.my_slot,
             rounds=rounds,
-            keepers=[k.model_dump(exclude_none=True) for k in req.keepers],
+            keepers=_stored_keepers(req.keepers),
         )
 
         prefilled = league is not None and (req.pick_order is None or req.rounds is None)
@@ -425,12 +498,13 @@ class DraftService:
                 status=ApiStatus.SUCCESS, message="No draft sessions yet", data=[]
             )
 
-        counts = DraftService._pick_numbers_by_session([s.id for s in sessions])
+        by_session = DraftService._picks_by_session([s.id for s in sessions])
         data = [
             _session_resp(
                 s,
-                used_picks=counts.get(s.id, ()),
+                used_picks=[n for n, _ in by_session.get(s.id, ())],
                 keeper_count=league_prefill(s.league if s.league_id is not None else None)["keeper_count"],
+                keeper_picks=[n for n, source in by_session.get(s.id, ()) if source == "keeper"],
             )
             for s in sessions
         ]
@@ -453,6 +527,7 @@ class DraftService:
                 used_picks=[p.overall_pick for p in picks],
                 picks=picks,
                 keeper_count=DraftService._keeper_count_of(session),
+                keeper_picks=[p.overall_pick for p in picks if p.source == "keeper"],
             ),
         )
 
@@ -483,7 +558,7 @@ class DraftService:
             session.rounds = req.rounds
             touched.append(DraftSession.rounds)
         if "keepers" in fields and req.keepers is not None:
-            session.keepers = [k.model_dump(exclude_none=True) for k in req.keepers]
+            session.keepers = _stored_keepers(req.keepers)
             touched.append(DraftSession.keepers)
         if "status" in fields and req.status is not None:
             session.status = req.status
@@ -528,6 +603,7 @@ class DraftService:
                 used_picks=[p.overall_pick for p in picks],
                 picks=picks,
                 keeper_count=DraftService._keeper_count_of(session),
+                keeper_picks=[p.overall_pick for p in picks if p.source == "keeper"],
             ),
         )
 
@@ -654,16 +730,17 @@ class DraftService:
         return ConflictError("DRAFT_PICK_ALREADY_EXISTS", f"Pick {overall} is already recorded")
 
     @staticmethod
-    def _pick_numbers_by_session(session_ids: list[int]) -> dict[int, list[int]]:
+    def _picks_by_session(session_ids: list[int]) -> dict[int, list[tuple[int, str]]]:
+        """Session id -> [(overall_pick, source)]: enough to place the front."""
         if not session_ids:
             return {}
-        by_session: dict[int, list[int]] = {}
+        by_session: dict[int, list[tuple[int, str]]] = {}
         rows = (
-            DraftPick.select(DraftPick.session, DraftPick.overall_pick)
+            DraftPick.select(DraftPick.session, DraftPick.overall_pick, DraftPick.source)
             .where(DraftPick.session.in_(session_ids))
         )
         for row in rows:
-            by_session.setdefault(row.session_id, []).append(row.overall_pick)
+            by_session.setdefault(row.session_id, []).append((row.overall_pick, row.source))
         return by_session
 
     @staticmethod

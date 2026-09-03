@@ -166,7 +166,9 @@ async def update_draft_session(
         "pick — every component of the score visible (`season_value`, `vorp`, `scarcity`, "
         "`flexibility`, `injury`).\n\n"
         "Players the league's hard position caps have made undraftable for the caller are flagged "
-        "`cap_blocked` (shown greyed, never hidden) and are excluded from the recommendations."
+        "`cap_blocked` (shown greyed, never hidden) and are excluded from the recommendations.\n\n"
+        "`roster` lists the caller's drafted players with primary position, eligible slots and NBA "
+        "team — what the roster zone needs to fill lineup slots, count caps and flag stacking."
     ),
     responses={
         200: {"description": "Board retrieved successfully (empty data with a message before any season data exists)"},
@@ -189,7 +191,10 @@ async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(ge
         "in a hole an undo left. The player is resolved NBA id → ESPN id → normalized name, and a "
         "pick whose player is not in `nba.players` yet is still recorded with the provider identity. "
         "A player already in the session cannot be recorded a second time — undo the earlier pick "
-        "to correct it."
+        "to correct it.\n\n"
+        "`source: keeper` records a keeper at the pick its round costs (the session's `keepers` "
+        "carry that number as `overall_pick`). A keeper pick leaves the board like any other but "
+        "never counts as the draft front: whose-turn arithmetic steps over it."
     ),
     responses={
         200: {"description": "Pick recorded"},
