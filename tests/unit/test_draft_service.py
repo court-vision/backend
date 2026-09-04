@@ -202,7 +202,7 @@ def test_the_draft_length_needs_both_a_size_and_a_round_count():
 def _session(**overrides):
     base = dict(name=None, espn_league_id=None, 
         id=12, team_id=7, league_id=3, kind="manual", status="active", draft_type="snake",
-        pick_order=[10, 6, 5, 8, 2, 3, 7, 4, 9, 1], my_slot=3, rounds=13, keepers=[],
+        pick_order=[10, 6, 5, 8, 2, 3, 7, 4, 9, 1], my_slot=3, rounds=13, keepers=[], punts=[],
         started_at=None, completed_at=None, created_at=None, updated_at=None,
     )
     base.update(overrides)
@@ -491,3 +491,82 @@ def test_a_pick_sits_where_espn_says_when_its_team_is_known():
     assert pick_placement(1, 4, "snake", order, None) == (1, 1)    # nothing observed: the snake
     assert pick_placement(6, 4, "snake", order, 99) == (2, 3)      # a team not in the order: the snake
     assert pick_placement(7, 4, "auction", order, 8) == (None, 4)  # an auction: no round, a real seat
+
+
+# ---- punts -----------------------------------------------------------------
+
+NINE_CAT_JSON = [
+    {"key": k, "label": k.upper(), "higher_is_better": k != "tov", "is_rate": k.endswith("_pct")}
+    for k in ("fg_pct", "ft_pct", "fg3m", "pts", "reb", "ast", "stl", "blk", "tov")
+]
+
+
+def _scored_league(**overrides):
+    """A league object shaped the way `resolve_scoring` reads one."""
+    base = dict(
+        id=3, scoring_type="points", category_win_mode=None, categories=[],
+        point_weights={"pts": 1.0}, settings_synced_at=object(),
+        roster_slots=dict(ESPN_ROSTER_SLOTS), draft_settings=dict(ESPN_DRAFT_SETTINGS),
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _punt_session(league):
+    """A session with no team, so scoring resolves straight off its league."""
+    return SimpleNamespace(team_id=None, league_id=getattr(league, "id", None), league=league)
+
+
+@pytest.mark.unit
+def test_a_category_league_can_punt_the_categories_it_scores():
+    from services.draft_service import punt_options
+
+    session = _punt_session(_scored_league(scoring_type="categories",
+                                           categories=NINE_CAT_JSON,
+                                           category_win_mode="each_category"))
+    assert punt_options(session) == [c["key"] for c in NINE_CAT_JSON]
+
+
+@pytest.mark.unit
+def test_a_points_league_has_nothing_to_punt():
+    from services.draft_service import punt_options
+
+    assert punt_options(_punt_session(_scored_league())) == []
+    assert punt_options(_punt_session(None)) == []          # a mock draft: no league at all
+
+
+@pytest.mark.unit
+def test_punting_in_a_points_room_is_refused_rather_than_stored():
+    """A punt that weighs nothing would leave the room showing a build it is
+    not actually drafting to."""
+    session = _punt_session(_scored_league())
+    with pytest.raises(BadRequestError) as err:
+        DraftService._validated_punts(session, ["tov"])
+    assert err.value.error_code == "PUNTS_NEED_CATEGORIES"
+
+
+@pytest.mark.unit
+def test_a_punt_the_league_does_not_score_is_refused_and_named():
+    session = _punt_session(_scored_league(scoring_type="categories",
+                                           categories=NINE_CAT_JSON,
+                                           category_win_mode="each_category"))
+    with pytest.raises(BadRequestError) as err:
+        DraftService._validated_punts(session, ["tov", "dunks"])
+    assert err.value.error_code == "PUNTS_UNKNOWN_CATEGORY"
+    assert "dunks" in str(err.value)
+
+
+@pytest.mark.unit
+def test_accepted_punts_are_normalized_and_an_empty_list_clears_the_build():
+    session = _punt_session(_scored_league(scoring_type="categories",
+                                           categories=NINE_CAT_JSON,
+                                           category_win_mode="each_category"))
+    assert DraftService._validated_punts(session, [" TOV ", "tov", "ft_pct"]) == ["tov", "ft_pct"]
+    assert DraftService._validated_punts(session, []) == []
+
+
+@pytest.mark.unit
+def test_the_session_reports_the_punts_it_is_drafting_around():
+    resp = _session_resp(_session(punts=["tov", "ft_pct"]), used_picks=[])
+    assert resp.punts == ["tov", "ft_pct"]
+    assert _session_resp(_session(punts=None), used_picks=[]).punts == []

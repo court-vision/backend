@@ -11,7 +11,12 @@ from .common import ApiModel, BaseRequest, BaseResponse, CategoryDefResp
 DraftKind = Literal["live", "manual", "mock", "import"]
 DraftStatus = Literal["active", "completed", "abandoned"]
 DraftType = Literal["snake", "auction"]
-PickSource = Literal["manual", "espn_sync", "import", "keeper"]
+Availability = Literal["likely", "tossup", "gone"]
+PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
+# What a client may claim a pick's provenance is. `mock` is missing on purpose:
+# it asserts the autopicker made the pick, which the room's undo rules and the
+# recap both read, so it is written by the server or not at all.
+ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
 
 
 # ------------------------------- Sessions ------------------------------- #
@@ -84,6 +89,14 @@ class DraftSessionUpdate(BaseRequest):
     my_slot: Optional[int] = Field(default=None, ge=1)
     rounds: Optional[int] = Field(default=None, ge=1, le=40)
     keepers: Optional[List[DraftKeeper]] = None
+    punts: Optional[List[str]] = Field(
+        default=None,
+        max_length=12,
+        description=(
+            "Category keys this room concedes (e.g. `[\"ft_pct\", \"tov\"]`). Every key must be one "
+            "of the league's own rankable categories; a points-scored room has none to punt."
+        ),
+    )
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> "DraftSessionUpdate":
@@ -110,11 +123,14 @@ class DraftPickCreate(BaseRequest):
     )
     overall_pick: Optional[int] = Field(default=None, ge=1, description="Defaults to the session's next unused pick")
     by_me: bool = Field(default=False, description="Drafted by the caller (counts against position caps and fills the roster zone)")
-    source: PickSource = Field(
+    source: ClientPickSource = Field(
         default="manual",
         description=(
             "`keeper` records a pick spent before the draft started (at the pick its round costs): "
-            "it leaves the board like any pick but never counts as the draft front"
+            "it leaves the board like any pick but never counts as the draft front — and it is "
+            "checked against the session's designated keepers before it is written.\n\n"
+            "`mock` is not accepted here: it means the autopicker made the pick, and only the "
+            "server may say that."
         ),
     )
     bid: Optional[float] = Field(default=None, ge=0, description="Auction price (v2; ignored by snake drafts)")
@@ -165,6 +181,10 @@ class DraftSessionResp(ApiModel):
     my_slot: Optional[int] = None
     rounds: Optional[int] = None
     keepers: List[DraftKeeper] = []
+    punts: List[str] = Field(
+        default=[],
+        description="Category keys this room concedes; they weigh 0 in the board's fit column",
+    )
     league_size: Optional[int] = Field(default=None, description="Teams in the draft: len(pick_order) when known")
     keeper_count: Optional[int] = Field(default=None, description="Keepers the league allows, from its draft settings")
     total_picks: Optional[int] = Field(default=None, description="league_size x rounds, when both are known")
@@ -333,6 +353,31 @@ class DraftBoardRow(ApiModel):
         default=None,
         description="market_rank − cv_rank; positive means the market ranks the player worse than CV does (a bargain)",
     )
+    fit_value: Optional[float] = Field(
+        default=None,
+        description=(
+            "Category leagues only: `value` re-scored for *this* roster — the same per-category z's "
+            "weighted by how far the roster trails an average team, with punted categories at zero. "
+            "None for points leagues and for rows with no stat line to score."
+        ),
+    )
+    fit_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "Rank by `fit_value` among the players still available. Unlike `cv_rank` this moves "
+            "with every pick — it is a statement about the roster, not about the player."
+        ),
+    )
+    availability: Optional[Availability] = Field(
+        default=None,
+        description=(
+            "Whether the player is likely to survive to the caller's next pick (the pick after "
+            "that, when the caller is on the clock): `likely`, `tossup` or `gone`, from the gap "
+            "between ADP (or market rank) and that pick. None without a confirmed slot or market "
+            "data. Deliberately a bucket, not a probability — ESPN publishes a point estimate, "
+            "and a percentage would imply a calibration we do not have."
+        ),
+    )
     cap_blocked: bool = Field(
         default=False,
         description=(
@@ -368,6 +413,23 @@ class DraftRosterEntry(ApiModel):
     injury_status: Optional[str] = None
 
 
+class CategoryNeedResp(ApiModel):
+    """One category's standing on the caller's roster, and what fit does about it.
+
+    `need` is in standard deviations of a k-pick sum: positive means the roster
+    is *behind* an average team after the same number of picks. It is not a
+    probability and does not claim to be one.
+    """
+
+    key: str
+    label: str
+    mine: float = Field(description="Summed per-category z the caller's drafted players hold")
+    pace: float = Field(description="What an average team holds after the same number of picks")
+    need: float = Field(description="(pace - mine) / spread, clamped to +/-2; positive means behind")
+    weight: float = Field(description="What fit multiplies this category by; 0 when punted")
+    punted: bool
+
+
 class DraftBoardMeta(ApiModel):
     season: str                                 # season the board is for, e.g. "2026-27"
     format: str                                 # points | categories
@@ -391,6 +453,17 @@ class DraftBoardMeta(ApiModel):
     )
     position_limits: dict[str, int] = {}        # the league's hard per-position caps, as stored ({"C": 4})
     categories: list[CategoryDefResp] = []      # empty for points leagues
+    punts: list[str] = Field(
+        default=[],
+        description="Category keys this room concedes, as stored on the session",
+    )
+    category_need: list["CategoryNeedResp"] = Field(
+        default=[],
+        description=(
+            "Category leagues only: where the caller's roster stands against an average team "
+            "after the same number of picks, and the weight fit gives each category"
+        ),
+    )
     settings_synced: Optional[bool] = None      # whether the league's settings were read from the provider
     unsupported: list[str] = Field(
         default=[],
@@ -404,7 +477,8 @@ class DraftBoardMeta(ApiModel):
 class RecommendationComponent(ApiModel):
     """One visible term of a recommendation score, in season-value points."""
 
-    key: Literal["season_value", "vorp", "scarcity", "flexibility", "injury"]
+    key: Literal["season_value", "vorp", "scarcity", "flexibility", "injury",
+                 "category_fit", "congestion"]
     label: str
     value: float
     in_score: bool = Field(
@@ -425,7 +499,9 @@ class DraftRecommendation(ApiModel):
     value: float = Field(description="Per-game league-scored value (the board row's `value`)")
     season_value: float = Field(description="value x projected games")
     vorp: float = Field(description="season_value minus the replacement level at the player's position")
-    score: float = Field(description="vorp + scarcity + flexibility + injury — the ranking number")
+    score: float = Field(
+        description="vorp + scarcity + flexibility + injury + category_fit — the ranking number"
+    )
     components: List[RecommendationComponent] = []
     reason: str = Field(description="One-sentence summary of the dominant terms")
 

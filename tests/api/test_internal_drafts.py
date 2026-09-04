@@ -357,6 +357,27 @@ def test_a_pick_that_names_nobody_is_a_422(authed_client, draft_service, monkeyp
 
 
 @pytest.mark.api
+def test_a_client_cannot_claim_the_autopicker_made_its_pick(authed_client, draft_service, monkeypatch):
+    """`mock` is provenance the server asserts, not a label a client may apply:
+    the room's undo rules and the recap both read it. Rejected before the
+    service is reached, the way `keeper` is checked once it gets there."""
+    _own_session(monkeypatch)
+
+    res = authed_client.post(
+        "/v1/internal/drafts/12/picks", json={"player_id": 203999, "source": "mock"}
+    )
+
+    assert res.status_code == 422
+    assert draft_service == []
+    # The sources a client may legitimately claim still go through.
+    for source in ("manual", "espn_sync", "import", "keeper"):
+        ok = authed_client.post(
+            "/v1/internal/drafts/12/picks", json={"player_id": 203999, "source": source}
+        )
+        assert ok.status_code == 200, source
+
+
+@pytest.mark.api
 def test_the_session_board_resolves_scoring_from_the_sessions_league(authed_client, service, monkeypatch):
     league = _league(point_weights={"pts": 2.0, "reb": 3.0})
     _own_session(monkeypatch, league=league)
@@ -385,7 +406,9 @@ def test_the_literal_board_path_is_not_read_as_a_session_id(authed_client, servi
     """`/drafts/board` must keep matching the stateless route, not `/{session_id}`."""
     _own(monkeypatch, league=_league())
     assert authed_client.get("/v1/internal/drafts/board?team_id=7").status_code == 200
-    assert service["calls"][0]["session"] is None
+    # The stateless route carries view knobs but no session: no id means no
+    # picks are read and no slot is counted from.
+    assert service["calls"][0]["session"].session_id is None
 
 
 # ------------------------------ INIT sync ------------------------------- #

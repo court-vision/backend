@@ -354,3 +354,70 @@ async def test_an_auction_pick_gets_a_seat_from_its_team_and_no_round(user):
     session = await _session(user, draft_type="auction")
     pick = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Bought", espn_team_id=8, bid=40))).data
     assert (pick.round, pick.slot, pick.espn_team_id) == (None, 4, 8)
+
+
+async def test_a_punt_survives_the_round_trip_and_an_empty_list_clears_it(user, players):
+    """The column migration 0015 adds, exercised through the service that
+    validates it: a category league's own keys go in, anything else is refused,
+    and clearing the build is an empty list rather than a null."""
+    from db.models.leagues import League
+
+    league = League.create(
+        provider="espn", provider_league_id="993431466", season=2027, name="Cat League",
+        scoring_type="categories", category_win_mode="each_category",
+        categories=[{"key": "pts", "label": "PTS", "higher_is_better": True, "is_rate": False},
+                    {"key": "tov", "label": "TO", "higher_is_better": False, "is_rate": False}],
+        point_weights={}, roster_slots={"PG": 1, "C": 1, "BE": 3}, position_limits={},
+        draft_settings={"type": "SNAKE", "pick_order": [10, 6, 5, 8]},
+        raw_settings={}, settings_synced_at=datetime.utcnow(),
+    )
+    # Through a team, which is how a real room is created: scoring (and so the
+    # punt vocabulary) resolves team -> league, preview included.
+    from db.models.teams import Team
+
+    team = Team.create(user_id=user.user_id, team_identifier="punt", league_info="{}", league=league)
+    session = (await DraftService.create_session(
+        user.user_id, DraftSessionCreate(team_id=team.team_id, my_slot=3)
+    )).data
+    assert session.league_id == league.id
+
+    updated = (await DraftService.update_session(
+        session.id, DraftSessionUpdate(punts=[" TOV "])
+    )).data
+    assert updated.punts == ["tov"]
+    assert DraftSession.get_by_id(session.id).punts == ["tov"]
+
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(session.id, DraftSessionUpdate(punts=["dunks"]))
+    assert exc.value.error_code == "PUNTS_UNKNOWN_CATEGORY"
+    assert DraftSession.get_by_id(session.id).punts == ["tov"]      # refused whole
+
+    cleared = (await DraftService.update_session(session.id, DraftSessionUpdate(punts=[]))).data
+    assert cleared.punts == []
+    assert DraftSession.get_by_id(session.id).punts == []
+
+
+async def test_a_points_room_cannot_store_a_punt(user, players):
+    session = await _session(user)          # no league at all: scored by points
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(session.id, DraftSessionUpdate(punts=["tov"]))
+    assert exc.value.error_code == "PUNTS_NEED_CATEGORIES"
+    assert DraftSession.get_by_id(session.id).punts == []
+
+
+async def test_a_new_session_starts_with_no_build_and_the_column_defaults_empty(user):
+    session = await _session(user)
+    assert session.punts == []
+    assert DraftSession.get_by_id(session.id).punts == []
+
+
+async def test_the_source_check_accepts_a_mock_pick_and_still_refuses_nonsense(user, players):
+    """Migration 0015 widens draft_picks_source_check for the autopicker that
+    lands next; the constraint has to be live before any code writes one."""
+    session = await _session(user)
+    DraftPick.create(session_id=session.id, overall_pick=1, player_id=1, source="mock")
+    assert _stored(session.id)[0].source == "mock"
+
+    with pytest.raises(IntegrityError) as exc:
+        DraftPick.create(session_id=session.id, overall_pick=2, player_id=2, source="guess")
+    assert "draft_picks_source_check" in str(exc.value)
