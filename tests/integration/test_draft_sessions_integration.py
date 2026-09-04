@@ -421,3 +421,57 @@ async def test_the_source_check_accepts_a_mock_pick_and_still_refuses_nonsense(u
     with pytest.raises(IntegrityError) as exc:
         DraftPick.create(session_id=session.id, overall_pick=2, player_id=2, source="guess")
     assert "draft_picks_source_check" in str(exc.value)
+
+
+async def test_a_patch_that_links_and_closes_at_once_is_judged_by_the_closed_status(user):
+    a = await _session(user, kind="mock")
+    b = await _session(user, kind="mock")
+    await DraftService.update_session(a.id, DraftSessionUpdate(espn_league_id=888))
+    # b takes the same draft while closing: a completed room holds nothing, so no conflict.
+    closed = (await DraftService.update_session(b.id, DraftSessionUpdate(espn_league_id=888, status="completed"))).data
+    assert closed.espn_league_id == 888 and closed.status == "completed"
+
+
+async def test_an_undo_that_would_reopen_a_room_onto_a_draft_another_room_now_holds_is_refused(user):
+    old = await _session(user, rounds=2, kind="mock")             # eight picks
+    await DraftService.update_session(old.id, DraftSessionUpdate(espn_league_id=555))
+    for i in range(1, 9):
+        await DraftService.add_pick(old.id, DraftPickCreate(player_name=f"P{i}"))
+    assert (await DraftService.get_session(old.id)).data.status == "completed"
+
+    fresh = await _session(user, kind="mock")
+    await DraftService.update_session(fresh.id, DraftSessionUpdate(espn_league_id=555))   # free: old is closed
+
+    with pytest.raises(ConflictError) as exc:
+        await DraftService.remove_pick(old.id, 8)
+    assert exc.value.error_code == "DRAFT_ROOM_ALREADY_LINKED"
+    still = (await DraftService.get_session(old.id)).data
+    assert still.status == "completed" and still.pick_count == 8      # nothing was deleted
+
+
+async def test_migration_0016_backfills_legacy_live_rooms_and_keeps_one_link_per_draft(user, integration_db):
+    """The migration's data steps are idempotent, so they can be replayed here
+    against rooms shaped like the ones that predate linking."""
+    from pathlib import Path
+
+    from db.base import db
+
+    league = _espn_league()
+    older = await _session(user, kind="manual")
+    newer = await _session(user, kind="manual")
+    # Legacy shape: live rooms that carry the league but no link.
+    DraftSession.update(kind="live", league=league, espn_league_id=None).where(
+        DraftSession.id.in_([older.id, newer.id])
+    ).execute()
+    DraftSession.update(updated_at=datetime(2026, 1, 1)).where(DraftSession.id == older.id).execute()
+    DraftSession.update(updated_at=datetime(2026, 2, 1)).where(DraftSession.id == newer.id).execute()
+
+    # A faithful replay: the index does not exist yet when the migration's
+    # data steps run, so it is dropped here and recreated by the file itself.
+    db.execute_sql("DROP INDEX IF EXISTS usr.draft_sessions_user_espn_league_active_uq")
+    sql = (Path(__file__).resolve().parents[2] / "migrations" / "0016__draft_session_binding.sql").read_text()
+    db.execute_sql(sql)
+
+    assert DraftSession.get_by_id(newer.id).espn_league_id == 35392660
+    assert DraftSession.get_by_id(older.id).espn_league_id is None
+    assert DraftSession.get_by_id(older.id).status == "active"

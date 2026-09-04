@@ -625,19 +625,24 @@ class DraftService:
                 )
             DraftService._check_room_free(user_id, espn_league_id)
 
-        session = DraftSession.create(
-            user_id=user_id,
-            team_id=req.team_id,
-            league_id=league.id if league is not None else None,
-            kind=req.kind,
-            name=clean_name(req.name),
-            espn_league_id=espn_league_id,
-            draft_type=draft_type,
-            pick_order=pick_order,
-            my_slot=req.my_slot,
-            rounds=rounds,
-            keepers=_stored_keepers(req.keepers),
-        )
+        try:
+            session = DraftSession.create(
+                user_id=user_id,
+                team_id=req.team_id,
+                league_id=league.id if league is not None else None,
+                kind=req.kind,
+                name=clean_name(req.name),
+                espn_league_id=espn_league_id,
+                draft_type=draft_type,
+                pick_order=pick_order,
+                my_slot=req.my_slot,
+                rounds=rounds,
+                keepers=_stored_keepers(req.keepers),
+            )
+        except IntegrityError as exc:
+            # Two live rooms for one league racing past the check above: the
+            # partial unique index decides, and the answer is the same 409.
+            raise DraftService._link_conflict(exc) from exc
 
         prefilled = league is not None and (req.pick_order is None or req.rounds is None)
         return DraftSessionResponse(
@@ -729,8 +734,11 @@ class DraftService:
             session.name = clean_name(req.name)
             touched.append(DraftSession.name)
         if "espn_league_id" in fields:
-            # Linking is explicit and exclusive; an explicit null unlinks.
-            if req.espn_league_id is not None:
+            # Linking is explicit and exclusive; an explicit null unlinks. Only
+            # an ACTIVE room holds a draft, so a PATCH that also closes the room
+            # is checked against the status it will have, not the one it had.
+            resulting_status = req.status if ("status" in fields and req.status is not None) else session.status
+            if req.espn_league_id is not None and resulting_status == "active":
                 DraftService._check_room_free(session.user_id, req.espn_league_id, exclude_id=session.id)
             session.espn_league_id = req.espn_league_id
             touched.append(DraftSession.espn_league_id)
@@ -903,19 +911,26 @@ class DraftService:
         )
         if pick is None:
             raise NotFoundError("DRAFT_PICK_NOT_FOUND", f"Pick {overall_pick} is not recorded")
+        # Undoing a pick in a finished draft means the draft is not finished:
+        # the room reopens, so the last pick can close it again. A reopened
+        # room holds its draft again, and a newer room may have taken it in
+        # the meantime — refused up front, before anything is deleted.
+        session = DraftService._session_or_404(session_id)
+        total = total_picks_of(session)
+        held = DraftPick.select().where(DraftPick.session == session_id).count()
+        reopens = session.status == "completed" and bool(total) and held - 1 < total
+        if reopens and session.espn_league_id is not None:
+            DraftService._check_room_free(session.user_id, session.espn_league_id, exclude_id=session.id)
         with db.atomic():
             pick.delete_instance()
-            # Undoing a pick in a finished draft means the draft is not
-            # finished: reopen it, so the last pick can close it again.
-            session = DraftService._session_or_404(session_id)
-            if session.status == "completed":
-                remaining = DraftPick.select().where(DraftPick.session == session_id).count()
-                total = total_picks_of(session)
-                if total and remaining < total:
-                    session.status = "active"
-                    session.completed_at = None
-                    session.updated_at = datetime.utcnow()
+            if reopens:
+                session.status = "active"
+                session.completed_at = None
+                session.updated_at = datetime.utcnow()
+                try:
                     session.save(only=[DraftSession.status, DraftSession.completed_at, DraftSession.updated_at])
+                except IntegrityError as exc:
+                    raise DraftService._link_conflict(exc) from exc
         return DraftPickDeleteResponse(
             status=ApiStatus.SUCCESS, message=f"Pick {overall_pick} undone", data=overall_pick
         )
