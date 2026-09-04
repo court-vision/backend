@@ -33,6 +33,7 @@ class DraftSession(BaseModel):
     my_slot = IntegerField(null=True)                       # 1-based slot of the user's team
     rounds = IntegerField(null=True)
     keepers = BinaryJSONField(default=list)                 # pre-designated keepers [{player_id?, espn_player_id?, name, slot?}]
+    punts = BinaryJSONField(default=list)                   # category keys this room concedes, e.g. ["ft_pct", "tov"]
     started_at = DateTimeField(null=True)
     completed_at = DateTimeField(null=True)
     created_at = DateTimeField(default=datetime.utcnow)
@@ -63,7 +64,7 @@ class DraftPick(BaseModel):
     espn_player_id = IntegerField(null=True)
     player_name = CharField(max_length=255, null=True)
     by_me = BooleanField(default=False)
-    source = CharField(max_length=16, default="manual")     # manual | espn_sync | import
+    source = CharField(max_length=16, default="manual")     # manual | espn_sync | import | keeper | mock
     bid = DecimalField(max_digits=7, decimal_places=2, null=True)   # auction (v2)
     created_at = DateTimeField(default=datetime.utcnow)
 

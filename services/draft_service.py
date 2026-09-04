@@ -48,6 +48,9 @@ from schemas.draft import (
     DraftSessionResponse,
     DraftSessionUpdate,
 )
+from services.draft_fit import normalize_punts
+from services.scoring.category_value import rankable_categories
+from services.scoring.resolver import resolve_scoring, resolve_scoring_for_team
 
 # Roster slots that are not drafted for: the injury slot is filled from the
 # roster, never from the draft board.
@@ -246,6 +249,22 @@ def check_length_holds_picks(total_picks: Optional[int], used: Iterable[int]) ->
             "DRAFT_SHORTER_THAN_PICKS",
             f"Pick {last} is already recorded; a {total_picks}-pick draft cannot hold it",
         )
+
+
+def punt_options(session: DraftSession) -> list[str]:
+    """The category keys this room can concede.
+
+    Resolved exactly as the board resolves its scoring, team preview included:
+    a points league viewed as 9-cat *is* showing categories, so punting them is
+    meaningful. Empty for a points-scored room, which has nothing to punt.
+    """
+    scoring = (
+        resolve_scoring_for_team(session.team_id) if session.team_id is not None
+        else resolve_scoring(session.league if session.league_id is not None else None)
+    )
+    if not scoring.is_categories:
+        return []
+    return [c.key for c in rankable_categories(scoring)]
 
 
 def league_prefill(league: Optional[League]) -> dict:
@@ -506,6 +525,7 @@ def _session_resp(
         my_slot=session.my_slot,
         rounds=session.rounds,
         keepers=_keepers_of(session),
+        punts=[str(k) for k in (session.punts or []) if isinstance(k, str)],
         league_size=league_size,
         keeper_count=keeper_count,
         total_picks=total_picks,
@@ -642,6 +662,12 @@ class DraftService:
         if "keepers" in fields and req.keepers is not None:
             session.keepers = _stored_keepers(req.keepers)
             touched.append(DraftSession.keepers)
+        if "punts" in fields and req.punts is not None:
+            # Validated before anything is written: a punt the league does not
+            # have would weigh nothing and quietly mislead the room into
+            # thinking a build was set. An empty list clears the build.
+            session.punts = DraftService._validated_punts(session, req.punts)
+            touched.append(DraftSession.punts)
         if "status" in fields and req.status is not None:
             session.status = req.status
             touched.append(DraftSession.status)
@@ -785,6 +811,24 @@ class DraftService:
         )
 
     # ---- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _validated_punts(session: DraftSession, punts: Iterable[str]) -> list[str]:
+        """The requested punts, restricted to categories this room actually has."""
+        options = punt_options(session)
+        if not options:
+            raise BadRequestError(
+                "PUNTS_NEED_CATEGORIES",
+                "This draft is scored by points; there are no categories to punt",
+            )
+        kept, unknown = normalize_punts(punts, options)
+        if unknown:
+            raise BadRequestError(
+                "PUNTS_UNKNOWN_CATEGORY",
+                f"Not a category in this league: {', '.join(unknown)}. "
+                f"This league scores {', '.join(options)}",
+            )
+        return kept
 
     @staticmethod
     def _session_or_404(session_id: int) -> DraftSession:

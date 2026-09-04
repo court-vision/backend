@@ -59,8 +59,10 @@ router = APIRouter(prefix="/drafts", tags=["Drafts"])
         "caller's roster.\n\n"
         "`cv_rank` is computed over the full pool before `picked`/`mine` are removed, so it stays "
         "stable and market-comparable throughout a draft.\n\n"
-        "Stateless: pick state rides in the query params. Use the session board once a draft room "
-        "is open."
+        "Category leagues also carry `fit_value`/`fit_rank`: the same board re-scored for the "
+        "caller's own roster, with any `punt` categories weighing zero.\n\n"
+        "Stateless: pick state rides in the query params, so there is no slot to count from and "
+        "rows carry no availability. Use the session board once a draft room is open."
     ),
     responses={
         200: {"description": "Board retrieved successfully (empty data with a message before any season data exists)"},
@@ -80,12 +82,24 @@ async def get_draft_board(
             "also removed, and counted against the league's position caps"
         ),
     ),
+    punt: list[str] = Query(
+        default=[],
+        description=(
+            "Category keys to concede, e.g. `punt=ft_pct&punt=tov`. They weigh zero in "
+            "`fit_value`; unknown keys are ignored here (the room stores validated punts on "
+            "the session instead). No effect on a points league."
+        ),
+    ),
     team: OwnedTeamContext = Depends(get_owned_team),
 ):
     # `get_owned_team` already loaded the league, so resolving its scoring is
     # pure — no second trip to the database (the rankings pattern).
     scoring = resolve_scoring(team.league)
-    return respond(await DraftBoardService.get_board(scoring, picked_ids=picked, my_ids=mine))
+    # No session, so no picks and no slot: BoardSession carries only the view
+    # knobs the query string sets.
+    return respond(await DraftBoardService.get_board(
+        scoring, picked_ids=picked, my_ids=mine, session=BoardSession(punts=tuple(punt))
+    ))
 
 
 @router.post(
@@ -140,15 +154,23 @@ async def get_draft_session(session: OwnedDraftSessionContext = Depends(get_owne
     summary="Update a draft session",
     description=(
         "Partial update — only the fields present in the body are written. Used for confirming or "
-        "correcting `my_slot`, editing pre-designated `keepers`, and closing the room "
-        "(`status: completed`, which stamps `completed_at` the first time).\n\n"
+        "correcting `my_slot`, editing pre-designated `keepers`, setting the `punts` this room is "
+        "drafting around, and closing the room (`status: completed`, which stamps `completed_at` "
+        "the first time).\n\n"
+        "`punts` must be categories this league actually scores; a points-scored room has none, "
+        "and an empty list clears the build.\n\n"
         "Changing `draft_type` or `pick_order` re-derives the round and slot of every recorded "
         "pick. A change that would leave the session inconsistent — a slot outside the new pick "
         "order, or a draft resized shorter than the picks already recorded — is refused."
     ),
     responses={
         200: {"description": "Session updated"},
-        400: {"description": "Slot outside the draft, or a draft resized shorter than its recorded picks"},
+        400: {
+            "description": (
+                "Slot outside the draft, a draft resized shorter than its recorded picks, or "
+                "punts this league cannot score"
+            )
+        },
         404: {"description": "No such session, or it does not belong to the caller"},
         422: {"description": "Empty or invalid update"},
     },
@@ -171,7 +193,13 @@ async def update_draft_session(
         "Players the league's hard position caps have made undraftable for the caller are flagged "
         "`cap_blocked` (shown greyed, never hidden) and are excluded from the recommendations.\n\n"
         "`roster` lists the caller's drafted players with primary position, eligible slots and NBA "
-        "team — what the roster zone needs to fill lineup slots, count caps and flag stacking."
+        "team — what the roster zone needs to fill lineup slots, count caps and flag stacking.\n\n"
+        "Category leagues additionally carry `fit_value`/`fit_rank` — the board re-scored for this "
+        "roster, with the session's `punts` at zero weight — a `category_fit` component on every "
+        "recommendation, and `meta.category_need`, which says how far the roster trails an average "
+        "team in each category.\n\n"
+        "Rows with market data carry `availability` (`likely`/`tossup`/`gone`) for the caller's "
+        "next pick — the pick after that while the caller is on the clock."
     ),
     responses={
         200: {"description": "Board retrieved successfully (empty data with a message before any season data exists)"},
@@ -197,7 +225,9 @@ async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(ge
         "to correct it.\n\n"
         "`source: keeper` records a keeper at the pick its round costs (the session's `keepers` "
         "carry that number as `overall_pick`). A keeper pick leaves the board like any other but "
-        "never counts as the draft front: whose-turn arithmetic steps over it."
+        "never counts as the draft front: whose-turn arithmetic steps over it, so it is checked "
+        "against the session's designated keepers rather than taken on trust. `source: mock` is "
+        "rejected here — it claims the autopicker made the pick, which only the server may say."
     ),
     responses={
         200: {"description": "Pick recorded"},
