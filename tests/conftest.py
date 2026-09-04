@@ -22,6 +22,23 @@ os.environ.setdefault("PIPELINE_API_TOKEN", "test-token")
 os.environ.setdefault("NBA_SEASON", "2025-26")
 
 
+# ---- The captured draft ----
+
+@pytest.fixture(scope="session")
+def replay():
+    """A real 52-pick ESPN snake draft, vendored under tests/fixtures/.
+
+    Its provenance is in the file's own `_source`. Both the fast arithmetic
+    conformance check and the end-to-end replay read it, so the two can never
+    drift apart on what the draft actually was.
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "draft_replay_4team_13round.json"
+    return json.loads(path.read_text())
+
+
 # ---- Time-freezing fixtures ----
 
 @pytest.fixture

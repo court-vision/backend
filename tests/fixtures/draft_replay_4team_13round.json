@@ -1,0 +1,379 @@
+{
+  "_source": "Real ESPN snake draft, league 552315826 (season 2027), captured 2026-09-01 by spike/mdraftdetail_poll.py in the monorepo at spike/runs/20260901_024411/. Vendored here because that capture lives outside this repository and CI cannot see it. pick_order and draft type are the league's own draftSettings from the same capture; the league designated no keepers (keeperCount 0), so the keeper cases in the replay are layered on top and are marked as such.",
+  "league_id": 552315826,
+  "draft_type": "snake",
+  "pick_order": [
+    2,
+    1,
+    4,
+    3
+  ],
+  "league_size": 4,
+  "rounds": 13,
+  "picks": [
+    {
+      "overall": 1,
+      "round": 1,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 5104157
+    },
+    {
+      "overall": 2,
+      "round": 1,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 3112335
+    },
+    {
+      "overall": 3,
+      "round": 1,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 4278073
+    },
+    {
+      "overall": 4,
+      "round": 1,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 3032977
+    },
+    {
+      "overall": 5,
+      "round": 2,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 3945274
+    },
+    {
+      "overall": 6,
+      "round": 2,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 6583
+    },
+    {
+      "overall": 7,
+      "round": 2,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 4594268
+    },
+    {
+      "overall": 8,
+      "round": 2,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4432166
+    },
+    {
+      "overall": 9,
+      "round": 3,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 4065648
+    },
+    {
+      "overall": 10,
+      "round": 3,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 3155942
+    },
+    {
+      "overall": 11,
+      "round": 3,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 1966
+    },
+    {
+      "overall": 12,
+      "round": 3,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 4277905
+    },
+    {
+      "overall": 13,
+      "round": 4,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 3992
+    },
+    {
+      "overall": 14,
+      "round": 4,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 3136195
+    },
+    {
+      "overall": 15,
+      "round": 4,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 3149673
+    },
+    {
+      "overall": 16,
+      "round": 4,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4431678
+    },
+    {
+      "overall": 17,
+      "round": 5,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 3136193
+    },
+    {
+      "overall": 18,
+      "round": 5,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 4684740
+    },
+    {
+      "overall": 19,
+      "round": 5,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 4017837
+    },
+    {
+      "overall": 20,
+      "round": 5,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 4871145
+    },
+    {
+      "overall": 21,
+      "round": 6,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 3917376
+    },
+    {
+      "overall": 22,
+      "round": 6,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 4593803
+    },
+    {
+      "overall": 23,
+      "round": 6,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 6478
+    },
+    {
+      "overall": 24,
+      "round": 6,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4871144
+    },
+    {
+      "overall": 25,
+      "round": 7,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 3908809
+    },
+    {
+      "overall": 26,
+      "round": 7,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 3975
+    },
+    {
+      "overall": 27,
+      "round": 7,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 3934672
+    },
+    {
+      "overall": 28,
+      "round": 7,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 4066261
+    },
+    {
+      "overall": 29,
+      "round": 8,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 4432158
+    },
+    {
+      "overall": 30,
+      "round": 8,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 4066259
+    },
+    {
+      "overall": 31,
+      "round": 8,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 4395628
+    },
+    {
+      "overall": 32,
+      "round": 8,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4433134
+    },
+    {
+      "overall": 33,
+      "round": 9,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 3202
+    },
+    {
+      "overall": 34,
+      "round": 9,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 4279888
+    },
+    {
+      "overall": 35,
+      "round": 9,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 3936299
+    },
+    {
+      "overall": 36,
+      "round": 9,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 4566434
+    },
+    {
+      "overall": 37,
+      "round": 10,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 3978
+    },
+    {
+      "overall": 38,
+      "round": 10,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 4432573
+    },
+    {
+      "overall": 39,
+      "round": 10,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 4432816
+    },
+    {
+      "overall": 40,
+      "round": 10,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4701230
+    },
+    {
+      "overall": 41,
+      "round": 11,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 4433255
+    },
+    {
+      "overall": 42,
+      "round": 11,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 4066320
+    },
+    {
+      "overall": 43,
+      "round": 11,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 5041939
+    },
+    {
+      "overall": 44,
+      "round": 11,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 4395651
+    },
+    {
+      "overall": 45,
+      "round": 12,
+      "round_pick": 1,
+      "team": 3,
+      "espn_player_id": 3062679
+    },
+    {
+      "overall": 46,
+      "round": 12,
+      "round_pick": 2,
+      "team": 4,
+      "espn_player_id": 4066328
+    },
+    {
+      "overall": 47,
+      "round": 12,
+      "round_pick": 3,
+      "team": 1,
+      "espn_player_id": 4869342
+    },
+    {
+      "overall": 48,
+      "round": 12,
+      "round_pick": 4,
+      "team": 2,
+      "espn_player_id": 4066457
+    },
+    {
+      "overall": 49,
+      "round": 13,
+      "round_pick": 1,
+      "team": 2,
+      "espn_player_id": 5037871
+    },
+    {
+      "overall": 50,
+      "round": 13,
+      "round_pick": 2,
+      "team": 1,
+      "espn_player_id": 3078576
+    },
+    {
+      "overall": 51,
+      "round": 13,
+      "round_pick": 3,
+      "team": 4,
+      "espn_player_id": 4437244
+    },
+    {
+      "overall": 52,
+      "round": 13,
+      "round_pick": 4,
+      "team": 3,
+      "espn_player_id": 3133628
+    }
+  ]
+}
