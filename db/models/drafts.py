@@ -64,6 +64,7 @@ class DraftPick(BaseModel):
     slot = IntegerField(null=True)                          # drafting team's slot in pick_order
     player = ForeignKeyField(Player, column_name="player_id", null=True, backref="draft_picks")
     espn_player_id = IntegerField(null=True)
+    espn_team_id = BigIntegerField(null=True)               # who ESPN says picked (an id from pick_order); null for a hand-entered pick
     player_name = CharField(max_length=255, null=True)
     by_me = BooleanField(default=False)
     source = CharField(max_length=16, default="manual")     # manual | espn_sync | import

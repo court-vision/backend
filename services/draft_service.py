@@ -226,6 +226,34 @@ def pick_geometry(
     )
 
 
+def seat_of(espn_team_id: Optional[int], pick_order: Optional[Iterable]) -> Optional[int]:
+    """The 1-based seat of an ESPN team in the pick order, when both are known."""
+    if espn_team_id is None:
+        return None
+    for index, team in enumerate(pick_order or []):
+        try:
+            if int(team) == int(espn_team_id):
+                return index + 1
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def pick_placement(
+    overall_pick: int,
+    league_size: Optional[int],
+    draft_type: str,
+    pick_order: Optional[Iterable] = None,
+    espn_team_id: Optional[int] = None,
+) -> tuple[Optional[int], Optional[int]]:
+    """Round and seat of a pick. The seat is the one ESPN attributed the pick
+    to when that team is known (a traded pick, an auction), else the snake
+    geometry's; the round is always the geometry's."""
+    pick_round, pick_slot = pick_geometry(overall_pick, league_size, draft_type)
+    seat = seat_of(espn_team_id, pick_order)
+    return pick_round, (seat if seat is not None else pick_slot)
+
+
 def check_slot_in_range(my_slot: Optional[int], league_size: Optional[int]) -> None:
     """A confirmed slot must be a seat the pick order actually has.
 
@@ -477,6 +505,7 @@ def _pick_resp(pick: DraftPick) -> DraftPickResp:
         slot=pick.slot,
         player_id=pick.player_id,
         espn_player_id=pick.espn_player_id,
+        espn_team_id=pick.espn_team_id,
         player_name=pick.player_name,
         by_me=bool(pick.by_me),
         source=pick.source,
@@ -719,8 +748,8 @@ class DraftService:
                 # snake into an auction makes every value NULL. This runs once
                 # per header change, over at most a draft's worth of rows.
                 for pick in picks:
-                    pick.round, pick.slot = pick_geometry(
-                        pick.overall_pick, league_size, session.draft_type
+                    pick.round, pick.slot = pick_placement(
+                        pick.overall_pick, league_size, session.draft_type, session.pick_order, pick.espn_team_id
                     )
                     pick.save(only=[DraftPick.round, DraftPick.slot])
             session.updated_at = datetime.utcnow()
@@ -797,7 +826,9 @@ class DraftService:
                 DraftService._check_keeper_pick(
                     session, overall, player_id, espn_player_id, player_name
                 )
-            pick_round, pick_slot = pick_geometry(overall, league_size, session.draft_type)
+            pick_round, pick_slot = pick_placement(
+                overall, league_size, session.draft_type, session.pick_order, req.espn_team_id
+            )
             try:
                 pick = DraftPick.create(
                     session_id=session_id,
@@ -806,6 +837,7 @@ class DraftService:
                     slot=pick_slot,
                     player_id=player_id,
                     espn_player_id=espn_player_id,
+                    espn_team_id=req.espn_team_id,
                     player_name=player_name,
                     by_me=req.by_me,
                     source=req.source,

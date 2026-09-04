@@ -99,6 +99,15 @@ class DraftPickCreate(BaseRequest):
     player_id: Optional[int] = Field(default=None, description="NBA player id (nba.players.id)")
     espn_player_id: Optional[int] = None
     player_name: Optional[str] = Field(default=None, max_length=255)
+    espn_team_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "The ESPN team that made the pick (an id from `pick_order`), when the pick came from "
+            "ESPN. Sets `slot` by lookup rather than by the snake geometry — a traded pick or an "
+            "auction pick lands in the seat that actually made it."
+        ),
+    )
     overall_pick: Optional[int] = Field(default=None, ge=1, description="Defaults to the session's next unused pick")
     by_me: bool = Field(default=False, description="Drafted by the caller (counts against position caps and fills the roster zone)")
     source: PickSource = Field(
@@ -123,9 +132,16 @@ class DraftPickCreate(BaseRequest):
 class DraftPickResp(ApiModel):
     overall_pick: int
     round: Optional[int] = Field(default=None, description="1-based round; None for auction drafts")
-    slot: Optional[int] = Field(default=None, description="1-based slot in pick_order that made the pick")
+    slot: Optional[int] = Field(
+        default=None,
+        description=(
+            "1-based seat in pick_order that made the pick: the ESPN team's seat when the pick's "
+            "team is known, else derived from the pick number (snake drafts only)"
+        ),
+    )
     player_id: Optional[int] = Field(default=None, description="NBA player id, when the pick resolved to one")
     espn_player_id: Optional[int] = None
+    espn_team_id: Optional[int] = Field(default=None, description="The ESPN team that made the pick, when ESPN said")
     player_name: Optional[str] = None
     by_me: bool = False
     source: PickSource = "manual"

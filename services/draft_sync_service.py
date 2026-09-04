@@ -44,6 +44,7 @@ from services.draft_service import (
     matching_keeper,
     pick_for_slot,
     pick_geometry,
+    pick_placement,
     round_of,
     total_picks_of,
     _keepers_of,
@@ -240,7 +241,8 @@ class DraftSyncService:
                     conflicts.append(verdict)
                     continue
 
-                by_me = int(made["teamId"]) == header.espn_team_id
+                team_id = int(made["teamId"])
+                by_me = team_id == header.espn_team_id
                 source = "espn_sync"
                 addition = None
                 if made.get("isKeeper"):
@@ -253,7 +255,9 @@ class DraftSyncService:
                     amount = made.get("bidAmount") or 0
                     bid = amount if amount > 0 else None
 
-                pick_round, pick_slot = pick_geometry(pn, league_size, session.draft_type)
+                pick_round, pick_slot = pick_placement(
+                    pn, league_size, session.draft_type, session.pick_order, team_id
+                )
                 try:
                     # A savepoint: a racing insert becomes a reported conflict
                     # rather than poisoning the whole reconciliation.
@@ -265,6 +269,7 @@ class DraftSyncService:
                             slot=pick_slot,
                             player_id=player_id,
                             espn_player_id=espn_id,
+                            espn_team_id=team_id,
                             player_name=player_name,
                             by_me=by_me,
                             source=source,

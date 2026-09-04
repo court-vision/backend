@@ -332,3 +332,25 @@ async def test_delete_removes_the_room_and_its_picks(user):
     assert _stored(session.id) == []
     with pytest.raises(NotFoundError):
         await DraftService.delete_session(session.id)
+
+
+# ----------------------------- attribution ---------------------------- #
+
+
+async def test_a_pick_from_espn_sits_in_its_teams_seat(user):
+    session = await _session(user)                        # order [10, 6, 5, 8]
+    traded = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Traded", espn_team_id=5))).data
+    assert (traded.round, traded.slot, traded.espn_team_id) == (1, 3, 5)
+    plain = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Plain"))).data
+    assert (plain.round, plain.slot, plain.espn_team_id) == (1, 2, None)
+
+    # Reshaping the draft keeps the observed seat and re-derives the guessed one.
+    reshaped = (await DraftService.update_session(session.id, DraftSessionUpdate(pick_order=[8, 10, 6, 5]))).data
+    by_number = {p.overall_pick: p for p in reshaped.picks}
+    assert by_number[1].slot == 4 and by_number[2].slot == 2
+
+
+async def test_an_auction_pick_gets_a_seat_from_its_team_and_no_round(user):
+    session = await _session(user, draft_type="auction")
+    pick = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Bought", espn_team_id=8, bid=40))).data
+    assert (pick.round, pick.slot, pick.espn_team_id) == (None, 4, 8)

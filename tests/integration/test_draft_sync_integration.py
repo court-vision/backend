@@ -150,3 +150,13 @@ async def test_a_synced_keeper_does_not_break_a_later_patch(user, players):
     # A PATCH that touches the session must not try to reprice that keeper.
     resp = await DraftService.update_session(session.id, DraftSessionUpdate(status="completed"))
     assert resp.data.status == "completed"
+
+
+async def test_synced_picks_carry_the_espn_team_and_its_seat(user, players):
+    session = await _mock_session(user)
+    data = (await DraftSyncService.sync_init(session.id, DraftInitSyncRequest(payload=INPROGRESS))).data
+    order = data.session.pick_order
+    stored = _stored(session.id)
+    assert stored and all(p.espn_team_id is not None for p in stored)
+    assert all(p.slot == order.index(p.espn_team_id) + 1 for p in stored)
+    assert stored[0].espn_team_id == 1
