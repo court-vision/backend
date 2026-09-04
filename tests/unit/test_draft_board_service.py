@@ -475,7 +475,11 @@ def test_recommendations_decompose_the_score_and_sum_to_it(stub_inputs):
     best = resp.recommendations[0]
     assert best.player_id == 1                      # the most valuable available player
     keys = [c.key for c in best.components]
-    assert keys == ["season_value", "vorp", "scarcity", "flexibility", "injury"]
+    assert keys == ["season_value", "vorp", "scarcity", "flexibility", "injury", "category_fit"]
+    # A points league has no categories to fit: the term is present (the room
+    # renders every component) and contributes nothing.
+    fit = next(c for c in best.components if c.key == "category_fit")
+    assert fit.value == 0.0 and "points league" in fit.detail
     summed = round(sum(c.value for c in best.components if c.in_score), 1)
     assert summed == best.score
     # season_value is context, not a term: it is the base vorp is measured from.
@@ -594,12 +598,12 @@ def test_the_replacement_bar_does_not_fall_as_a_position_is_drafted():
     def candidates(drafted_top: int) -> list[dict]:
         pool = [
             {"id": 100 + i, "name": f"C{i}", "value": 45 - i * 0.5,
-             "season_value": round((45 - i * 0.5) * 65, 1), "position": "C",
+             "season_value": round((45 - i * 0.5) * 65, 1), "gp": 65, "position": "C",
              "available": i >= drafted_top, "blocked": False, "injury": None, "slots": ["C", "UT"]}
             for i in range(60)
         ]
         pool.append({"id": 999, "name": "Star", "value": 45.0, "season_value": 2925.0,
-                     "position": "PG", "available": True, "blocked": False,
+                     "gp": 65, "position": "PG", "available": True, "blocked": False,
                      "injury": None, "slots": ["PG", "G", "UT"]})
         return pool
 
@@ -724,8 +728,10 @@ def test_fetch_projections_win_over_the_baseline_and_carry_projected_games(fake_
 @pytest.mark.unit
 def test_fetch_splits_a_sessions_picks_into_everyones_and_mine(fake_tables):
     fake_tables["picks"] = [
-        SimpleNamespace(player_id=1, by_me=True, espn_player_id=101, player_name="Star"),
-        SimpleNamespace(player_id=2, by_me=False, espn_player_id=None, player_name=None),
+        SimpleNamespace(player_id=1, by_me=True, espn_player_id=101, player_name="Star",
+                        overall_pick=3, source="manual"),
+        SimpleNamespace(player_id=2, by_me=False, espn_player_id=None, player_name=None,
+                        overall_pick=1, source="manual"),
     ]
 
     inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
@@ -742,9 +748,12 @@ def test_fetch_counts_a_pick_recorded_before_its_player_was_synced(fake_tables):
     had neither; the sync has since landed them as players 9 and 2. Both picks
     are theirs — off the board, and the first one counted against my caps."""
     fake_tables["picks"] = [
-        SimpleNamespace(player_id=None, by_me=True, espn_player_id=109, player_name=None),
-        SimpleNamespace(player_id=None, by_me=False, espn_player_id=None, player_name="Guard"),
-        SimpleNamespace(player_id=None, by_me=False, espn_player_id=999, player_name="Nobody Yet"),
+        SimpleNamespace(player_id=None, by_me=True, espn_player_id=109, player_name=None,
+                        overall_pick=1, source="manual"),
+        SimpleNamespace(player_id=None, by_me=False, espn_player_id=None, player_name="Guard",
+                        overall_pick=2, source="manual"),
+        SimpleNamespace(player_id=None, by_me=False, espn_player_id=999, player_name="Nobody Yet",
+                        overall_pick=3, source="manual"),
     ]
 
     inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
@@ -771,3 +780,272 @@ def test_an_uncapped_espn_position_is_never_blocked_by_the_coarse_fallback(monke
     by_id = {r.player_id: r for r in resp.data}
     assert by_id[4].cap_blocked is False     # ESPN says PF; the C cap is not his
     assert by_id[6].cap_blocked is True      # no ESPN data: judged coarsely, and coarsely a C
+
+
+# ---- category fit ----------------------------------------------------------
+
+# Counting categories only: the fit model weighs per-category z's, and rate
+# categories would add makes/attempts bookkeeping that says nothing about it.
+COUNTING_CAT = [
+    {"key": k, "label": k.upper(), "higher_is_better": k != "tov", "is_rate": False}
+    for k in ("pts", "reb", "ast", "stl", "blk", "tov", "fg3m")
+]
+
+
+def _cat_league(**overrides):
+    return _league(scoring_type="categories", categories=COUNTING_CAT,
+                   category_win_mode="each_category", **overrides)
+
+
+def _cat_inputs(**overrides) -> BoardInputs:
+    """A pool with real spread in more than one category: two bigs who rebound
+    and block, two guards who pass and steal, and a scorer in between."""
+    pool = [
+        _row(1, fpts=50.0, name="Big", pts=24, reb=12, ast=2, stl=0.6, blk=2.4, tov=2.2, fg3m=0.4),
+        _row(2, fpts=44.0, name="Guard", pts=22, reb=3.4, ast=9.5, stl=1.9, blk=0.3, tov=3.1, fg3m=3.2),
+        _row(3, fpts=46.0, name="Wing", pts=28, reb=6, ast=4, stl=1.1, blk=0.6, tov=2.6, fg3m=3.0),
+        _row(4, fpts=38.0, name="Big2", pts=15, reb=11.5, ast=1.6, stl=0.5, blk=2.1, tov=1.7, fg3m=0.2),
+        _row(5, fpts=36.0, name="Guard2", pts=17, reb=2.8, ast=8.2, stl=2.1, blk=0.2, tov=2.9, fg3m=2.7),
+        _row(6, fpts=34.0, name="Wing2", pts=19, reb=5.5, ast=3.4, stl=1.0, blk=0.7, tov=2.0, fg3m=2.4),
+    ]
+    base = BoardInputs(
+        season=SEASON,
+        pool=pool,
+        source={p.id: "baseline" for p in pool},
+        last_season_gp={p.id: 65 for p in pool},
+        projected_gp={},
+        market={p.id: {"overall_rank": p.id, "adp": float(p.id), "auction_value": None}
+                for p in pool},
+        market_as_of=date(2026, 9, 1),
+        positions={1: "C", 2: "G", 3: "F", 4: "C", 5: "G", 6: "F"},
+    )
+    for key, value in overrides.items():
+        setattr(base, key, value)
+    return base
+
+
+def _cat_board(mine=(), punts=(), picked=(), **session_kwargs):
+    inputs = _cat_inputs()
+    return inputs, asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_cat_league()),
+        picked_ids=picked, my_ids=mine,
+        session=BoardSession(punts=tuple(punts), **session_kwargs),
+    ))
+
+
+@pytest.fixture
+def cat_tables(monkeypatch):
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _cat_inputs()))
+
+
+@pytest.mark.unit
+def test_the_fit_column_opens_the_draft_equal_to_the_balanced_one(cat_tables):
+    """Nothing drafted, nothing punted: there is no roster to be short of
+    anything, so fit must agree with the balanced value exactly."""
+    _, resp = _cat_board(league_size=12, rounds=13)
+
+    assert resp.meta.category_need, "a category league reports where its roster stands"
+    assert all(n.need == 0.0 and n.weight == 1.0 for n in resp.meta.category_need)
+    for row in resp.data:
+        assert row.fit_value == row.value
+    assert [r.fit_rank for r in resp.data] == [r.cv_rank for r in resp.data]
+
+
+@pytest.mark.unit
+def test_fit_re_scores_the_board_for_the_roster_already_drafted(cat_tables):
+    """Two guards in: the board's balanced order does not change, but a big now
+    outranks a wing the balanced column prefers."""
+    _, balanced = _cat_board(league_size=12, rounds=13)
+    _, resp = _cat_board(mine=[2, 5], league_size=12, rounds=13)
+
+    by_id = {r.player_id: r for r in resp.data}
+    need = {n.key: n for n in resp.meta.category_need}
+    # A guard-heavy roster trails on the glass and on blocks, and leads in
+    # assists and steals.
+    assert need["reb"].need > 0 and need["blk"].need > 0
+    assert need["ast"].need < 0 and need["stl"].need < 0
+    assert need["reb"].weight > 1 > need["ast"].weight
+
+    # The rows keep the balanced order — fit is a column, not the sort — and
+    # the balanced values are untouched by whose roster is asking. (The two
+    # drafted guards have left the board; the rest hold their places.)
+    drafted = {2, 5}
+    survivors = [r.player_id for r in balanced.data if r.player_id not in drafted]
+    assert [r.player_id for r in resp.data] == survivors
+    was = {r.player_id: r.value for r in balanced.data}
+    assert all(r.value == was[r.player_id] for r in resp.data)
+    # But the wing the balanced column prefers is behind the second big on fit.
+    assert by_id[3].value > by_id[4].value
+    assert by_id[4].fit_value > by_id[3].fit_value
+    assert by_id[4].fit_rank < by_id[3].fit_rank
+
+
+@pytest.mark.unit
+def test_fit_ranks_only_what_is_still_available(cat_tables):
+    """cv_rank is a fact about the pool and holds still; fit_rank is a fact
+    about this roster's next pick, so it renumbers as the board empties."""
+    _, resp = _cat_board(picked=[1], mine=[2], league_size=12, rounds=13)
+
+    # A dense 1..n over what is left, and it is the fit order — not the
+    # balanced one the rows are emitted in.
+    ranks = sorted(r.fit_rank for r in resp.data)
+    assert ranks == list(range(1, len(resp.data) + 1))
+    assert 1 not in [r.player_id for r in resp.data]
+    by_fit = sorted(resp.data, key=lambda r: r.fit_rank)
+    assert [r.fit_value for r in by_fit] == sorted(
+        (r.fit_value for r in resp.data), reverse=True
+    )
+
+
+@pytest.mark.unit
+def test_a_punt_zeroes_a_categorys_weight_and_says_so_in_the_meta(cat_tables):
+    _, plain = _cat_board(league_size=12, rounds=13)
+    _, resp = _cat_board(punts=["fg3m"], league_size=12, rounds=13)
+
+    assert resp.meta.punts == ["fg3m"]
+    weights = {n.key: n.weight for n in resp.meta.category_need}
+    assert weights["fg3m"] == 0.0
+    assert all(w == 1.0 for k, w in weights.items() if k != "fg3m")
+
+    # The three-point shooters lose the value that sat in the punted category;
+    # the bigs, who had none of it, gain rank without gaining value.
+    before = {r.player_id: r.fit_value for r in plain.data}
+    after = {r.player_id: r.fit_value for r in resp.data}
+    assert after[2] < before[2] and after[5] < before[5]      # the shooters
+    assert after[1] >= before[1]                             # the big keeps his
+    # The punt re-ranks the fit column without touching the balanced one, and
+    # nobody leaves the board.
+    fit_order = [r.player_id for r in sorted(resp.data, key=lambda r: r.fit_rank)]
+    plain_order = [r.player_id for r in sorted(plain.data, key=lambda r: r.fit_rank)]
+    assert fit_order != plain_order
+    assert [r.player_id for r in resp.data] == [r.player_id for r in plain.data]
+    assert len(resp.data) == len(plain.data)
+
+
+@pytest.mark.unit
+def test_an_unknown_punt_key_is_dropped_rather_than_reported_as_applied(cat_tables):
+    """The stateless board takes punts from the query string, where anything
+    can arrive. `meta.punts` states what actually weighs zero."""
+    _, resp = _cat_board(punts=["fg3m", "dunks"], league_size=12, rounds=13)
+
+    assert resp.meta.punts == ["fg3m"]
+
+
+@pytest.mark.unit
+def test_the_category_fit_component_is_summed_and_explains_itself(cat_tables):
+    _, resp = _cat_board(mine=[2, 5], league_size=12, rounds=13)
+
+    best = resp.recommendations[0]
+    fit = next(c for c in best.components if c.key == "category_fit")
+    assert fit.in_score is True
+    assert round(sum(c.value for c in best.components if c.in_score), 1) == best.score
+    # It names the categories that moved the pick, in this league's own terms.
+    assert any(n.label in fit.detail for n in resp.meta.category_need)
+    assert "pace" in fit.detail
+
+    # The best fit on a guard-heavy roster is a big, and the term is what put
+    # him there rather than his raw value.
+    assert best.player_id in (1, 4)
+    assert fit.value > 0
+
+
+@pytest.mark.unit
+def test_a_points_league_has_no_fit_column_and_no_category_need(stub_inputs):
+    resp = _board(resolve_scoring(_league()))
+
+    assert resp.meta.category_need == []
+    assert all(r.fit_value is None and r.fit_rank is None for r in resp.data)
+
+
+# ---- availability ----------------------------------------------------------
+
+
+def _availability_board(used_picks, market=None, **session_kwargs):
+    inputs = _inputs(used_picks=tuple(used_picks),
+                     market=market if market is not None else _inputs().market)
+    return asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_league()),
+        session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13,
+                             **session_kwargs),
+    )), inputs
+
+
+@pytest.mark.unit
+def test_availability_is_asked_about_my_next_pick(monkeypatch):
+    """Three picks in a four-team draft: the front is 4, my next turn is 6, and
+    the threshold is half a round. Everyone the market drafts inside three
+    picks of my turn is a toss-up."""
+    market = _espn_market(**{"6": {"adp": 12.0}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
+        lambda my_ids, session_id=None: _inputs(used_picks=(1, 2, 3), market=market)))
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_league()),
+        session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13),
+    ))
+
+    by_id = {r.player_id: r for r in resp.data}
+    assert by_id[1].availability == "gone"        # adp 1.4, five picks before mine
+    assert by_id[2].availability == "tossup"      # adp 5.5, half a pick before mine
+    assert by_id[6].availability == "likely"      # adp 12.0, six picks after mine
+    assert by_id[5].availability is None          # no market row at all
+
+
+@pytest.mark.unit
+def test_on_the_clock_the_question_becomes_whether_waiting_is_safe(monkeypatch):
+    """While I am picking, everything on the board is available *now* — the
+    only useful horizon is the turn after this one."""
+    market = _espn_market(**{"6": {"adp": 12.0}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
+        lambda my_ids, session_id=None: _inputs(used_picks=(1, 2, 3, 4, 5), market=market)))
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_league()),
+        session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13),
+    ))
+
+    # Front is 6 and so is my turn; the next one after it is 11.
+    by_id = {r.player_id: r for r in resp.data}
+    assert by_id[6].availability == "tossup"      # adp 12 against pick 11
+    assert by_id[2].availability == "gone"        # adp 5.5, long gone by 11
+
+
+@pytest.mark.unit
+def test_a_room_with_no_slot_confirmed_reports_no_availability(monkeypatch):
+    """Without a seat there is no next pick to measure against, and a guess
+    would be worse than silence."""
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
+        lambda my_ids, session_id=None: _inputs(used_picks=(1, 2, 3))))
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_league()),
+        session=BoardSession(session_id=77, league_size=4, rounds=13),
+    ))
+
+    assert all(r.availability is None for r in resp.data)
+
+
+@pytest.mark.unit
+def test_the_stateless_board_has_no_draft_to_count_from(stub_inputs):
+    resp = _board(resolve_scoring(_league()))
+
+    assert all(r.availability is None for r in resp.data)
+    assert resp.meta.session_id is None
+
+
+@pytest.mark.unit
+def test_the_front_steps_over_keepers_when_it_finds_my_turn(monkeypatch):
+    """A keeper is spent before the draft starts: it neither moves the front
+    nor counts as my turn, so availability is measured against the pick I
+    actually get to use."""
+    market = _espn_market(**{"6": {"adp": 12.0}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
+        lambda my_ids, session_id=None: _inputs(
+            used_picks=(1, 2, 3, 6), keeper_picks=(6,), market=market)))
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_league()),
+        session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13),
+    ))
+
+    # Pick 6 is my keeper, so my next real turn is 11; adp 12 is now a toss-up
+    # rather than a comfortable wait.
+    by_id = {r.player_id: r for r in resp.data}
+    assert by_id[6].availability == "tossup"

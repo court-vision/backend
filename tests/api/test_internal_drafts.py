@@ -340,7 +340,9 @@ def test_the_literal_board_path_is_not_read_as_a_session_id(authed_client, servi
     """`/drafts/board` must keep matching the stateless route, not `/{session_id}`."""
     _own(monkeypatch, league=_league())
     assert authed_client.get("/v1/internal/drafts/board?team_id=7").status_code == 200
-    assert service["calls"][0]["session"] is None
+    # The stateless route carries view knobs but no session: no id means no
+    # picks are read and no slot is counted from.
+    assert service["calls"][0]["session"].session_id is None
 
 
 # ------------------------------ INIT sync ------------------------------- #

@@ -69,6 +69,7 @@ class OwnedDraftSessionContext:
     pick_order: tuple[int, ...]
     my_slot: Optional[int]
     rounds: Optional[int]
+    punts: tuple[str, ...] = ()
 
     @property
     def league_size(self) -> Optional[int]:
@@ -209,6 +210,7 @@ def _owned_session(session_id: int, user_id: int) -> Optional[OwnedDraftSessionC
         pick_order=order,
         my_slot=session.my_slot,
         rounds=session.rounds,
+        punts=tuple(str(k) for k in (session.punts or []) if isinstance(k, str)),
     )
 
 
