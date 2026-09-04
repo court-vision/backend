@@ -28,6 +28,8 @@ from api.deps import (
 from core.responses import respond
 from schemas.draft import (
     DraftBoardResp,
+    DraftInitSyncRequest,
+    DraftInitSyncResponse,
     DraftPickCreate,
     DraftPickDeleteResponse,
     DraftPickResponse,
@@ -38,6 +40,7 @@ from schemas.draft import (
 )
 from services.draft_board_service import BoardSession, DraftBoardService
 from services.draft_service import DraftService
+from services.draft_sync_service import DraftSyncService
 from services.scoring.resolver import resolve_scoring
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
@@ -224,3 +227,28 @@ async def remove_draft_pick(
     overall_pick: int, session: OwnedDraftSessionContext = Depends(get_owned_session)
 ):
     return respond(await DraftService.remove_pick(session.session_id, overall_pick))
+
+
+@router.post(
+    "/{session_id}/sync/init",
+    response_model=DraftInitSyncResponse,
+    summary="Reconcile a session with the ESPN draft room's INIT frame",
+    description=(
+        "Decodes the ESPN draft room's INIT snapshot and folds it into this session. On a session "
+        "with no picks yet it sets the pick order, slot, rounds and draft type from the room; then "
+        "it records every pick the room has made, at that pick's ESPN number, skipping the ones "
+        "already recorded and reporting (never overwriting) any that disagree.\n\n"
+        "Idempotent by design: the room's tab posts this on every connect, so a reconnect re-posts "
+        "the whole snapshot and only the newly-made picks are inserted."
+    ),
+    responses={
+        200: {"description": "Reconciled — see `inserted`, `skipped`, `conflicts`, `warnings`"},
+        400: {"description": "The payload is not a decodable INIT frame"},
+        404: {"description": "No such session, or it does not belong to the caller"},
+        409: {"description": "The ESPN room belongs to a different league than this session"},
+    },
+)
+async def sync_draft_init(
+    req: DraftInitSyncRequest, session: OwnedDraftSessionContext = Depends(get_owned_session)
+):
+    return respond(await DraftSyncService.sync_init(session.session_id, req))

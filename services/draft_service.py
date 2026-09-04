@@ -341,10 +341,20 @@ def plan_keeper_moves(keepers: Iterable, picks: Iterable) -> dict[int, int]:
     a target another pick already holds cannot be taken.
     """
     picks = list(picks)
-    keeper_picks = [p for p in picks if p.source == "keeper"]
+    keepers = list(keepers)
+    # Reprice only my own keepers. `_keepers_of` prices keepers at my slot, so a
+    # keeper the header moves must be mine. Another seat's keeper — a
+    # `source="keeper"` row synced from an ESPN INIT, recorded `by_me=False` with
+    # no designation of mine — is left where the room put it; pricing it against
+    # my slot would strand it. A keeper recorded the ordinary way is mine (it
+    # carries a designation, and the keeper flow marks it `by_me`), so an
+    # explicit `by_me=False` *and* no matching designation is the only "not mine".
+    def _mine(pick) -> bool:
+        return getattr(pick, "by_me", True) or matching_keeper(keepers, pick) is not None
+
+    keeper_picks = [p for p in picks if p.source == "keeper" and _mine(p)]
     if not keeper_picks:
         return {}
-    keepers = list(keepers)
 
     moves: dict[int, int] = {}
     for pick in keeper_picks:
