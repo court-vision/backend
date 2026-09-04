@@ -13,6 +13,10 @@ DraftStatus = Literal["active", "completed", "abandoned"]
 DraftType = Literal["snake", "auction"]
 Availability = Literal["likely", "tossup", "gone"]
 PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
+# What a client may claim a pick's provenance is. `mock` is missing on purpose:
+# it asserts the autopicker made the pick, which the room's undo rules and the
+# recap both read, so it is written by the server or not at all.
+ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
 
 
 # ------------------------------- Sessions ------------------------------- #
@@ -86,12 +90,14 @@ class DraftPickCreate(BaseRequest):
     player_name: Optional[str] = Field(default=None, max_length=255)
     overall_pick: Optional[int] = Field(default=None, ge=1, description="Defaults to the session's next unused pick")
     by_me: bool = Field(default=False, description="Drafted by the caller (counts against position caps and fills the roster zone)")
-    source: PickSource = Field(
+    source: ClientPickSource = Field(
         default="manual",
         description=(
             "`keeper` records a pick spent before the draft started (at the pick its round costs): "
-            "it leaves the board like any pick but never counts as the draft front. `mock` is "
-            "written by the mock autopicker, never by a client."
+            "it leaves the board like any pick but never counts as the draft front — and it is "
+            "checked against the session's designated keepers before it is written.\n\n"
+            "`mock` is not accepted here: it means the autopicker made the pick, and only the "
+            "server may say that."
         ),
     )
     bid: Optional[float] = Field(default=None, ge=0, description="Auction price (v2; ignored by snake drafts)")

@@ -225,7 +225,9 @@ async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(ge
         "to correct it.\n\n"
         "`source: keeper` records a keeper at the pick its round costs (the session's `keepers` "
         "carry that number as `overall_pick`). A keeper pick leaves the board like any other but "
-        "never counts as the draft front: whose-turn arithmetic steps over it."
+        "never counts as the draft front: whose-turn arithmetic steps over it, so it is checked "
+        "against the session's designated keepers rather than taken on trust. `source: mock` is "
+        "rejected here — it claims the autopicker made the pick, which only the server may say."
     ),
     responses={
         200: {"description": "Pick recorded"},
