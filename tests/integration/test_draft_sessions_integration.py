@@ -8,14 +8,17 @@ leave the session inconsistent), and a pick recorded before its player reached
 nba.players counting as his everywhere once he has.
 """
 
+import json
 from datetime import datetime
 
 import pytest
 from peewee import IntegrityError
 
-from core.errors import BadRequestError, ConflictError
+from core.errors import BadRequestError, ConflictError, NotFoundError
 from db.models.drafts import DraftPick, DraftSession
+from db.models.leagues import League
 from db.models.nba.players import Player
+from db.models.teams import Team
 from db.models.users import User
 from schemas.draft import DraftPickCreate, DraftSessionCreate, DraftSessionUpdate
 from services.draft_board_service import DraftBoardService
@@ -236,6 +239,123 @@ async def test_repricing_a_keeper_moves_its_recorded_pick_with_the_header(user, 
     assert sorted(p.overall_pick for p in _stored(session.id)) == [6, 7]
 
 
+# ------------------------------ linking ------------------------------ #
+
+
+def _espn_league(provider_league_id="35392660", **overrides):
+    fields = dict(
+        provider="espn", provider_league_id=provider_league_id, season=2026, name="League",
+        scoring_type="points", roster_slots={}, position_limits={},
+        draft_settings={"pick_order": [10, 6, 5, 8]},
+    )
+    fields.update(overrides)
+    return League.create(**fields)
+
+
+def _team(user, league):
+    return Team.create(
+        user_id=user, team_identifier=f"t-{league.id}", league=league,
+        league_info=json.dumps({"provider": league.provider, "league_id": league.provider_league_id}),
+    )
+
+
+async def test_a_live_room_is_linked_to_its_league_at_creation_and_is_exclusive(user):
+    team = _team(user, _espn_league())
+    live = DraftSessionCreate(kind="live", team_id=team.team_id, my_slot=3)
+    first = (await DraftService.create_session(user.user_id, live)).data
+    assert first.espn_league_id == 35392660
+
+    with pytest.raises(ConflictError) as exc:
+        await DraftService.create_session(user.user_id, live)
+    assert exc.value.error_code == "DRAFT_ROOM_ALREADY_LINKED"
+    assert str(first.id) in exc.value.message
+
+    # A finished room leaves the index: next season's draft gets a fresh one.
+    await DraftService.update_session(first.id, DraftSessionUpdate(status="completed"))
+    second = (await DraftService.create_session(user.user_id, live)).data
+    assert second.id != first.id and second.espn_league_id == 35392660
+
+
+async def test_a_live_room_needs_a_synced_espn_league(user):
+    team = _team(user, _espn_league(provider="yahoo", provider_league_id="466.l.12345"))
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.create_session(user.user_id, DraftSessionCreate(kind="live", team_id=team.team_id))
+    assert exc.value.error_code == "DRAFT_LIVE_NEEDS_ESPN_LEAGUE"
+    # The same team is fine for practice: a mock room links later, to whatever lobby it joins.
+    mock = (await DraftService.create_session(user.user_id, DraftSessionCreate(kind="mock", team_id=team.team_id))).data
+    assert mock.espn_league_id is None
+
+
+async def test_linking_by_patch_is_exclusive_and_an_explicit_null_unlinks(user):
+    a = await _session(user, kind="mock")
+    b = await _session(user, kind="mock")
+    assert (await DraftService.update_session(a.id, DraftSessionUpdate(espn_league_id=777))).data.espn_league_id == 777
+
+    with pytest.raises(ConflictError) as exc:
+        await DraftService.update_session(b.id, DraftSessionUpdate(espn_league_id=777))
+    assert exc.value.error_code == "DRAFT_ROOM_ALREADY_LINKED"
+
+    # Re-linking to the same room is not a conflict with itself.
+    assert (await DraftService.update_session(a.id, DraftSessionUpdate(espn_league_id=777))).data.espn_league_id == 777
+    assert (await DraftService.update_session(a.id, DraftSessionUpdate(espn_league_id=None))).data.espn_league_id is None
+    assert (await DraftService.update_session(b.id, DraftSessionUpdate(espn_league_id=777))).data.espn_league_id == 777
+
+
+async def test_a_name_is_trimmed_and_an_empty_one_clears_it(user):
+    session = await _session(user, name="  Tuesday practice  ")
+    assert session.name == "Tuesday practice"
+    assert (await DraftService.update_session(session.id, DraftSessionUpdate(name="   "))).data.name is None
+
+
+async def test_the_last_pick_closes_the_room_and_an_undo_reopens_it(user):
+    session = await _session(user, rounds=2)      # four teams, two rounds: eight picks
+    for i in range(1, 8):
+        await DraftService.add_pick(session.id, DraftPickCreate(player_name=f"Player {i}"))
+    assert (await DraftService.get_session(session.id)).data.status == "active"
+
+    await DraftService.add_pick(session.id, DraftPickCreate(player_name="Player 8"))
+    closed = (await DraftService.get_session(session.id)).data
+    assert closed.status == "completed" and closed.completed_at is not None and closed.pick_count == 8
+
+    await DraftService.remove_pick(session.id, 8)
+    reopened = (await DraftService.get_session(session.id)).data
+    assert reopened.status == "active" and reopened.completed_at is None
+
+
+async def test_delete_removes_the_room_and_its_picks(user):
+    session = await _session(user)
+    await DraftService.add_pick(session.id, DraftPickCreate(player_name="A"))
+    await DraftService.add_pick(session.id, DraftPickCreate(player_name="B"))
+
+    assert (await DraftService.delete_session(session.id)).data == session.id
+    assert DraftSession.get_or_none(DraftSession.id == session.id) is None
+    assert _stored(session.id) == []
+    with pytest.raises(NotFoundError):
+        await DraftService.delete_session(session.id)
+
+
+# ----------------------------- attribution ---------------------------- #
+
+
+async def test_a_pick_from_espn_sits_in_its_teams_seat(user):
+    session = await _session(user)                        # order [10, 6, 5, 8]
+    traded = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Traded", espn_team_id=5))).data
+    assert (traded.round, traded.slot, traded.espn_team_id) == (1, 3, 5)
+    plain = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Plain"))).data
+    assert (plain.round, plain.slot, plain.espn_team_id) == (1, 2, None)
+
+    # Reshaping the draft keeps the observed seat and re-derives the guessed one.
+    reshaped = (await DraftService.update_session(session.id, DraftSessionUpdate(pick_order=[8, 10, 6, 5]))).data
+    by_number = {p.overall_pick: p for p in reshaped.picks}
+    assert by_number[1].slot == 4 and by_number[2].slot == 2
+
+
+async def test_an_auction_pick_gets_a_seat_from_its_team_and_no_round(user):
+    session = await _session(user, draft_type="auction")
+    pick = (await DraftService.add_pick(session.id, DraftPickCreate(player_name="Bought", espn_team_id=8, bid=40))).data
+    assert (pick.round, pick.slot, pick.espn_team_id) == (None, 4, 8)
+
+
 async def test_a_punt_survives_the_round_trip_and_an_empty_list_clears_it(user, players):
     """The column migration 0015 adds, exercised through the service that
     validates it: a category league's own keys go in, anything else is refused,
@@ -301,3 +421,57 @@ async def test_the_source_check_accepts_a_mock_pick_and_still_refuses_nonsense(u
     with pytest.raises(IntegrityError) as exc:
         DraftPick.create(session_id=session.id, overall_pick=2, player_id=2, source="guess")
     assert "draft_picks_source_check" in str(exc.value)
+
+
+async def test_a_patch_that_links_and_closes_at_once_is_judged_by_the_closed_status(user):
+    a = await _session(user, kind="mock")
+    b = await _session(user, kind="mock")
+    await DraftService.update_session(a.id, DraftSessionUpdate(espn_league_id=888))
+    # b takes the same draft while closing: a completed room holds nothing, so no conflict.
+    closed = (await DraftService.update_session(b.id, DraftSessionUpdate(espn_league_id=888, status="completed"))).data
+    assert closed.espn_league_id == 888 and closed.status == "completed"
+
+
+async def test_an_undo_that_would_reopen_a_room_onto_a_draft_another_room_now_holds_is_refused(user):
+    old = await _session(user, rounds=2, kind="mock")             # eight picks
+    await DraftService.update_session(old.id, DraftSessionUpdate(espn_league_id=555))
+    for i in range(1, 9):
+        await DraftService.add_pick(old.id, DraftPickCreate(player_name=f"P{i}"))
+    assert (await DraftService.get_session(old.id)).data.status == "completed"
+
+    fresh = await _session(user, kind="mock")
+    await DraftService.update_session(fresh.id, DraftSessionUpdate(espn_league_id=555))   # free: old is closed
+
+    with pytest.raises(ConflictError) as exc:
+        await DraftService.remove_pick(old.id, 8)
+    assert exc.value.error_code == "DRAFT_ROOM_ALREADY_LINKED"
+    still = (await DraftService.get_session(old.id)).data
+    assert still.status == "completed" and still.pick_count == 8      # nothing was deleted
+
+
+async def test_migration_0016_backfills_legacy_live_rooms_and_keeps_one_link_per_draft(user, integration_db):
+    """The migration's data steps are idempotent, so they can be replayed here
+    against rooms shaped like the ones that predate linking."""
+    from pathlib import Path
+
+    from db.base import db
+
+    league = _espn_league()
+    older = await _session(user, kind="manual")
+    newer = await _session(user, kind="manual")
+    # Legacy shape: live rooms that carry the league but no link.
+    DraftSession.update(kind="live", league=league, espn_league_id=None).where(
+        DraftSession.id.in_([older.id, newer.id])
+    ).execute()
+    DraftSession.update(updated_at=datetime(2026, 1, 1)).where(DraftSession.id == older.id).execute()
+    DraftSession.update(updated_at=datetime(2026, 2, 1)).where(DraftSession.id == newer.id).execute()
+
+    # A faithful replay: the index does not exist yet when the migration's
+    # data steps run, so it is dropped here and recreated by the file itself.
+    db.execute_sql("DROP INDEX IF EXISTS usr.draft_sessions_user_espn_league_active_uq")
+    sql = (Path(__file__).resolve().parents[2] / "migrations" / "0016__draft_session_binding.sql").read_text()
+    db.execute_sql(sql)
+
+    assert DraftSession.get_by_id(newer.id).espn_league_id == 35392660
+    assert DraftSession.get_by_id(older.id).espn_league_id is None
+    assert DraftSession.get_by_id(older.id).status == "active"

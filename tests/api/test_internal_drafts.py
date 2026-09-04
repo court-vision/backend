@@ -187,7 +187,7 @@ def draft_service(monkeypatch):
 
     from schemas.draft import (
         DraftPickDeleteResponse, DraftPickResp, DraftPickResponse,
-        DraftSessionListResponse, DraftSessionResponse,
+        DraftSessionDeleteResponse, DraftSessionListResponse, DraftSessionResponse,
     )
 
     created = DraftSessionResponse(status=ApiStatus.SUCCESS, message="Draft session created", data=SESSION)
@@ -203,6 +203,7 @@ def draft_service(monkeypatch):
                                                    data=[SESSION])),
         ("add_pick", pick),
         ("remove_pick", DraftPickDeleteResponse(status=ApiStatus.SUCCESS, message="Pick 4 undone", data=4)),
+        ("delete_session", DraftSessionDeleteResponse(status=ApiStatus.SUCCESS, message="Draft room #12 deleted", data=12)),
     ):
         monkeypatch.setattr(module.DraftService, name, record(name, result))
     return calls
@@ -280,6 +281,50 @@ def test_get_and_patch_reach_the_service_with_the_owned_session_id(authed_client
     assert name == "update_session" and args[0] == 12 and args[1].status == "completed"
     # An absent field is not "set to None": only what was sent is written.
     assert args[1].model_fields_set == {"status"}
+
+
+@pytest.mark.api
+def test_delete_reaches_the_service_with_the_owned_session_id(authed_client, draft_service, monkeypatch):
+    _own_session(monkeypatch)
+
+    res = authed_client.delete("/v1/internal/drafts/12")
+
+    assert res.status_code == 200
+    assert res.json()["data"] == 12
+    assert draft_service == [("delete_session", (12,), {})]
+
+
+@pytest.mark.api
+def test_deleting_a_session_you_do_not_own_is_a_404(authed_client, draft_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12)
+
+    assert authed_client.delete("/v1/internal/drafts/13").status_code == 404
+    assert draft_service == []
+
+
+@pytest.mark.api
+def test_a_live_room_without_a_team_is_a_422(authed_client, draft_service, monkeypatch):
+    _own(monkeypatch)
+
+    res = authed_client.post("/v1/internal/drafts", json={"kind": "live"})
+
+    assert res.status_code == 422
+    assert draft_service == []
+
+
+@pytest.mark.api
+def test_a_patch_can_rename_and_link_or_unlink(authed_client, draft_service, monkeypatch):
+    _own_session(monkeypatch)
+
+    assert authed_client.patch("/v1/internal/drafts/12", json={"name": "  Tuesday practice "}).status_code == 200
+    assert authed_client.patch("/v1/internal/drafts/12", json={"espn_league_id": 35392660}).status_code == 200
+    assert authed_client.patch("/v1/internal/drafts/12", json={"espn_league_id": None}).status_code == 200
+
+    sent = [args[1] for name, args, _ in draft_service if name == "update_session"]
+    assert sent[0].model_fields_set == {"name"} and sent[0].name == "  Tuesday practice "
+    assert sent[1].espn_league_id == 35392660
+    # An explicit null is a field that was set — that is what unlinks.
+    assert sent[2].model_fields_set == {"espn_league_id"} and sent[2].espn_league_id is None
 
 
 @pytest.mark.api

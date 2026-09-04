@@ -200,7 +200,7 @@ def test_the_draft_length_needs_both_a_size_and_a_round_count():
 
 
 def _session(**overrides):
-    base = dict(
+    base = dict(name=None, espn_league_id=None, 
         id=12, team_id=7, league_id=3, kind="manual", status="active", draft_type="snake",
         pick_order=[10, 6, 5, 8, 2, 3, 7, 4, 9, 1], my_slot=3, rounds=13, keepers=[], punts=[],
         started_at=None, completed_at=None, created_at=None, updated_at=None,
@@ -466,6 +466,31 @@ def test_a_finished_draft_reports_no_next_turn_rather_than_a_round_it_never_play
     done = _session_resp(session, used_picks=list(range(1, 53)), keeper_count=0)
     assert done.my_next_pick is None and done.picks_until_my_turn is None
     assert done.next_overall_pick == 53 and done.total_picks == 52
+
+
+def test_the_last_pick_closes_a_draft_of_known_length_only():
+    session = SimpleNamespace(pick_order=[1, 2, 3, 4], rounds=2, status="active", completed_at=None)
+    assert DraftService._closes_draft(session, 7) is False
+    assert DraftService._closes_draft(session, 8) is True
+    # No pick order, no length: nothing to fill. A closed room stays closed.
+    assert DraftService._closes_draft(SimpleNamespace(pick_order=[], rounds=2, status="active"), 99) is False
+    assert DraftService._closes_draft(SimpleNamespace(pick_order=[1, 2], rounds=2, status="completed"), 4) is False
+
+    fields = DraftService._complete(session)
+    assert session.status == "completed" and session.completed_at is not None
+    assert len(fields) == 2
+
+
+def test_a_pick_sits_where_espn_says_when_its_team_is_known():
+    from services.draft_service import pick_placement, seat_of
+
+    order = [10, 6, 5, 8]
+    assert seat_of(5, order) == 3
+    assert seat_of(99, order) is None and seat_of(None, order) is None and seat_of(5, None) is None
+    assert pick_placement(1, 4, "snake", order, 5) == (1, 3)       # a traded first pick: ESPN's seat, not the snake's
+    assert pick_placement(1, 4, "snake", order, None) == (1, 1)    # nothing observed: the snake
+    assert pick_placement(6, 4, "snake", order, 99) == (2, 3)      # a team not in the order: the snake
+    assert pick_placement(7, 4, "auction", order, 8) == (None, 4)  # an auction: no round, a real seat
 
 
 # ---- punts -----------------------------------------------------------------
