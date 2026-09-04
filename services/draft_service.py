@@ -40,6 +40,7 @@ from schemas.draft import (
     DraftKeeper,
     DraftPickCreate,
     DraftPickDeleteResponse,
+    DraftSessionDeleteResponse,
     DraftPickResp,
     DraftPickResponse,
     DraftSessionCreate,
@@ -246,6 +247,22 @@ def check_length_holds_picks(total_picks: Optional[int], used: Iterable[int]) ->
             "DRAFT_SHORTER_THAN_PICKS",
             f"Pick {last} is already recorded; a {total_picks}-pick draft cannot hold it",
         )
+
+
+def espn_league_id_of(league: Optional[League]) -> Optional[int]:
+    """The ESPN draft a synced ESPN league maps to; None for Yahoo or unsynced."""
+    if league is None or getattr(league, "provider", None) != "espn":
+        return None
+    try:
+        return int(league.provider_league_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def clean_name(name: Optional[str]) -> Optional[str]:
+    """A room's label: trimmed, and None when there is nothing left."""
+    cleaned = (name or "").strip()
+    return cleaned or None
 
 
 def league_prefill(league: Optional[League]) -> dict:
@@ -501,6 +518,8 @@ def _session_resp(
         league_id=session.league_id,
         kind=session.kind,
         status=session.status,
+        name=session.name,
+        espn_league_id=session.espn_league_id,
         draft_type=session.draft_type,
         pick_order=order,
         my_slot=session.my_slot,
@@ -544,11 +563,26 @@ class DraftService:
 
         check_slot_in_range(req.my_slot, len(pick_order) or None)
 
+        # A live room follows exactly one ESPN draft — its team's league's — and
+        # is linked to it here. A mock room links to whichever ESPN lobby it
+        # first reconciles with; a manual room follows nothing.
+        espn_league_id = None
+        if req.kind == "live":
+            espn_league_id = espn_league_id_of(league)
+            if espn_league_id is None:
+                raise BadRequestError(
+                    "DRAFT_LIVE_NEEDS_ESPN_LEAGUE",
+                    "A live room needs a team in a synced ESPN league; use a mock room to practise with these settings",
+                )
+            DraftService._check_room_free(user_id, espn_league_id)
+
         session = DraftSession.create(
             user_id=user_id,
             team_id=req.team_id,
             league_id=league.id if league is not None else None,
             kind=req.kind,
+            name=clean_name(req.name),
+            espn_league_id=espn_league_id,
             draft_type=draft_type,
             pick_order=pick_order,
             my_slot=req.my_slot,
@@ -642,6 +676,15 @@ class DraftService:
         if "keepers" in fields and req.keepers is not None:
             session.keepers = _stored_keepers(req.keepers)
             touched.append(DraftSession.keepers)
+        if "name" in fields:
+            session.name = clean_name(req.name)
+            touched.append(DraftSession.name)
+        if "espn_league_id" in fields:
+            # Linking is explicit and exclusive; an explicit null unlinks.
+            if req.espn_league_id is not None:
+                DraftService._check_room_free(session.user_id, req.espn_league_id, exclude_id=session.id)
+            session.espn_league_id = req.espn_league_id
+            touched.append(DraftSession.espn_league_id)
         if "status" in fields and req.status is not None:
             session.status = req.status
             touched.append(DraftSession.status)
@@ -681,7 +724,12 @@ class DraftService:
                     )
                     pick.save(only=[DraftPick.round, DraftPick.slot])
             session.updated_at = datetime.utcnow()
-            session.save(only=touched)
+            try:
+                session.save(only=touched)
+            except IntegrityError as exc:
+                # Two rooms linking to the same draft at once: the partial
+                # unique index decides where the read above could not.
+                raise DraftService._link_conflict(exc) from exc
 
         return DraftSessionResponse(
             status=ApiStatus.SUCCESS,
@@ -693,6 +741,19 @@ class DraftService:
                 keeper_count=DraftService._keeper_count_of(session),
                 keeper_picks=[p.overall_pick for p in picks if p.source == "keeper"],
             ),
+        )
+
+    @staticmethod
+    @db_operation("drafts.delete")
+    def delete_session(session_id: int) -> DraftSessionDeleteResponse:
+        """The room and every pick in it. The picks cascade at the database, but
+        deleting them here keeps the intent readable and the count honest."""
+        session = DraftService._session_or_404(session_id)
+        with db.atomic():
+            DraftPick.delete().where(DraftPick.session == session_id).execute()
+            session.delete_instance()
+        return DraftSessionDeleteResponse(
+            status=ApiStatus.SUCCESS, message=f"Draft room #{session_id} deleted", data=session_id
         )
 
     # ---- picks -------------------------------------------------------------
@@ -755,11 +816,16 @@ class DraftService:
                 # the unique indexes are what decide — and which one fired
                 # says whether the number or the player was taken.
                 raise DraftService._pick_conflict(exc, overall, player_name) from exc
-            # The first recorded pick is when the draft actually started.
+            # The first recorded pick is when the draft actually started; the
+            # last one is when it finished. `existing` is the set before this
+            # insert, so the count includes keepers, which spend numbers too.
             if session.started_at is None:
                 session.started_at = datetime.utcnow()
             session.updated_at = datetime.utcnow()
-            session.save(only=[DraftSession.started_at, DraftSession.updated_at])
+            fields = [DraftSession.started_at, DraftSession.updated_at]
+            if DraftService._closes_draft(session, len(existing) + 1):
+                fields += DraftService._complete(session)
+            session.save(only=fields)
 
         unresolved = player is None
         return DraftPickResponse(
@@ -779,12 +845,70 @@ class DraftService:
         )
         if pick is None:
             raise NotFoundError("DRAFT_PICK_NOT_FOUND", f"Pick {overall_pick} is not recorded")
-        pick.delete_instance()
+        with db.atomic():
+            pick.delete_instance()
+            # Undoing a pick in a finished draft means the draft is not
+            # finished: reopen it, so the last pick can close it again.
+            session = DraftService._session_or_404(session_id)
+            if session.status == "completed":
+                remaining = DraftPick.select().where(DraftPick.session == session_id).count()
+                total = total_picks_of(session)
+                if total and remaining < total:
+                    session.status = "active"
+                    session.completed_at = None
+                    session.updated_at = datetime.utcnow()
+                    session.save(only=[DraftSession.status, DraftSession.completed_at, DraftSession.updated_at])
         return DraftPickDeleteResponse(
             status=ApiStatus.SUCCESS, message=f"Pick {overall_pick} undone", data=overall_pick
         )
 
     # ---- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _linked_elsewhere(user_id: int, espn_league_id: int, exclude_id: Optional[int] = None) -> Optional[int]:
+        """Another ACTIVE room of this user already following that ESPN draft, if any."""
+        query = DraftSession.select(DraftSession.id).where(
+            (DraftSession.user == user_id)
+            & (DraftSession.espn_league_id == espn_league_id)
+            & (DraftSession.status == "active")
+        )
+        if exclude_id is not None:
+            query = query.where(DraftSession.id != exclude_id)
+        row = query.first()
+        return row.id if row is not None else None
+
+    @staticmethod
+    def _check_room_free(user_id: int, espn_league_id: int, exclude_id: Optional[int] = None) -> None:
+        """One active room per ESPN draft: the refusal names the room that has it."""
+        other = DraftService._linked_elsewhere(user_id, espn_league_id, exclude_id)
+        if other is not None:
+            raise ConflictError(
+                "DRAFT_ROOM_ALREADY_LINKED",
+                f"ESPN draft {espn_league_id} is already linked to draft room #{other}",
+                data={"existing_session_id": other, "espn_league_id": espn_league_id},
+            )
+
+    @staticmethod
+    def _link_conflict(exc: IntegrityError) -> Exception:
+        if "draft_sessions_user_espn_league_active_uq" in str(exc):
+            return ConflictError(
+                "DRAFT_ROOM_ALREADY_LINKED", "Another active draft room already follows that ESPN draft"
+            )
+        return exc
+
+    @staticmethod
+    def _closes_draft(session: DraftSession, pick_count: int) -> bool:
+        """True when `pick_count` recorded picks fill a draft whose length is known."""
+        total = total_picks_of(session)
+        return bool(total) and pick_count >= total and session.status == "active"
+
+    @staticmethod
+    def _complete(session: DraftSession) -> list:
+        """Mark the session finished; returns the fields to save."""
+        session.status = "completed"
+        if session.completed_at is None:
+            session.completed_at = datetime.utcnow()
+        return [DraftSession.status, DraftSession.completed_at]
 
     @staticmethod
     def _session_or_404(session_id: int) -> DraftSession:

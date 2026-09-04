@@ -42,19 +42,43 @@ class DraftSessionCreate(BaseRequest):
     back to `usr.teams`, so the user confirms their own slot at create time.
     """
 
-    team_id: Optional[int] = Field(default=None, ge=1, description="Owned team to draft for; omit for a mock draft")
-    kind: DraftKind = "manual"
+    team_id: Optional[int] = Field(default=None, ge=1, description="Owned team whose league settings the room uses; omit for generic settings")
+    kind: DraftKind = Field(
+        default="manual",
+        description=(
+            "Where the picks come from. `live`: this team's own ESPN draft (needs a team in a synced "
+            "ESPN league; the room is linked to it at once). `mock`: an ESPN mock lobby, linked on "
+            "the first INIT it reconciles with. `manual`: the caller enters every pick."
+        ),
+    )
+    name: Optional[str] = Field(default=None, max_length=80, description="A label of the caller's choosing")
     draft_type: Optional[DraftType] = Field(default=None, description="Defaults to the league's draft type, else snake")
     pick_order: Optional[List[int]] = Field(default=None, description="Provider team ids in first-round order; defaults to the league's")
     my_slot: Optional[int] = Field(default=None, ge=1, description="1-based slot the caller drafts from")
     rounds: Optional[int] = Field(default=None, ge=1, le=40, description="Defaults to the league's draftable roster size")
     keepers: List[DraftKeeper] = []
 
+    @model_validator(mode="after")
+    def _live_follows_a_team(self) -> "DraftSessionCreate":
+        if self.kind == "live" and self.team_id is None:
+            raise ValueError("a live room needs a team_id: it follows that team's own ESPN draft")
+        return self
+
 
 class DraftSessionUpdate(BaseRequest):
     """Partial update — only the fields present are written."""
 
     status: Optional[DraftStatus] = None
+    name: Optional[str] = Field(default=None, max_length=80, description="A label of the caller's choosing; empty clears it")
+    espn_league_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Link the room to one ESPN draft (a real league's id, or a mock lobby's). Exclusive: "
+            "one active room per ESPN draft, so linking to a draft another active room already "
+            "follows is refused with that room's id. An explicit null unlinks."
+        ),
+    )
     draft_type: Optional[DraftType] = None
     pick_order: Optional[List[int]] = None
     my_slot: Optional[int] = Field(default=None, ge=1)
@@ -115,6 +139,11 @@ class DraftSessionResp(ApiModel):
     league_id: Optional[int] = None
     kind: DraftKind
     status: DraftStatus
+    name: Optional[str] = None
+    espn_league_id: Optional[int] = Field(
+        default=None,
+        description="The ESPN draft this room follows; null until a mock room links to one",
+    )
     draft_type: DraftType
     pick_order: List[int] = []
     my_slot: Optional[int] = None
@@ -157,6 +186,11 @@ class DraftSessionResponse(BaseResponse):
 class DraftSessionListResponse(BaseResponse):
     """Every draft session the caller owns, newest first."""
     data: List[DraftSessionResp] = []
+
+
+class DraftSessionDeleteResponse(BaseResponse):
+    """The id of the session that was deleted."""
+    data: Optional[int] = None
 
 
 class DraftPickResponse(BaseResponse):

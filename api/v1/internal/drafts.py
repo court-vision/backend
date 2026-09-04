@@ -34,6 +34,7 @@ from schemas.draft import (
     DraftPickDeleteResponse,
     DraftPickResponse,
     DraftSessionCreate,
+    DraftSessionDeleteResponse,
     DraftSessionListResponse,
     DraftSessionResponse,
     DraftSessionUpdate,
@@ -95,14 +96,19 @@ async def get_draft_board(
     description=(
         "Creates a draft room. With a `team_id`, everything the provider already told us is "
         "prefilled from that team's synced league: draft type, pick order, rounds (the league's "
-        "draftable roster size) and the keeper allowance. Omit `team_id` for a mock draft.\n\n"
+        "draftable roster size) and the keeper allowance. Omit `team_id` for generic settings.\n\n"
+        "`kind` says where the picks come from. `live` follows the team's own ESPN draft and is "
+        "linked to it at once — one active live room per league, so a second is refused with the "
+        "first's id. `mock` follows an ESPN mock lobby and links to the first one it reconciles "
+        "with. `manual` follows nothing.\n\n"
         "`my_slot` is the one thing the caller must supply: `pick_order` holds ESPN team ids that "
         "nothing maps back to our teams, so the room asks which seat is yours."
     ),
     responses={
         200: {"description": "Session created"},
-        400: {"description": "Slot outside the draft"},
+        400: {"description": "Slot outside the draft, or a live room without a synced ESPN league"},
         404: {"description": "No such team, or it does not belong to the caller"},
+        409: {"description": "An active room already follows that ESPN draft (`existing_session_id`)"},
         422: {"description": "Invalid session fields"},
     },
 )
@@ -145,11 +151,15 @@ async def get_draft_session(session: OwnedDraftSessionContext = Depends(get_owne
         "Changing `draft_type` or `pick_order` re-derives the round and slot of every recorded "
         "pick. A change that would leave the session inconsistent — a slot outside the new pick "
         "order, or a draft resized shorter than the picks already recorded — is refused."
+        "\n\n`name` renames the room. `espn_league_id` links it to one ESPN draft (a real league's "
+        "id, or a mock lobby's): exclusive — one active room per draft, refused with the other "
+        "room's id otherwise — and an explicit null unlinks."
     ),
     responses={
         200: {"description": "Session updated"},
         400: {"description": "Slot outside the draft, or a draft resized shorter than its recorded picks"},
         404: {"description": "No such session, or it does not belong to the caller"},
+        409: {"description": "Another active room already follows that ESPN draft (`existing_session_id`)"},
         422: {"description": "Empty or invalid update"},
     },
 )
@@ -157,6 +167,23 @@ async def update_draft_session(
     req: DraftSessionUpdate, session: OwnedDraftSessionContext = Depends(get_owned_session)
 ):
     return respond(await DraftService.update_session(session.session_id, req))
+
+
+@router.delete(
+    "/{session_id}",
+    response_model=DraftSessionDeleteResponse,
+    summary="Delete a draft session",
+    description=(
+        "Removes the room and every pick recorded in it. There is no undo: a finished draft is "
+        "better closed (`status: completed`) than deleted."
+    ),
+    responses={
+        200: {"description": "Session deleted"},
+        404: {"description": "No such session, or it does not belong to the caller"},
+    },
+)
+async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_owned_session)):
+    return respond(await DraftService.delete_session(session.session_id))
 
 
 @router.get(

@@ -36,6 +36,7 @@ from schemas.draft import (
     DraftSyncConflict,
 )
 from services.draft_service import (
+    espn_league_id_of,
     DraftService,
     check_length_holds_picks,
     check_slot_in_range,
@@ -59,6 +60,9 @@ from utils.espn_draft_init import (
     rounds_of,
     strip_init_prefix,
 )
+
+# ESPN's draft-state code in INIT and STATE frames: 0 before, 1 during, 2 after, 3 paused.
+ESPN_AFTER_DRAFT = 2
 
 
 @dataclass(frozen=True)
@@ -163,16 +167,24 @@ class DraftSyncService:
         session = DraftService._session_or_404(session_id)
         header = derive_header(decoded)
 
-        # 3. League check. A synced session must belong to the room's league; a
-        #    mock or never-synced session accepts any.
-        if session.league_id is not None:
-            provider_id = getattr(session.league, "provider_league_id", None)
-            if provider_id is not None and str(header.espn_league_id) != str(provider_id):
-                raise ConflictError(
-                    "DRAFT_INIT_LEAGUE_MISMATCH",
-                    f"That ESPN room is league {header.espn_league_id}, this session is league {provider_id}",
-                    data={"espn_league_id": header.espn_league_id, "session_league_id": provider_id},
-                )
+        # 3. Which ESPN draft this room follows. A linked room accepts only its
+        #    own; a live room from before linking existed falls back to its
+        #    league's provider id. A mock room links to the first room it
+        #    reconciles with (the client asks the user before posting) and is
+        #    exclusive from then on: one active room per user per ESPN draft.
+        expected = session.espn_league_id
+        if expected is None and session.kind == "live" and session.league_id is not None:
+            expected = espn_league_id_of(session.league)
+        if expected is not None and header.espn_league_id != expected:
+            raise ConflictError(
+                "DRAFT_INIT_LEAGUE_MISMATCH",
+                f"That ESPN room is league {header.espn_league_id}, this session is league {expected}",
+                data={"espn_league_id": header.espn_league_id, "session_league_id": expected},
+            )
+        link: Optional[int] = None
+        if session.espn_league_id is None and session.kind in ("live", "mock"):
+            DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
+            link = header.espn_league_id
 
         inserted = 0
         skipped = 0
@@ -272,17 +284,29 @@ class DraftSyncService:
                         DraftSyncConflict(pick_number=pn, espn_player_id=espn_id, reason=reason, message=err.message)
                     )
 
-            # 6. Persist any new keeper designations, and stamp the session.
+            # 6. Persist any new keeper designations, the link, and the stamps.
             model_fields = []
             if keeper_additions:
                 session.keepers = (session.keepers or []) + keeper_additions
                 model_fields.append(DraftSession.keepers)
+            if link is not None:
+                session.espn_league_id = link
+                model_fields.append(DraftSession.espn_league_id)
             if inserted and session.started_at is None:
                 session.started_at = datetime.utcnow()
                 model_fields.append(DraftSession.started_at)
+            # The room is over when its picks fill the draft, or when ESPN's
+            # own state says so (2 = after the draft) — whichever comes first.
+            if session.status == "active" and (
+                DraftService._closes_draft(session, len(existing)) or header.draft_state == ESPN_AFTER_DRAFT
+            ):
+                model_fields += DraftService._complete(session)
             if model_fields:
                 session.updated_at = datetime.utcnow()
-                session.save(only=model_fields + [DraftSession.updated_at])
+                try:
+                    session.save(only=model_fields + [DraftSession.updated_at])
+                except IntegrityError as exc:
+                    raise DraftService._link_conflict(exc) from exc
 
         picks = DraftService._picks_of(session_id)
         data = DraftInitSyncResp(

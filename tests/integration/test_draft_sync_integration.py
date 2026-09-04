@@ -114,20 +114,32 @@ async def test_a_prior_manual_pick_of_a_synced_player_is_player_already_drafted(
     assert dup and dup[0].held_at == 7
 
 
-async def test_a_league_mismatch_is_refused_and_writes_nothing(user):
-    league = League.create(
-        provider="espn", provider_league_id="999", season=2027, name="Other",
-        scoring_type="points", roster_slots={}, position_limits={}, draft_settings={},
-    )
-    session = (await DraftService.create_session(
-        user.user_id, DraftSessionCreate(kind="live"),
-    )).data
-    DraftSession.update(league=league).where(DraftSession.id == session.id).execute()
+async def test_a_linked_room_refuses_any_other_espn_draft_and_writes_nothing(user):
+    session = await _mock_session(user)
+    await DraftService.update_session(session.id, DraftSessionUpdate(espn_league_id=999))
 
     with pytest.raises(ConflictError) as exc:
         await DraftSyncService.sync_init(session.id, DraftInitSyncRequest(payload=ROOMOPEN))
     assert exc.value.error_code == "DRAFT_INIT_LEAGUE_MISMATCH"
     assert _stored(session.id) == []
+    assert DraftSession.get_by_id(session.id).espn_league_id == 999
+
+
+async def test_a_mock_room_links_to_the_first_room_it_reconciles_with_exclusively(user):
+    first = await _mock_session(user)
+    data = (await DraftSyncService.sync_init(first.id, DraftInitSyncRequest(payload=ROOMOPEN))).data
+    assert data.session.espn_league_id == 35392660
+    # A reconnect posts the same INIT again: the same room, no conflict.
+    again = (await DraftSyncService.sync_init(first.id, DraftInitSyncRequest(payload=ROOMOPEN))).data
+    assert again.session.espn_league_id == 35392660
+
+    second = await _mock_session(user)
+    with pytest.raises(ConflictError) as exc:
+        await DraftSyncService.sync_init(second.id, DraftInitSyncRequest(payload=ROOMOPEN))
+    assert exc.value.error_code == "DRAFT_ROOM_ALREADY_LINKED"
+    assert str(first.id) in exc.value.message
+    assert DraftSession.get_by_id(second.id).espn_league_id is None
+    assert _stored(second.id) == []
 
 
 async def test_a_synced_keeper_does_not_break_a_later_patch(user, players):
