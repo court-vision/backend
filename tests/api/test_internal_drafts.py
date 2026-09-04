@@ -341,3 +341,59 @@ def test_the_literal_board_path_is_not_read_as_a_session_id(authed_client, servi
     _own(monkeypatch, league=_league())
     assert authed_client.get("/v1/internal/drafts/board?team_id=7").status_code == 200
     assert service["calls"][0]["session"] is None
+
+
+# ------------------------------ INIT sync ------------------------------- #
+
+
+@pytest.fixture
+def draft_sync_service(monkeypatch):
+    """Stub DraftSyncService.sync_init; record what the route handed it."""
+    from services import draft_sync_service as module
+    from schemas.draft import DraftInitSyncResp, DraftInitSyncResponse
+
+    calls = []
+
+    async def fake(*args, **kwargs):
+        calls.append((args, kwargs))
+        return DraftInitSyncResponse(
+            status=ApiStatus.SUCCESS,
+            message="INIT reconciled: 45 inserted, 0 skipped",
+            data=DraftInitSyncResp(
+                session=SESSION, espn_league_id=588175580, espn_team_id=4, draft_state=1,
+                draft_type="snake", made=45, inserted=45, skipped=0, conflicts=[], warnings=[],
+                espn_front=46, header_applied=True, position_limits={"C": 4},
+            ),
+        )
+
+    monkeypatch.setattr(module.DraftSyncService, "sync_init", staticmethod(fake))
+    return calls
+
+
+@pytest.mark.api
+def test_sync_init_reaches_the_service_with_the_owned_session_id(authed_client, draft_sync_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12)
+
+    res = authed_client.post("/v1/internal/drafts/12/sync/init", json={"payload": "A" * 40})
+
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert body["inserted"] == 45 and body["espn_team_id"] == 4 and body["header_applied"] is True
+    args, _ = draft_sync_service[0]
+    assert args[0] == 12 and args[1].payload == "A" * 40
+
+
+@pytest.mark.api
+def test_sync_init_for_a_session_you_do_not_own_is_a_404(authed_client, draft_sync_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12)
+    res = authed_client.post("/v1/internal/drafts/999/sync/init", json={"payload": "A" * 40})
+    assert res.status_code == 404 and res.json()["error_code"] == "DRAFT_SESSION_NOT_FOUND"
+    assert draft_sync_service == []
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("body", [{}, {"payload": "short"}])
+def test_sync_init_rejects_a_missing_or_tiny_payload(authed_client, draft_sync_service, monkeypatch, body):
+    _own_session(monkeypatch, session_id=12)
+    assert authed_client.post("/v1/internal/drafts/12/sync/init", json=body).status_code == 422
+    assert draft_sync_service == []

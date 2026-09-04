@@ -169,6 +169,56 @@ class DraftPickDeleteResponse(BaseResponse):
     data: Optional[int] = None
 
 
+# ------------------------------ Live sync ------------------------------- #
+
+
+class DraftInitSyncRequest(BaseRequest):
+    """The base64 body of the ESPN draft room's `INIT <base64>` frame.
+
+    The room posts it on every connect, so this endpoint is idempotent: picks it
+    already holds are skipped, not re-recorded.
+    """
+
+    payload: str = Field(
+        min_length=24,
+        max_length=1_000_000,
+        description="Base64 of the room's INIT snapshot (a leading `INIT ` prefix and whitespace are tolerated)",
+    )
+
+
+class DraftSyncConflict(ApiModel):
+    """One INIT pick that disagrees with what the session already has — reported,
+    never applied. The fix is a resync (INIT is authoritative) or a manual undo."""
+
+    pick_number: int
+    espn_player_id: int
+    reason: Literal["pick_number_taken", "player_already_drafted"]
+    held_at: Optional[int] = Field(default=None, description="Where the player is already recorded (player_already_drafted)")
+    held_espn_player_id: Optional[int] = Field(default=None, description="Who already holds this pick number (pick_number_taken)")
+    message: str
+
+
+class DraftInitSyncResp(ApiModel):
+    session: DraftSessionResp
+    espn_league_id: int = Field(description="The ESPN league id decoded from the INIT frame")
+    espn_team_id: int = Field(description="The connecting user's ESPN team id (INIT.teamId) — what `by_me` is counted against")
+    draft_state: int = Field(description="ESPN's draft state code from the snapshot (0 = not started)")
+    draft_type: DraftType
+    made: int = Field(description="Picks made in the INIT snapshot")
+    inserted: int = Field(description="Picks newly recorded from this INIT")
+    skipped: int = Field(description="Picks the session already held (a normal reconnect)")
+    conflicts: List[DraftSyncConflict] = []
+    warnings: List[str] = Field(default=[], description="Header disagreements on a session that already has picks (not applied)")
+    espn_front: int = Field(description="Next pick number to assign — one past the last made pick; what the live path numbers from")
+    header_applied: bool = Field(description="Whether pick order / slot / rounds / type were written from INIT (only on an empty session)")
+    position_limits: dict[str, int] = Field(default={}, description="Hard per-position caps decoded from the room (display; the league's own are authoritative)")
+
+
+class DraftInitSyncResponse(BaseResponse):
+    """The reconciled session plus a report of what the INIT changed."""
+    data: Optional[DraftInitSyncResp] = None
+
+
 # --------------------------------- Board --------------------------------- #
 
 
