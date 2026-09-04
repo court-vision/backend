@@ -77,7 +77,16 @@ def test_strip_prefix_tolerates_the_init_token():
 
 @pytest.mark.unit
 def test_garbage_and_truncation_raise():
-    with pytest.raises(Exception):
-        decode_init("bm90IGEgZHJhZnQgcGF5bG9hZA==")  # valid base64, wrong bytes
-    with pytest.raises(Exception):
-        decode_init("AAAAAQ==")  # truncated mid-stream
+    with pytest.raises(ValueError):
+        decode_init("bm90IGEgZHJhZnQgcGF5bG9hZA==")  # valid base64, wrong bytes: no presence flag
+    with pytest.raises(EOFError):
+        decode_init("AAAAAQ==")  # truncated after the presence flag
+
+
+@pytest.mark.unit
+def test_int32_decodes_the_signed_boundary():
+    from utils.espn_draft_init import Reader
+
+    assert Reader(b"\x80\x00\x00\x00").int32() == -(1 << 31)   # INT32_MIN, inclusive boundary
+    assert Reader(b"\x7f\xff\xff\xff").int32() == (1 << 31) - 1
+    assert Reader(b"\xff\xff\xff\xff").int32() == -1            # the "unset" sentinel

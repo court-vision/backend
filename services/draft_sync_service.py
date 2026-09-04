@@ -230,12 +230,11 @@ class DraftSyncService:
 
                 by_me = int(made["teamId"]) == header.espn_team_id
                 source = "espn_sync"
+                addition = None
                 if made.get("isKeeper"):
                     source, addition = DraftSyncService._keeper_source(
                         pn, espn_id, by_me, session, league_size, existing_keepers, keeper_additions, warnings
                     )
-                    if addition is not None:
-                        keeper_additions.append(addition)
 
                 bid = None
                 if session.draft_type == "auction":
@@ -261,6 +260,11 @@ class DraftSyncService:
                         )
                     existing.append(pick)
                     inserted += 1
+                    # Only a keeper pick that actually landed earns its
+                    # designation: a rolled-back insert must not leave the
+                    # session naming a keeper it never recorded.
+                    if addition is not None:
+                        keeper_additions.append(addition)
                 except IntegrityError as exc:
                     err = DraftService._pick_conflict(exc, pn, player_name)
                     reason = "player_already_drafted" if err.error_code == "DRAFT_PLAYER_ALREADY_DRAFTED" else "pick_number_taken"

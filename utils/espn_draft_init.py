@@ -46,7 +46,8 @@ class Reader:
 
     def int32(self) -> int:
         v = self._num(4)
-        return v - (1 << 32) if v > (1 << 31) else v
+        # Two's complement: 0x80000000 is INT32_MIN, so the boundary is inclusive.
+        return v - (1 << 32) if v >= (1 << 31) else v
 
     def short(self) -> int:
         return self._num(2)
