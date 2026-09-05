@@ -153,6 +153,36 @@ def classify_pick(
 
 
 class DraftSyncService:
+
+    @staticmethod
+    def _link_decision(session: DraftSession, header: InitHeader) -> Optional[int]:
+        """Which ESPN draft this room follows, and whether this INIT links it.
+
+        A linked room accepts only its own draft; a live room from before
+        linking existed falls back to its league's provider id. A mock room
+        links to the first room it reconciles with (the client asks the user
+        before posting) and is exclusive from then on: one active room per user
+        per ESPN draft.
+
+        Called twice on purpose — once before the transaction, so an INIT from
+        the wrong room is refused without taking a lock, and once from the
+        locked row, because a concurrent INIT can link the room in between and
+        the second request must not relink it from what it read beforehand.
+        """
+        expected = session.espn_league_id
+        if expected is None and session.kind == "live" and session.league_id is not None:
+            expected = espn_league_id_of(session.league)
+        if expected is not None and header.espn_league_id != expected:
+            raise ConflictError(
+                "DRAFT_INIT_LEAGUE_MISMATCH",
+                f"That ESPN room is league {header.espn_league_id}, this session is league {expected}",
+                data={"espn_league_id": header.espn_league_id, "session_league_id": expected},
+            )
+        if session.espn_league_id is None and session.kind in ("live", "mock"):
+            DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
+            return header.espn_league_id
+        return None
+
     @staticmethod
     @db_operation("drafts.sync_init")
     def sync_init(session_id: int, req: DraftInitSyncRequest) -> DraftInitSyncResponse:
@@ -169,24 +199,10 @@ class DraftSyncService:
         session = DraftService._session_or_404(session_id)
         header = derive_header(decoded)
 
-        # 3. Which ESPN draft this room follows. A linked room accepts only its
-        #    own; a live room from before linking existed falls back to its
-        #    league's provider id. A mock room links to the first room it
-        #    reconciles with (the client asks the user before posting) and is
-        #    exclusive from then on: one active room per user per ESPN draft.
-        expected = session.espn_league_id
-        if expected is None and session.kind == "live" and session.league_id is not None:
-            expected = espn_league_id_of(session.league)
-        if expected is not None and header.espn_league_id != expected:
-            raise ConflictError(
-                "DRAFT_INIT_LEAGUE_MISMATCH",
-                f"That ESPN room is league {header.espn_league_id}, this session is league {expected}",
-                data={"espn_league_id": header.espn_league_id, "session_league_id": expected},
-            )
-        link: Optional[int] = None
-        if session.espn_league_id is None and session.kind in ("live", "mock"):
-            DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
-            link = header.espn_league_id
+        # 3. Which ESPN draft this room follows — decided here so a wrong room
+        #    fails before anything takes a lock, and decided again below from
+        #    the locked row, which is the answer that counts.
+        DraftSyncService._link_decision(session, header)
 
         inserted = 0
         skipped = 0
@@ -195,23 +211,29 @@ class DraftSyncService:
         header_applied = False
 
         with db.atomic():
-            if link is not None:
+            # Everything this room is allowed to become is read off its own row,
+            # so take the row before deciding. Two INITs can both read the same
+            # unlinked room; without the lock the second would relink it —
+            # header and all — to a different draft from state it read before
+            # the first landed. The autopicker takes the same lock for the same
+            # reason, which is what keeps a room from both following a draft and
+            # holding simulated picks.
+            lock_room(session_id)
+            session = DraftService._session_or_404(session_id)
+            link = DraftSyncService._link_decision(session, header)
+
+            if link is not None and DraftPick.select().where(
+                (DraftPick.session == session_id) & (DraftPick.source == "mock")
+            ).exists():
                 # A room CV has simulated into cannot then start following an
                 # ESPN draft: the pick numbers are already spent, so every INIT
                 # pick would come back a conflict. The mirror of the
                 # autopicker's own refusal — a room follows a real draft or
-                # plays a simulated one, never both. Under the room's lock,
-                # because the autopicker takes the same one before it writes:
-                # unlocked, a linking sync and a running advance would each see
-                # the state before the other and both proceed.
-                lock_room(session_id)
-                if DraftPick.select().where(
-                    (DraftPick.session == session_id) & (DraftPick.source == "mock")
-                ).exists():
-                    raise ConflictError(
-                        "DRAFT_ROOM_IS_SIMULATED",
-                        "This room holds simulated picks; open a fresh room to follow an ESPN draft",
-                    )
+                # plays a simulated one, never both.
+                raise ConflictError(
+                    "DRAFT_ROOM_IS_SIMULATED",
+                    "This room holds simulated picks; open a fresh room to follow an ESPN draft",
+                )
 
             existing = DraftService._picks_of(session_id)
 
