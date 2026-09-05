@@ -17,6 +17,8 @@ PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
 # it asserts the autopicker made the pick, which the room's undo rules and the
 # recap both read, so it is written by the server or not at all.
 ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
+MockUntil = Literal["my_turn", "end"]
+MockStopReason = Literal["my_turn", "end", "pool_exhausted", "cap_blocked"]
 
 
 # ------------------------------- Sessions ------------------------------- #
@@ -287,6 +289,68 @@ class DraftInitSyncResp(ApiModel):
 class DraftInitSyncResponse(BaseResponse):
     """The reconciled session plus a report of what the INIT changed."""
     data: Optional[DraftInitSyncResp] = None
+
+
+# ------------------------------- Mock mode ------------------------------- #
+
+
+class MockAdvanceRequest(BaseRequest):
+    """How far to play the draft forward."""
+
+    until: MockUntil = Field(
+        default="my_turn",
+        description=(
+            "`my_turn`: run the other seats up to — not including — your next pick, so the room "
+            "lands on the clock with the board already scored. When you have no turn left, it "
+            "runs to the end, which is how a mock finishes on this button alone.\n\n"
+            "`end`: run every remaining pick, yours included — the autopicker plays your seat "
+            "exactly as it plays the others, and those picks are recorded as yours."
+        ),
+    )
+
+
+class MockAdvanceResp(ApiModel):
+    """What the autopicker did, and the room it left behind."""
+
+    session: DraftSessionResp = Field(
+        description=(
+            "The room after the advance, with every pick — the newly simulated ones are those "
+            "with `from_pick <= overall_pick` (and `< stopped_at`, when the run stopped short)"
+        ),
+    )
+    picks_made: int = Field(description="Picks the autopicker recorded on this call")
+    until: MockUntil
+    from_pick: int = Field(description="The pick the autopicker started at — the draft front when it was called")
+    stopped_at: Optional[int] = Field(
+        default=None,
+        description=(
+            "The first pick the autopicker did not make: your next pick under `my_turn`, or the "
+            "pick it could not fill when the pool or a cap stopped it. Null when it ran the "
+            "draft out."
+        ),
+    )
+    stopped_reason: MockStopReason = Field(
+        description=(
+            "`my_turn`/`end`: it reached where it was going. `pool_exhausted`: nothing draftable "
+            "was left. `cap_blocked`: players were left, but every one would break the seat on "
+            "the clock's hard position caps — the autopicker stops rather than breach one."
+        ),
+    )
+    completed: bool = Field(description="The session auto-completed on this advance")
+    fallback: bool = Field(
+        description=(
+            "The seats drafted by CV value because the season has no market snapshot yet, not "
+            "by ADP. True exactly when `market_as_of` is null."
+        ),
+    )
+    market_as_of: Optional[date] = Field(
+        default=None, description="Snapshot date of the ADP the seats drafted from"
+    )
+
+
+class MockAdvanceResponse(BaseResponse):
+    """The advanced room."""
+    data: Optional[MockAdvanceResp] = None
 
 
 # --------------------------------- Board --------------------------------- #

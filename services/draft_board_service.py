@@ -422,6 +422,25 @@ class DraftBoardService:
     # ---- pure assembly ---------------------------------------------------------
 
     @staticmethod
+    def rank_pool(scoring: "ResolvedScoring", pool: list[PoolRow], cat_defs: list) -> list[tuple]:
+        """The pool in big-board order: (row, value, per-category values, per-category
+        z, z-sum), best first — the order `cv_rank` enumerates.
+
+        Public because the mock autopicker needs the same ordering when there is
+        no market snapshot to draft from. One ranking rule, two callers: an
+        autopicker drafting by a second-hand approximation of CV value would
+        make the mock's own board disagree with the room's.
+        """
+        if scoring.is_categories:
+            scored = compute_category_scores(pool, cat_defs)
+            return [(s.row, category_value(s.score), s.values, s.z, s.score) for s in scored]
+        points = scoring.points
+        entries = [(row, round(points.score(row.line), VALUE_DECIMALS), None, None, None)
+                   for row in pool]
+        entries.sort(key=lambda e: (-e[1], -e[0].fpts_avg))
+        return entries
+
+    @staticmethod
     def _build_board(
         scoring: "ResolvedScoring",
         picked_ids: frozenset[int],
@@ -436,15 +455,7 @@ class DraftBoardService:
         mine = my_ids | inputs.session_mine
         removed = picked | mine
 
-        # (row, value, per-category values, per-category z, z-sum), best first.
-        if scoring.is_categories:
-            scored = compute_category_scores(inputs.pool, cat_defs)
-            entries = [(s.row, category_value(s.score), s.values, s.z, s.score) for s in scored]
-        else:
-            points = scoring.points
-            entries = [(row, round(points.score(row.line), VALUE_DECIMALS), None, None, None)
-                       for row in inputs.pool]
-            entries.sort(key=lambda e: (-e[1], -e[0].fpts_avg))
+        entries = DraftBoardService.rank_pool(scoring, inputs.pool, cat_defs)
 
         primary = DraftBoardService._primary_positions(inputs)
         eligible = DraftBoardService._eligible_slots(inputs)

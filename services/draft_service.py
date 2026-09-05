@@ -280,6 +280,23 @@ def check_length_holds_picks(total_picks: Optional[int], used: Iterable[int]) ->
         )
 
 
+def lock_room(session_id: int) -> None:
+    """Take a room's row for the rest of the calling transaction.
+
+    Two writers decide what a room is allowed to become from facts on this row —
+    the autopicker refuses a room that follows an ESPN draft, and the INIT sync
+    refuses one that holds simulated picks. Read without a lock, both would see
+    the state before the other's write and both would proceed, leaving a room
+    that is somehow both. Whoever takes the row first now decides, and the other
+    asks again.
+
+    Its own statement on its own table: `FOR UPDATE` cannot be applied to the
+    nullable side of an outer join, and every full read of a session joins the
+    league. The transaction holds the lock however it was taken.
+    """
+    DraftSession.select(DraftSession.id).where(DraftSession.id == session_id).for_update().first()
+
+
 def espn_league_id_of(league: Optional[League]) -> Optional[int]:
     """The ESPN draft a synced ESPN league maps to; None for Yahoo or unsynced."""
     if league is None or getattr(league, "provider", None) != "espn":

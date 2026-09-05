@@ -38,8 +38,11 @@ from schemas.draft import (
     DraftSessionListResponse,
     DraftSessionResponse,
     DraftSessionUpdate,
+    MockAdvanceRequest,
+    MockAdvanceResponse,
 )
 from services.draft_board_service import BoardSession, DraftBoardService
+from services.draft_mock_service import DraftMockService
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
 from services.scoring.resolver import resolve_scoring
@@ -309,3 +312,43 @@ async def sync_draft_init(
     req: DraftInitSyncRequest, session: OwnedDraftSessionContext = Depends(get_owned_session)
 ):
     return respond(await DraftSyncService.sync_init(session.session_id, req))
+
+
+@router.post(
+    "/{session_id}/mock/advance",
+    response_model=MockAdvanceResponse,
+    summary="Run the mock autopicker",
+    description=(
+        "Plays the draft forward from where it stands. `until: my_turn` runs the other seats up "
+        "to — not including — your next pick, so the room lands on the clock with the board "
+        "already scored; with no turn of yours left it runs to the end, which is how a mock "
+        "finishes on that button alone. `until: end` runs every remaining pick, yours included, "
+        "and completes the session.\n\n"
+        "Each seat takes the best available by ADP (ESPN's editorial rank where there is no ADP), "
+        "with a small preference for reaching a few names down the board, and never past a hard "
+        "position cap — if every remaining player would break the caps of the seat on the clock, "
+        "the run stops and says so rather than breaching one. There is no roster-need modelling: "
+        "the other seats are a clock, not opponents, and neither is your own seat under `end`. "
+        "Stop at your turn and read the board if you want the pick made well.\n\n"
+        "Deterministic: every pick is seeded from `(session_id, overall_pick)`, so advancing a "
+        "room turn by turn produces exactly the draft advancing it in one call would, and a mock "
+        "replays identically. A different room drafts differently, on purpose.\n\n"
+        "Mock rooms only, and only ones following nothing. A manual or live room is tracking a "
+        "real draft, and a mock room already linked to an ESPN lobby takes its picks from there — "
+        "simulating over either would be fiction. Picks are recorded `source: mock` and undo one "
+        "by one like any other.\n\n"
+        "Before ESPN publishes a market snapshot for the season the seats fall back to CV value "
+        "and the response says so (`fallback`)."
+    ),
+    responses={
+        200: {"description": "Advanced — see `picks_made`, `stopped_at`, `stopped_reason`, `fallback`"},
+        400: {"description": "No pick order or round count, an auction room, or no slot to stop at"},
+        404: {"description": "No such session, or it does not belong to the caller"},
+        409: {"description": "Not a mock room, a mock room already following an ESPN draft, or a draft that is not active"},
+        422: {"description": "`until` is neither `my_turn` nor `end`"},
+    },
+)
+async def advance_mock_draft(
+    req: MockAdvanceRequest, session: OwnedDraftSessionContext = Depends(get_owned_session)
+):
+    return respond(await DraftMockService.advance(session.session_id, req))
