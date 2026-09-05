@@ -220,6 +220,9 @@ class BoardInputs:
     session_mine: frozenset[int] = frozenset()          # drafted by the caller
     used_picks: tuple[int, ...] = ()                    # pick numbers recorded in the session
     keeper_picks: tuple[int, ...] = ()                  # the subset spent before the draft started
+    # Seat (1-based slot in pick_order) -> the players it has drafted. Every
+    # seat, mine included; the fit model drops mine before pacing against them.
+    seat_players: dict[int, frozenset[int]] = field(default_factory=dict)
 
 
 class DraftBoardService:
@@ -261,11 +264,13 @@ class DraftBoardService:
         session_mine: set[int] = set()
         used_picks: list[int] = []
         keeper_picks: list[int] = []
+        seat_players: dict[int, set[int]] = {}
         if session_id is not None:
             picks = list(
                 DraftPick.select(
                     DraftPick.player, DraftPick.by_me, DraftPick.espn_player_id,
                     DraftPick.player_name, DraftPick.overall_pick, DraftPick.source,
+                    DraftPick.slot,
                 ).where(DraftPick.session == session_id)
             )
             # A pick recorded before its player reached nba.players carries
@@ -282,6 +287,12 @@ class DraftBoardService:
                 session_picked.add(pick.player_id)
                 if pick.by_me:
                     session_mine.add(pick.player_id)
+                # Whose roster this pick joined. Seats come from `pick_order`
+                # (the ESPN team that picked, where ESPN said so) and are what
+                # turns the other rooms' picks from "off the board" into
+                # eleven rosters the fit model can pace against.
+                if pick.slot is not None:
+                    seat_players.setdefault(int(pick.slot), set()).add(pick.player_id)
 
         baseline = {row.id: row for row in load_baseline_pool()}
         pool: dict[int, PoolRow] = dict(baseline)
@@ -346,6 +357,7 @@ class DraftBoardService:
             positions=positions, names=names,
             session_picked=frozenset(session_picked), session_mine=frozenset(session_mine),
             used_picks=tuple(sorted(used_picks)), keeper_picks=tuple(sorted(keeper_picks)),
+            seat_players={seat: frozenset(ids) for seat, ids in seat_players.items()},
         )
 
     @staticmethod
@@ -442,7 +454,7 @@ class DraftBoardService:
         # What this roster is short of and what it has conceded: the weights the
         # fit column is scored with (None for points leagues, which have no
         # per-category z's to weigh).
-        fit = DraftBoardService._fit_model(scoring, session, entries, mine, cat_defs)
+        fit = DraftBoardService._fit_model(scoring, session, entries, mine, cat_defs, inputs)
         fit_values = DraftBoardService._fit_values(fit, entries)
         fit_ranks = DraftBoardService._fit_ranks(fit_values, removed)
         league_size = DraftBoardService._league_size(scoring, session)
@@ -604,6 +616,8 @@ class DraftBoardService:
                 # simply echoes what the session stores.
                 punts=(fit.punts if fit is not None else list(session.punts)),
                 category_need=DraftBoardService._category_need(fit),
+                pace_source=(fit.pace_source if fit is not None else None),
+                seats_counted=(fit.seats_counted if fit is not None else 0),
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
                 # dd/td weights score 0 against aggregate lines; name them rather
                 # than imply the league's weights were fully applied (the
@@ -767,6 +781,7 @@ class DraftBoardService:
         entries: list,
         my_ids: frozenset[int],
         cat_defs: list,
+        inputs: BoardInputs,
     ) -> Optional[FitModel]:
         """The weights this roster's fit column is scored with.
 
@@ -782,7 +797,28 @@ class DraftBoardService:
             DraftBoardService._league_size(scoring, session), roster_size
         )
         ranked = [(row.id, z) for row, _value, _cats, z, _z_sum in entries]
-        return build_fit_model(ranked, my_ids, cat_defs, tier_size, session.punts)
+        return build_fit_model(
+            ranked, my_ids, cat_defs, tier_size, session.punts,
+            opponent_rosters=DraftBoardService._opponent_rosters(inputs, session),
+        )
+
+    @staticmethod
+    def _opponent_rosters(
+        inputs: BoardInputs, session: BoardSession
+    ) -> list[frozenset[int]]:
+        """What every seat but mine has drafted.
+
+        None of them without a confirmed slot: my own roster would be counted
+        among the teams I am measured against, which would flatter every
+        category I am strong in and hide every hole. The tier estimate is the
+        right answer until the room knows which seat is mine.
+        """
+        if session.my_slot is None or not inputs.seat_players:
+            return []
+        return [
+            players for seat, players in sorted(inputs.seat_players.items())
+            if seat != session.my_slot and players
+        ]
 
     @staticmethod
     def _fit_values(fit: Optional[FitModel], entries: list) -> dict[int, float]:
@@ -820,6 +856,7 @@ class DraftBoardService:
             CategoryNeedResp(
                 key=need.key, label=need.label, mine=need.mine, pace=need.pace,
                 need=need.need, weight=need.weight, punted=need.punted,
+                my_rank=need.my_rank, seats=need.seats,
             )
             for need in fit.needs
         ]

@@ -259,3 +259,134 @@ def test_the_drivers_sum_to_the_shift():
     fit = _model(my_ids=[4], punts=["ast"])
     for _pid, z in POOL:
         assert sum(s for _need, s in fit.drivers(z)) == pytest.approx(fit.shift(z))
+
+
+# ---- pacing against the teams actually in the draft ------------------------
+
+
+def _seats(*rosters):
+    """Opposing seats as player-id collections."""
+    return [set(r) for r in rosters]
+
+
+def test_three_seats_are_enough_to_stop_guessing_and_fewer_are_not():
+    """Two opponents are an anecdote: the dispersion across them is noise, and
+    the tier estimate is the better answer until a third has drafted."""
+    two = _model(my_ids=[1], pool=POOL, tier_size=4)
+    assert two.pace_source == "tier"
+
+    with_two = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3]))
+    assert with_two.pace_source == "tier" and with_two.seats_counted == 2
+
+    with_three = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3], [4]))
+    assert with_three.pace_source == "seats" and with_three.seats_counted == 3
+
+
+def test_an_empty_seat_does_not_count_as_a_team():
+    """A seat that has drafted nobody the pool can score is not a team to be
+    behind — it is a team that has not started."""
+    fit = build_fit_model(
+        POOL, [1], REB_AST, 4,
+        opponent_rosters=_seats([2], [3], [], [404]),   # 404 is not in the pool
+    )
+    assert fit.seats_counted == 2 and fit.pace_source == "tier"
+
+
+def test_pace_is_what_the_other_teams_actually_hold():
+    """Three guard-heavy opponents make rebounds the scarce thing, whatever the
+    pool as a whole looks like."""
+    pool = POOL + [
+        (5, {"reb": -2.0, "ast": 2.0}), (6, {"reb": -2.0, "ast": 2.0}),
+        (7, {"reb": -2.0, "ast": 2.0}),
+    ]
+    # I hold the big (reb +2); all three opponents hold a guard (reb -2).
+    fit = build_fit_model(pool, [1], REB_AST, len(pool),
+                          opponent_rosters=_seats([5], [6], [7]))
+
+    reb = next(n for n in fit.needs if n.key == "reb")
+    ast = next(n for n in fit.needs if n.key == "ast")
+    assert fit.pace_source == "seats"
+    assert reb.pace == -2.0 and reb.mine == 2.0     # they hold -2 each, I hold +2
+    assert ast.pace == 2.0 and ast.mine == -2.0
+    # I am ahead on the glass and behind on assists, against these teams.
+    assert reb.need < 0 < ast.need
+    # These three agree exactly, so their own dispersion is zero; the pool's
+    # spread is the yardstick rather than the signal being thrown away.
+    assert reb.spread > 0
+
+
+def test_a_seat_one_pick_ahead_in_the_snake_is_not_a_lead():
+    """Mid-round some seats have drafted once more than others. Scaling each to
+    my own pick count is what stops that reading as an advantage."""
+    pool = [(i, {"reb": 1.0, "ast": 1.0}) for i in range(1, 9)]
+    # I have one player; every opponent has two of the identical players.
+    fit = build_fit_model(pool, [1], REB_AST, 8,
+                          opponent_rosters=_seats([2, 3], [4, 5], [6, 7]))
+
+    reb = next(n for n in fit.needs if n.key == "reb")
+    assert fit.pace_source == "seats"
+    # Their raw holding is 2.0; scaled to my one pick it is 1.0, which is mine.
+    assert reb.mine == 1.0 and reb.pace == 1.0 and reb.need == 0.0
+
+
+def test_standing_is_reported_unscaled_because_that_is_what_it_means():
+    """`my_rank` answers "where am I right now", so it counts what is on the
+    rosters — not a per-pick rate."""
+    pool = [
+        (1, {"reb": 5.0, "ast": 0.0}),      # mine
+        (2, {"reb": 9.0, "ast": 0.0}),
+        (3, {"reb": 4.0, "ast": 0.0}),
+        (4, {"reb": 1.0, "ast": 0.0}),
+    ]
+    fit = build_fit_model(pool, [1], REB_AST, 4, opponent_rosters=_seats([2], [3], [4]))
+
+    reb = next(n for n in fit.needs if n.key == "reb")
+    assert reb.mine == 5.0
+    assert reb.my_rank == 2 and reb.seats == 4      # one team holds more
+    ast = next(n for n in fit.needs if n.key == "ast")
+    assert ast.my_rank == 1                          # all level; ties take the better rank
+
+
+def test_standing_is_silent_when_there_are_no_seats_to_stand_among():
+    fit = _model(my_ids=[1])
+    assert all(n.my_rank is None and n.seats is None for n in fit.needs)
+
+
+def test_an_empty_roster_stays_balanced_however_far_ahead_the_others_are():
+    """The k = 0 identity has to survive real opponents: with nothing drafted
+    there is nothing to be behind, and fit must still equal balanced."""
+    fit = build_fit_model(POOL, [], REB_AST, 4, opponent_rosters=_seats([1], [2], [3]))
+
+    assert fit.picks_counted == 0 and fit.pace_source == "tier"
+    assert all(n.need == 0.0 and n.weight == 1.0 for n in fit.needs)
+    for _pid, z in POOL:
+        assert fit.shift(z) == 0.0
+    # Standing is still reported — the other teams have drafted, I have not.
+    reb = next(n for n in fit.needs if n.key == "reb")
+    assert reb.seats == 4 and reb.my_rank is not None
+
+
+def test_a_drafted_rookie_the_pool_cannot_score_shrinks_nobodys_pick_count():
+    """An unscorable player must leave both sides of the comparison, or the
+    seat holding him is scaled as though he contributed nothing."""
+    pool = [(i, {"reb": 1.0, "ast": 1.0}) for i in range(1, 9)]
+    theirs = build_fit_model(pool, [1], REB_AST, 8,
+                             opponent_rosters=_seats([2, 999], [4, 998], [6, 997]))
+
+    reb = next(n for n in theirs.needs if n.key == "reb")
+    # Each opponent scores one player, like me — not two.
+    assert reb.pace == 1.0 and reb.need == 0.0
+
+
+def test_unanimous_opponents_are_a_signal_not_a_silence():
+    """Three teams holding exactly the same thing have no dispersion of their
+    own. That is the clearest possible read on where the field is, so the
+    pool's spread stands in as the yardstick and the need survives."""
+    pool = POOL + [(i, {"reb": -2.0, "ast": 2.0}) for i in (5, 6, 7)]
+    fit = build_fit_model(pool, [1], REB_AST, len(pool),
+                          opponent_rosters=_seats([5], [6], [7]))
+
+    reb = next(n for n in fit.needs if n.key == "reb")
+    assert reb.pace == -2.0             # theirs, not the pool's
+    assert reb.spread > 0               # the pool's, because theirs is zero
+    assert reb.need != 0.0

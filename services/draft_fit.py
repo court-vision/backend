@@ -11,15 +11,22 @@ categories the manager has decided to concede.
 
 The model, in four steps:
 
-1. **Pace.** The draftable tier is the top `league_size x roster_size` players
-   by balanced score over the full pool — a fixed reference, drafted players
-   included, so it does not drift as the board empties. An average team's
-   holding in category c after k picks is `mean(z_c over the tier) x k`.
-2. **Need.** `need_c = (pace_c - mine_c) / spread_c`, clamped to +/-2, where
-   `spread_c = stdev(z_c over the tier) x sqrt(k)` — the spread of a k-pick
-   sum. It reads directly: "1.2 standard deviations behind pace in assists".
-   No probabilities: a calibrated one needs an ADP *distribution* and a model
-   of the other seats, neither of which exists this season (plan diff #6).
+1. **Pace**, from real teams wherever there are real teams to read. Every pick
+   records the seat that made it, so the opposing rosters sum directly: pace is
+   the mean of what those teams actually hold in category c, each scaled to my
+   own pick count so a seat one pick ahead in the snake does not read as a
+   lead. Before enough seats have drafted anybody — and in a room with no seats
+   at all — it falls back to the original estimate: the draftable tier, the top
+   `league_size x roster_size` players by balanced score over the full pool,
+   whose mean z per category times k is what an average team would hold.
+   `FitModel.pace_source` says which was used; the two are the same shape, so
+   nothing downstream changes with it.
+2. **Need.** `need_c = (pace_c - mine_c) / spread_c`, clamped to +/-2. The
+   spread is the observed dispersion across the opposing teams when they are
+   what is being read, and `stdev(z_c over the tier) x sqrt(k)` — the spread of
+   a k-pick sum — when they are not. It reads directly: "1.2 standard deviations
+   behind pace in assists". Still no probabilities: a calibrated one needs an
+   ADP *distribution*, which no source publishes (plan diff #6).
 3. **Weights.** `w_c = 0` for a punted category, else `1 + FIT_GAIN x need_c`.
    With FIT_GAIN at 0.25 and the clamp at 2, weights live in [0.5, 1.5]: fit
    leans a ranking, it never inverts a category's sign.
@@ -31,6 +38,11 @@ The model, in four steps:
    not in floating point, and an all-ones model must return the balanced value
    *exactly*, or an untouched board would show a fit column differing from its
    value column by a rounding step and mean nothing by it.
+
+`my_rank` per category comes from the same seat holdings, unscaled: where this
+roster stands right now among the teams in the draft. That is the number a
+manager means by "I am third in blocks and last in free-throw percentage", and
+it is the input a punt *recommendation* would be built from.
 
 Before the first pick k is 0, pace and holdings are both 0, so every need is 0
 and fit is exactly balanced — until a punt is set, which is the point of
@@ -61,6 +73,11 @@ SPREAD_EPS = 1e-9
 # Draftable roster spots when a room knows neither its rounds nor its slots.
 DEFAULT_ROSTER_SIZE = 13
 
+# Opposing seats that must have drafted somebody before their rosters are worth
+# pacing against. Two teams are an anecdote and the dispersion across them is
+# noise; below this the tier estimate is the better answer.
+MIN_SEATS_FOR_PACE = 3
+
 NEED_DECIMALS = 3
 VALUE_DECIMALS = 3
 
@@ -77,6 +94,10 @@ class CategoryNeed:
     need: float         # (pace - mine) / spread, clamped: + means behind pace
     weight: float       # 0 when punted, else 1 + FIT_GAIN * need
     punted: bool
+    # Where this roster stands when the other seats can be read: 1 = holds the
+    # most of this category of any team in the draft. None when they cannot.
+    my_rank: Optional[int] = None
+    seats: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +107,8 @@ class FitModel:
     needs: tuple[CategoryNeed, ...]
     picks_counted: int      # my roster players the pool could score (see build_fit_model)
     tier_size: int
+    pace_source: str = "tier"   # seats | tier
+    seats_counted: int = 0      # opposing rosters the pace was read from
 
     @property
     def weights(self) -> dict[str, float]:
@@ -168,31 +191,69 @@ def build_fit_model(
     categories: Sequence[CategoryDef],
     tier_size: int,
     punts: Iterable[str] = (),
+    opponent_rosters: Optional[Sequence[Collection[int]]] = None,
 ) -> FitModel:
-    """Weights for one roster, from the pool it is drafting out of.
+    """Weights for one roster, from the pool and the teams it is drafting against.
 
     `ranked_z` is every player in the pool as `(player_id, per-category z)`, in
     balanced-score order (best first) — exactly what `compute_category_scores`
-    returns. Only roster players the pool can score are counted, on both sides
-    of the comparison: a drafted rookie with no stat line to z-score is absent
-    from `mine` and must not be paced against either, or a roster would look
-    behind in every category for owning him.
+    returns. `opponent_rosters` is one collection of player ids per opposing
+    seat; pass none (or too few to measure) and the pace falls back to the tier
+    estimate, which is what a room with no seats gets.
+
+    Only players the pool can score are counted, on every side of the
+    comparison: a drafted rookie with no stat line to z-score is absent from
+    `mine`, from the opposing holdings, and from the pick counts they are
+    scaled by — otherwise a roster would look behind in every category for
+    owning him.
     """
     punted, _ = normalize_punts(punts, [c.key for c in categories])
+    z_by_id = {pid: z for pid, z in ranked_z if z}
     tier = list(ranked_z[:tier_size]) if tier_size > 0 else []
-    owned = [z for pid, z in ranked_z if pid in my_ids and z]
+    owned = [z_by_id[pid] for pid in my_ids if pid in z_by_id]
     picks = len(owned)
+
+    # One entry per opposing seat that has drafted somebody the pool can score.
+    seats = [
+        scored for scored in (
+            [z_by_id[pid] for pid in roster if pid in z_by_id]
+            for roster in (opponent_rosters or ())
+        )
+        if scored
+    ]
+    # With nobody drafted there is nothing to be behind, whatever the seats
+    # hold — the k = 0 case has to stay exactly balanced.
+    use_seats = len(seats) >= MIN_SEATS_FOR_PACE and picks > 0
 
     needs: list[CategoryNeed] = []
     for category in categories:
         key = category.key
+        mine = sum(float(z.get(key, 0.0)) for z in owned)
+        held = [sum(float(z.get(key, 0.0)) for z in seat) for seat in seats]
+
+        # The estimate, always computed: it is the pace when there are no seats
+        # to read, and the yardstick when the seats agree too closely to be one.
         column = [float((z or {}).get(key, 0.0)) for _, z in tier]
         mean = statistics.fmean(column) if column else 0.0
         stdev = statistics.pstdev(column, mean) if len(column) >= MIN_TIER else 0.0
+        tier_pace = mean * picks
+        tier_spread = stdev * sqrt(max(picks, 1))
 
-        pace = mean * picks
-        mine = sum(float(z.get(key, 0.0)) for z in owned)
-        spread = stdev * sqrt(max(picks, 1))
+        if use_seats:
+            # Each seat scaled to my pick count: a team one pick ahead in the
+            # snake holds more of everything, and that is not a lead.
+            scaled = [total * (picks / len(seat)) for total, seat in zip(held, seats)]
+            pace = statistics.fmean(scaled)
+            observed = statistics.pstdev(scaled, pace) if len(scaled) >= MIN_TIER else 0.0
+            # Opponents in perfect agreement have no dispersion to divide by,
+            # and that is the strongest statement about where the field sits,
+            # not the absence of one. Keep what they actually hold as the pace
+            # and borrow the pool's spread as the yardstick, rather than
+            # reporting no signal in the one case the signal is unanimous.
+            spread = observed if observed > SPREAD_EPS else tier_spread
+        else:
+            pace, spread = tier_pace, tier_spread
+
         need = _clamp((pace - mine) / spread) if spread > SPREAD_EPS else 0.0
         is_punted = key in punted
 
@@ -205,6 +266,13 @@ def build_fit_model(
             need=round(need, NEED_DECIMALS),
             weight=0.0 if is_punted else round(1.0 + FIT_GAIN * need, NEED_DECIMALS),
             punted=is_punted,
+            # Standing is unscaled: what is on the rosters right now, which is
+            # what "third in blocks" means. Ties share the better rank.
+            my_rank=(1 + sum(1 for total in held if total > mine)) if held else None,
+            seats=(len(held) + 1) if held else None,
         ))
 
-    return FitModel(needs=tuple(needs), picks_counted=picks, tier_size=len(tier))
+    return FitModel(
+        needs=tuple(needs), picks_counted=picks, tier_size=len(tier),
+        pace_source=("seats" if use_seats else "tier"), seats_counted=len(seats),
+    )
