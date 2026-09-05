@@ -184,6 +184,18 @@ class DraftSyncService:
             )
         link: Optional[int] = None
         if session.espn_league_id is None and session.kind in ("live", "mock"):
+            # A room CV has simulated into cannot then start following an ESPN
+            # draft: the numbers are already spent, so every INIT pick would
+            # come back a conflict. The refusal is the mirror of the
+            # autopicker's own — a room follows a real draft or plays a
+            # simulated one, never both.
+            if DraftPick.select().where(
+                (DraftPick.session == session_id) & (DraftPick.source == "mock")
+            ).exists():
+                raise ConflictError(
+                    "DRAFT_ROOM_IS_SIMULATED",
+                    "This room holds simulated picks; open a fresh room to follow an ESPN draft",
+                )
             DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
             link = header.espn_league_id
 

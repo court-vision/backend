@@ -3,15 +3,16 @@ API tests for the Draft Lab routes.
 
 Covers the stateless board (ownership, the scoring resolved from the auth
 context, picked/mine reaching the service as id sets), the session and pick
-CRUD routes, and the session board — including that `/drafts/board` still wins
-over `/drafts/{session_id}`.
+CRUD routes, the session board — including that `/drafts/board` still wins
+over `/drafts/{session_id}` — and the mock autopicker's route.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
 
+from core.errors import ConflictError
 from schemas.common import ApiStatus
 from schemas.draft import DraftBoardMeta, DraftBoardResp, DraftBoardRow, DraftSessionResp
 
@@ -465,3 +466,83 @@ def test_sync_init_rejects_a_missing_or_tiny_payload(authed_client, draft_sync_s
     _own_session(monkeypatch, session_id=12)
     assert authed_client.post("/v1/internal/drafts/12/sync/init", json=body).status_code == 422
     assert draft_sync_service == []
+
+
+# ------------------------------- Mock mode -------------------------------- #
+
+
+@pytest.fixture
+def draft_mock_service(monkeypatch):
+    """Stub DraftMockService.advance; record what the route handed it."""
+    from services import draft_mock_service as module
+    from schemas.draft import MockAdvanceResp, MockAdvanceResponse
+
+    calls = []
+
+    async def fake(*args, **kwargs):
+        calls.append((args, kwargs))
+        return MockAdvanceResponse(
+            status=ApiStatus.SUCCESS,
+            message="Simulated 2 picks — you are on the clock at pick 3",
+            data=MockAdvanceResp(
+                session=SESSION, picks_made=2, until="my_turn", from_pick=1, stopped_at=3,
+                stopped_reason="my_turn", completed=False, fallback=False,
+                market_as_of=date(2026, 9, 1),
+            ),
+        )
+
+    monkeypatch.setattr(module.DraftMockService, "advance", staticmethod(fake))
+    return calls
+
+
+@pytest.mark.api
+def test_mock_advance_reaches_the_service_with_the_owned_session_id(authed_client, draft_mock_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12, kind="mock")
+
+    res = authed_client.post("/v1/internal/drafts/12/mock/advance", json={"until": "end"})
+
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert body["picks_made"] == 2 and body["stopped_at"] == 3 and body["fallback"] is False
+    args, _ = draft_mock_service[0]
+    assert args[0] == 12 and args[1].until == "end"
+
+
+@pytest.mark.api
+def test_mock_advance_defaults_to_stopping_at_my_turn(authed_client, draft_mock_service, monkeypatch):
+    """The common case is one keystroke, so an empty body is the useful one."""
+    _own_session(monkeypatch, session_id=12, kind="mock")
+
+    assert authed_client.post("/v1/internal/drafts/12/mock/advance", json={}).status_code == 200
+    args, _ = draft_mock_service[0]
+    assert args[1].until == "my_turn"
+
+
+@pytest.mark.api
+def test_mock_advance_for_a_session_you_do_not_own_is_a_404(authed_client, draft_mock_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12, kind="mock")
+    res = authed_client.post("/v1/internal/drafts/999/mock/advance", json={})
+    assert res.status_code == 404 and res.json()["error_code"] == "DRAFT_SESSION_NOT_FOUND"
+    assert draft_mock_service == []
+
+
+@pytest.mark.api
+def test_mock_advance_rejects_an_unknown_stopping_point(authed_client, draft_mock_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12, kind="mock")
+    assert authed_client.post("/v1/internal/drafts/12/mock/advance", json={"until": "lunch"}).status_code == 422
+    assert draft_mock_service == []
+
+
+@pytest.mark.api
+def test_a_room_that_may_not_be_simulated_answers_409(authed_client, monkeypatch):
+    """The guard itself is the service's; this pins the status it surfaces as."""
+    from services import draft_mock_service as module
+
+    async def refuse(*args, **kwargs):
+        raise ConflictError("NOT_A_MOCK", "Draft room #12 is a manual room, tracking a real draft")
+
+    monkeypatch.setattr(module.DraftMockService, "advance", staticmethod(refuse))
+    _own_session(monkeypatch, session_id=12)
+
+    res = authed_client.post("/v1/internal/drafts/12/mock/advance", json={})
+    assert res.status_code == 409 and res.json()["error_code"] == "NOT_A_MOCK"
