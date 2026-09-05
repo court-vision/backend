@@ -216,7 +216,7 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
         "The room's board: the same valuation as `/drafts/board`, with pick state taken from the "
         "session rather than the query string, and with recommendations for the caller's next "
         "pick — every component of the score visible (`season_value`, `vorp`, `scarcity`, "
-        "`flexibility`, `injury`).\n\n"
+        "`flexibility`, `injury`, `category_fit`).\n\n"
         "Players the league's hard position caps have made undraftable for the caller are flagged "
         "`cap_blocked` (shown greyed, never hidden) and are excluded from the recommendations.\n\n"
         "`roster` lists the caller's drafted players with primary position, eligible slots and NBA "
