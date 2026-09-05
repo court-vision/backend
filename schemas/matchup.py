@@ -40,7 +40,8 @@ class CategoryTeamScore(ApiModel):
 
 class MatchupPlayerResp(ApiModel):
     """Player data within a matchup context"""
-    player_id: int
+    player_id: int                         # Provider ID (ESPN or Yahoo), not an NBA ID
+    nba_player_id: Optional[int] = None    # NBA (nba_api) player ID for terminal navigation
     name: str
     team: str                              # NBA team abbreviation
     position: str                          # Primary position (PG, SG, etc.)
@@ -216,6 +217,7 @@ class DailyMatchupPlayerStats(ApiModel):
 class DailyMatchupFuturePlayer(ApiModel):
     """Player info for a future day. Shows whether they have a game."""
     player_id: int
+    nba_player_id: Optional[int] = None        # Resolved NBA player ID
     name: str
     team: str
     position: str

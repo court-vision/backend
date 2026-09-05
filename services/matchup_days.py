@@ -99,7 +99,8 @@ def build_past_roster(roster: Iterable[Any], resolve: Callable[[Any], Optional[i
     return result
 
 
-def build_future_roster(roster: Iterable[Any], team_game_map: dict[str, Any]) -> list[DailyMatchupFuturePlayer]:
+def build_future_roster(roster: Iterable[Any], team_game_map: dict[str, Any],
+                        resolve: Callable[[Any], Optional[int]]) -> list[DailyMatchupFuturePlayer]:
     result: list[DailyMatchupFuturePlayer] = []
     for p in roster:
         game = team_game_map.get(p.team)
@@ -109,7 +110,8 @@ def build_future_roster(roster: Iterable[Any], team_game_map: dict[str, Any]) ->
             opponent = f"vs {game.away_team_id}" if game.home_team_id == p.team else f"@ {game.home_team_id}"
             game_time = str(game.start_time_et) if game.start_time_et else None
         result.append(DailyMatchupFuturePlayer(
-            player_id=p.player_id, name=p.name, team=p.team, position=p.position,
+            player_id=p.player_id, nba_player_id=resolve(p),
+            name=p.name, team=p.team, position=p.position,
             has_game=game is not None, opponent=opponent, game_time_et=game_time,
             injured=p.injured, injury_status=p.injury_status,
         ))
@@ -167,9 +169,9 @@ def build_day(md: MatchupData, target_date: date, today: date, period_start: dat
                                          total_fpts=opp_total, roster=opp_roster, categories=opp_cats)
     else:
         your_team = DailyMatchupTeam(team_name=md.your_team.team_name, team_id=md.your_team.team_id,
-                                     total_fpts=None, roster=build_future_roster(md.your_team.roster, team_game_map))
+                                     total_fpts=None, roster=build_future_roster(md.your_team.roster, team_game_map, resolve))
         opponent_team = DailyMatchupTeam(team_name=md.opponent_team.team_name, team_id=md.opponent_team.team_id,
-                                         total_fpts=None, roster=build_future_roster(md.opponent_team.roster, team_game_map))
+                                         total_fpts=None, roster=build_future_roster(md.opponent_team.roster, team_game_map, resolve))
 
     return DailyMatchupData(
         date=target_date.isoformat(),

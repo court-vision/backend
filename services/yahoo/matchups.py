@@ -6,6 +6,7 @@ from schemas.common import ApiStatus, LeagueInfo
 from schemas.matchup import (
     CategoryTeamScore, MatchupData, MatchupPlayerResp, MatchupResp, MatchupTeamResp,
 )
+from services.nba_id_resolver import nba_ids_by_name
 from services.player_service import _normalize_name
 from services.player_value_service import PlayerValueService
 from services.providers.http import provider_get
@@ -392,6 +393,13 @@ class YahooMatchupService(YahooRosterService):
             scoring, names=player_lookups,
         )
 
+        # Terminal panels navigate by NBA player ID. Yahoo IDs share no
+        # namespace with `nba.players.espn_id`, so these resolve by name.
+        nba_id_map = await run_db(
+            "yahoo.matchup_nba_ids", nba_ids_by_name,
+            [_normalize_name(p["name"]) for p in parsed_players],
+        )
+
         # Build MatchupPlayerResp list
         roster = []
         for p in parsed_players:
@@ -402,6 +410,7 @@ class YahooMatchupService(YahooRosterService):
 
             roster.append(MatchupPlayerResp(
                 player_id=p["player_id"],
+                nba_player_id=nba_id_map.get(normalized_name),
                 name=p["name"],
                 team=p["team"],
                 position=p["position"],
