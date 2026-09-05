@@ -1087,7 +1087,7 @@ def test_the_board_paces_against_the_seats_once_enough_have_drafted(cat_seat_tab
         session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
     ))
 
-    assert resp.meta.pace_source == "seats" and resp.meta.seats_counted == 3
+    assert resp.meta.pace_source == "seats" and resp.meta.seats_drafted == 3
     need = {n.key: n for n in resp.meta.category_need}
     # Standing is reported against the whole room, me included.
     assert all(n.seats == 4 for n in need.values())
@@ -1108,7 +1108,7 @@ def test_my_own_seat_is_never_one_of_the_teams_i_am_measured_against(cat_seat_ta
         session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
     ))
 
-    assert mine_excluded.meta.seats_counted == 3     # four seats hold players, three are theirs
+    assert mine_excluded.meta.seats_drafted == 3     # four seats hold players, three are theirs
 
 
 @pytest.mark.unit
@@ -1124,7 +1124,7 @@ def test_a_room_that_does_not_know_my_seat_falls_back_to_the_estimate(cat_seat_t
         session=BoardSession(session_id=77, league_size=12, rounds=13),   # no my_slot
     ))
 
-    assert resp.meta.pace_source == "tier" and resp.meta.seats_counted == 0
+    assert resp.meta.pace_source == "tier" and resp.meta.seats_drafted == 0
     assert all(n.my_rank is None for n in resp.meta.category_need)
 
 
@@ -1132,7 +1132,7 @@ def test_a_room_that_does_not_know_my_seat_falls_back_to_the_estimate(cat_seat_t
 def test_the_stateless_board_has_no_seats_and_says_so(stub_inputs):
     """A points board carries neither, and the field is absent rather than 0."""
     resp = _board(resolve_scoring(_league()))
-    assert resp.meta.pace_source is None and resp.meta.seats_counted == 0
+    assert resp.meta.pace_source is None and resp.meta.seats_drafted == 0
 
 
 @pytest.mark.unit

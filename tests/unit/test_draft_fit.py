@@ -276,10 +276,10 @@ def test_three_seats_are_enough_to_stop_guessing_and_fewer_are_not():
     assert two.pace_source == "tier"
 
     with_two = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3]))
-    assert with_two.pace_source == "tier" and with_two.seats_counted == 2
+    assert with_two.pace_source == "tier" and with_two.seats_drafted == 2
 
     with_three = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3], [4]))
-    assert with_three.pace_source == "seats" and with_three.seats_counted == 3
+    assert with_three.pace_source == "seats" and with_three.seats_drafted == 3
 
 
 def test_an_empty_seat_does_not_count_as_a_team():
@@ -289,7 +289,7 @@ def test_an_empty_seat_does_not_count_as_a_team():
         POOL, [1], REB_AST, 4,
         opponent_rosters=_seats([2], [3], [], [404]),   # 404 is not in the pool
     )
-    assert fit.seats_counted == 2 and fit.pace_source == "tier"
+    assert fit.seats_drafted == 2 and fit.pace_source == "tier"
 
 
 def test_pace_is_what_the_other_teams_actually_hold():
@@ -390,3 +390,14 @@ def test_unanimous_opponents_are_a_signal_not_a_silence():
     assert reb.pace == -2.0             # theirs, not the pool's
     assert reb.spread > 0               # the pool's, because theirs is zero
     assert reb.need != 0.0
+
+
+def test_seats_drafted_counts_teams_not_a_claim_about_the_pace():
+    """The field says how many opposing seats have drafted, which is how far a
+    room is from switching — not that the switch happened. A client that read
+    it as "the pace used these" would call two seats an active read."""
+    two = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3]))
+    assert two.seats_drafted == 2 and two.pace_source == "tier"
+
+    three = build_fit_model(POOL, [1], REB_AST, 4, opponent_rosters=_seats([2], [3], [4]))
+    assert three.seats_drafted == 3 and three.pace_source == "seats"

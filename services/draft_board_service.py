@@ -617,7 +617,7 @@ class DraftBoardService:
                 punts=(fit.punts if fit is not None else list(session.punts)),
                 category_need=DraftBoardService._category_need(fit),
                 pace_source=(fit.pace_source if fit is not None else None),
-                seats_counted=(fit.seats_counted if fit is not None else 0),
+                seats_drafted=(fit.seats_drafted if fit is not None else 0),
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
                 # dd/td weights score 0 against aggregate lines; name them rather
                 # than imply the league's weights were fully applied (the

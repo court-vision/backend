@@ -108,7 +108,7 @@ class FitModel:
     picks_counted: int      # my roster players the pool could score (see build_fit_model)
     tier_size: int
     pace_source: str = "tier"   # seats | tier
-    seats_counted: int = 0      # opposing rosters the pace was read from
+    seats_drafted: int = 0      # opposing seats holding somebody the pool can score
 
     @property
     def weights(self) -> dict[str, float]:
@@ -274,5 +274,5 @@ def build_fit_model(
 
     return FitModel(
         needs=tuple(needs), picks_counted=picks, tier_size=len(tier),
-        pace_source=("seats" if use_seats else "tier"), seats_counted=len(seats),
+        pace_source=("seats" if use_seats else "tier"), seats_drafted=len(seats),
     )

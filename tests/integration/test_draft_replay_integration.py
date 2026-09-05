@@ -372,7 +372,7 @@ async def test_the_board_paces_against_the_seats_the_real_picks_landed_in(
 
     # Before anybody has drafted there is nothing to pace against.
     opening = await DraftBoardService.get_board(scoring, session=room)
-    assert opening.meta.pace_source == "tier" and opening.meta.seats_counted == 0
+    assert opening.meta.pace_source == "tier" and opening.meta.seats_drafted == 0
 
     # One full round: every seat now holds exactly one player.
     for pick in replay["picks"][:replay["league_size"]]:
@@ -383,7 +383,7 @@ async def test_the_board_paces_against_the_seats_the_real_picks_landed_in(
     # Three opponents in a four-team draft — the minimum worth reading, and
     # every one of them came from a real pick's seat.
     assert board.meta.pace_source == "seats"
-    assert board.meta.seats_counted == replay["league_size"] - 1
+    assert board.meta.seats_drafted == replay["league_size"] - 1
     seats_recorded = {
         p.slot for p in DraftPick.select().where(DraftPick.session == session.id)
     }

@@ -483,8 +483,13 @@ class DraftBoardMeta(ApiModel):
             "no confirmed slot, or before enough seats have drafted). None for points leagues."
         ),
     )
-    seats_counted: int = Field(
-        default=0, description="Opposing rosters the pace was read from (0 when estimated)"
+    seats_drafted: int = Field(
+        default=0,
+        description=(
+            "Opposing seats holding at least one player the pool can score. The pace reads them "
+            "once there are three, so this is how far a `tier` room is from switching — not a "
+            "claim that it did. Read `pace_source` for that."
+        ),
     )
     settings_synced: Optional[bool] = None      # whether the league's settings were read from the provider
     unsupported: list[str] = Field(
