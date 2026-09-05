@@ -21,7 +21,7 @@ from db.models.users import User
 from schemas.draft import DraftInitSyncRequest, DraftPickCreate, DraftSessionCreate, DraftSessionUpdate
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
-from utils.espn_draft_init import decode_init, made_picks, strip_init_prefix
+from utils.espn_draft_init import decode_init, made_picks, pick_order_of, strip_init_prefix
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -51,6 +51,18 @@ async def _mock_session(user, **overrides):
 
 def _stored(session_id):
     return list(DraftPick.select().where(DraftPick.session == session_id).order_by(DraftPick.overall_pick))
+
+
+def _header_of(session_id) -> dict:
+    """Every session field an INIT can write — what "the room is unchanged" means."""
+    row = DraftSession.get_by_id(session_id)
+    return {
+        "espn_league_id": row.espn_league_id,
+        "pick_order": list(row.pick_order or []),
+        "my_slot": row.my_slot,
+        "rounds": row.rounds,
+        "draft_type": row.draft_type,
+    }
 
 
 async def test_room_open_init_sets_the_header_on_an_empty_session(user):
@@ -160,3 +172,41 @@ async def test_synced_picks_carry_the_espn_team_and_its_seat(user, players):
     assert stored and all(p.espn_team_id is not None for p in stored)
     assert all(p.slot == order.index(p.espn_team_id) + 1 for p in stored)
     assert stored[0].espn_team_id == 1
+
+
+async def test_an_init_racing_another_that_linked_the_room_first_is_refused(user, players, monkeypatch):
+    """Two INITs can both read the same unlinked room. Whichever takes the row
+    first decides what draft it follows; the other must see that and refuse,
+    rather than relinking the room — header and all — from what it read before.
+
+    Standing in for the racing request (a real one needs a second connection and
+    is timing-bound), the link is written from inside `lock_room` itself: the
+    moment the second request's decision goes stale. That stand-in write shares
+    this request's transaction and rolls back with the refusal, so the room ends
+    where it began — and "unchanged" is the whole assertion, because this INIT
+    would otherwise have left its own league and its own header behind (which is
+    exactly what `test_room_open_init_sets_the_header_on_an_empty_session`
+    shows it does to a room that is free to take it).
+    """
+    from services import draft_sync_service as module
+
+    session = await _mock_session(user)
+    before = _header_of(session.id)
+
+    real_lock = module.lock_room
+
+    def link_elsewhere_then_lock(session_id):
+        DraftSession.update(espn_league_id=424242).where(DraftSession.id == session_id).execute()
+        real_lock(session_id)
+
+    monkeypatch.setattr(module, "lock_room", link_elsewhere_then_lock)
+
+    with pytest.raises(ConflictError) as exc:
+        await DraftSyncService.sync_init(session.id, DraftInitSyncRequest(payload=ROOMOPEN))
+    assert exc.value.error_code == "DRAFT_INIT_LEAGUE_MISMATCH"
+
+    incoming = decode_init(ROOMOPEN)
+    assert _header_of(session.id) == before
+    assert before["espn_league_id"] != incoming["leagueId"]
+    assert before["pick_order"] != pick_order_of(incoming), "the INIT's own header must differ, or this proves nothing"
+    assert _stored(session.id) == []
