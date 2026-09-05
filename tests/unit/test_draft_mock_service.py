@@ -245,14 +245,25 @@ def test_a_seat_already_holding_its_limit_blocks_immediately():
 
 
 def test_a_player_one_seat_cannot_take_is_still_there_for_the_next():
-    """Caps are counted per seat, so a cap is not a removal from the board."""
-    def only_seat_one_is_capped(roster):
-        return lambda pid: bool(roster) and 901 in roster
+    """Caps are counted per seat, so a cap is not a removal from the board.
+
+    Two players, two picks: seat 1 is the only one capped out of the best
+    available, so it takes the second name — and the first is still there for
+    seat 2. A cap that removed him from the queue would leave seat 2 with
+    nothing.
+    """
+    def seat_one_cannot_take_the_best(roster):
+        # The marker player stands in for whatever puts seat 1 over its cap;
+        # the factory sees a roster, not a seat number.
+        return lambda pid: 999 in roster and pid == 1
+
     result = _run(
-        geometry=_geometry(total_picks=4),
-        seat_rosters={1: frozenset({901})},
-        cap_check_for=only_seat_one_is_capped,
+        geometry=_geometry(total_picks=2),
+        candidates=_pool(2),
+        seat_rosters={1: frozenset({999})},
+        cap_check_for=seat_one_cannot_take_the_best,
         until="end",
     )
-    # Seat 1 can draft nobody; the run stops there rather than skipping the seat.
-    assert result.picks == () and result.blocked_slot == 1
+
+    assert [(p.slot, p.candidate.player_id) for p in result.picks] == [(1, 2), (2, 1)]
+    assert result.stopped_reason == "end"

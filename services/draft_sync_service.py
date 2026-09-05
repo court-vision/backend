@@ -41,6 +41,7 @@ from services.draft_service import (
     check_length_holds_picks,
     check_slot_in_range,
     duplicate_pick_of,
+    lock_room,
     matching_keeper,
     pick_for_slot,
     pick_geometry,
@@ -184,18 +185,6 @@ class DraftSyncService:
             )
         link: Optional[int] = None
         if session.espn_league_id is None and session.kind in ("live", "mock"):
-            # A room CV has simulated into cannot then start following an ESPN
-            # draft: the numbers are already spent, so every INIT pick would
-            # come back a conflict. The refusal is the mirror of the
-            # autopicker's own — a room follows a real draft or plays a
-            # simulated one, never both.
-            if DraftPick.select().where(
-                (DraftPick.session == session_id) & (DraftPick.source == "mock")
-            ).exists():
-                raise ConflictError(
-                    "DRAFT_ROOM_IS_SIMULATED",
-                    "This room holds simulated picks; open a fresh room to follow an ESPN draft",
-                )
             DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
             link = header.espn_league_id
 
@@ -206,6 +195,24 @@ class DraftSyncService:
         header_applied = False
 
         with db.atomic():
+            if link is not None:
+                # A room CV has simulated into cannot then start following an
+                # ESPN draft: the pick numbers are already spent, so every INIT
+                # pick would come back a conflict. The mirror of the
+                # autopicker's own refusal — a room follows a real draft or
+                # plays a simulated one, never both. Under the room's lock,
+                # because the autopicker takes the same one before it writes:
+                # unlocked, a linking sync and a running advance would each see
+                # the state before the other and both proceed.
+                lock_room(session_id)
+                if DraftPick.select().where(
+                    (DraftPick.session == session_id) & (DraftPick.source == "mock")
+                ).exists():
+                    raise ConflictError(
+                        "DRAFT_ROOM_IS_SIMULATED",
+                        "This room holds simulated picks; open a fresh room to follow an ESPN draft",
+                    )
+
             existing = DraftService._picks_of(session_id)
 
             # 4. Header: written only onto an empty session (nothing to re-derive).

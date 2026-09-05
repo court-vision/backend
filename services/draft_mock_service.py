@@ -61,6 +61,7 @@ from services.draft_service import (
     DraftService,
     _session_resp,
     draft_front,
+    lock_room,
     next_pick_for_slot,
     pick_placement,
     slot_of,
@@ -327,6 +328,14 @@ class DraftMockService:
             return DraftBoardService._cap_check(limits, roster, pool.primary, pool.coarse)
 
         with db.atomic():
+            # The pool fetch above is a window: a live sync could link this room
+            # to an ESPN draft while it runs, and a room that both follows a
+            # draft and holds simulated picks is exactly the state the guards
+            # exist to prevent. So take the row and ask again — `sync_init`
+            # takes the same lock before it links, so one of the two sees the
+            # other's write rather than both seeing the state before it.
+            session = DraftMockService._locked_session(session_id)
+            DraftMockService._check_simulatable(session, req.until)
             picks = DraftService._picks_of(session_id)
             drafted = {p.player_id for p in picks if p.player_id is not None}
             candidates = [c for c in pool.candidates if c.player_id not in drafted]
@@ -430,6 +439,18 @@ class DraftMockService:
             )
 
     # ---- inputs ------------------------------------------------------------
+
+    @staticmethod
+    def _locked_session(session_id: int) -> DraftSession:
+        """The room, held for the rest of this transaction.
+
+        The lock is taken on its own statement before the re-read: `FOR UPDATE`
+        cannot be applied to the nullable side of an outer join, and
+        `_session_or_404` joins the league. Which statement takes the lock does
+        not matter — the transaction holds it either way.
+        """
+        lock_room(session_id)
+        return DraftService._session_or_404(session_id)
 
     @staticmethod
     def _drafted(session_id: int) -> set[int]:

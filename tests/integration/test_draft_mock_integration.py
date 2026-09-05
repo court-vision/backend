@@ -334,6 +334,38 @@ async def test_a_room_with_no_shape_is_refused(team, pool, replay):
     assert exc.value.error_code == "DRAFT_MOCK_NEEDS_SHAPE"
 
 
+async def test_a_room_linked_while_the_pool_was_fetched_is_refused_before_anything_is_written(
+    team, pool, replay, monkeypatch
+):
+    """The window the room lock closes.
+
+    The candidate pool is fetched outside the transaction, so a live sync can
+    link the room while it runs. Standing in for the racing sync (a genuinely
+    concurrent test would need a second connection and would be timing-bound),
+    the link is written from inside the pool fetch itself — the same interleaving
+    the lock makes impossible. What is asserted is the recheck: the advance sees
+    the link and refuses, rather than leaving a room that both follows an ESPN
+    draft and holds simulated picks.
+    """
+    from services import draft_mock_service as module
+
+    session = await _room(team, replay)
+    original = module.DraftMockService._pool
+
+    def link_then_fetch(session_id, scoring, drafted):
+        DraftSession.update(espn_league_id=99887766).where(
+            DraftSession.id == session_id
+        ).execute()
+        return original(session_id, scoring, drafted)
+
+    monkeypatch.setattr(module.DraftMockService, "_pool", staticmethod(link_then_fetch))
+
+    with pytest.raises(ConflictError) as exc:
+        await _advance(session.id, until="end")
+    assert exc.value.error_code == "MOCK_ROOM_IS_LINKED"
+    assert DraftPick.select().where(DraftPick.session == session.id).count() == 0
+
+
 async def test_a_simulated_room_refuses_to_start_following_an_espn_draft(team, pool, replay):
     """The mirror of the refusal above: a room plays a simulated draft or
     follows a real one, never both. Without this the numbers are already spent
