@@ -428,6 +428,17 @@ class CategoryNeedResp(ApiModel):
     need: float = Field(description="(pace - mine) / spread, clamped to +/-2; positive means behind")
     weight: float = Field(description="What fit multiplies this category by; 0 when punted")
     punted: bool
+    my_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "Where this roster stands in the category among the teams in the draft, 1 = most. "
+            "Counted on what the rosters hold right now, unscaled. None until the other seats "
+            "can be read (no confirmed slot, or nobody else has drafted)."
+        ),
+    )
+    seats: Optional[int] = Field(
+        default=None, description="Teams `my_rank` is out of, the caller included"
+    )
 
 
 class DraftBoardMeta(ApiModel):
@@ -460,8 +471,24 @@ class DraftBoardMeta(ApiModel):
     category_need: list["CategoryNeedResp"] = Field(
         default=[],
         description=(
-            "Category leagues only: where the caller's roster stands against an average team "
-            "after the same number of picks, and the weight fit gives each category"
+            "Category leagues only: where the caller's roster stands after the same number of "
+            "picks, and the weight fit gives each category"
+        ),
+    )
+    pace_source: Optional[Literal["seats", "tier"]] = Field(
+        default=None,
+        description=(
+            "What `category_need` was measured against: `seats` reads the opposing rosters in "
+            "this room, `tier` estimates an average team from the draftable pool (a room with "
+            "no confirmed slot, or before enough seats have drafted). None for points leagues."
+        ),
+    )
+    seats_drafted: int = Field(
+        default=0,
+        description=(
+            "Opposing seats holding at least one player the pool can score. The pace reads them "
+            "once there are three, so this is how far a `tier` room is from switching — not a "
+            "claim that it did. Read `pace_source` for that."
         ),
     )
     settings_synced: Optional[bool] = None      # whether the league's settings were read from the provider

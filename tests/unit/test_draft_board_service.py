@@ -729,9 +729,9 @@ def test_fetch_projections_win_over_the_baseline_and_carry_projected_games(fake_
 def test_fetch_splits_a_sessions_picks_into_everyones_and_mine(fake_tables):
     fake_tables["picks"] = [
         SimpleNamespace(player_id=1, by_me=True, espn_player_id=101, player_name="Star",
-                        overall_pick=3, source="manual"),
+                        overall_pick=3, source="manual", slot=3),
         SimpleNamespace(player_id=2, by_me=False, espn_player_id=None, player_name=None,
-                        overall_pick=1, source="manual"),
+                        overall_pick=1, source="manual", slot=1),
     ]
 
     inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
@@ -749,11 +749,11 @@ def test_fetch_counts_a_pick_recorded_before_its_player_was_synced(fake_tables):
     are theirs — off the board, and the first one counted against my caps."""
     fake_tables["picks"] = [
         SimpleNamespace(player_id=None, by_me=True, espn_player_id=109, player_name=None,
-                        overall_pick=1, source="manual"),
+                        overall_pick=1, source="manual", slot=1),
         SimpleNamespace(player_id=None, by_me=False, espn_player_id=None, player_name="Guard",
-                        overall_pick=2, source="manual"),
+                        overall_pick=2, source="manual", slot=2),
         SimpleNamespace(player_id=None, by_me=False, espn_player_id=999, player_name="Nobody Yet",
-                        overall_pick=3, source="manual"),
+                        overall_pick=3, source="manual", slot=3),
     ]
 
     inputs = DraftBoardService._fetch_inputs(frozenset(), 77)
@@ -1049,3 +1049,110 @@ def test_the_front_steps_over_keepers_when_it_finds_my_turn(monkeypatch):
     # rather than a comfortable wait.
     by_id = {r.player_id: r for r in resp.data}
     assert by_id[6].availability == "tossup"
+
+
+# ---- pacing against the room's own seats -----------------------------------
+
+
+def _seat_board(seat_players, my_slot=3, mine=(), **session_kwargs):
+    """A board whose session picks are spread across seats."""
+    inputs = _cat_inputs(seat_players={s: frozenset(p) for s, p in seat_players.items()})
+    with_session = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_cat_league()), my_ids=mine,
+        session=BoardSession(session_id=77, my_slot=my_slot, league_size=12,
+                             rounds=13, **session_kwargs),
+    ))
+    return inputs, with_session
+
+
+@pytest.fixture
+def cat_seat_tables(monkeypatch):
+    def install(inputs):
+        monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                            staticmethod(lambda my_ids, session_id=None: inputs))
+    return install
+
+
+@pytest.mark.unit
+def test_the_board_paces_against_the_seats_once_enough_have_drafted(cat_seat_tables):
+    """Three guard-heavy opponents and a big on my roster: the need is measured
+    against what those teams hold, and the meta says so."""
+    inputs = _cat_inputs(seat_players={
+        3: frozenset({1}),          # mine: the big
+        1: frozenset({2}), 2: frozenset({5}), 4: frozenset({6}),
+    })
+    cat_seat_tables(inputs)
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_cat_league()), my_ids=[1],
+        session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
+    ))
+
+    assert resp.meta.pace_source == "seats" and resp.meta.seats_drafted == 3
+    need = {n.key: n for n in resp.meta.category_need}
+    # Standing is reported against the whole room, me included.
+    assert all(n.seats == 4 for n in need.values())
+    assert need["reb"].my_rank == 1          # the only big in the room
+    assert need["ast"].my_rank == 4          # and last in assists
+
+
+@pytest.mark.unit
+def test_my_own_seat_is_never_one_of_the_teams_i_am_measured_against(cat_seat_tables):
+    """Counting my own roster among the opponents would flatter every category
+    I am strong in and hide every hole."""
+    both = _cat_inputs(seat_players={
+        3: frozenset({1}), 1: frozenset({2}), 2: frozenset({5}), 4: frozenset({6}),
+    })
+    cat_seat_tables(both)
+    mine_excluded = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_cat_league()), my_ids=[1],
+        session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
+    ))
+
+    assert mine_excluded.meta.seats_drafted == 3     # four seats hold players, three are theirs
+
+
+@pytest.mark.unit
+def test_a_room_that_does_not_know_my_seat_falls_back_to_the_estimate(cat_seat_tables):
+    """Without a confirmed slot my own roster cannot be told from the others,
+    so the tier estimate is the honest answer rather than a poisoned pace."""
+    inputs = _cat_inputs(seat_players={
+        3: frozenset({1}), 1: frozenset({2}), 2: frozenset({5}), 4: frozenset({6}),
+    })
+    cat_seat_tables(inputs)
+    resp = asyncio.run(DraftBoardService.get_board(
+        resolve_scoring(_cat_league()), my_ids=[1],
+        session=BoardSession(session_id=77, league_size=12, rounds=13),   # no my_slot
+    ))
+
+    assert resp.meta.pace_source == "tier" and resp.meta.seats_drafted == 0
+    assert all(n.my_rank is None for n in resp.meta.category_need)
+
+
+@pytest.mark.unit
+def test_the_stateless_board_has_no_seats_and_says_so(stub_inputs):
+    """A points board carries neither, and the field is absent rather than 0."""
+    resp = _board(resolve_scoring(_league()))
+    assert resp.meta.pace_source is None and resp.meta.seats_drafted == 0
+
+
+@pytest.mark.unit
+def test_the_seats_change_the_recommendation_not_just_the_readout(cat_seat_tables):
+    """The point of reading real teams: the same roster gets a different pick
+    depending on what the rest of the room has taken."""
+    def top_pick(seat_players):
+        cat_seat_tables(_cat_inputs(
+            seat_players={s: frozenset(p) for s, p in seat_players.items()}
+        ))
+        resp = asyncio.run(DraftBoardService.get_board(
+            resolve_scoring(_cat_league()), my_ids=[3],
+            session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
+        ))
+        return resp.recommendations[0].player_id, resp.meta.pace_source
+
+    # A room where the bigs are gone: rebounds and blocks are scarce.
+    against_bigs, source_a = top_pick({3: {3}, 1: {1}, 2: {4}, 4: {6}})
+    # A room where the guards are gone instead.
+    against_guards, source_b = top_pick({3: {3}, 1: {2}, 2: {5}, 4: {6}})
+
+    assert source_a == source_b == "seats"
+    assert against_bigs != against_guards

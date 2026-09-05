@@ -339,3 +339,64 @@ async def test_a_room_opened_without_a_slot_comes_alive_when_one_is_set(team, bo
             session.id, DraftSessionUpdate(my_slot=replay["league_size"] + 1)
         )
     assert exc.value.error_code == "DRAFT_SLOT_OUT_OF_RANGE"
+
+
+async def test_the_board_paces_against_the_seats_the_real_picks_landed_in(
+    team, league, board_players, replay
+):
+    """B5.1 end to end: the other seats' picks stop being anonymous.
+
+    Every pick the room records carries the seat that made it, so a category
+    board can read the three opposing rosters of this four-team draft and pace
+    against what they actually hold. Nothing here fabricates a seat — they come
+    out of the captured draft, through `add_pick`, into `usr.draft_picks.slot`,
+    and back through the board's own fetch.
+
+    The captured players are deliberately uniform in every category but points
+    (see `board_players`), so what this pins is the wiring and the standings;
+    the arithmetic on a differentiated pool is unit-tested.
+    """
+    league.scoring_type = "categories"
+    league.category_win_mode = "each_category"
+    league.categories = [
+        {"key": k, "label": k.upper(), "higher_is_better": k != "tov", "is_rate": False}
+        for k in ("pts", "reb", "ast", "stl", "blk", "tov")
+    ]
+    league.save()
+
+    session = await _open_room(team, replay)
+    scoring = resolve_scoring(league)
+    assert scoring.is_categories
+    room = BoardSession(session_id=session.id, my_slot=MY_SLOT, rounds=replay["rounds"],
+                        league_size=replay["league_size"], draft_type="snake")
+
+    # Before anybody has drafted there is nothing to pace against.
+    opening = await DraftBoardService.get_board(scoring, session=room)
+    assert opening.meta.pace_source == "tier" and opening.meta.seats_drafted == 0
+
+    # One full round: every seat now holds exactly one player.
+    for pick in replay["picks"][:replay["league_size"]]:
+        await _record(session.id, pick, board_players, replay)
+
+    board = await DraftBoardService.get_board(scoring, session=room)
+
+    # Three opponents in a four-team draft — the minimum worth reading, and
+    # every one of them came from a real pick's seat.
+    assert board.meta.pace_source == "seats"
+    assert board.meta.seats_drafted == replay["league_size"] - 1
+    seats_recorded = {
+        p.slot for p in DraftPick.select().where(DraftPick.session == session.id)
+    }
+    assert seats_recorded == set(range(1, replay["league_size"] + 1))
+
+    need = {n.key: n for n in board.meta.category_need}
+    assert set(need) == {"pts", "reb", "ast", "stl", "blk", "tov"}
+    for entry in need.values():
+        assert entry.seats == replay["league_size"]         # the room, me included
+        assert 1 <= entry.my_rank <= replay["league_size"]
+    # Value descends with draft order and seat 3 picked third, so on points —
+    # the one category these players differ in — two teams are ahead of me.
+    assert need["pts"].my_rank == 3
+
+    # And the fit column is live: every scorable row carries one.
+    assert all(r.fit_value is not None for r in board.data if r.value is not None)
