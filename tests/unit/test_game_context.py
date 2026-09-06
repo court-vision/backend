@@ -67,3 +67,50 @@ def test_no_rows_needs_no_query():
     # `for_rows` short-circuits on an empty log, so an empty response does not
     # reach the database at all.
     assert GameContext.for_rows([]).of(row("LAL")) == {}
+
+
+# ---- the stored id, once migration 0019 has filled it ----------------------
+
+
+def row_with_game(game_id, team_id="LAL", day=1):
+    r = row(team_id, day)
+    r.game_id = game_id
+    return r
+
+
+def context_by_id(games, r):
+    """A GameContext built from stub games keyed by id, as `for_rows` does."""
+    return GameContext({}, {g.game_id: g for g in games}).of(r)
+
+
+def test_a_stored_game_id_resolves_without_inferring_anything():
+    got = context_by_id([game("0022600001", "LAL", "BOS")], row_with_game("0022600001"))
+    assert got == {"game_id": "0022600001", "home": True, "opponent": "BOS"}
+
+
+def test_the_stored_id_wins_over_a_date_that_would_say_otherwise():
+    # The id is the row's identity; the (date, team) join was only ever a
+    # stand-in for it, so it must not override the real answer.
+    stored = game("0022600001", "LAL", "BOS")
+    by_date = {(stored.game_date, "LAL"): [game("0022609999", "LAL", "NYK")]}
+    got = GameContext(by_date, {stored.game_id: stored}).of(row_with_game("0022600001"))
+    assert got["game_id"] == "0022600001" and got["opponent"] == "BOS"
+
+
+def test_a_row_without_a_stored_id_still_falls_back_to_the_date():
+    # Rows written before 0019, and rows whose game nba.games does not have.
+    stored = game("0022600001", "LAL", "BOS")
+    by_date = {(stored.game_date, "LAL"): [stored]}
+    assert GameContext(by_date, {}).of(row("LAL")) == {
+        "game_id": "0022600001",
+        "home": True,
+        "opponent": "BOS",
+    }
+
+
+def test_a_stored_id_with_no_matching_game_falls_back_rather_than_failing():
+    # The FK is ON DELETE SET NULL, so this should not happen — but a dangling
+    # id must not take the whole log down with it.
+    stored = game("0022600001", "LAL", "BOS")
+    by_date = {(stored.game_date, "LAL"): [stored]}
+    assert GameContext(by_date, {}).of(row_with_game("0022600404"))["game_id"] == "0022600001"
