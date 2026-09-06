@@ -11,6 +11,7 @@ from uuid import UUID
 
 from peewee import (
     AutoField,
+    IntegrityError,
     IntegerField,
     CharField,
     DateField,
@@ -20,7 +21,7 @@ from peewee import (
     ForeignKeyField,
 )
 
-from db.base import BaseModel
+from db.base import BaseModel, db
 from db.models.nba.games import Game
 from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
@@ -192,19 +193,36 @@ class PlayerGameStats(BaseModel):
         # before its game id was known — that row is promoted in place, and
         # skipping this step is how the same line ends up stored twice, since
         # (player, NULL) and (player, game) are distinct to both unique indexes.
-        game_stats = None
-        if game_id is not None:
-            game_stats = cls.get_or_none(cls.player == player_id, cls.game == game_id)
-        if game_stats is None:
-            game_stats = cls.get_or_none(cls.player == player_id, cls.game_date == game_date)
+        def existing():
+            row = None
+            if game_id is not None:
+                row = cls.get_or_none(cls.player == player_id, cls.game == game_id)
+            if row is None:
+                row = cls.get_or_none(cls.player == player_id, cls.game_date == game_date)
+            return row
 
-        if game_stats is None:
-            return cls.create(player_id=player_id, **defaults)
+        def apply(row):
+            for key, value in defaults.items():
+                setattr(row, key, value)
+            row.save()
+            return row
 
-        for key, value in defaults.items():
-            setattr(game_stats, key, value)
-        game_stats.save()
-        return game_stats
+        row = existing()
+        if row is not None:
+            return apply(row)
+
+        # The lookup above is advisory; the unique indexes are what decide. Two
+        # writers finding nothing would both insert, and one would lose — so the
+        # loser re-reads and updates instead of failing. This is what peewee's
+        # own `get_or_create` does, and dropping it was a regression.
+        try:
+            with db.atomic():
+                return cls.create(player_id=player_id, **defaults)
+        except IntegrityError:
+            row = existing()
+            if row is None:
+                raise
+            return apply(row)
 
     @classmethod
     def get_player_games(
