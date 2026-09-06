@@ -10,6 +10,7 @@ data behind it changes once a day, after the post-game pipelines run.
 """
 
 from typing import Literal, Optional
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -19,10 +20,40 @@ from core.rate_limit import PUBLIC_RATE_LIMIT, limiter
 from core.responses import respond
 from core.settings import settings
 from schemas.rankings import RankingsResp, RollingWindow
+from schemas.market import ESPNMarketResp, MarketSort, SeasonKey
+from services.public_market_service import PublicMarketService
 from services.rankings_service import RankingsService
 from services.scoring.category_rank import RANKABLE_KEYS
 
 router = APIRouter(prefix="/rankings", tags=["Rankings"])
+
+
+@router.get(
+    "/espn",
+    response_model=ESPNMarketResp,
+    summary="Get ESPN draft rankings and market values",
+    description=(
+        "ESPN editorial draft ranks, ADP, auction values, position eligibility, and injury status. "
+        "These are preseason market snapshots, separate from Court Vision performance rankings. "
+        "Includes mapped players without game stats. Missing values are null and sort last; "
+        "ties sort by NBA player ID. `as_of` selects the newest snapshot on or before that date. "
+        "An unavailable snapshot returns an empty success response; there is no cross-season fallback."
+    ),
+    responses={429: {"description": "Rate limit exceeded"}},
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_espn_rankings(
+    request: Request,
+    season: Optional[SeasonKey] = Query(None, description="NBA season, e.g. 2026-27; defaults to the configured active season"),
+    as_of: Optional[date] = Query(None, description="Latest snapshot on or before this date; omit for latest"),
+    name: Optional[str] = Query(None, min_length=1, max_length=100, description="Case- and accent-insensitive name search"),
+    sort_by: MarketSort = Query("rank", description="rank/adp ascend; auction values descend; nulls last"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> ESPNMarketResp:
+    return respond(await PublicMarketService.get_market(
+        season=season, as_of=as_of, name=name, sort_by=sort_by, limit=limit, offset=offset,
+    ))
 
 RESPONSE_CACHE = ResponseCache(
     "rankings",

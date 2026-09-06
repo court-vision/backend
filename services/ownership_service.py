@@ -10,7 +10,7 @@ from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_game_stats import PlayerGameStats
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.ownership import (
     OwnershipTrendingResp,
@@ -231,6 +231,8 @@ class OwnershipService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("ownership_trending_error", error=str(e))
             return OwnershipTrendingResp(
@@ -284,6 +286,8 @@ class OwnershipService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("get_player_ownership_error", error=str(e), player_id=player_id)
             return PlayerOwnershipResp(

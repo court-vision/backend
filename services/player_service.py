@@ -203,7 +203,7 @@ class PlayerService:
             player = Player.get_or_none(Player.id == player_id)
         elif name is not None:
             normalized_name = _normalize_name(name)
-            player = Player.get_or_none(Player.name_normalized == normalized_name)
+            player = Player.get_or_none(fn.unaccent(Player.name_normalized) == normalized_name)
         else:
             raise BadRequestError("PLAYER_LOOKUP_REQUIRED", "Provide espn_id, player_id, or name")
 
@@ -219,7 +219,7 @@ class PlayerService:
 
         # If team filter is provided, apply it
         if team is not None:
-            game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team)
+            game_logs_query = game_logs_query.where(PlayerGameStats.team_id == team.strip().upper())
 
         all_logs = list(game_logs_query)
 
@@ -328,11 +328,15 @@ class PlayerService:
             Average fantasy points per game, or None if no games found.
         """
         if days in (7, 14, 30):
+            latest_date = PlayerRollingStats.latest_fresh_date(days)
+            if latest_date is None:
+                return None
             record = (
                 PlayerRollingStats.select()
                 .where(
                     (PlayerRollingStats.player == player_id)
                     & (PlayerRollingStats.window_days == days)
+                    & (PlayerRollingStats.as_of_date == latest_date)
                 )
                 .order_by(PlayerRollingStats.as_of_date.desc())
                 .first()

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Optional
 from db import base as db_base
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
-from db.models.stats.rankings import Rankings, RankingsSource
+from db.models.nba.rankings import Rankings, RankingsSource
 from core.compute import run_cpu
 from core.logging import get_logger
 from schemas.common import ApiStatus, CategoryDefResp

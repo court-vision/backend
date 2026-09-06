@@ -10,7 +10,7 @@ from core.settings import get_settings
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.teams import TeamScheduleResp, TeamScheduleData, ScheduleGame
 
@@ -112,6 +112,8 @@ class TeamScheduleService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("team_schedule_fetch_error", error=str(e), team=team_id)
             return TeamScheduleResp(

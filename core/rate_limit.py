@@ -19,13 +19,14 @@ from schemas.common import ApiStatus
 
 def get_rate_limit_key(request: Request) -> str:
     """
-    Get rate limit key - uses API key if present, otherwise IP address.
-    This allows API key users to have separate (higher) rate limits.
+    Use a verified key identity on protected routes; otherwise use the IP.
+
+    Public routes do not authenticate X-API-Key. Trusting that header here lets
+    anonymous callers reset their quota by sending a different string each time.
     """
-    api_key = request.headers.get("X-API-Key")
-    if api_key:
-        # Use first 11 chars (prefix) to avoid storing full key in memory
-        return f"api_key:{api_key[:11]}"
+    identity = getattr(request.state, "api_key_identity", None)
+    if identity:
+        return f"api_key:{identity}"
     return get_remote_address(request)
 
 
@@ -52,6 +53,7 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) 
         api_status=ApiStatus.RATE_LIMITED,
         error_code=RATE_LIMITED_CODE,
         message=f"Rate limit exceeded: {exc.detail}",
+        headers={"Retry-After": str(exc.limit.limit.get_expiry())},
     )
 
 

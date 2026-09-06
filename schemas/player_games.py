@@ -11,6 +11,7 @@ class GameLog(ApiModel):
     """Individual game in a player's game log."""
 
     date: str = Field(..., description="Game date (YYYY-MM-DD)")
+    game_id: Optional[str] = Field(None, description="NBA game ID when the stored schedule identifies a unique matchup")
     opponent: Optional[str] = Field(None, description="Opponent team abbreviation")
     home: Optional[bool] = Field(None, description="Whether this was a home game")
     fpts: int = Field(..., description="Fantasy points scored")

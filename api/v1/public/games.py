@@ -7,6 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Request, Path
 from schemas.games import GamesOnDateResp
 from services.games_service import GamesService
+from core.responses import respond
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 
 router = APIRouter(prefix="/games", tags=["Games"])
@@ -28,4 +29,4 @@ async def get_games_on_date(
     game_date: date = Path(..., description="Date in YYYY-MM-DD format"),
 ) -> GamesOnDateResp:
     """Get all games on a specific date."""
-    return await GamesService.get_games_on_date(game_date)
+    return respond(await GamesService.get_games_on_date(game_date))

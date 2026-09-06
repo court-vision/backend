@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Request, Query
 from schemas.ownership import OwnershipTrendingResp
 from services.ownership_service import OwnershipService
+from core.responses import respond
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 
 router = APIRouter(prefix="/ownership", tags=["Ownership"])
@@ -41,11 +42,11 @@ async def get_ownership_trending(
     limit: int = Query(20, ge=1, le=50, description="Maximum players per direction"),
 ) -> OwnershipTrendingResp:
     """Get players with trending ownership using velocity-based ranking."""
-    return await OwnershipService.get_trending(
+    return respond(await OwnershipService.get_trending(
         days=days,
         min_change=min_change,
         min_ownership=min_ownership,
         sort_by=sort_by,
         direction=direction,
         limit=limit,
-    )
+    ))

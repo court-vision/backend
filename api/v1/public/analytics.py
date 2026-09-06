@@ -10,6 +10,7 @@ from schemas.breakout import BreakoutResp
 from schemas.optimize import OptimizeResp, GenerateLineupRequest
 from services.breakout_service import BreakoutService
 from services.optimize_service import OptimizeService
+from core.responses import respond
 from core.rate_limit import limiter, API_KEY_RATE_LIMIT
 from core.api_key_auth import require_scope
 
@@ -36,7 +37,7 @@ async def generate_lineup(
     api_key=Security(require_scope("analytics")),
 ) -> OptimizeResp:
     """Generate optimized lineup using stored team credentials."""
-    return await OptimizeService.optimize_from_team(api_key, body)
+    return respond(await OptimizeService.optimize_from_team(api_key, body))
 
 
 @router.get(
@@ -62,7 +63,7 @@ async def get_breakout_streamers(
     _api_key=Security(require_scope("analytics")),
 ) -> BreakoutResp:
     """Return breakout streamer candidates."""
-    return await BreakoutService.get_breakout_candidates(
+    return respond(await BreakoutService.get_breakout_candidates(
         limit=limit,
         team_filter=team.upper() if team else None,
-    )
+    ))

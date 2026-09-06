@@ -4,8 +4,9 @@ API key authentication for protected endpoints.
 
 from typing import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 
-from fastapi import Security
+from fastapi import Request, Security
 from fastapi.security import APIKeyHeader
 
 from core.errors import AuthenticationError, AuthorizationError
@@ -32,6 +33,7 @@ def _verify_key(raw_key: str) -> APIKeyContext | None:
 
 
 async def verify_api_key(
+    request: Request,
     api_key: str | None = Security(api_key_header),
 ) -> APIKeyContext:
     """
@@ -47,6 +49,7 @@ async def verify_api_key(
     if not key_record:
         raise AuthenticationError("INVALID_API_KEY", "Invalid or expired API key")
 
+    request.state.api_key_identity = sha256(api_key.encode()).hexdigest()
     return key_record
 
 

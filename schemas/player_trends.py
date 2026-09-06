@@ -12,6 +12,7 @@ class TrendPeriod(ApiModel):
 
     avg_fpts: float = Field(..., description="Average fantasy points per game")
     games: int = Field(..., description="Number of games in period")
+    as_of_date: Optional[str] = Field(None, description="Date the rolling snapshot runs through")
 
 
 class OwnershipTrend(ApiModel):

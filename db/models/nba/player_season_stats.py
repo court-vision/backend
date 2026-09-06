@@ -131,6 +131,39 @@ class PlayerSeasonStats(BaseModel):
             return round(self.fpts / self.gp, 1)
         return 0.0
 
+    @classmethod
+    def latest_per_player(cls, season: str):
+        """Latest row for each player in a season, joined to player identity.
+
+        Snapshots are sparse: an inactive player's last row can be weeks older
+        than a teammate's. Apply team/GP filters to the returned query, after
+        selecting the latest row, so a trade cannot resurrect an old team row.
+        """
+        from peewee import fn
+
+        latest = (
+            cls.select(cls.player.alias("pid"), fn.MAX(cls.as_of_date).alias("max_date"))
+            .where(cls.season == season)
+            .group_by(cls.player)
+        ).alias("latest")
+        return (
+            cls.select(cls, Player)
+            .join(Player)
+            .switch(cls)
+            .join(latest, on=((cls.player == latest.c.pid) & (cls.as_of_date == latest.c.max_date)))
+            .where(cls.season == season)
+        )
+
+    @classmethod
+    def available_season(cls) -> str:
+        """Active season, or the previous one when no active-season rows exist."""
+        from core.season import previous_season
+        from core.settings import settings
+
+        if cls.select().where(cls.season == settings.nba_season).exists():
+            return settings.nba_season
+        return previous_season(settings.nba_season)
+
     @property
     def ppg(self) -> float:
         """Calculate points per game."""
@@ -211,4 +244,3 @@ class PlayerSeasonStats(BaseModel):
             season_stats.save()
 
         return season_stats
-

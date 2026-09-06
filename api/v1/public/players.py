@@ -1,9 +1,12 @@
 from typing import Optional
+from datetime import date
 from fastapi import APIRouter, Query, Request, Path
 from schemas.player import PlayerStatsResp, PlayerPercentilesResp, PlayerStatusResp, PlayerOwnershipResp
 from schemas.players_list import PlayersListResp
 from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
+from schemas.market import PlayerProjectionResp, SeasonKey
+from services.public_market_service import PublicMarketService
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 from services.player_games_service import PlayerGamesService
@@ -13,6 +16,28 @@ from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from core.responses import respond
 
 router = APIRouter(prefix="/players", tags=["Players"])
+
+
+@router.get(
+    "/{player_id}/projection",
+    response_model=PlayerProjectionResp,
+    summary="Get a player's ESPN preseason projection",
+    description=(
+        "Projected games and per-game statistics from the latest ESPN projection snapshot "
+        "in the requested season. Shooting rates are recomputed from makes/attempts on a 0–1 scale. "
+        "Missing measurements remain null. A known player without a projection returns success "
+        "with data=null; an unknown NBA player ID returns 404."
+    ),
+    responses={404: {"description": "Player not found"}, 429: {"description": "Rate limit exceeded"}},
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_projection(
+    request: Request,
+    player_id: int = Path(..., gt=0, description="NBA player ID"),
+    season: Optional[SeasonKey] = Query(None, description="NBA season; defaults to the configured active season"),
+    as_of: Optional[date] = Query(None, description="Latest snapshot on or before this date; omit for latest"),
+) -> PlayerProjectionResp:
+    return respond(await PublicMarketService.get_projection(player_id=player_id, season=season, as_of=as_of))
 
 
 @router.get(
@@ -62,8 +87,8 @@ async def list_players(
 @limiter.limit(PUBLIC_RATE_LIMIT)
 async def get_player_stats_by_query(
     request: Request,
-    espn_id: Optional[int] = Query(None, description="ESPN player ID (preferred for internal lookups)"),
-    player_id: Optional[int] = Query(None, description="Player ID (alias for espn_id, for backwards compatibility)"),
+    espn_id: Optional[int] = Query(None, description="ESPN player ID; takes precedence over player_id"),
+    player_id: Optional[int] = Query(None, description="NBA player ID (distinct from espn_id)"),
     name: Optional[str] = Query(None, description="Player name (used for public/roster lookup)"),
     team: Optional[str] = Query(None, description="Player team abbreviation (used with name)"),
     window: str = Query("season", description="Stat window for averages: 'season' for full season, or 'lN' for last N games (e.g. l5, l10, l15)", pattern="^(season|l[1-9][0-9]?)$"),
@@ -72,8 +97,8 @@ async def get_player_stats_by_query(
     Get player stats by ID or by name/team combination.
 
     Lookup priority:
-    1. espn_id - ESPN player ID (most reliable for internal use)
-    2. player_id - Alias for espn_id (backwards compatibility)
+    1. espn_id - ESPN player ID
+    2. player_id - NBA player ID
     3. name + team - Name-based lookup (for public queries)
 
     The `window` parameter controls which games are used to compute averages:
@@ -98,9 +123,13 @@ async def get_player_stats_by_query(
     },
 )
 @limiter.limit(PUBLIC_RATE_LIMIT)
-async def get_player_stats(request: Request, player_id: int) -> PlayerStatsResp:
-    """Get player stats by ID (legacy endpoint for backwards compatibility)."""
-    return respond(await PlayerService.get_player_stats(player_id=player_id))
+async def get_player_stats(
+    request: Request,
+    player_id: int = Path(..., description="NBA player ID"),
+    window: str = Query("season", pattern="^(season|l[1-9][0-9]?)$", description="Full season or last N games (l5, l10, etc.)"),
+) -> PlayerStatsResp:
+    """Get player stats by NBA ID with the same windows as the query endpoint."""
+    return respond(await PlayerService.get_player_stats(player_id=player_id, window=window))
 
 
 @router.get(

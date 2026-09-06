@@ -48,20 +48,10 @@ def _game_dict(game) -> dict:
 
 
 def _get_team_player_ids(team_id: str) -> set[int]:
-    latest_date = (
-        PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
-        .where(PlayerSeasonStats.team == team_id)
-        .order_by(PlayerSeasonStats.as_of_date.desc())
-        .limit(1)
-        .scalar()
-    )
-    if not latest_date:
-        return set()
     return {
         row.player_id
-        for row in PlayerSeasonStats.select(PlayerSeasonStats.player).where(
-            (PlayerSeasonStats.team == team_id) & (PlayerSeasonStats.as_of_date == latest_date)
-        )
+        for row in PlayerSeasonStats.latest_per_player(PlayerSeasonStats.available_season())
+        .where(PlayerSeasonStats.team == team_id)
     }
 
 

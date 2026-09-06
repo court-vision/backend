@@ -6,9 +6,9 @@ from core.logging import get_logger
 from db.models.nba.players import Player
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
-from db.models.stats.rankings import Rankings
+from services.players_list_service import PlayersListService
 from db.models.nba.player_ownership import PlayerOwnership
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.player_trends import (
     PlayerTrendsResp,
@@ -53,11 +53,15 @@ class TrendsService:
                 ("last_14_days", 14),
                 ("last_30_days", 30),
             ]:
+                latest_date = PlayerRollingStats.latest_fresh_date(window)
+                if latest_date is None:
+                    continue
                 record = (
                     PlayerRollingStats.select()
                     .where(
                         (PlayerRollingStats.player == player_id)
                         & (PlayerRollingStats.window_days == window)
+                        & (PlayerRollingStats.as_of_date == latest_date)
                     )
                     .order_by(PlayerRollingStats.as_of_date.desc())
                     .first()
@@ -66,14 +70,14 @@ class TrendsService:
                     trends[period_name] = TrendPeriod(
                         avg_fpts=round(float(record.fpts), 1),
                         games=record.gp,
+                        as_of_date=record.as_of_date.isoformat(),
                     )
 
             # Current league-wide rank, from nba.rankings. The `rank` column on
             # player_season_stats used to fill this, but it ranked only the
             # players who had a row written that night -- a cohort artifact, not
             # a standing.
-            ranking = Rankings.get_or_none(Rankings.id == player_id)
-            current_rank = int(ranking.curr_rank) if ranking else None
+            current_rank = PlayersListService._league_ranks([player_id]).get(player_id)
 
             latest_season_stats = (
                 PlayerSeasonStats.select()
@@ -107,6 +111,8 @@ class TrendsService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("player_trends_error", error=str(e), player_id=player_id)
             return PlayerTrendsResp(

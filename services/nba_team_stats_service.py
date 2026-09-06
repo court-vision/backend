@@ -5,7 +5,7 @@ Service for NBA team season stats.
 from core.logging import get_logger
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.teams import NBATeamStatsResp, NBATeamStatsData
 
@@ -78,6 +78,8 @@ class NBATeamStatsService:
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("nba_team_stats_fetch_error", error=str(e), team=team_id)
             return NBATeamStatsResp(
