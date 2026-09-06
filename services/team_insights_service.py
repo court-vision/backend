@@ -28,6 +28,7 @@ from services.scoring.vocab import DEFAULT_CATEGORIES
 from services import schedule_service
 from core.logging import get_logger
 from db.base import DB_RUNTIME_ERRORS, run_db
+from services.nba_id_resolver import nba_ids_by_espn_id, nba_ids_by_name
 
 
 # Injury statuses that mean the player is out
@@ -54,6 +55,26 @@ def _classify_injury(injury_status: Optional[str]) -> str:
 
 
 class TeamInsightsService:
+
+    @staticmethod
+    def _nba_ids(league_info, roster: list[PlayerResp]) -> dict:
+        """
+        Resolve roster players to NBA player IDs, keyed the same way
+        `_stored_windows` keys its results: by ESPN id, or by normalized
+        name for Yahoo.
+
+        Yahoo rosters carry Yahoo player IDs, which share no namespace with
+        `nba.players.espn_id` — matching on them would silently resolve to a
+        different player, so Yahoo goes through names instead. Names that are
+        ambiguous within the pool are dropped rather than guessed: a null id
+        degrades to "no navigation", a wrong one sends the user to the wrong
+        player.
+        """
+        if not roster:
+            return {}
+        if league_info.provider == FantasyProvider.YAHOO:
+            return nba_ids_by_name([_normalize_name(p.name) for p in roster])
+        return nba_ids_by_espn_id([p.player_id for p in roster])
 
     @staticmethod
     def _stored_windows(team_id: int, league_info, roster: list[PlayerResp]):
@@ -120,9 +141,21 @@ class TeamInsightsService:
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "name") -> Optional[float]:
                     normalized = _normalize_name(player.name)
                     return avgs.get(normalized)
+
+                def _lookup_key(player: PlayerResp):
+                    return _normalize_name(player.name)
             else:
                 def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "espn_id") -> Optional[float]:
                     return avgs.get(player.player_id)
+
+                def _lookup_key(player: PlayerResp):
+                    return player.player_id
+
+            # Terminal panels navigate by NBA player ID, not the provider's.
+            nba_id_map = await run_db(
+                "team_insights.nba_ids", TeamInsightsService._nba_ids,
+                league_info, base_roster,
+            )
 
             # Step 4: Build enriched roster
             enriched_roster: list[EnrichedRosterPlayer] = []
@@ -130,6 +163,7 @@ class TeamInsightsService:
                 schedule_info = schedule_cache.get(player.team)
                 enriched_roster.append(EnrichedRosterPlayer(
                     player_id=player.player_id,
+                    nba_player_id=nba_id_map.get(_lookup_key(player)),
                     name=player.name,
                     avg_points=player.avg_points,
                     team=player.team,

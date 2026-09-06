@@ -2,6 +2,7 @@ from datetime import datetime
 from core.errors import BadRequestError
 from core.logging import get_logger
 from db.base import run_db
+from services.nba_id_resolver import nba_ids_by_espn_id
 from services.providers.http import provider_get
 from services.player_value_service import PlayerValueService, ValueResult
 from services.scoring.models import CategoryTeamScoreData, StatLine
@@ -492,6 +493,15 @@ class EspnService:
 
         our_roster, our_projected, our_inputs = build_roster(our_team)
         opponent_roster, opponent_projected, opp_inputs = build_roster(opponent_team)
+
+        # Terminal panels navigate by NBA player ID; ESPN rosters carry ESPN's.
+        nba_id_map = await run_db(
+            "espn.matchup_nba_ids",
+            nba_ids_by_espn_id,
+            [p.player_id for p in (*our_roster, *opponent_roster)],
+        )
+        for player in (*our_roster, *opponent_roster):
+            player.nba_player_id = nba_id_map.get(player.player_id)
 
         category_comparison = projected_category_comparison = None
         your_cat_schema = opp_cat_schema = None

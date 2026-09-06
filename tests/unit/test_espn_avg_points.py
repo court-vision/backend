@@ -77,6 +77,13 @@ def espn(monkeypatch):
         return {eid: state["values"].get(eid, ValueResult(None, None)) for eid in espn_ids}
 
     monkeypatch.setattr(PlayerValueService, "avg_points_for", staticmethod(fake_avg_points_for))
+
+    # Matchup rosters batch-resolve ESPN IDs -> NBA IDs; `nba_ids` controls the map.
+    state["nba_ids"] = {}
+    monkeypatch.setattr(
+        espn_service, "nba_ids_by_espn_id",
+        lambda espn_ids: {eid: state["nba_ids"][eid] for eid in espn_ids if eid in state["nba_ids"]},
+    )
     return state
 
 
@@ -206,3 +213,20 @@ def test_points_matchup_keeps_espn_window_average_and_fills_opening_week_zeros(m
     assert ours == {1: 30.0, 2: 12.5, 3: 18.0}                                    # ESPN's window average when it has one
     assert resp.data.your_team.projected_score == round(100.0 + (30.0 + 12.5 + 18.0) * 3, 2)
     assert resp.data.opponent_team.projected_score == round(90.0 + 20.0 * 3, 2)
+
+
+@pytest.mark.unit
+def test_matchup_rosters_carry_resolved_nba_player_ids(matchup):
+    """Terminal panels navigate by NBA ID, so matchup rows must carry one.
+
+    Players the lookup does not know stay None rather than falling back to the
+    ESPN ID, which would point at an unrelated player.
+    """
+    matchup["nba_ids"] = {1: 2544, 2: 203999, 4: 201142}
+
+    resp = asyncio.run(EspnService.get_matchup_data(LEAGUE, scoring=POINTS))
+
+    assert resp.status == ApiStatus.SUCCESS, resp.message
+    ours = {p.player_id: p.nba_player_id for p in resp.data.your_team.roster}
+    assert ours == {1: 2544, 2: 203999, 3: None}
+    assert resp.data.opponent_team.roster[0].nba_player_id == 201142

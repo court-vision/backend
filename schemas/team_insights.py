@@ -15,7 +15,8 @@ class PlayerScheduleInfo(ApiModel):
 class EnrichedRosterPlayer(ApiModel):
     """Roster player with schedule and multi-window stat data."""
     # Base fields (from PlayerResp)
-    player_id: int
+    player_id: int                       # Provider ID (ESPN or Yahoo), not an NBA ID
+    nba_player_id: Optional[int] = None  # NBA (nba_api) player ID for terminal navigation
     name: str
     avg_points: float          # Season avg FPTS
     team: str                  # NBA team abbreviation
