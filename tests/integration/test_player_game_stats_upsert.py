@@ -87,3 +87,51 @@ def test_a_game_whose_date_was_corrected_moves_its_row(fixture):
 
     (row,) = rows_for()
     assert row.game_date == moved, "the row followed its game rather than forking"
+
+
+def _commit_competing_row(day):
+    """Write the same (player, game) on a second connection and commit it."""
+    import os
+    from playhouse.db_url import connect as connect_url
+
+    other = connect_url(os.environ["DATABASE_URL"])
+    other.execute_sql(
+        "INSERT INTO nba.player_game_stats "
+        "(player_id, team_id, game_date, game_id, fpts, pts, reb, ast, stl, blk, tov, min,"
+        " fgm, fga, fg3m, fg3a, ftm, fta, created_at, updated_at) "
+        "VALUES (201, 'LAL', %s, '0022600001', 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,"
+        " now(), now())",
+        (day,),
+    )
+    other.commit()
+    other.close()
+
+
+def test_a_racing_writer_reloads_rather_than_failing(fixture, monkeypatch):
+    """The lookup is advisory; the unique index decides.
+
+    Two writers that both find nothing will both insert and one will lose. The
+    loser has to re-read and update rather than raise — which is what peewee's
+    `get_or_create` did before this upsert was written by hand.
+
+    The competing row lands *between* our lookup and our insert, on a second
+    connection so it is genuinely committed rather than sharing (and dying with)
+    our transaction. Both halves matter: commit it earlier and the first lookup
+    simply finds it, which is a different path entirely.
+    """
+    real_create = PlayerGameStats.create.__func__
+
+    def create_after_losing_the_race(cls, **kwargs):
+        monkeypatch.undo()          # only race the first insert
+        _commit_competing_row(DAY)
+        return real_create(cls, **kwargs)
+
+    monkeypatch.setattr(PlayerGameStats, "create",
+                        classmethod(create_after_losing_the_race))
+
+    row = PlayerGameStats.upsert_game_stats(
+        201, DAY, {**STATS, "pts": 41}, team_id="LAL", game_id="0022600001"
+    )
+
+    assert row.pts == 41, "the losing writer's values should still land"
+    assert len(rows_for()) == 1, "and there should be exactly one row"
