@@ -3,7 +3,19 @@ from typing import List, Optional
 from .common import ApiModel, BaseResponse
 
 
-class GameLog(ApiModel):
+# Named apart from `schemas.player_games.GameLog` on purpose, and the note is a
+# comment rather than a docstring because a docstring is published as the
+# schema's `description`, and this is our business rather than a caller's.
+#
+# Two models sharing a class name made the OpenAPI export non-deterministic:
+# FastAPI keeps one under the bare `GameLog` key and qualifies the other by
+# module, and hash ordering decided which. The same code exported two different
+# schemas from one process to the next, so the frontend's snapshot could differ
+# from production with nothing having changed, and production's own
+# /openapi.json could flip on a restart. Distinct names leave nothing to luck.
+class PlayerStatsGameLog(ApiModel):
+    """One game in the log on a player's stats response."""
+
     date: str
     fpts: int
     pts: int
@@ -73,7 +85,7 @@ class PlayerStats(ApiModel):
     window_games: int
     avg_stats: AvgStats
     advanced_stats: Optional[AdvancedStatsData] = None
-    game_logs: List[GameLog]
+    game_logs: List[PlayerStatsGameLog]
 
 
 class PlayerStatsResp(BaseResponse):

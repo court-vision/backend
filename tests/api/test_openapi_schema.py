@@ -96,3 +96,33 @@ class TestEnvelopeFieldsAreRequired:
         required = schemas["LivePlayersResp"].get("required", [])
         for field in ("status", "message", "data"):
             assert field in required
+
+
+@pytest.mark.api
+class TestSchemaNamesDoNotCollide:
+    """Two models with one class name make the export non-deterministic.
+
+    FastAPI keeps one under the bare class name and qualifies the other by
+    module (`schemas__player__GameLog`), and which one wins follows hash
+    ordering — so the same code exported two different schemas from one process
+    to the next. That made the frontend's checked-in snapshot differ from
+    production with nothing having changed, and meant production's own
+    `/openapi.json` could flip on a restart.
+    """
+
+    def test_no_schema_name_is_module_qualified(self, schemas):
+        qualified = sorted(k for k in schemas if "__" in k)
+        assert qualified == [], (
+            "These schema names are module-qualified, which FastAPI only does when two "
+            f"models share a class name: {qualified}. Rename one of each colliding pair — "
+            "while the collision stands, the export is not reproducible."
+        )
+
+    def test_the_two_game_log_models_stay_distinct(self, schemas):
+        # The collision that prompted the rule: a player's stats response and
+        # the game-log endpoint each had a `GameLog`.
+        assert "GameLog" in schemas and "PlayerStatsGameLog" in schemas
+        # The bare name belongs to the documented one, which is what production
+        # serves and what the frontend snapshot was generated from.
+        assert "opponent" in schemas["GameLog"]["properties"]
+        assert "opponent" not in schemas["PlayerStatsGameLog"]["properties"]
