@@ -362,7 +362,10 @@ class DraftBoardRow(ApiModel):
     name: str
     team: Optional[str] = Field(
         default=None,
-        description="NBA team abbreviation from last season's stats; None for rookies (and anyone without a baseline row)",
+        description=(
+            "Current NBA team abbreviation (nba.player_profiles), falling back to last season's "
+            "stats team; None when neither knows him (a rookie before his profile syncs)"
+        ),
     )
     position: Optional[str] = Field(default=None, description="NBA-style position (G, F, C, F-C, ...)")
     primary_position: Optional[str] = Field(
@@ -505,6 +508,49 @@ class CategoryNeedResp(ApiModel):
     )
 
 
+class DraftStackResp(ApiModel):
+    """Roster players sharing one NBA team's schedule."""
+
+    team: str
+    count: int
+    player_ids: List[int] = Field(description="The players on that team, best first")
+
+
+class DraftCongestionResp(ApiModel):
+    """Lineup congestion on the caller's roster: starter value that would sit on
+    nights more rostered players play than the league can start, measured on a
+    sample of the season's calendar. A friction estimate, not a projection."""
+
+    benched_per_week: float = Field(description="Starter value the roster benches per sampled fantasy week")
+    benched_season: float = Field(description="`benched_per_week` scaled to `season_weeks`")
+    sample_weeks: List[int] = Field(
+        default=[], description="Fantasy week numbers sampled; empty when no calendar could be read"
+    )
+    season_weeks: int = Field(
+        default=0, description="Weeks the sample is scaled to; 0 when no calendar could be read"
+    )
+    slots: int = Field(
+        default=0,
+        description=(
+            "Active lineup slots the matching fills; 0 when the league's slots are unknown, "
+            "which zeroes every penalty"
+        ),
+    )
+    stacks: List[DraftStackResp] = Field(
+        default=[], description="NBA teams with two or more roster players, largest first"
+    )
+    no_team: List[int] = Field(
+        default=[], description="Roster players with no team on file: never benched, never penalized"
+    )
+    evaluated: int = Field(
+        default=0,
+        description=(
+            "Candidates the congestion term was measured for (the top 25 by pre-congestion "
+            "score); the rest carry 0"
+        ),
+    )
+
+
 class DraftBoardMeta(ApiModel):
     season: str                                 # season the board is for, e.g. "2026-27"
     format: str                                 # points | categories
@@ -563,6 +609,13 @@ class DraftBoardMeta(ApiModel):
             "aggregate projection and season-baseline lines the board is valued from cannot carry them"
         ),
     )
+    congestion: Optional[DraftCongestionResp] = Field(
+        default=None,
+        description=(
+            "Lineup congestion for the roster zone: what the roster benches on its real game "
+            "nights and which NBA teams it stacks. Set on every board."
+        ),
+    )
 
 
 class RecommendationComponent(ApiModel):
@@ -591,7 +644,7 @@ class DraftRecommendation(ApiModel):
     season_value: float = Field(description="value x projected games")
     vorp: float = Field(description="season_value minus the replacement level at the player's position")
     score: float = Field(
-        description="vorp + scarcity + flexibility + injury + category_fit — the ranking number"
+        description="vorp + scarcity + flexibility + injury + category_fit + congestion — the ranking number"
     )
     components: List[RecommendationComponent] = []
     reason: str = Field(description="One-sentence summary of the dominant terms")
