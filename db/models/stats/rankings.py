@@ -21,6 +21,7 @@ class _RankingsRow(BaseModel):
     gp = SmallIntegerField(null=True)
     as_of_date = DateField(null=True)   # snapshot date this player's row runs through
     season = CharField(max_length=7, null=True)
+    position = CharField(max_length=10, null=True)   # from nba.players, via the view's existing join
 
     class Meta:
         schema = 'nba'

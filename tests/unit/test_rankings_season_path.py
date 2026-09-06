@@ -16,10 +16,13 @@ from services import rankings_service
 from services.rankings_service import RankingsService
 
 
-def _row(id: int, rank: int, fpts: int, gp: int, as_of: date, season="2025-26"):
+def _row(id: int, rank: int, fpts: int, gp: int, as_of: date, season="2025-26",
+         position="C"):
+    # Mirrors nba.rankings, which carries the player's position since 0018.
     return SimpleNamespace(
         id=id, curr_rank=rank, name=f"P{id}", team="DEN", fpts=fpts,
         avg_fpts=round(fpts / gp, 2), rank_change=0, gp=gp, as_of_date=as_of, season=season,
+        position=position,
     )
 
 
@@ -180,3 +183,21 @@ def test_category_scoring_does_not_hold_a_database_permit(monkeypatch):
 
     assert resp.status == ApiStatus.SUCCESS and len(resp.data) == 2
     assert state["scored_inside_db"] is False
+
+
+@pytest.mark.unit
+def test_position_rides_along_from_the_view(stub_tables):
+    """The view joins nba.players already, so position costs no extra query.
+
+    It is nullable: a player the profiles pipeline has not seen yet ranks with
+    position None rather than being dropped from the rankings.
+    """
+    stub_tables["copy"] = [
+        _row(1, 1, 2000, 40, date(2026, 3, 4), position="G-F"),
+        _row(2, 2, 1500, 38, date(2026, 3, 4), position=None),
+    ]
+
+    resp = asyncio.run(RankingsService.get_rankings())
+
+    assert resp.status == ApiStatus.SUCCESS, resp.message
+    assert [p.position for p in resp.data] == ["G-F", None]

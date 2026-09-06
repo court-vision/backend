@@ -58,6 +58,7 @@ def _season_row(rec, gp: int) -> PoolRow:
         id=rec.player_id, name=rec.player.name, team=rec.team_id, gp=gp, line=line,
         fpts_avg=round(fpts_total / gp, 2), fpts_total=fpts_total,
         espn_id=rec.player.espn_id, name_normalized=rec.player.name_normalized,
+        position=rec.player.position,
     )
 
 
@@ -82,6 +83,7 @@ def load_pool(window: Optional[int], season: Optional[str] = None) -> tuple[Opti
                 line=StatLine.from_row(rec, gp=1.0),
                 fpts_avg=fpts_avg, fpts_total=round(fpts_avg * gp, 1),
                 espn_id=rec.player.espn_id, name_normalized=rec.player.name_normalized,
+                position=rec.player.position,
             ))
         return latest_date, pool
 
