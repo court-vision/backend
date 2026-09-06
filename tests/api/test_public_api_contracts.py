@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -42,7 +43,9 @@ def isolated_limits():
 def test_public_failures_use_http_statuses(client, app, monkeypatch, path, module, service, method, status, code, expected):
     from importlib import import_module
 
-    app.dependency_overrides[api_key_auth.verify_api_key] = lambda: api_key_auth.APIKeyContext(1, ("analytics",))
+    app.dependency_overrides[api_key_auth.verify_api_key] = lambda: api_key_auth.APIKeyContext(
+        1, ("analytics",), "test-api-key"
+    )
     target = getattr(import_module(f"services.{module}"), service)
     monkeypatch.setattr(target, method, AsyncMock(return_value=BaseResponse(status=status, message="failure", error_code=code)))
     response = client.get(path)
@@ -113,12 +116,25 @@ def test_changing_anonymous_api_key_headers_cannot_reset_public_quota(app, clien
     assert response.json()["error_code"] == "RATE_LIMITED"
 
 
+def test_verified_api_key_uses_its_record_id_for_rate_limiting(monkeypatch):
+    record = SimpleNamespace(id="db-key-id", user_id=1, scopes=["analytics"])
+    monkeypatch.setattr(api_key_auth.APIKey, "verify_key", lambda raw_key: record)
+
+    context = api_key_auth._verify_key("cv_raw_credential")
+
+    assert context == api_key_auth.APIKeyContext(1, ("analytics",), "db-key-id")
+
+
 def test_real_auth_dependency_sets_a_private_distinct_rate_identity(app, client, monkeypatch):
     async def direct(operation, fn, *args):
         return await asyncio.to_thread(fn, *args)
 
+    identities = {
+        "cv_sameprefix_one": api_key_auth.APIKeyContext(1, ("analytics",), "key-id-one"),
+        "cv_sameprefix_two": api_key_auth.APIKeyContext(1, ("analytics",), "key-id-two"),
+    }
     monkeypatch.setattr(api_key_auth, "run_db", direct)
-    monkeypatch.setattr(api_key_auth, "_verify_key", lambda raw: api_key_auth.APIKeyContext(1, ("analytics",)))
+    monkeypatch.setattr(api_key_auth, "_verify_key", identities.get)
 
     @app.get("/key-quota")
     @limiter.limit("1/minute")
@@ -129,6 +145,7 @@ def test_real_auth_dependency_sets_a_private_distinct_rate_identity(app, client,
     second = client.get("/key-quota", headers={"X-API-Key": "cv_sameprefix_two"})
     assert first.status_code == second.status_code == 200
     assert first.json()["identity"] != second.json()["identity"]
+    assert first.json()["identity"] == "api_key:key-id-one"
     assert first.json()["identity"].startswith("api_key:")
     assert "cv_sameprefix" not in first.text
     assert client.get("/key-quota", headers={"X-API-Key": "cv_sameprefix_one"}).status_code == 429

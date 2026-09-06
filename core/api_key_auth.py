@@ -4,7 +4,6 @@ API key authentication for protected endpoints.
 
 from typing import Callable
 from dataclasses import dataclass
-from hashlib import sha256
 
 from fastapi import Request, Security
 from fastapi.security import APIKeyHeader
@@ -20,6 +19,7 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 class APIKeyContext:
     user_id: int
     scopes: tuple[str, ...]
+    rate_limit_identity: str
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.scopes
@@ -29,7 +29,11 @@ def _verify_key(raw_key: str) -> APIKeyContext | None:
     record = APIKey.verify_key(raw_key)
     if record is None:
         return None
-    return APIKeyContext(user_id=record.user_id, scopes=tuple(record.scopes or ()))
+    return APIKeyContext(
+        user_id=record.user_id,
+        scopes=tuple(record.scopes or ()),
+        rate_limit_identity=str(record.id),
+    )
 
 
 async def verify_api_key(
@@ -49,7 +53,9 @@ async def verify_api_key(
     if not key_record:
         raise AuthenticationError("INVALID_API_KEY", "Invalid or expired API key")
 
-    request.state.api_key_identity = sha256(api_key.encode()).hexdigest()
+    # The persisted API key ID is an opaque, stable identifier. Using it avoids
+    # retaining or deriving another value from the raw credential.
+    request.state.api_key_identity = key_record.rate_limit_identity
     return key_record
 
 
