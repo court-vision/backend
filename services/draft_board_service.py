@@ -29,6 +29,9 @@ Composes what already exists rather than inventing a new engine:
           far this roster trails an average team, with punted categories at
           zero. `value` says what a player is worth to anyone, `fit_value`
           what he is worth here; both map through the same scale.
+- Congestion: what a candidate would bench on the roster's real game nights
+          (services.draft_congestion) — per-day lineup matching over sampled
+          calendar weeks, so five centres or four Nuggets cost what they cost.
 
 cv_rank is computed over the FULL pool, picked players included, so it reads as
 a pre-draft big-board rank: it stays stable as picks remove rows and remains
@@ -41,7 +44,7 @@ building hundreds of pydantic rows must not hold a DB permit).
 
 Recommendations (v1) rank the available, non-cap-blocked pool by
 
-    score = vorp + scarcity + flexibility + category_fit − injury
+    score = vorp + scarcity + flexibility + category_fit − injury − congestion
 
 each term expressed in season-value points so the sum is interpretable, and each
 returned alongside the score. `season_value` (value × projected games) is the
@@ -67,6 +70,7 @@ from core.settings import settings
 from db import base as db_base
 from db.models.drafts import DraftPick
 from db.models.nba.draft_market import DraftMarket
+from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.players import Player
 from schemas.common import ApiStatus, CategoryDefResp
@@ -75,9 +79,25 @@ from schemas.draft import (
     DraftBoardMeta,
     DraftBoardResp,
     DraftBoardRow,
+    DraftCongestionResp,
     DraftRecommendation,
     DraftRosterEntry,
+    DraftStackResp,
     RecommendationComponent,
+)
+from services import schedule_service
+from services.draft_congestion import (
+    DEFAULT_SEASON_WEEKS,
+    ESPN_POSITIONS,
+    NON_STARTING_SLOTS as _NON_STARTING_SLOTS,
+    SLOT_MEMBERS as _SLOT_MEMBERS,
+    UNIVERSAL_SLOTS as _UNIVERSAL_SLOTS,
+    CongestionModel,
+    CongestionPlayer,
+    Penalty,
+    SampleWeek,
+    build_congestion_model,
+    week_from_calendar,
 )
 from services.draft_fit import FitModel, build_fit_model, draftable_tier_size
 from services.draft_service import (
@@ -109,24 +129,10 @@ if TYPE_CHECKING:  # pragma: no cover
 _COARSE_GROUP: dict[str, str] = {"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}
 _GROUP_SIZE: dict[str, int] = {"G": 2, "F": 2, "C": 1}
 
-# The five ESPN positions a player can be primary at, in default_position_id order.
-ESPN_POSITIONS: tuple[str, ...] = ("PG", "SG", "SF", "PF", "C")
-
-# Lineup slots that hold a starter but are not a position: everyone is UT-eligible,
-# so UT is neither a flexibility bonus nor a replacement-level pool of its own.
-_UNIVERSAL_SLOTS = frozenset({"UT"})
-_NON_STARTING_SLOTS = frozenset({"BE", "IR", "Rookie", ""})
-
-# Which ESPN positions can fill a multi-position lineup slot. Used only to spread
-# a league's derived slots (G, F, UT, ...) across the five primary positions when
-# computing how many starters the league needs at each.
-_SLOT_MEMBERS: dict[str, tuple[str, ...]] = {
-    "PG": ("PG",), "SG": ("SG",), "SF": ("SF",), "PF": ("PF",), "C": ("C",),
-    "G": ("PG", "SG"), "F": ("SF", "PF"),
-    "SG/SF": ("SG", "SF"), "G/F": ("PG", "SG", "SF", "PF"),
-    "PF/C": ("PF", "C"), "F/C": ("SF", "PF", "C"),
-    "UT": ESPN_POSITIONS,
-}
+# The lineup vocabulary — ESPN_POSITIONS (re-exported), the universal and
+# non-starting slots, and which positions fill a derived slot — lives in
+# services.draft_congestion, whose matching needs it too; it is imported above
+# under the names this file has always used them by.
 
 VALUE_DECIMALS = 1
 
@@ -141,6 +147,15 @@ SCARCITY_WEIGHT = 0.5        # at most half a player's VORP again, at a dry posi
 SCARCITY_IDLE_NEED = 0.25    # damping when my own roster does not need the position
 FLEX_RATE = 0.02             # per extra startable lineup slot, as a share of season value
 RECOMMENDATION_COUNT = 5
+
+# Congestion is measured for this many candidates, by pre-congestion score, and
+# the rest carry 0: the matching is cheap, but only the band that can still reach
+# the top five needs re-ranking by it.
+CONGESTION_CANDIDATES = 25
+
+# Fantasy weeks the congestion sample reads: ordinary ones — not the short
+# opening week, not the merged All-Star fortnight (18).
+SAMPLE_WEEK_NUMBERS: tuple[int, ...] = (3, 9, 16)
 
 # How far ADP has to sit from the pick in question before the answer stops
 # being "it depends". Half a round of picks, floored so a tiny league still
@@ -223,6 +238,35 @@ class BoardInputs:
     # Seat (1-based slot in pick_order) -> the players it has drafted. Every
     # seat, mine included; the fit model drops mine before pacing against them.
     seat_players: dict[int, frozenset[int]] = field(default_factory=dict)
+    # Current NBA team per wanted player (nba.player_profiles): the board's first
+    # choice ahead of last season's stats team, which goes stale every summer.
+    current_team: dict[int, Optional[str]] = field(default_factory=dict)
+    # Ordinary fantasy weeks the congestion term samples, and how many weeks the
+    # season has; empty / 0 when the calendar could not be read.
+    schedule_weeks: tuple[SampleWeek, ...] = ()
+    season_weeks: int = 0
+
+
+@dataclass
+class _Terms:
+    """One candidate's terms before congestion, with everything a detail line
+    reads kept alongside, so the second pass recomputes nothing."""
+
+    c: dict
+    position: Optional[str]
+    season_value: float
+    bar: float
+    vorp: float
+    scarcity: float
+    need: int
+    left: int
+    my_need: float
+    flexibility: float
+    slots: list[str]
+    extra_slots: int
+    injury: float
+    category_fit: float
+    base: float             # the score before congestion
 
 
 class DraftBoardService:
@@ -341,6 +385,18 @@ class DraftBoardService:
                 positions[rec.id] = rec.position
                 names[rec.id] = (rec.name, rec.espn_id)
 
+        # Where each player plays now. The pool's team is last season's stats
+        # row and goes stale with every offseason move; the profile is what the
+        # congestion matching and the roster zone's stacks read. Raw FK values:
+        # `rec.team` would fetch a team row per player.
+        current_team: dict[int, Optional[str]] = {}
+        if wanted:
+            for rec in PlayerProfile.select(PlayerProfile.player, PlayerProfile.team).where(
+                PlayerProfile.player.in_(list(wanted))
+            ):
+                current_team[rec.player_id] = rec.team_id
+        schedule_weeks, season_weeks = DraftBoardService._sample_weeks()
+
         market_only = [
             MarketOnlyRow(id=pid, name=names[pid][0], espn_id=names[pid][1], position=positions.get(pid))
             for pid in market_only_ids
@@ -358,7 +414,28 @@ class DraftBoardService:
             session_picked=frozenset(session_picked), session_mine=frozenset(session_mine),
             used_picks=tuple(sorted(used_picks)), keeper_picks=tuple(sorted(keeper_picks)),
             seat_players={seat: frozenset(ids) for seat, ids in seat_players.items()},
+            current_team=current_team,
+            schedule_weeks=schedule_weeks, season_weeks=season_weeks,
         )
+
+    @staticmethod
+    def _sample_weeks() -> tuple[tuple[SampleWeek, ...], int]:
+        """Ordinary fantasy weeks for the congestion sample, and the season's length.
+
+        The calendar is a static file the schedule service caches once per
+        process, so this is not a second trip anywhere. Empty when the season's
+        calendar is not on disk: the term then says so rather than pretending.
+        """
+        try:
+            weeks: list[SampleWeek] = []
+            for number in SAMPLE_WEEK_NUMBERS:
+                week = schedule_service.get_matchup_by_number(number)
+                if week:
+                    weeks.append(week_from_calendar(number, week["game_span"], week["games"]))
+            season_weeks = schedule_service.get_max_week() or DEFAULT_SEASON_WEEKS
+        except FileNotFoundError:
+            return (), 0
+        return tuple(weeks), season_weeks
 
     @staticmethod
     def _latest_projections(season: str, source: str = "espn") -> tuple[Optional[date], list]:
@@ -460,6 +537,7 @@ class DraftBoardService:
         primary = DraftBoardService._primary_positions(inputs)
         eligible = DraftBoardService._eligible_slots(inputs)
         limits = DraftBoardService._position_limits(scoring)
+        roster_slots = DraftBoardService._roster_slots(scoring)
         cap_check = DraftBoardService._cap_check(limits, mine, primary, inputs.positions)
 
         # What this roster is short of and what it has conceded: the weights the
@@ -478,12 +556,13 @@ class DraftBoardService:
             market_rank = market.get("overall_rank")
             gp = inputs.projected_gp.get(row.id) or DEFAULT_PROJECTED_GP
             blocked = cap_check(row.id)
+            team = inputs.current_team.get(row.id) or row.team
             if row.id not in removed:
                 rows.append(DraftBoardRow(
                     player_id=row.id,
                     espn_id=row.espn_id,
                     name=row.name,
-                    team=row.team,
+                    team=team,
                     position=inputs.positions.get(row.id),
                     primary_position=primary.get(row.id),
                     positions=eligible.get(row.id),
@@ -507,7 +586,7 @@ class DraftBoardService:
                     score=z_sum,
                 ))
             candidates.append({
-                "id": row.id, "name": row.name, "value": value, "team": row.team,
+                "id": row.id, "name": row.name, "value": value, "team": team,
                 "source": inputs.source.get(row.id, "baseline"),
                 "season_value": round(value * gp, VALUE_DECIMALS),
                 "gp": gp,
@@ -531,7 +610,7 @@ class DraftBoardService:
                 player_id=entry.id,
                 espn_id=entry.espn_id,
                 name=entry.name,
-                team=None,
+                team=inputs.current_team.get(entry.id),
                 position=entry.position,
                 primary_position=primary.get(entry.id),
                 positions=eligible.get(entry.id),
@@ -555,8 +634,14 @@ class DraftBoardService:
                 score=None,
             ))
 
+        # What this roster would bench on its real game nights, measured once;
+        # every candidate's congestion term is a delta against it.
+        congestion = build_congestion_model(
+            [DraftBoardService._congestion_player(c) for c in candidates if c["id"] in mine],
+            roster_slots, inputs.schedule_weeks, inputs.season_weeks or DEFAULT_SEASON_WEEKS,
+        )
         recommendations = DraftBoardService._recommend(
-            candidates, scoring, session, mine, primary, fit
+            candidates, scoring, session, mine, primary, fit, congestion
         )
 
         # The caller's drafted players, with what the roster zone needs to place
@@ -570,7 +655,7 @@ class DraftBoardService:
             for c in candidates if c["id"] in mine
         ] + [
             DraftRosterEntry(
-                player_id=entry.id, name=entry.name, team=None,
+                player_id=entry.id, name=entry.name, team=inputs.current_team.get(entry.id),
                 primary_position=primary.get(entry.id), positions=eligible.get(entry.id),
                 value=None, value_source="market",
                 injury_status=DraftBoardService._injury_of(inputs.market.get(entry.id, {})),
@@ -588,7 +673,7 @@ class DraftBoardService:
             if name is None:
                 continue
             roster.append(DraftRosterEntry(
-                player_id=pid, name=name, team=None,
+                player_id=pid, name=name, team=inputs.current_team.get(pid),
                 primary_position=primary.get(pid), positions=eligible.get(pid),
                 value=None, value_source="baseline",
                 injury_status=DraftBoardService._injury_of(inputs.market.get(pid, {})),
@@ -618,7 +703,7 @@ class DraftBoardService:
                 market_as_of=inputs.market_as_of,
                 session_id=session.session_id,
                 league_size=league_size,
-                roster_slots=DraftBoardService._roster_slots(scoring),
+                roster_slots=roster_slots,
                 position_source=("espn" if primary else ("coarse" if any(inputs.positions.values()) else "none")),
                 position_limits=limits,
                 categories=[CategoryDefResp(**c.to_json()) for c in cat_defs],
@@ -629,6 +714,7 @@ class DraftBoardService:
                 category_need=DraftBoardService._category_need(fit),
                 pace_source=(fit.pace_source if fit is not None else None),
                 seats_drafted=(fit.seats_drafted if fit is not None else 0),
+                congestion=DraftBoardService._congestion_meta(congestion, candidates),
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
                 # dd/td weights score 0 against aggregate lines; name them rather
                 # than imply the league's weights were fully applied (the
@@ -782,6 +868,53 @@ class DraftBoardService:
         if not status or str(status).upper() in ("ACTIVE", "NORMAL"):
             return None
         return str(status)
+
+    # ---- congestion ------------------------------------------------------------
+
+    @staticmethod
+    def _congestion_player(c: Mapping) -> CongestionPlayer:
+        """A candidate dict as the matching sees him: value floored at zero, ESPN
+        slots when the market knows them, primary position as the fallback."""
+        slots = c.get("slots")
+        value = c.get("value")
+        return CongestionPlayer(
+            id=c["id"],
+            value=max(float(value), 0.0) if value is not None else 0.0,
+            team=c.get("team"),
+            slots=frozenset(slots) if slots else None,
+            position=c.get("position"),
+        )
+
+    @staticmethod
+    def _congestion_detail(pen: Penalty) -> str:
+        """One line on what the term measured, or why it could not."""
+        if pen.reason:
+            return pen.reason
+        if pen.games == 0:
+            return f"no sampled games for {pen.team}"
+        shared = f"; {pen.stack + 1} would share {pen.team}'s schedule" if pen.stack else ""
+        if pen.value < 0:
+            weeks = f"{pen.weeks} sampled week" + ("s" if pen.weeks != 1 else "")
+            return f"would bench ~{pen.per_week:.1f}/week of starter value over {weeks}" + shared
+        return "fits the lineup every sampled night" + shared
+
+    @staticmethod
+    def _congestion_meta(model: CongestionModel, candidates: list[dict]) -> DraftCongestionResp:
+        """The roster-level summary the roster zone renders."""
+        pool = sum(1 for c in candidates if c["available"] and not c["blocked"])
+        return DraftCongestionResp(
+            benched_per_week=model.benched_per_week,
+            benched_season=model.benched_season,
+            sample_weeks=list(model.sample_weeks),
+            season_weeks=model.season_weeks if model.weeks else 0,
+            slots=len(model.slots),
+            stacks=[
+                DraftStackResp(team=s.team, count=s.count, player_ids=list(s.player_ids))
+                for s in model.stacks
+            ],
+            no_team=list(model.no_team),
+            evaluated=min(pool, CONGESTION_CANDIDATES) if model.active else 0,
+        )
 
     # ---- category fit ----------------------------------------------------------
 
@@ -981,6 +1114,7 @@ class DraftBoardService:
         my_ids: frozenset[int],
         primary: Mapping[int, str],
         fit: Optional[FitModel] = None,
+        congestion: Optional[CongestionModel] = None,
     ) -> list[DraftRecommendation]:
         """Rank what is left by VORP with the visible adjustments applied."""
         pool = [c for c in candidates if c["available"] and not c["blocked"]]
@@ -1040,7 +1174,7 @@ class DraftBoardService:
             if str(s).strip() not in _NON_STARTING_SLOTS and str(s).strip() not in _UNIVERSAL_SLOTS
         }
 
-        scored: list[DraftRecommendation] = []
+        terms: list[_Terms] = []
         for c in pool:
             position = c["position"]
             season_value = c["season_value"]
@@ -1075,61 +1209,98 @@ class DraftBoardService:
                 if fit_value is not None else 0.0
             )
 
-            score = round(
-                vorp + scarcity + flexibility + injury + category_fit, VALUE_DECIMALS
-            )
-            scored.append(DraftRecommendation(
-                player_id=c["id"],
-                name=c["name"],
-                primary_position=position,
-                value=c["value"],
-                season_value=season_value,
-                vorp=vorp,
-                score=score,
-                components=[
-                    RecommendationComponent(
-                        key="season_value", label="Season value", value=season_value, in_score=False,
-                        detail=f"{c['value']} per game over a projected season",
-                    ),
-                    RecommendationComponent(
-                        key="vorp", label="Value over replacement", value=vorp, in_score=True,
-                        detail=(
-                            f"replacement at {position} is {round(bar, VALUE_DECIMALS)}" if position
-                            else f"no position data — measured against the pool ({round(bar, VALUE_DECIMALS)})"
-                        ),
-                    ),
-                    RecommendationComponent(
-                        key="scarcity", label="Positional scarcity", value=scarcity, in_score=True,
-                        detail=(
-                            f"{left} startable {position} left of {need}"
-                            + ("" if my_need > 0 else "; your roster is already set there")
-                            if position and need > 0 else "no positional pressure"
-                        ),
-                    ),
-                    RecommendationComponent(
-                        key="flexibility", label="Lineup flexibility", value=flexibility, in_score=True,
-                        detail=(
-                            f"starts at {', '.join(sorted(set(slots)))}" if extra_slots
-                            else "one starting slot"
-                        ),
-                    ),
-                    RecommendationComponent(
-                        key="injury", label="Injury risk", value=injury, in_score=True,
-                        detail=(f"listed {c['injury']}" if c["injury"] else "no injury flag"),
-                    ),
-                    RecommendationComponent(
-                        key="category_fit", label="Category fit", value=category_fit, in_score=True,
-                        detail=DraftBoardService._fit_detail(fit, c.get("z"), c["gp"]),
-                    ),
-                ],
-                reason=DraftBoardService._reason(
-                    c["name"], position, vorp, scarcity, flexibility, injury, category_fit,
-                    c["injury"],
-                ),
+            terms.append(_Terms(
+                c=c, position=position, season_value=season_value, bar=bar, vorp=vorp,
+                scarcity=scarcity, need=need, left=left, my_need=my_need,
+                flexibility=flexibility, slots=slots, extra_slots=extra_slots,
+                injury=injury, category_fit=category_fit,
+                base=round(vorp + scarcity + flexibility + injury + category_fit, VALUE_DECIMALS),
             ))
+
+        # Congestion last, and only for the candidates that can still reach the
+        # top: every other term is per player, this one re-runs the roster's
+        # lineup with him in it. The cutoff is read here rather than bound as a
+        # default so a test can move it.
+        terms.sort(key=lambda t: (-t.base, -t.season_value))
+        limit = CONGESTION_CANDIDATES
+        scored: list[DraftRecommendation] = []
+        for index, t in enumerate(terms):
+            if congestion is not None and index < limit:
+                pen = congestion.penalty(DraftBoardService._congestion_player(t.c))
+                term, detail = pen.value, DraftBoardService._congestion_detail(pen)
+            else:
+                term, detail = 0.0, f"not evaluated — outside the top {limit} by score"
+            scored.append(DraftBoardService._recommendation(t, fit, term, detail))
 
         scored.sort(key=lambda r: (-r.score, -r.season_value))
         return scored[:RECOMMENDATION_COUNT]
+
+    @staticmethod
+    def _recommendation(
+        t: _Terms, fit: Optional[FitModel], congestion: float, congestion_detail: str
+    ) -> DraftRecommendation:
+        """One candidate with the whole score decomposed."""
+        c = t.c
+        position = t.position
+        # One rounding over the already-rounded terms, added in the order the
+        # components list them, so summing the visible terms reproduces the score.
+        score = round(
+            t.vorp + t.scarcity + t.flexibility + t.injury + t.category_fit + congestion,
+            VALUE_DECIMALS,
+        )
+        return DraftRecommendation(
+            player_id=c["id"],
+            name=c["name"],
+            primary_position=position,
+            value=c["value"],
+            season_value=t.season_value,
+            vorp=t.vorp,
+            score=score,
+            components=[
+                RecommendationComponent(
+                    key="season_value", label="Season value", value=t.season_value, in_score=False,
+                    detail=f"{c['value']} per game over a projected season",
+                ),
+                RecommendationComponent(
+                    key="vorp", label="Value over replacement", value=t.vorp, in_score=True,
+                    detail=(
+                        f"replacement at {position} is {round(t.bar, VALUE_DECIMALS)}" if position
+                        else f"no position data — measured against the pool ({round(t.bar, VALUE_DECIMALS)})"
+                    ),
+                ),
+                RecommendationComponent(
+                    key="scarcity", label="Positional scarcity", value=t.scarcity, in_score=True,
+                    detail=(
+                        f"{t.left} startable {position} left of {t.need}"
+                        + ("" if t.my_need > 0 else "; your roster is already set there")
+                        if position and t.need > 0 else "no positional pressure"
+                    ),
+                ),
+                RecommendationComponent(
+                    key="flexibility", label="Lineup flexibility", value=t.flexibility, in_score=True,
+                    detail=(
+                        f"starts at {', '.join(sorted(set(t.slots)))}" if t.extra_slots
+                        else "one starting slot"
+                    ),
+                ),
+                RecommendationComponent(
+                    key="injury", label="Injury risk", value=t.injury, in_score=True,
+                    detail=(f"listed {c['injury']}" if c["injury"] else "no injury flag"),
+                ),
+                RecommendationComponent(
+                    key="category_fit", label="Category fit", value=t.category_fit, in_score=True,
+                    detail=DraftBoardService._fit_detail(fit, c.get("z"), c["gp"]),
+                ),
+                RecommendationComponent(
+                    key="congestion", label="Lineup congestion", value=congestion, in_score=True,
+                    detail=congestion_detail,
+                ),
+            ],
+            reason=DraftBoardService._reason(
+                c["name"], position, t.vorp, t.scarcity, t.flexibility, t.injury, t.category_fit,
+                congestion, c["injury"],
+            ),
+        )
 
     @staticmethod
     def _fit_detail(
@@ -1166,6 +1337,7 @@ class DraftBoardService:
         flexibility: float,
         injury: float,
         category_fit: float,
+        congestion: float,
         injury_status: Optional[str],
     ) -> str:
         """One sentence naming the terms that actually moved the score."""
@@ -1179,4 +1351,6 @@ class DraftBoardService:
             parts.append(f"{category_fit:+.1f} for category fit")
         if injury:
             parts.append(f"{injury:+.1f} for {injury_status}")
+        if congestion:
+            parts.append(f"{congestion:+.1f} for lineup congestion")
         return f"{name}: " + ", ".join(parts)

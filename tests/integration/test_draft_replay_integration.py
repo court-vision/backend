@@ -30,8 +30,10 @@ from core.errors import BadRequestError, ConflictError
 from db.models.drafts import DraftPick
 from db.models.leagues import League
 from db.models.nba.draft_market import DraftMarket
+from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
+from db.models.nba.teams import NBATeam
 from db.models.teams import Team
 from db.models.users import User
 from core.settings import settings
@@ -400,3 +402,43 @@ async def test_the_board_paces_against_the_seats_the_real_picks_landed_in(
 
     # And the fit column is live: every scorable row carries one.
     assert all(r.fit_value is not None for r in board.data if r.value is not None)
+
+
+async def test_the_board_reads_the_current_team_from_profiles_and_summarises_congestion(
+    team, league, board_players, replay
+):
+    """B7 end to end: the board's team comes from nba.player_profiles, and the
+    congestion summary is built on the real calendar.
+
+    The captured players carry no team on their stats rows and only my first
+    two picks get a profile here, so the matching has two Nuggets to seat and
+    nobody else: they never outnumber ten seats, every candidate reads "no
+    team on file" — the honest answer — and the roster zone sees its one stack.
+    """
+    NBATeam.get_or_create(
+        id="DEN", defaults={"name": "Denver Nuggets", "conference": "West", "division": "Northwest"}
+    )
+    mine = [board_players[replay["picks"][n - 1]["espn_player_id"]] for n in _mine(replay)[:2]]
+    for pid in mine:
+        PlayerProfile.create(player=pid, team="DEN")
+
+    session = await _open_room(team, replay)
+    scoring = resolve_scoring(league)
+    room = BoardSession(session_id=session.id, my_slot=MY_SLOT, rounds=replay["rounds"],
+                        league_size=replay["league_size"], draft_type="snake")
+
+    board = await DraftBoardService.get_board(scoring, my_ids=mine, session=room)
+
+    # The profile is the team; a stats row with none stays None.
+    assert [(r.player_id, r.team) for r in board.roster] == [(pid, "DEN") for pid in mine]
+    assert all(r.team is None for r in board.data)
+
+    meta = board.meta.congestion
+    assert meta.sample_weeks == [3, 9, 16] and meta.season_weeks == 24
+    assert meta.slots == 10 and meta.no_team == []
+    assert [(s.team, s.count, s.player_ids) for s in meta.stacks] == [("DEN", 2, mine)]
+    assert meta.benched_per_week == 0.0 and meta.benched_season == 0.0
+    assert meta.evaluated == 25
+    for rec in board.recommendations:
+        term = next(c for c in rec.components if c.key == "congestion")
+        assert term.value == 0.0 and term.in_score and term.detail == "no team on file"

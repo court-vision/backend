@@ -19,6 +19,7 @@ from services.draft_board_service import (
     DraftBoardService,
     MarketOnlyRow,
 )
+from services.draft_congestion import SampleWeek
 from services.scoring.category_value import category_value
 from services.scoring.models import StatLine
 from services.scoring.category_rank import PoolRow
@@ -442,22 +443,32 @@ def test_a_centre_drafted_inside_the_session_spends_the_cap(monkeypatch):
 @pytest.mark.unit
 def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkeypatch):
     """The default fixture has no ESPN positions, so scarcity and flexibility
-    are structurally zero there — assert the sum where all four terms bite."""
+    are structurally zero there — assert the sum where all five terms bite."""
     # Four centres so the position has a replacement level below its best
-    # player (with only one left, VORP is 0 and scarcity has nothing to scale).
+    # player (with only one left, VORP is 0 and scarcity has nothing to scale),
+    # and four cheap Denver centres of my own so a fifth collides on the
+    # sampled Denver nights.
     market = _espn_market(
         **{"1": {"default_position_id": 5, "eligible_slot_ids": [4, 9, 11, 12]},
            "2": {"default_position_id": 1, "eligible_slot_ids": [0, 1, 5, 11, 12]},
            "3": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12],
                  "injury_status": "DOUBTFUL"},
            "4": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
-           "6": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]}}
+           "6": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
+           **{str(pid): {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]}
+              for pid in (11, 12, 13, 14)}}
+    )
+    inputs = _inputs(
+        market=market,
+        pool=_inputs().pool + [_row(pid, fpts=10.0, pts=10) for pid in (11, 12, 13, 14)],
+        schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),) * 3),),
+        season_weeks=24,
     )
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
-                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
-    resp = _board(resolve_scoring(_league()), picked=[6])
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+    resp = _board(resolve_scoring(_league()), picked=[6], mine=[11, 12, 13, 14])
 
-    seen = {"scarcity": False, "flexibility": False, "injury": False}
+    seen = {"scarcity": False, "flexibility": False, "injury": False, "congestion": False}
     for rec in resp.recommendations:
         summed = round(sum(c.value for c in rec.components if c.in_score), 1)
         assert summed == rec.score, f"{rec.name}: components do not sum to the score"
@@ -465,6 +476,14 @@ def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkey
             if next(c for c in rec.components if c.key == key).value:
                 seen[key] = True
     assert all(seen.values()), f"never exercised: {[k for k, v in seen.items() if not v]}"
+    # A fifth centre for C + UT x3 benches one of my 10-a-game centres on each
+    # of the three sampled Denver nights: 30 a week, over 24 weeks.
+    star = next(r for r in resp.recommendations if r.player_id == 1)
+    congestion = next(c for c in star.components if c.key == "congestion")
+    assert congestion.value == -720.0
+    assert congestion.detail == (
+        "would bench ~30.0/week of starter value over 1 sampled week; 5 would share DEN's schedule"
+    )
 
 
 @pytest.mark.unit
@@ -475,11 +494,17 @@ def test_recommendations_decompose_the_score_and_sum_to_it(stub_inputs):
     best = resp.recommendations[0]
     assert best.player_id == 1                      # the most valuable available player
     keys = [c.key for c in best.components]
-    assert keys == ["season_value", "vorp", "scarcity", "flexibility", "injury", "category_fit"]
+    assert keys == ["season_value", "vorp", "scarcity", "flexibility", "injury", "category_fit",
+                    "congestion"]
     # A points league has no categories to fit: the term is present (the room
     # renders every component) and contributes nothing.
     fit = next(c for c in best.components if c.key == "category_fit")
     assert fit.value == 0.0 and "points league" in fit.detail
+    # Nothing sampled the calendar here, so congestion is present and says so.
+    congestion = next(c for c in best.components if c.key == "congestion")
+    assert congestion.value == 0.0 and congestion.in_score
+    assert congestion.detail == "no schedule sampled"
+    assert resp.meta.congestion.sample_weeks == [] and resp.meta.congestion.evaluated == 0
     summed = round(sum(c.value for c in best.components if c.in_score), 1)
     assert summed == best.score
     # season_value is context, not a term: it is the base vorp is measured from.
@@ -489,6 +514,88 @@ def test_recommendations_decompose_the_score_and_sum_to_it(stub_inputs):
         (r.score for r in resp.recommendations), reverse=True
     )
     assert best.name in best.reason
+
+
+@pytest.mark.unit
+def test_congestion_penalizes_deepening_a_stack_and_the_meta_reports_it(monkeypatch):
+    """A C + UT league where I hold two Denver centres and a Laker: on the
+    night all three play one of them sits, and a Boston guard who can only
+    start at UT here is benched on the Denver night he shares."""
+    market = _espn_market(
+        **{"1": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
+           "3": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
+           "6": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
+           "2": {"default_position_id": 1, "eligible_slot_ids": [0, 5, 11, 12]}}
+    )
+    inputs = _inputs(
+        market=market, current_team={2: "BOS", 6: "LAL"},
+        schedule_weeks=(SampleWeek(3, (frozenset({"DEN", "LAL"}), frozenset({"DEN", "BOS"}))),),
+        season_weeks=24,
+    )
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league(roster_slots={"C": 1, "UT": 1, "BE": 3})), mine=[1, 3, 6])
+
+    meta = resp.meta.congestion
+    assert meta.benched_per_week == 10.0 and meta.benched_season == 240.0
+    assert meta.sample_weeks == [3] and meta.season_weeks == 24 and meta.slots == 2
+    assert [(s.team, s.count, s.player_ids) for s in meta.stacks] == [("DEN", 2, [1, 3])]
+    assert meta.no_team == [] and meta.evaluated == 3
+    # The roster zone reads the current team, and so does the board row.
+    assert [(r.player_id, r.team) for r in resp.roster] == [(1, "DEN"), (3, "DEN"), (6, "LAL")]
+    assert next(r for r in resp.data if r.player_id == 2).team == "BOS"
+
+    by_id = {r.player_id: r for r in resp.recommendations}
+    guard = next(c for c in by_id[2].components if c.key == "congestion")
+    assert guard.value == -528.0                       # 22 a game, one night a week, 24 weeks
+    assert guard.detail == "would bench ~22.0/week of starter value over 1 sampled week"
+    assert by_id[2].score == -528.0 and "-528.0 for lineup congestion" in by_id[2].reason
+    for pid in (4, 5):
+        assert next(c for c in by_id[pid].components if c.key == "congestion").detail == "no team on file"
+    # Before congestion the guard tied player 5 on score and led him on season
+    # value; the term puts him last.
+    assert [r.player_id for r in resp.recommendations] == [4, 5, 2]
+
+
+@pytest.mark.unit
+def test_the_current_team_wins_over_last_seasons_stats_team(monkeypatch):
+    """The pool's team is last season's; the profile says where he plays now,
+    and it reaches the board row and every kind of roster entry."""
+    market = _espn_market(**{"9": {"overall_rank": 25, "default_position_id": 4}})
+    inputs = _inputs(market=market,
+                     market_only=[MarketOnlyRow(id=9, name="Rookie", espn_id=109, position="F")],
+                     names={7: ("Ghost", None)},
+                     current_team={1: "LAL", 9: "BOS", 7: "MIA"})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()), mine=[9, 7])
+
+    by_id = {r.player_id: r for r in resp.data}
+    assert by_id[1].team == "LAL"                      # the profile wins
+    assert by_id[2].team == "DEN"                      # no profile: last season's row
+    assert [(r.player_id, r.team) for r in resp.roster] == [(9, "BOS"), (7, "MIA")]
+
+
+@pytest.mark.unit
+def test_congestion_is_measured_for_the_top_candidates_only(monkeypatch):
+    from services import draft_board_service as module
+
+    monkeypatch.setattr(module, "CONGESTION_CANDIDATES", 1)
+    inputs = _inputs(schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),)),), season_weeks=24)
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()))
+
+    first, second = resp.recommendations[:2]
+    assert first.player_id == 1
+    top = next(c for c in first.components if c.key == "congestion")
+    assert top.value == 0.0 and top.detail == "fits the lineup every sampled night"
+    tail = next(c for c in second.components if c.key == "congestion")
+    assert tail.value == 0.0 and tail.detail.startswith("not evaluated")
+    assert resp.meta.congestion.evaluated == 1
 
 
 @pytest.mark.unit
@@ -649,7 +756,7 @@ def fake_tables(monkeypatch):
         2: SimpleNamespace(id=2, name="Guard", position="G", espn_id=102, name_normalized="guard"),
         9: SimpleNamespace(id=9, name="Rookie", position="F", espn_id=109, name_normalized="rookie"),
     }
-    state = {"players": players, "picks": [], "projections": [], "market": []}
+    state = {"players": players, "picks": [], "projections": [], "market": [], "profiles": []}
 
     monkeypatch.setattr(module.settings, "nba_season", SEASON, raising=False)
     monkeypatch.setattr(module, "load_baseline_pool",
@@ -663,6 +770,10 @@ def fake_tables(monkeypatch):
                         classmethod(lambda cls, *fields: _Query(players.values())))
     monkeypatch.setattr(module.DraftPick, "select",
                         classmethod(lambda cls, *fields: _Query(state["picks"])))
+    monkeypatch.setattr(module.PlayerProfile, "select",
+                        classmethod(lambda cls, *fields: _Query(state["profiles"])))
+    # The calendar is a real file; the fetch tests are about the tables.
+    monkeypatch.setattr(DraftBoardService, "_sample_weeks", staticmethod(lambda: ((), 0)))
     return state
 
 
@@ -1156,3 +1267,39 @@ def test_the_seats_change_the_recommendation_not_just_the_readout(cat_seat_table
 
     assert source_a == source_b == "seats"
     assert against_bigs != against_guards
+
+
+@pytest.mark.unit
+def test_fetch_reads_the_current_team_from_profiles(fake_tables):
+    fake_tables["profiles"] = [SimpleNamespace(player_id=1, team_id="LAL"),
+                               SimpleNamespace(player_id=2, team_id=None)]
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    assert inputs.current_team == {1: "LAL", 2: None}
+    assert inputs.schedule_weeks == () and inputs.season_weeks == 0
+
+
+@pytest.mark.unit
+def test_sample_weeks_reads_the_ordinary_weeks_and_skips_a_missing_one(monkeypatch):
+    from services import draft_board_service as module
+
+    calendar = {
+        3: {"game_span": 7, "games": {"DEN": {"0": True, "3": True}, "BOS": {"1": True}}},
+        16: {"game_span": 7, "games": {"DEN": {"6": True}}},
+    }
+    monkeypatch.setattr(module.schedule_service, "get_matchup_by_number", lambda n: calendar.get(n))
+    monkeypatch.setattr(module.schedule_service, "get_max_week", lambda: 24)
+
+    weeks, season = DraftBoardService._sample_weeks()
+
+    assert [w.number for w in weeks] == [3, 16] and season == 24
+    assert len(weeks[0].days) == 7
+    assert weeks[0].days[0] == {"DEN"} and weeks[0].days[1] == {"BOS"} and weeks[0].days[2] == set()
+    assert weeks[1].days[6] == {"DEN"}
+
+    def missing(_number):
+        raise FileNotFoundError("no calendar on disk")
+
+    monkeypatch.setattr(module.schedule_service, "get_matchup_by_number", missing)
+    assert DraftBoardService._sample_weeks() == ((), 0)
