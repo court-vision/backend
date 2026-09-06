@@ -21,6 +21,7 @@ from peewee import (
 )
 
 from db.base import BaseModel
+from db.models.nba.games import Game
 from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
 
@@ -62,6 +63,18 @@ class PlayerGameStats(BaseModel):
     )
     game_date = DateField(index=True)
 
+    # The fixture this line belongs to. NULL only when nba.games has no
+    # matching game; readers fall back to a (game_date, team) lookup for those.
+    # See migration 0019 — the row's identity is the game, not the date.
+    game = ForeignKeyField(
+        Game,
+        backref="player_stats",
+        on_delete="SET NULL",
+        column_name="game_id",
+        null=True,
+        index=True,
+    )
+
     # Fantasy points (calculated based on league scoring)
     fpts = SmallIntegerField()
 
@@ -91,8 +104,10 @@ class PlayerGameStats(BaseModel):
         table_name = "player_game_stats"
         schema = "nba"
         indexes = (
-            # Unique constraint: one row per player per game
-            (("player", "game_date"), True),
+            # One row per player per game. A row with no game falls back to the
+            # date, as a partial unique index migration 0019 creates — Peewee
+            # cannot express `WHERE game_id IS NULL`, so it is not listed here.
+            (("player", "game"), True),
             # Index for querying by date range
             (("game_date",), False),
             # Index for querying by team
@@ -120,9 +135,16 @@ class PlayerGameStats(BaseModel):
         stats: dict,
         team_id: str | None = None,
         pipeline_run_id: UUID | None = None,
+        game_id: str | None = None,
     ) -> "PlayerGameStats":
         """
         Insert or update game statistics for a player.
+
+        Keyed on the game when one is known and on the date otherwise, which is
+        exactly what the table's two unique indexes enforce (migration 0019).
+        Keying on the game alone would be wrong for a row without one: a NULL is
+        distinct from every other NULL in Postgres, so the lookup would never
+        match and every run would insert a duplicate.
 
         Args:
             player_id: NBA player ID
@@ -130,6 +152,7 @@ class PlayerGameStats(BaseModel):
             stats: Dictionary with stat values (pts, reb, ast, etc.)
             team_id: Optional team abbreviation
             pipeline_run_id: Optional pipeline run UUID
+            game_id: NBA game id, when the source knows it
 
         Returns:
             The created or updated PlayerGameStats instance
@@ -153,18 +176,34 @@ class PlayerGameStats(BaseModel):
             "pipeline_run_id": pipeline_run_id,
         }
 
-        game_stats, created = cls.get_or_create(
-            player_id=player_id,
-            game_date=game_date,
-            defaults=defaults,
-        )
+        # An id nba.games has never heard of cannot be stored — the column is a
+        # foreign key, and inserting it would fail the whole row rather than
+        # lose one label. The schedule pipeline may simply not have reached this
+        # game yet, so the row lands keyed by date and a later run promotes it.
+        if game_id is not None and not Game.select().where(Game.game_id == game_id).exists():
+            game_id = None
 
-        if not created:
-            # Update existing record
-            for key, value in defaults.items():
-                setattr(game_stats, key, value)
-            game_stats.save()
+        defaults["game_date"] = game_date
+        defaults["game_id"] = game_id
 
+        # Find the row this line belongs to before deciding to write a new one.
+        # By game first: a game whose date was corrected keeps its row rather
+        # than gaining a second. Then by date, which is what finds a row written
+        # before its game id was known — that row is promoted in place, and
+        # skipping this step is how the same line ends up stored twice, since
+        # (player, NULL) and (player, game) are distinct to both unique indexes.
+        game_stats = None
+        if game_id is not None:
+            game_stats = cls.get_or_none(cls.player == player_id, cls.game == game_id)
+        if game_stats is None:
+            game_stats = cls.get_or_none(cls.player == player_id, cls.game_date == game_date)
+
+        if game_stats is None:
+            return cls.create(player_id=player_id, **defaults)
+
+        for key, value in defaults.items():
+            setattr(game_stats, key, value)
+        game_stats.save()
         return game_stats
 
     @classmethod
