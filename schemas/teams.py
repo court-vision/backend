@@ -104,6 +104,7 @@ class NBATeamRosterData(ApiModel):
     team_name: str
     players: list[NBATeamRosterPlayer]
     as_of_date: str
+    season: Optional[str] = Field(None, description="Season supplying the roster's last known team assignments and statistics")
 
 
 class NBATeamRosterResp(BaseResponse):

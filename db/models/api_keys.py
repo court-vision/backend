@@ -5,7 +5,7 @@ API key model for authenticated API access.
 import hashlib
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from peewee import (
     UUIDField,
@@ -31,7 +31,7 @@ class APIKey(BaseModel):
     name = CharField(max_length=100)
     scopes = ArrayField(CharField, default=[])  # ['read', 'optimize', 'admin']
     rate_limit = IntegerField(default=1000)  # Requests per minute
-    created_at = DateTimeField(default=datetime.utcnow)
+    created_at = DateTimeField(default=lambda: datetime.now(timezone.utc))
     expires_at = DateTimeField(null=True)
     last_used_at = DateTimeField(null=True)
     is_active = BooleanField(default=True)
@@ -89,12 +89,16 @@ class APIKey(BaseModel):
             )
 
             # Check expiration
-            if api_key.expires_at and api_key.expires_at < datetime.utcnow():
+            now = datetime.now(timezone.utc)
+            expires_at = api_key.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at is not None and expires_at <= now:
                 return None
 
             # Update last used timestamp
-            api_key.last_used_at = datetime.utcnow()
-            api_key.save()
+            api_key.last_used_at = now
+            api_key.save(only=[cls.last_used_at])
 
             return api_key
 

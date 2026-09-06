@@ -27,6 +27,8 @@ class PlayersListData(ApiModel):
     total: int = Field(..., description="Total number of players matching filters")
     limit: int = Field(..., description="Number of results returned")
     offset: int = Field(..., description="Offset from start")
+    season: Optional[str] = Field(None, description="Season actually served (may be the previous season before opening night)")
+    as_of_date: Optional[str] = Field(None, description="Newest snapshot date in the selected season")
 
 
 class PlayersListResp(BaseResponse):

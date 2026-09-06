@@ -186,5 +186,5 @@ def setup_middleware(app: FastAPI) -> None:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=[CORRELATION_HEADER, ERROR_CODE_HEADER],
+        expose_headers=["Retry-After", "ETag", CORRELATION_HEADER, ERROR_CODE_HEADER],
     )

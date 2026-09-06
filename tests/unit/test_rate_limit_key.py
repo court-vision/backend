@@ -1,51 +1,26 @@
-"""
-Unit tests for get_rate_limit_key.
-
-Verifies that:
-- Requests with X-API-Key use a prefixed key (not the IP)
-- Requests without X-API-Key fall back to IP address
-- Only the first 11 chars of the API key are used (privacy/memory)
-"""
+"""Only an authenticated identity can replace the caller's IP quota."""
 
 import pytest
-from unittest.mock import MagicMock
+from starlette.requests import Request
 
 from core.rate_limit import get_rate_limit_key
 
-
-def _make_request(headers: dict, client_ip: str = "1.2.3.4") -> MagicMock:
-    """Build a minimal mock Request with the given headers and client IP."""
-    request = MagicMock()
-    request.headers = headers
-    request.client.host = client_ip
-    return request
+pytestmark = pytest.mark.unit
 
 
-@pytest.mark.unit
-class TestGetRateLimitKey:
+def request(key=None):
+    return Request({
+        "type": "http", "client": ("203.0.113.42", 1234),
+        "headers": [(b"x-api-key", key.encode())] if key else [],
+    })
 
-    def test_api_key_header_uses_prefixed_key(self):
-        # Real keys are "cv_" + token_urlsafe(32); first 11 chars stored as key_prefix
-        key = "cv_abc12345678901234567890123456789012345"
-        request = _make_request({"X-API-Key": key})
-        result = get_rate_limit_key(request)
-        assert result == f"api_key:{key[:11]}"
 
-    def test_api_key_prefix_is_11_chars(self):
-        key = "cv_abc123xyz"
-        request = _make_request({"X-API-Key": key})
-        result = get_rate_limit_key(request)
-        prefix = result.removeprefix("api_key:")
-        assert len(prefix) == 11
+@pytest.mark.parametrize("key", [None, "cv_fake", "arbitrary-other-key"])
+def test_unverified_headers_cannot_change_the_ip_bucket(key):
+    assert get_rate_limit_key(request(key)) == "203.0.113.42"
 
-    def test_no_api_key_falls_back_to_ip(self):
-        request = _make_request({}, client_ip="203.0.113.42")
-        result = get_rate_limit_key(request)
-        assert result == "203.0.113.42"
 
-    def test_api_key_overrides_ip(self):
-        key = "cv_testkey1234"
-        request = _make_request({"X-API-Key": key}, client_ip="203.0.113.42")
-        result = get_rate_limit_key(request)
-        assert result.startswith("api_key:")
-        assert "203.0.113.42" not in result
+def test_authenticated_key_has_an_independent_bucket():
+    req = request("cv_secret")
+    req.state.api_key_identity = "verified-digest"
+    assert get_rate_limit_key(req) == "api_key:verified-digest"

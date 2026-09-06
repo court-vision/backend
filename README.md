@@ -66,7 +66,6 @@ backend/
 │   ├── logging.py           # structlog setup
 │   ├── rate_limit.py        # slowapi limiter, rate limit constants
 │   ├── middleware.py        # CORS, GZip setup
-│   ├── db_middleware.py     # DB connection lifecycle per request
 │   ├── correlation_middleware.py  # Request correlation IDs
 │   └── security.py
 │
@@ -240,7 +239,7 @@ All routes are prefixed under `/v1`. The server exposes two route groups:
 
 ### Public Routes (`/v1/...`)
 
-No authentication required. Rate-limited to **100 requests/minute** per IP.
+No authentication required. Rate-limited to **100 requests/minute per endpoint per IP**. Supplying an unverified `X-API-Key` header does not change this quota. The SQLMate visual-query route has its own 30/minute quota.
 
 | Method | Path | Description |
 |---|---|---|
@@ -254,7 +253,13 @@ No authentication required. Rate-limited to **100 requests/minute** per IP.
 | `GET` | `/v1/players/{player_id}/status` | Injury/availability status |
 | `GET` | `/v1/players/{player_id}/ownership` | Fantasy ownership percentage + trend |
 | `GET` | `/v1/games/{game_date}` | NBA games on a specific date (with live overlay for today) |
-| `GET` | `/v1/teams/` | NBA team list and schedules |
+| `GET` | `/v1/teams/{team_abbrev}/schedule` | NBA team schedule |
+| `GET` | `/v1/teams/{team_abbrev}/stats` | Latest NBA team statistics |
+| `GET` | `/v1/teams/{team_abbrev}/roster` | Last known season-stat roster, including inactive players |
+| `GET` | `/v1/teams/{team_abbrev}/live-game` | Live, upcoming, or most recent team game |
+| `GET` | `/v1/rankings/espn` | ESPN draft ranks, ADP, auction values, eligibility, injury snapshot; paginated and historical |
+| `GET` | `/v1/players/{player_id}/projection` | ESPN projected games and per-game stats, with source and snapshot date |
+| `GET` | `/v1/playoff/bracket` | Playoff bracket for the latest or requested season |
 | `GET` | `/v1/ownership/trending` | Players with significant ownership changes (velocity-ranked) |
 | `GET` | `/v1/schedule/weeks` | All NBA schedule weeks with dates and current week |
 | `GET` | `/v1/live/players/today` | Live box score stats for all players with games today (~60s cadence) |
@@ -367,10 +372,10 @@ The `clerk_user_id` is used to look up or lazily create a local `User` row via `
 
 ### Scoped API Keys (analytics routes)
 
-The `/v1/analytics/` endpoints use `X-API-Key` header authentication. Keys are scoped (e.g., `analytics`) and stored as bcrypt hashes. Rate limit is tracked per key prefix.
+The `/v1/analytics/` endpoints use `X-API-Key` header authentication. Keys are scoped (e.g., `analytics`) and stored as SHA-256 hashes of high-entropy random keys. Analytics rate limits use the full verified key digest; the display prefix is not an identity.
 
 ```bash
-curl -H "X-API-Key: cv_live_..." https://api.courtvision.dev/v1/analytics/breakout-streamers
+curl -H "X-API-Key: cv_..." https://api.courtvision.dev/v1/analytics/breakout-streamers
 ```
 
 Authenticated users can manage their own keys via `/v1/internal/api-keys/`.
@@ -389,7 +394,13 @@ All endpoints follow the `BaseApiResponse<T>` pattern:
 }
 ```
 
-`status` values: `success`, `error`, `not_found`, `rate_limited`
+Failures use HTTP 4xx/5xx with a machine-readable `error_code`; empty datasets remain 200 successes. Rate-limited responses include `Retry-After`. Database unavailability is 503, provider errors 502/504.
+
+`player_id` and player path parameters are **NBA IDs**; `espn_id` is a distinct ESPN ID. Both player-stat routes support `window=season` or `window=lN`. Player-stat shooting/advanced percentages use 0–100; team stats, category rankings, and projections use 0–1. Stored fantasy points use the platform's default scoring weights.
+
+ESPN snapshots accept `season=2026-27` and `as_of=2026-09-01` (newest snapshot on or before the date). They do not fall back across seasons or carry missing players forward from older snapshots. Unknown players return 404; known players without projections return 200 with `data: null`. Market results include mapped rookies even without NBA game stats.
+
+See [the public API audit](docs/PUBLIC_API_AUDIT.md) for changes, validation, migration cleanup, and scoped follow-ups.
 
 ---
 
@@ -410,8 +421,9 @@ Error classification: `RateLimitError` (429), `ServerError` (5xx), `NetworkError
 Middleware is applied outermost-first (first added = outermost wrapper):
 
 1. `CorrelationMiddleware` — attaches a `X-Correlation-ID` to every request/response
-2. `DatabaseMiddleware` — manages Peewee connection lifecycle per request
-3. CORS + GZip (via `setup_middleware`)
+2. CORS and centralized exception handlers (via `setup_middleware`)
+
+Peewee work runs in bounded `run_db` workers, which acquire and release connections. No request-wide database middleware is installed.
 
 ---
 

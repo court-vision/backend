@@ -4,7 +4,7 @@ API Key management routes.
 Authenticated users can create, list, and revoke their API keys.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -82,7 +82,7 @@ def create_api_key(
 
     expires_at = None
     if body.expires_days is not None:
-        expires_at = datetime.utcnow() + timedelta(days=body.expires_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_days)
 
     raw_key, api_key = APIKey.create_key(
         name=body.name,

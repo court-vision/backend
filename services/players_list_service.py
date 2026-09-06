@@ -9,8 +9,7 @@ from core.season import previous_season
 from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
-from db.models.stats.rankings import Rankings
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.players_list import PlayersListResp, PlayersListData, PlayerListItem
 
@@ -30,35 +29,18 @@ class PlayersListService:
         """
         if not player_ids:
             return {}
+        from services.rankings_service import RankingsService
+
+        ids = set(player_ids)
         return {
             row.id: int(row.curr_rank)
-            for row in Rankings.select(Rankings.id, Rankings.curr_rank).where(Rankings.id.in_(player_ids))
+            for row in RankingsService._fetch_season_rows() if row.id in ids
         }
 
     @staticmethod
     def _latest_rows(season: str):
         """Season-stats rows joined to Player, one per player: the latest as_of_date within `season`."""
-        latest = (
-            PlayerSeasonStats.select(
-                PlayerSeasonStats.player.alias("pid"),
-                fn.MAX(PlayerSeasonStats.as_of_date).alias("max_date"),
-            )
-            .where(PlayerSeasonStats.season == season)
-            .group_by(PlayerSeasonStats.player)
-        ).alias("latest")
-        return (
-            PlayerSeasonStats.select(
-                PlayerSeasonStats,
-                Player.id,
-                Player.espn_id,
-                Player.name,
-                Player.position,
-            )
-            .join(Player, on=(PlayerSeasonStats.player == Player.id))
-            .switch(PlayerSeasonStats)
-            .join(latest, on=((PlayerSeasonStats.player == latest.c.pid)
-                              & (PlayerSeasonStats.as_of_date == latest.c.max_date)))
-        )
+        return PlayerSeasonStats.latest_per_player(season)
 
     @staticmethod
     @db_operation("players.list")
@@ -107,6 +89,8 @@ class PlayersListService:
                     data=PlayersListData(players=[], total=0, limit=limit, offset=offset),
                 )
 
+            as_of = query.select(fn.MAX(PlayerSeasonStats.as_of_date)).scalar()
+
             # Apply filters
             if team:
                 query = query.where(PlayerSeasonStats.team_id == team.upper())
@@ -118,15 +102,15 @@ class PlayersListService:
                 query = query.where(PlayerSeasonStats.gp >= min_games)
 
             if name:
-                name_normalized = name.lower().strip()
-                query = query.where(Player.name_normalized.contains(name_normalized))
+                name_normalized = name.strip().lower()
+                query = query.where(fn.unaccent(Player.name_normalized).contains(fn.unaccent(name_normalized)))
 
             # Get total count before pagination
             total = query.count()
 
             # Apply pagination and ordering (cumulative fpts; the per-day `rank` is a cohort rank)
             query = (
-                query.order_by(PlayerSeasonStats.fpts.desc(), Player.name.asc())
+                query.order_by(PlayerSeasonStats.fpts.desc(), Player.name.asc(), Player.id.asc())
                 .offset(offset)
                 .limit(limit)
             )
@@ -158,9 +142,13 @@ class PlayersListService:
                     total=total,
                     limit=limit,
                     offset=offset,
+                    season=season,
+                    as_of_date=as_of.isoformat() if as_of else None,
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("players_list_error", error=str(e))
             return PlayersListResp(

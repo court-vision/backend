@@ -7,7 +7,7 @@ from db.models.nba.teams import NBATeam
 from db.models.nba.players import Player
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_injuries import PlayerInjury
-from db.base import db_operation
+from db.base import DB_RUNTIME_ERRORS, db_operation
 from schemas.common import ApiStatus
 from schemas.teams import NBATeamRosterResp, NBATeamRosterData, NBATeamRosterPlayer
 
@@ -39,38 +39,21 @@ class NBATeamRosterService:
                     data=None,
                 )
 
-            # Find the latest as_of_date for THIS TEAM specifically.
-            # Using a global max would exclude teams that haven't played recently
-            # (their rows don't exist for the most recent date in the table).
-            latest_date = (
-                PlayerSeasonStats.select(PlayerSeasonStats.as_of_date)
+            season = PlayerSeasonStats.available_season()
+            season_stats = list(
+                PlayerSeasonStats.latest_per_player(season)
                 .where(PlayerSeasonStats.team == team_id)
-                .order_by(PlayerSeasonStats.as_of_date.desc())
-                .limit(1)
-                .scalar()
+                .order_by(PlayerSeasonStats.fpts.desc(), Player.id)
             )
-
-            if not latest_date:
+            if not season_stats:
                 return NBATeamRosterResp(
                     status=ApiStatus.NOT_FOUND,
                     message="No player stats available",
                     data=None,
                 )
+            latest_date = max(s.as_of_date for s in season_stats)
+            player_ids = {s.player_id for s in season_stats}
 
-            # Fetch all players on this team as of the latest date
-            season_stats = list(
-                PlayerSeasonStats.select(PlayerSeasonStats, Player)
-                .join(Player)
-                .where(
-                    (PlayerSeasonStats.team == team_id)
-                    & (PlayerSeasonStats.as_of_date == latest_date)
-                    & (PlayerSeasonStats.gp > 0)
-                )
-                .order_by(PlayerSeasonStats.fpts.desc())
-            )
-
-            # Build injury lookup for all players in one pass
-            player_ids = [s.player_id for s in season_stats]
             injury_map: dict[int, str] = {}
             if player_ids:
                 for injury in PlayerInjury.get_injured_players():
@@ -112,9 +95,12 @@ class NBATeamRosterService:
                     team_name=team.name,
                     players=players,
                     as_of_date=latest_date.isoformat(),
+                    season=season,
                 ),
             )
 
+        except DB_RUNTIME_ERRORS:
+            raise
         except Exception as e:
             log.error("nba_team_roster_fetch_error", error=str(e), team=team_id)
             return NBATeamRosterResp(
