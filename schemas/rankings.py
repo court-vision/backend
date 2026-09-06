@@ -24,6 +24,10 @@ class RankingsPlayer(ApiModel):
     rank: int
     player_name: str
     team: str
+    position: Optional[str] = Field(
+        default=None,
+        description="Primary position (e.g. 'G', 'F-C'); null when nba.players has none for the player",
+    )
     total_fpts: float
     avg_fpts: float
     rank_change: int = Field(

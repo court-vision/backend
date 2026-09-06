@@ -151,8 +151,11 @@ class RankingsService:
                 id=row.id,
                 rank=row.curr_rank,
                 player_name=row.name,
-                team=row.team or "",           # as the rolling and category paths do: a
-                total_fpts=float(row.fpts),    # traded player with no team is not a 400
+                # as the rolling and category paths do: a traded player with
+                # no team is not a 400
+                team=row.team or "",
+                position=row.position,
+                total_fpts=float(row.fpts),
                 avg_fpts=float(row.avg_fpts),
                 rank_change=row.rank_change,
                 gp=int(row.gp) if row.gp is not None else None,
@@ -201,6 +204,7 @@ class RankingsService:
                 rank=rank,
                 player_name=record.player.name,
                 team=record.team_id or "",
+                position=record.player.position,
                 total_fpts=round(float(record.fpts) * record.gp, 1),
                 avg_fpts=float(record.fpts),
                 rank_change=0,
@@ -263,6 +267,7 @@ class RankingsService:
                 rank=rank,
                 player_name=s.row.name,
                 team=s.row.team or "",
+                position=s.row.position,
                 total_fpts=s.row.fpts_total,
                 avg_fpts=s.row.fpts_avg,
                 rank_change=0,
@@ -348,6 +353,7 @@ class RankingsService:
                 rank=rank,
                 player_name=row.name,
                 team=row.team or "",
+                position=row.position,
                 total_fpts=round(value * row.gp, 1),
                 avg_fpts=round(value, 2),
                 rank_change=0,

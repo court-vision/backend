@@ -51,6 +51,7 @@ class PoolRow:
     # normalized name (Yahoo rosters) without a second query.
     espn_id: int | None = None
     name_normalized: str | None = None
+    position: str | None = None
 
 
 @dataclass
