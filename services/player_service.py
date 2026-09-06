@@ -8,7 +8,7 @@ from schemas.player import (
     PlayerStats,
     AvgStats,
     AdvancedStatsData,
-    GameLog,
+    PlayerStatsGameLog,
     PercentileData,
     PlayerPercentilesResp,
     PlayerStatusData,
@@ -252,7 +252,7 @@ class PlayerService:
 
         # Step 5: Build full game logs (always return all for charts/tables)
         game_logs = [
-            GameLog(
+            PlayerStatsGameLog(
                 date=str(g.game_date),
                 fpts=g.fpts,
                 pts=g.pts,
