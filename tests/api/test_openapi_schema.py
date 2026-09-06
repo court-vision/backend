@@ -118,11 +118,12 @@ class TestSchemaNamesDoNotCollide:
             "while the collision stands, the export is not reproducible."
         )
 
-    def test_the_two_game_log_models_stay_distinct(self, schemas):
-        # The collision that prompted the rule: a player's stats response and
-        # the game-log endpoint each had a `GameLog`.
-        assert "GameLog" in schemas and "PlayerStatsGameLog" in schemas
-        # The bare name belongs to the documented one, which is what production
-        # serves and what the frontend snapshot was generated from.
-        assert "opponent" in schemas["GameLog"]["properties"]
-        assert "opponent" not in schemas["PlayerStatsGameLog"]["properties"]
+    def test_one_game_log_model_serves_both_endpoints(self, schemas):
+        # The collision that prompted the rule was two `GameLog` models, one per
+        # endpoint. There is one now, so the endpoints cannot describe a game
+        # differently and there is no name left to resolve by luck.
+        assert "PlayerStatsGameLog" not in schemas
+        assert {"game_id", "opponent", "home"} <= set(schemas["GameLog"]["properties"])
+        for holder, field in (("PlayerStats", "game_logs"), ("PlayerGamesData", "games")):
+            ref = schemas[holder]["properties"][field]["items"]["$ref"]
+            assert ref.endswith("/GameLog"), f"{holder}.{field} -> {ref}"
