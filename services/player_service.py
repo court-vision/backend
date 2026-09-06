@@ -8,13 +8,14 @@ from schemas.player import (
     PlayerStats,
     AvgStats,
     AdvancedStatsData,
-    PlayerStatsGameLog,
+    GameLog,
     PercentileData,
     PlayerPercentilesResp,
     PlayerStatusData,
     PlayerStatusResp,
 )
 from core.errors import BadRequestError, NotFoundError
+from services.game_context import GameContext
 from core.nba_calendar import nba_date_et
 from schemas.common import ApiStatus
 from db.models.nba.players import Player
@@ -251,9 +252,11 @@ class PlayerService:
         advanced_stats = _fetch_advanced_stats(player.id)
 
         # Step 5: Build full game logs (always return all for charts/tables)
+        fixtures = GameContext.for_rows(game_logs_list)
         game_logs = [
-            PlayerStatsGameLog(
+            GameLog(
                 date=str(g.game_date),
+                **fixtures.of(g),
                 fpts=g.fpts,
                 pts=g.pts,
                 reb=g.reb,
