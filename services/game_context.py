@@ -45,7 +45,10 @@ class GameContext:
 
         # Only the rows the id could not answer for need the old join, so a
         # table that has been through the backfill does not pay for it at all.
-        legacy = [r for r in rows if not getattr(r, "game_id", None)]
+        # A row whose stored id found no game counts as one of them: the FK is
+        # ON DELETE SET NULL so it should not happen, but if it ever does, the
+        # fallback has to have been loaded or `of` has nothing to fall back to.
+        legacy = [r for r in rows if by_id.get(getattr(r, "game_id", None)) is None]
         teams = {r.team_id for r in legacy if r.team_id}
         dates = {r.game_date for r in legacy}
         if teams and dates:

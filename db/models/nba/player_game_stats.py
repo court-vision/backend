@@ -176,27 +176,34 @@ class PlayerGameStats(BaseModel):
             "pipeline_run_id": pipeline_run_id,
         }
 
+        # An id nba.games has never heard of cannot be stored — the column is a
+        # foreign key, and inserting it would fail the whole row rather than
+        # lose one label. The schedule pipeline may simply not have reached this
+        # game yet, so the row lands keyed by date and a later run promotes it.
+        if game_id is not None and not Game.select().where(Game.game_id == game_id).exists():
+            game_id = None
+
+        defaults["game_date"] = game_date
+        defaults["game_id"] = game_id
+
+        # Find the row this line belongs to before deciding to write a new one.
+        # By game first: a game whose date was corrected keeps its row rather
+        # than gaining a second. Then by date, which is what finds a row written
+        # before its game id was known — that row is promoted in place, and
+        # skipping this step is how the same line ends up stored twice, since
+        # (player, NULL) and (player, game) are distinct to both unique indexes.
+        game_stats = None
         if game_id is not None:
-            defaults["game_date"] = game_date
-            game_stats, created = cls.get_or_create(
-                player_id=player_id,
-                game_id=game_id,
-                defaults=defaults,
-            )
-        else:
-            defaults["game_id"] = None
-            game_stats, created = cls.get_or_create(
-                player_id=player_id,
-                game_date=game_date,
-                defaults=defaults,
-            )
+            game_stats = cls.get_or_none(cls.player == player_id, cls.game == game_id)
+        if game_stats is None:
+            game_stats = cls.get_or_none(cls.player == player_id, cls.game_date == game_date)
 
-        if not created:
-            # Update existing record
-            for key, value in defaults.items():
-                setattr(game_stats, key, value)
-            game_stats.save()
+        if game_stats is None:
+            return cls.create(player_id=player_id, **defaults)
 
+        for key, value in defaults.items():
+            setattr(game_stats, key, value)
+        game_stats.save()
         return game_stats
 
     @classmethod

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from services import game_context as module
 from services.game_context import GameContext
 
 pytestmark = pytest.mark.unit
@@ -78,6 +79,44 @@ def row_with_game(game_id, team_id="LAL", day=1):
     return r
 
 
+class _StubGame:
+    """Stands in for the `Game` model so `for_rows` can be driven without a
+    database. Every `select().where(...)` answers with the same games and counts
+    the call, which is how the no-fallback-query claim above is checked."""
+
+    def __init__(self, games):
+        self._games = games
+        self.queries = 0
+
+    def select(self):
+        self.queries += 1
+        return self
+
+    def where(self, *_):
+        return self
+
+    def __iter__(self):
+        return iter(self._games)
+
+    def __getattr__(self, name):
+        # `Game.game_id` / `Game.game_date` etc. in the query expressions.
+        return _Anything()
+
+
+class _Anything:
+    def in_(self, *_):
+        return self
+
+    def __eq__(self, _):
+        return self
+
+    def __and__(self, _):
+        return self
+
+    def __or__(self, _):
+        return self
+
+
 def context_by_id(games, r):
     """A GameContext built from stub games keyed by id, as `for_rows` does."""
     return GameContext({}, {g.game_id: g for g in games}).of(r)
@@ -108,9 +147,31 @@ def test_a_row_without_a_stored_id_still_falls_back_to_the_date():
     }
 
 
-def test_a_stored_id_with_no_matching_game_falls_back_rather_than_failing():
-    # The FK is ON DELETE SET NULL, so this should not happen — but a dangling
-    # id must not take the whole log down with it.
+def test_a_stored_id_with_no_matching_game_falls_back_rather_than_failing(monkeypatch):
+    """Through `for_rows`, not a hand-built context.
+
+    A dangling id has to be *selected into* the fallback batch, or `of` reaches
+    for a candidate list that was never loaded and answers nothing. Building the
+    context by hand hides that, which is how it was missed the first time.
+    """
     stored = game("0022600001", "LAL", "BOS")
-    by_date = {(stored.game_date, "LAL"): [stored]}
-    assert GameContext(by_date, {}).of(row_with_game("0022600404"))["game_id"] == "0022600001"
+    monkeypatch.setattr(module, "Game", _StubGame([stored]))
+
+    ctx = GameContext.for_rows([row_with_game("0022600404")])
+
+    assert ctx.of(row_with_game("0022600404")) == {
+        "game_id": "0022600001",
+        "home": True,
+        "opponent": "BOS",
+    }
+
+
+def test_for_rows_does_not_load_the_fallback_for_a_fully_resolved_log(monkeypatch):
+    """The point of storing the id: a backfilled table stops paying the join."""
+    stored = game("0022600001", "LAL", "BOS")
+    stub = _StubGame([stored])
+    monkeypatch.setattr(module, "Game", stub)
+
+    GameContext.for_rows([row_with_game("0022600001")])
+
+    assert stub.queries == 1, "a second query means the date fallback ran anyway"
