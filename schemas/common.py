@@ -108,6 +108,11 @@ class LeagueInfo(BaseModel):
     # ESPN-specific fields
     espn_s2: str | None = ""
     swid: str | None = ""
+    # ESPN's numeric team id inside the league. Learned from the provider on the
+    # first successful roster read (or at add/update) and kept so lineup writes
+    # and the auto-lineup run never depend on matching `team_name`, which a user
+    # can rename mid-season. None until learned.
+    espn_team_id: int | None = None
 
     # Yahoo-specific fields
     yahoo_access_token: str | None = None
@@ -225,6 +230,7 @@ class LeagueInfoPublic(ApiModel):
     league_name: str | None = "N/A"
     year: int
     yahoo_team_key: str | None = None
+    espn_team_id: int | None = None
     scoring_preview: Optional[Literal["points", "categories"]] = None
 
     # Whether credentials are on file, so the UI can render "stored" without
@@ -258,6 +264,7 @@ class LeagueInfoPublic(ApiModel):
             league_name=league_info.league_name,
             year=league_info.year,
             yahoo_team_key=league_info.yahoo_team_key,
+            espn_team_id=league_info.espn_team_id,
             scoring_preview=league_info.scoring_preview,
             has_espn_credentials=espn_creds,
             has_yahoo_credentials=yahoo_creds,

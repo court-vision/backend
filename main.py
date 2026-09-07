@@ -19,12 +19,13 @@ from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
 from services.features_client import start_features_runtime, stop_features_runtime
 from services.sqlmate_client import start_sqlmate_runtime, stop_sqlmate_runtime
+from services.fantasy_writer_client import start_fantasy_writer_runtime, stop_fantasy_writer_runtime
 from services.providers.http import start_provider_runtime, stop_provider_runtime
 from services.providers.blocking import start_blocking_provider_runtime, stop_blocking_provider_runtime
 from services.schedule_service import assert_calendar_available
 from api.v1.internal import (users, teams, lineups, espn, yahoo, matchups, streamers, notifications,
                              api_keys, rankings as internal_rankings, sqlmate as internal_sqlmate,
-                             drafts)
+                             drafts, lineup_editor, jobs)
 from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
                            schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
 
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
         start_blocking_provider_runtime()
         start_features_runtime()
         start_sqlmate_runtime()
+        start_fantasy_writer_runtime()
         log.info("database_initialized")
 
         # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
         # All lifecycle functions are idempotent, including partial-startup cleanup.
         await stop_features_runtime()
         await stop_sqlmate_runtime()
+        await stop_fantasy_writer_runtime()
         await stop_provider_runtime()
         await stop_blocking_provider_runtime()
         await stop_cpu_runtime()
@@ -133,6 +136,8 @@ api_v1_internal.include_router(api_keys.router)
 api_v1_internal.include_router(internal_rankings.router)
 api_v1_internal.include_router(internal_sqlmate.router)
 api_v1_internal.include_router(drafts.router)
+api_v1_internal.include_router(lineup_editor.router)
+api_v1_internal.include_router(jobs.router)
 
 app.include_router(api_v1_internal)
 

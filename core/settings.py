@@ -81,6 +81,18 @@ class Settings(BaseSettings):
     # pool so a burst of alerts can never consume the NBA workers.
     email_max_in_flight: int = 2
 
+    # Lineup writes go through the private fantasy-writer service (the only
+    # place the ESPN transaction protocol lives). ROSTER_WRITES_ENABLED is the
+    # kill switch: off, every write route answers 403 ROSTER_WRITE_DISABLED and
+    # the lineup read reports can_write=false / writes_disabled, while reads and
+    # plans keep working. The writer is reached only over Railway private
+    # networking (http://fantasy-writer.railway.internal:8080).
+    roster_writes_enabled: bool = False
+    fantasy_writer_url: str = "http://localhost:8090"
+    fantasy_writer_token: Optional[SecretStr] = None
+    fantasy_writer_timeout_seconds: float = 30.0  # > the writer's own 20 s ESPN timeout
+    fantasy_writer_max_in_flight: int = 2
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "console"
@@ -189,6 +201,7 @@ class Settings(BaseSettings):
             "features_max_in_flight": self.features_max_in_flight,
             "sqlmate_max_in_flight": self.sqlmate_max_in_flight,
             "email_max_in_flight": self.email_max_in_flight,
+            "fantasy_writer_max_in_flight": self.fantasy_writer_max_in_flight,
         }
         invalid = [name for name, value in limits.items() if value <= 0]
         if invalid:
@@ -200,6 +213,7 @@ class Settings(BaseSettings):
             self.provider_queue_timeout_seconds,
             self.cpu_queue_timeout_seconds,
             self.sqlmate_timeout_seconds,
+            self.fantasy_writer_timeout_seconds,
         )
         if any(t <= 0 for t in timeouts):
             raise ValueError("concurrency queue timeouts must be positive")
@@ -219,6 +233,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SQLMATE_INTERNAL_URL must use an http://*.railway.internal private domain on Railway"
             )
+        return self
+
+    @model_validator(mode="after")
+    def require_private_fantasy_writer_on_railway(self) -> "Settings":
+        """Writes on a deployed API only ever leave over private networking, with a token."""
+        if not self.railway_environment_name or not self.roster_writes_enabled:
+            return self
+
+        parsed = urlsplit(self.fantasy_writer_url)
+        hostname = parsed.hostname or ""
+        if parsed.scheme != "http" or not hostname.endswith(".railway.internal"):
+            raise ValueError(
+                "FANTASY_WRITER_URL must use an http://*.railway.internal private domain on Railway"
+            )
+        if not self.fantasy_writer_token:
+            raise ValueError("FANTASY_WRITER_TOKEN is required when ROSTER_WRITES_ENABLED is on")
         return self
 
     @model_validator(mode="after")
