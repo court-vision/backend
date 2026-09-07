@@ -24,10 +24,12 @@ from api.deps import (
     get_db_user,
     get_owned_session,
     get_owned_team,
+    load_session_league_info,
 )
 from core.responses import respond
 from schemas.draft import (
     DraftBoardResp,
+    DraftImportResponse,
     DraftRecapResp,
     DraftInitSyncRequest,
     DraftInitSyncResponse,
@@ -43,6 +45,7 @@ from schemas.draft import (
     MockAdvanceResponse,
 )
 from services.draft_board_service import BoardSession, DraftBoardService
+from services.draft_import_service import DraftImportService
 from services.draft_mock_service import DraftMockService
 from services.draft_recap_service import DraftRecapService
 from services.draft_service import DraftService
@@ -388,3 +391,36 @@ async def get_draft_recap(session: OwnedDraftSessionContext = Depends(get_owned_
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
     scoring = resolve_scoring(session.league)
     return respond(await DraftRecapService.get_recap(scoring, session))
+
+
+@router.post(
+    "/{session_id}/import",
+    response_model=DraftImportResponse,
+    summary="Import a finished ESPN draft",
+    description=(
+        "Records a completed ESPN draft into this session, so a draft run without the room still "
+        "gets a recap.\n\n"
+        "Only after the fact: ESPN writes the picks into `mDraftDetail` when the draft completes, "
+        "atomically with its `drafted` flag, and shows every slot empty until then — an unfinished "
+        "draft answers 409 `DRAFT_NOT_COMPLETE` rather than importing a skeleton. While a draft is "
+        "running, the tap (`/sync/init` plus live picks) is what tracks it.\n\n"
+        "An empty session takes its pick order, slot, length and type from the draft; one that "
+        "already holds picks keeps its own and reports the disagreements as `warnings`. Picks are "
+        "recorded `source: import` (ESPN's keepers as `keeper`), and `by_me` is the team whose "
+        "name matches the session team's.\n\n"
+        "Idempotent: re-importing skips every pick already held and reports any that disagree "
+        "instead of overwriting them. The session is marked completed either way."
+    ),
+    responses={
+        200: {"description": "Imported — see `inserted`, `skipped`, `conflicts`, `header_applied`"},
+        400: {"description": "The room has no team, the provider is not ESPN, or the team is not in the league"},
+        401: {"description": "The stored ESPN credentials were rejected"},
+        404: {"description": "No such session, or it does not belong to the caller"},
+        409: {"description": "The draft has not finished, the room is simulated, or it follows a different ESPN draft"},
+    },
+)
+async def import_draft(session: OwnedDraftSessionContext = Depends(get_owned_session)):
+    # Credentials are hydrated here and nowhere else on the draft routes: this
+    # is the only one that talks to a provider.
+    league_info = await load_session_league_info(session)
+    return respond(await DraftImportService.import_draft(session.session_id, league_info))

@@ -13,14 +13,21 @@ The heavy lifting is reused from `draft_service`: player resolution, the
 strongest-shared-identity duplicate rule, pick geometry, the slot/length
 validators, and the response shaper. This service only decodes, classifies, and
 inserts.
+
+`RoomHeader`, `apply_header` and `fold_picks` are the parts that are not about
+INIT at all — they are "what a room says about itself" and "fold these made
+picks into this session". The completed-draft import
+(`services/draft_import_service.py`) is the second caller: the two differ in
+where the picks come from and what provenance they carry, never in how a pick
+is classified, placed, or inserted.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 from peewee import IntegrityError
 
@@ -68,7 +75,7 @@ ESPN_AFTER_DRAFT = 2
 
 
 @dataclass(frozen=True)
-class InitHeader:
+class RoomHeader:
     espn_league_id: int
     espn_team_id: int
     draft_state: int
@@ -79,11 +86,11 @@ class InitHeader:
     espn_front: int
 
 
-def derive_header(decoded: dict) -> InitHeader:
+def derive_header(decoded: dict) -> RoomHeader:
     """The session-shaping facts an INIT carries: order, slot, length, type."""
     order = pick_order_of(decoded)
     league = decoded.get("league") or {}
-    return InitHeader(
+    return RoomHeader(
         espn_league_id=int(decoded["leagueId"]),
         espn_team_id=int(decoded["teamId"]),
         draft_state=int(league.get("draftState", 0)),
@@ -95,7 +102,7 @@ def derive_header(decoded: dict) -> InitHeader:
     )
 
 
-def header_warnings(header: InitHeader, session) -> list[str]:
+def header_warnings(header: RoomHeader, session) -> list[str]:
     """How a session that already has picks disagrees with the room's header.
 
     Reported, not applied: rewriting the header on a live session would re-derive
@@ -152,17 +159,159 @@ def classify_pick(
     return "insert"
 
 
+@dataclass(frozen=True)
+class IncomingPick:
+    """One made pick as a room reports it, whatever reported it."""
+
+    pick_number: int
+    espn_player_id: int
+    espn_team_id: int
+    is_keeper: bool = False
+    bid_amount: Optional[float] = None
+
+
+@dataclass
+class FoldResult:
+    inserted: int = 0
+    skipped: int = 0
+    conflicts: list[DraftSyncConflict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    keeper_additions: list[dict] = field(default_factory=list)
+
+
+def apply_header(session: DraftSession, header: RoomHeader, existing: list) -> tuple[bool, list[str]]:
+    """Write the room's shape onto an empty session, or report the disagreement.
+
+    Only an empty session is rewritten: re-deriving the header underneath
+    recorded picks would move every one of their rounds and slots. `rounds` is
+    the one field that merely fills a gap — a session created from league
+    settings already knows how long the draft is, and a count of rounds the room
+    happens to have reached does not overrule it.
+    """
+    if existing:
+        return False, header_warnings(header, session)
+
+    touched = []
+    if header.pick_order:
+        session.pick_order = header.pick_order
+        touched.append(DraftSession.pick_order)
+    if header.my_slot is not None:
+        session.my_slot = header.my_slot
+        touched.append(DraftSession.my_slot)
+    if header.rounds is not None and session.rounds is None:
+        session.rounds = header.rounds
+        touched.append(DraftSession.rounds)
+    if header.draft_type != session.draft_type:
+        session.draft_type = header.draft_type
+        touched.append(DraftSession.draft_type)
+    if not touched:
+        return False, []
+
+    league_size = len(session.pick_order or []) or None
+    check_slot_in_range(session.my_slot, league_size)
+    check_length_holds_picks(total_picks_of(session), [])
+    session.updated_at = datetime.utcnow()
+    session.save(only=touched + [DraftSession.updated_at])
+    return True, []
+
+
+def fold_picks(
+    session: DraftSession,
+    incoming: Iterable[IncomingPick],
+    existing: list,
+    *,
+    my_espn_team_id: Optional[int],
+    default_source: str,
+    league_size: Optional[int],
+) -> FoldResult:
+    """Fold made picks into a session, ascending, one savepoint each.
+
+    Idempotent by construction: a pick the session already holds is skipped and
+    one that disagrees is reported, never overwritten — which is what makes a
+    reconnect, a backfill and a re-import the same operation run twice.
+
+    `existing` is appended to as inserts land, so a pick classified later in the
+    same run sees the ones before it. The nested transaction is a savepoint: a
+    racing insert becomes a reported conflict instead of poisoning everything
+    already folded.
+    """
+    result = FoldResult()
+    existing_keepers = _keepers_of(session)
+
+    for made in incoming:
+        pn, espn_id = made.pick_number, made.espn_player_id
+        player = DraftService._resolve_player(DraftPickCreate(espn_player_id=espn_id))
+        player_id = player.id if player is not None else None
+        player_name = player.name if player is not None else None
+
+        verdict = classify_pick(existing, pn, espn_id, player_id, player_name)
+        if verdict == "skip":
+            result.skipped += 1
+            continue
+        if isinstance(verdict, DraftSyncConflict):
+            result.conflicts.append(verdict)
+            continue
+
+        by_me = made.espn_team_id == my_espn_team_id
+        source = default_source
+        addition = None
+        if made.is_keeper:
+            source, addition = DraftSyncService._keeper_source(
+                pn, espn_id, by_me, session, league_size, existing_keepers,
+                result.keeper_additions, result.warnings, default_source,
+            )
+
+        bid = None
+        if session.draft_type == "auction":
+            amount = made.bid_amount or 0
+            bid = amount if amount > 0 else None
+
+        pick_round, pick_slot = pick_placement(
+            pn, league_size, session.draft_type, session.pick_order, made.espn_team_id
+        )
+        try:
+            with db.atomic():
+                pick = DraftPick.create(
+                    session_id=session.id,
+                    overall_pick=pn,
+                    round=pick_round,
+                    slot=pick_slot,
+                    player_id=player_id,
+                    espn_player_id=espn_id,
+                    espn_team_id=made.espn_team_id,
+                    player_name=player_name,
+                    by_me=by_me,
+                    source=source,
+                    bid=bid,
+                )
+            existing.append(pick)
+            result.inserted += 1
+            # Only a keeper pick that actually landed earns its designation: a
+            # rolled-back insert must not leave the session naming a keeper it
+            # never recorded.
+            if addition is not None:
+                result.keeper_additions.append(addition)
+        except IntegrityError as exc:
+            err = DraftService._pick_conflict(exc, pn, player_name)
+            reason = "player_already_drafted" if err.error_code == "DRAFT_PLAYER_ALREADY_DRAFTED" else "pick_number_taken"
+            result.conflicts.append(
+                DraftSyncConflict(pick_number=pn, espn_player_id=espn_id, reason=reason, message=err.message)
+            )
+    return result
+
+
 class DraftSyncService:
 
     @staticmethod
-    def _link_decision(session: DraftSession, header: InitHeader) -> Optional[int]:
+    def _link_decision(session: DraftSession, header: RoomHeader) -> Optional[int]:
         """Which ESPN draft this room follows, and whether this INIT links it.
 
         A linked room accepts only its own draft; a live room from before
         linking existed falls back to its league's provider id. A mock room
         links to the first room it reconciles with (the client asks the user
         before posting) and is exclusive from then on: one active room per user
-        per ESPN draft.
+        per ESPN draft. An import room links to the draft it imported, for the
+        same reason and by the same rule.
 
         Called twice on purpose — once before the transaction, so an INIT from
         the wrong room is refused without taking a lock, and once from the
@@ -178,7 +327,7 @@ class DraftSyncService:
                 f"That ESPN room is league {header.espn_league_id}, this session is league {expected}",
                 data={"espn_league_id": header.espn_league_id, "session_league_id": expected},
             )
-        if session.espn_league_id is None and session.kind in ("live", "mock"):
+        if session.espn_league_id is None and session.kind in ("live", "mock", "import"):
             DraftService._check_room_free(session.user_id, header.espn_league_id, exclude_id=session.id)
             return header.espn_league_id
         return None
@@ -203,12 +352,6 @@ class DraftSyncService:
         #    fails before anything takes a lock, and decided again below from
         #    the locked row, which is the answer that counts.
         DraftSyncService._link_decision(session, header)
-
-        inserted = 0
-        skipped = 0
-        conflicts: list[DraftSyncConflict] = []
-        warnings: list[str] = []
-        header_applied = False
 
         with db.atomic():
             # Everything this room is allowed to become is read off its own row,
@@ -238,97 +381,31 @@ class DraftSyncService:
             existing = DraftService._picks_of(session_id)
 
             # 4. Header: written only onto an empty session (nothing to re-derive).
-            if not existing:
-                touched = []
-                if header.pick_order:
-                    session.pick_order = header.pick_order
-                    touched.append(DraftSession.pick_order)
-                if header.my_slot is not None:
-                    session.my_slot = header.my_slot
-                    touched.append(DraftSession.my_slot)
-                if header.rounds is not None and session.rounds is None:
-                    session.rounds = header.rounds
-                    touched.append(DraftSession.rounds)
-                if header.draft_type != session.draft_type:
-                    session.draft_type = header.draft_type
-                    touched.append(DraftSession.draft_type)
-                if touched:
-                    league_size = len(session.pick_order or []) or None
-                    check_slot_in_range(session.my_slot, league_size)
-                    check_length_holds_picks(total_picks_of(session), [])
-                    session.updated_at = datetime.utcnow()
-                    session.save(only=touched + [DraftSession.updated_at])
-                    header_applied = True
-            else:
-                warnings = header_warnings(header, session)
-
-            league_size = len(session.pick_order or []) or None
-            keeper_additions: list[dict] = []
-            existing_keepers = _keepers_of(session)
+            header_applied, warnings = apply_header(session, header, existing)
 
             # 5. Fold in each made pick, ascending.
-            for made in made_picks(decoded):
-                pn = int(made["pickNumber"])
-                espn_id = int(made["playerId"])
-                player = DraftService._resolve_player(DraftPickCreate(espn_player_id=espn_id))
-                player_id = player.id if player is not None else None
-                player_name = player.name if player is not None else None
-
-                verdict = classify_pick(existing, pn, espn_id, player_id, player_name)
-                if verdict == "skip":
-                    skipped += 1
-                    continue
-                if isinstance(verdict, DraftSyncConflict):
-                    conflicts.append(verdict)
-                    continue
-
-                team_id = int(made["teamId"])
-                by_me = team_id == header.espn_team_id
-                source = "espn_sync"
-                addition = None
-                if made.get("isKeeper"):
-                    source, addition = DraftSyncService._keeper_source(
-                        pn, espn_id, by_me, session, league_size, existing_keepers, keeper_additions, warnings
+            league_size = len(session.pick_order or []) or None
+            folded = fold_picks(
+                session,
+                (
+                    IncomingPick(
+                        pick_number=int(made["pickNumber"]),
+                        espn_player_id=int(made["playerId"]),
+                        espn_team_id=int(made["teamId"]),
+                        is_keeper=bool(made.get("isKeeper")),
+                        bid_amount=made.get("bidAmount"),
                     )
-
-                bid = None
-                if session.draft_type == "auction":
-                    amount = made.get("bidAmount") or 0
-                    bid = amount if amount > 0 else None
-
-                pick_round, pick_slot = pick_placement(
-                    pn, league_size, session.draft_type, session.pick_order, team_id
-                )
-                try:
-                    # A savepoint: a racing insert becomes a reported conflict
-                    # rather than poisoning the whole reconciliation.
-                    with db.atomic():
-                        pick = DraftPick.create(
-                            session_id=session_id,
-                            overall_pick=pn,
-                            round=pick_round,
-                            slot=pick_slot,
-                            player_id=player_id,
-                            espn_player_id=espn_id,
-                            espn_team_id=team_id,
-                            player_name=player_name,
-                            by_me=by_me,
-                            source=source,
-                            bid=bid,
-                        )
-                    existing.append(pick)
-                    inserted += 1
-                    # Only a keeper pick that actually landed earns its
-                    # designation: a rolled-back insert must not leave the
-                    # session naming a keeper it never recorded.
-                    if addition is not None:
-                        keeper_additions.append(addition)
-                except IntegrityError as exc:
-                    err = DraftService._pick_conflict(exc, pn, player_name)
-                    reason = "player_already_drafted" if err.error_code == "DRAFT_PLAYER_ALREADY_DRAFTED" else "pick_number_taken"
-                    conflicts.append(
-                        DraftSyncConflict(pick_number=pn, espn_player_id=espn_id, reason=reason, message=err.message)
-                    )
+                    for made in made_picks(decoded)
+                ),
+                existing,
+                my_espn_team_id=header.espn_team_id,
+                default_source="espn_sync",
+                league_size=league_size,
+            )
+            inserted, skipped = folded.inserted, folded.skipped
+            conflicts = folded.conflicts
+            warnings = warnings + folded.warnings
+            keeper_additions = folded.keeper_additions
 
             # 6. Persist any new keeper designations, the link, and the stamps.
             model_fields = []
@@ -392,8 +469,9 @@ class DraftSyncService:
         existing_keepers: list,
         pending_additions: list[dict],
         warnings: list[str],
+        default_source: str = "espn_sync",
     ) -> tuple[str, Optional[dict]]:
-        """Decide how an INIT keeper is stored.
+        """Decide how a room's keeper is stored.
 
         Another seat's keeper is a spent pick the front must step over, recorded
         `source="keeper", by_me=False` — never repriced (see `plan_keeper_moves`).
@@ -413,7 +491,7 @@ class DraftSyncService:
             warnings.append(
                 f"your keeper at pick {pick_number} does not sit at your slot's pick — recorded as an ordinary pick"
             )
-            return "espn_sync", None
+            return default_source, None
 
         probe = _probe(espn_player_id=espn_id)
         already = matching_keeper(existing_keepers, probe) is not None or any(

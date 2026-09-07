@@ -15,7 +15,7 @@ from fastapi import Depends, Request
 from peewee import JOIN
 
 from core.clerk_auth import get_current_user
-from core.errors import NotFoundError
+from core.errors import BadRequestError, NotFoundError
 from db.base import run_db
 from db.models.users import User
 from db.models.teams import Team
@@ -236,4 +236,26 @@ async def load_owned_league_info(team: OwnedTeamContext) -> LeagueInfo:
         _hydrate_owned_league_info,
         team.team_id,
         team.user_id,
+    )
+
+
+async def load_session_league_info(session: OwnedDraftSessionContext) -> LeagueInfo:
+    """The provider credentials behind a draft session's team.
+
+    Same hydration as `load_owned_league_info`, reached from a session rather
+    than a team, and called only where the credentials are actually used —
+    importing a finished draft is the one draft path that talks to a provider.
+    A room with no team (a mock) has nothing to hydrate and says so here rather
+    than failing inside the import.
+    """
+    if session.team_id is None:
+        raise BadRequestError(
+            "IMPORT_NEEDS_TEAM",
+            "This room has no linked team, so there is no league to import a draft from",
+        )
+    return await run_db(
+        "teams.hydrate_provider_credentials",
+        _hydrate_owned_league_info,
+        session.team_id,
+        session.user_id,
     )
