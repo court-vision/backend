@@ -35,6 +35,10 @@ DROP_KEYS = {
     "members", "owners", "primaryOwner", "managers", "manager", "guid", "email",
     "nickname", "image_url", "felo_score", "espn_s2", "swid", "SWID",
     "yahoo_access_token", "yahoo_refresh_token",
+    # A draft pick's `memberId` is the SWID of whoever clicked it — ESPN sets it
+    # on human picks only, so it is easy to miss in a payload that is mostly
+    # autopicks.
+    "memberId",
 }
 
 

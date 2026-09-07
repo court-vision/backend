@@ -546,3 +546,162 @@ def test_a_room_that_may_not_be_simulated_answers_409(authed_client, monkeypatch
 
     res = authed_client.post("/v1/internal/drafts/12/mock/advance", json={})
     assert res.status_code == 409 and res.json()["error_code"] == "NOT_A_MOCK"
+
+
+# -------------------------------- Recap --------------------------------- #
+
+
+@pytest.fixture
+def draft_recap_service(monkeypatch):
+    """Stub the recap service; record the scoring and session it was handed."""
+    from schemas.draft import DraftRecapResp, RecapMeta, RecapPickResp, RecapSeatResp
+    from services import draft_recap_service as module
+
+    calls = []
+
+    async def fake(scoring, session):
+        calls.append({"scoring": scoring, "session": session})
+        return DraftRecapResp(
+            status=ApiStatus.SUCCESS,
+            message="130 picks graded across 10 seats; you drafted a B",
+            data=[RecapPickResp(
+                overall_pick=1, round=1, slot=1, source="manual", player_id=203999,
+                value=52.4, cv_rank=1, value_over_slot=0.0,
+            )],
+            seats=[RecapSeatResp(
+                slot=3, is_me=True, picks=13, unscored=0, total_value=610.5,
+                value_over_slot=18.2, grade="B", position=4.0,
+            )],
+            meta=RecapMeta(
+                format="points", value_kind="fpts", graded_by="value_over_slot",
+                standings_basis="season_value", session_id=12, status="completed",
+                complete=True, picks_made=130, total_picks=130, unscored=0,
+                unattributed=0, league_size=10, rounds=13, my_slot=3, draft_type="snake",
+            ),
+        )
+
+    monkeypatch.setattr(module.DraftRecapService, "get_recap", staticmethod(fake))
+    return calls
+
+
+@pytest.mark.api
+def test_the_recap_resolves_scoring_from_the_sessions_league(authed_client, draft_recap_service, monkeypatch):
+    league = _league(point_weights={"pts": 2.0, "reb": 3.0})
+    _own_session(monkeypatch, league=league, status="completed")
+
+    res = authed_client.get("/v1/internal/drafts/12/recap")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["seats"][0]["grade"] == "B" and body["meta"]["graded_by"] == "value_over_slot"
+    call = draft_recap_service[0]
+    assert call["scoring"].points.weights == {"pts": 2.0, "reb": 3.0}
+    # The whole session goes through: the recap needs its slot, rounds and status.
+    assert call["session"].session_id == 12 and call["session"].my_slot == 3
+    assert call["session"].status == "completed"
+
+
+@pytest.mark.api
+def test_a_recap_for_a_session_you_do_not_own_is_a_404(authed_client, draft_recap_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12)
+    res = authed_client.get("/v1/internal/drafts/999/recap")
+    assert res.status_code == 404 and res.json()["error_code"] == "DRAFT_SESSION_NOT_FOUND"
+    assert draft_recap_service == []
+
+
+# -------------------------------- Import -------------------------------- #
+
+
+@pytest.fixture
+def draft_import_service(monkeypatch):
+    """Stub the import service and the credential hydration behind it."""
+    from api import deps
+    from schemas.common import FantasyProvider, LeagueInfo
+    from schemas.draft import DraftImportResp, DraftImportResponse
+    from services import draft_import_service as module
+
+    monkeypatch.setattr(
+        deps, "_hydrate_owned_league_info",
+        lambda team_id, user_id: LeagueInfo(
+            provider=FantasyProvider.ESPN, league_id=552315826,
+            team_name="Replay Team Four", year=2027, espn_s2="s2", swid="{SWID}",
+        ),
+    )
+
+    calls = []
+
+    async def fake(session_id, league_info):
+        calls.append((session_id, league_info))
+        return DraftImportResponse(
+            status=ApiStatus.SUCCESS,
+            message="Draft imported: 52 recorded, 0 already held",
+            data=DraftImportResp(
+                session=SESSION, espn_league_id=552315826, espn_team_id=4,
+                draft_type="snake", made=52, inserted=52, skipped=0,
+                conflicts=[], warnings=[], header_applied=True,
+            ),
+        )
+
+    monkeypatch.setattr(module.DraftImportService, "import_draft", staticmethod(fake))
+    return calls
+
+
+@pytest.mark.api
+def test_the_import_hands_the_service_the_sessions_own_credentials(authed_client, draft_import_service, monkeypatch):
+    _own_session(monkeypatch, kind="import")
+
+    res = authed_client.post("/v1/internal/drafts/12/import")
+
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert body["inserted"] == 52 and body["espn_team_id"] == 4 and body["header_applied"] is True
+    session_id, league_info = draft_import_service[0]
+    assert session_id == 12 and league_info.league_id == 552315826
+
+
+@pytest.mark.api
+def test_a_room_with_no_team_has_no_league_to_import_from(authed_client, draft_import_service, monkeypatch):
+    """A mock room never had provider credentials — say so before the fetch."""
+    _own_session(monkeypatch, kind="mock", team_id=None, league_id=None)
+
+    res = authed_client.post("/v1/internal/drafts/12/import")
+
+    assert res.status_code == 400 and res.json()["error_code"] == "IMPORT_NEEDS_TEAM"
+    assert draft_import_service == []
+
+
+@pytest.mark.api
+def test_an_import_for_a_session_you_do_not_own_is_a_404(authed_client, draft_import_service, monkeypatch):
+    _own_session(monkeypatch, session_id=12)
+    res = authed_client.post("/v1/internal/drafts/999/import")
+    assert res.status_code == 404 and res.json()["error_code"] == "DRAFT_SESSION_NOT_FOUND"
+    assert draft_import_service == []
+
+
+@pytest.mark.api
+def test_an_unfinished_draft_answers_409(authed_client, monkeypatch):
+    """The gate itself is the service's; this pins the status it surfaces as."""
+    from api import deps
+    from schemas.common import FantasyProvider, LeagueInfo
+    from services import draft_import_service as module
+
+    monkeypatch.setattr(
+        deps, "_hydrate_owned_league_info",
+        lambda team_id, user_id: LeagueInfo(
+            provider=FantasyProvider.ESPN, league_id=1, team_name="T", year=2027,
+        ),
+    )
+
+    async def refuse(*args, **kwargs):
+        raise ConflictError(
+            "DRAFT_NOT_COMPLETE",
+            "That ESPN draft has not finished — its picks are not readable until it does",
+            data={"in_progress": True},
+        )
+
+    monkeypatch.setattr(module.DraftImportService, "import_draft", staticmethod(refuse))
+    _own_session(monkeypatch, kind="import")
+
+    res = authed_client.post("/v1/internal/drafts/12/import")
+
+    assert res.status_code == 409 and res.json()["error_code"] == "DRAFT_NOT_COMPLETE"
