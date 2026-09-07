@@ -664,3 +664,127 @@ class DraftBoardResp(BaseResponse):
         description="The caller's drafted players (session picks plus `mine`), in big-board order",
     )
     meta: Optional[DraftBoardMeta] = None
+
+
+# --------------------------------- Recap --------------------------------- #
+
+
+class RecapPickResp(ApiModel):
+    """One pick, priced against the board CV would have drafted from."""
+
+    overall_pick: int
+    round: Optional[int] = None
+    slot: Optional[int] = Field(default=None, description="Seat that made the pick (index into `pick_order`)")
+    by_me: bool = False
+    source: PickSource
+    player_id: Optional[int] = None
+    espn_player_id: Optional[int] = None
+    player_name: Optional[str] = None
+    team: Optional[str] = None
+    value: Optional[float] = Field(default=None, description="League-scored value; null for a pick nothing can score")
+    cv_rank: Optional[int] = None
+    market_rank: Optional[int] = None
+    adp: Optional[float] = None
+    surplus_cv: Optional[int] = Field(default=None, description="cv_rank − overall_pick; positive = taken later than his rank")
+    surplus_market: Optional[float] = Field(default=None, description="adp − overall_pick; positive = later than ESPN's crowd")
+    value_over_slot: Optional[float] = Field(
+        default=None,
+        description="value(player) − value(the cv-ranked player at this pick number); null in an auction",
+    )
+    bid: Optional[float] = None
+
+
+class RecapSeatResp(ApiModel):
+    """One seat's draft, graded against the other seats in the same room."""
+
+    slot: int
+    espn_team_id: Optional[int] = None
+    is_me: bool = False
+    picks: int
+    unscored: int = Field(description="Picks with no value to price — listed in `picks`, left out of the sums")
+    total_value: float
+    value_over_slot: Optional[float] = Field(default=None, description="Σ over the seat's priced picks; null in an auction")
+    grade: Optional[str] = Field(default=None, description="Relative letter A–F; a four-seat league tops out at D")
+    position: Optional[float] = Field(default=None, description="Rank among the seats, ties sharing the average position")
+    best_pick: Optional[int] = None
+    worst_pick: Optional[int] = None
+
+
+class RecapCategoryLine(ApiModel):
+    key: str
+    label: str
+    z_sum: float = Field(description="Summed per-category z of everyone the seat drafted")
+    rank: float
+    roto_points: float
+
+
+class RecapH2HCell(ApiModel):
+    opponent_slot: int
+    won: float
+    lost: float
+    tied: float
+
+
+class RecapStandingResp(ApiModel):
+    """Where a seat's drafted roster projects to finish."""
+
+    slot: int
+    categories: List[RecapCategoryLine] = []
+    roto_points: Optional[float] = None
+    roto_rank: Optional[float] = None
+    season_value: Optional[float] = Field(default=None, description="Points leagues: Σ value × projected games")
+    value_rank: Optional[float] = None
+    expected_wins: Optional[float] = Field(default=None, description="Categories won in an average matchup; a tie counts half")
+    h2h: List[RecapH2HCell] = []
+
+
+class RecapMeta(ApiModel):
+    format: str                                 # points | categories
+    value_kind: Literal["fpts", "cat_value"]
+    graded_by: Literal["value_over_slot", "value"] = Field(
+        description="What the seat grades rank on. An auction has no value ladder to price picks against."
+    )
+    standings_basis: Literal["z_sum", "season_value"] = Field(
+        description="Category standings sum per-player z; they approximate a roto finish, they do not simulate a season."
+    )
+    session_id: int
+    status: DraftStatus
+    complete: bool = Field(description="Whether every pick in the draft has been recorded")
+    picks_made: int
+    total_picks: Optional[int] = None
+    unscored: int = Field(description="Picks nothing could value")
+    unattributed: int = Field(description="Picks with no seat — a room that never learned its pick order")
+    league_size: Optional[int] = None
+    rounds: Optional[int] = None
+    my_slot: Optional[int] = None
+    draft_type: DraftType
+    categories: List[CategoryDefResp] = []
+    projections_as_of: Optional[date] = None
+    market_as_of: Optional[date] = None
+
+
+class DraftRecapResp(BaseResponse):
+    """The finished draft: every pick priced, every seat graded, standings projected."""
+
+    data: List[RecapPickResp] = []
+    seats: List[RecapSeatResp] = []
+    standings: List[RecapStandingResp] = []
+    meta: Optional[RecapMeta] = None
+
+
+class DraftImportResp(ApiModel):
+    session: DraftSessionResp
+    espn_league_id: int
+    espn_team_id: int = Field(description="The session team's ESPN team id — what `by_me` is counted against")
+    draft_type: DraftType
+    made: int = Field(description="Picks in the completed ESPN draft")
+    inserted: int = Field(description="Picks newly recorded from this import")
+    skipped: int = Field(description="Picks the session already held (a re-import)")
+    conflicts: List[DraftSyncConflict] = []
+    warnings: List[str] = Field(default=[], description="Header disagreements on a session that already has picks (not applied)")
+    header_applied: bool = Field(description="Whether pick order / slot / rounds / type were written from ESPN (only on an empty session)")
+
+
+class DraftImportResponse(BaseResponse):
+    """What the import recorded, in the shape `sync/init` reports."""
+    data: Optional[DraftImportResp] = None

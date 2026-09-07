@@ -28,6 +28,7 @@ from api.deps import (
 from core.responses import respond
 from schemas.draft import (
     DraftBoardResp,
+    DraftRecapResp,
     DraftInitSyncRequest,
     DraftInitSyncResponse,
     DraftPickCreate,
@@ -43,6 +44,7 @@ from schemas.draft import (
 )
 from services.draft_board_service import BoardSession, DraftBoardService
 from services.draft_mock_service import DraftMockService
+from services.draft_recap_service import DraftRecapService
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
 from services.scoring.resolver import resolve_scoring
@@ -352,3 +354,37 @@ async def advance_mock_draft(
     req: MockAdvanceRequest, session: OwnedDraftSessionContext = Depends(get_owned_session)
 ):
     return respond(await DraftMockService.advance(session.session_id, req))
+
+
+@router.get(
+    "/{session_id}/recap",
+    response_model=DraftRecapResp,
+    summary="Grade a finished draft",
+    description=(
+        "The session's own picks, priced against the board they were drafted from — however they "
+        "were recorded (by hand, from a live ESPN room, from an import, or by the autopicker).\n\n"
+        "Each pick carries `value_over_slot`: what the player was worth against the player CV "
+        "ranked at that pick number. `surplus_cv` and `surplus_market` say the same in rank terms, "
+        "against our board and against ESPN's ADP.\n\n"
+        "Seats are graded A–F on the sum of their picks' `value_over_slot`, **ranked against the "
+        "other seats in this room only** — a grade says who drafted best here, not how the room "
+        "compares to any other league. An auction has no value ladder to price a pick number "
+        "against, so those rooms grade on total value instead (`meta.graded_by`).\n\n"
+        "Category leagues also project the standings: each seat's per-category z-sum ranked into "
+        "roto points, plus the categories it would win against every other seat. That is an "
+        "approximation from the draft, not a season simulation (`meta.standings_basis`). Points "
+        "leagues get projected season value per seat.\n\n"
+        "A pick whose player never resolved, or who has no line to value, is listed with a null "
+        "`value` and left out of its seat's sums — never dropped, and never charged to the seat.\n\n"
+        "Available before a draft finishes as well: `meta.complete` and `picks_made` say how far "
+        "it got."
+    ),
+    responses={
+        200: {"description": "Recap built (empty data with a message when the room has no picks)"},
+        404: {"description": "No such session, or it does not belong to the caller"},
+    },
+)
+async def get_draft_recap(session: OwnedDraftSessionContext = Depends(get_owned_session)):
+    # `get_owned_session` already loaded the league, so scoring resolution is pure.
+    scoring = resolve_scoring(session.league)
+    return respond(await DraftRecapService.get_recap(scoring, session))
