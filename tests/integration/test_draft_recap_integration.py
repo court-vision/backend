@@ -188,3 +188,31 @@ async def test_a_room_with_no_picks_answers_rather_than_failing(team, replay, bo
     assert recap.data == [] and recap.seats == [] and recap.standings == []
     assert recap.meta.picks_made == 0 and recap.meta.complete is False
     assert recap.message == "No picks recorded yet"
+
+
+async def test_a_mock_the_autopicker_played_recaps_end_to_end(team, board_players, replay):
+    """The path a user can walk today without touching ESPN: open a mock, let
+    CV play every seat, read the grades. It is also the seam between the
+    autopicker's `source: mock` picks and the recap that reads them."""
+    from schemas.draft import DraftSessionCreate, MockAdvanceRequest
+    from services.draft_mock_service import DraftMockService
+
+    session = (await DraftService.create_session(
+        team.user_id, DraftSessionCreate(team_id=team.team_id, kind="mock", my_slot=MY_SLOT)
+    )).data
+    advanced = (await DraftMockService.advance(session.id, MockAdvanceRequest(until="end"))).data
+    # The last seat cannot fill pick 52 without a fourth centre, so the
+    # autopicker stops rather than breaching the cap — and the room is still
+    # recappable, which is the case a status gate would have refused.
+    assert advanced.picks_made == 51 and advanced.stopped_reason == "cap_blocked"
+
+    recap = await _recap(session.id, team.user_id)
+
+    assert recap.meta.picks_made == 51 and recap.meta.complete is False
+    assert {p.source for p in recap.data} == {"mock"}
+    assert len(recap.seats) == 4 and all(s.grade for s in recap.seats)
+    assert sum(s.picks for s in recap.seats) == 51
+    # The autopicker drafts by ADP, which here descends with value, so the
+    # seats end up close: nothing separates them by more than a round's worth.
+    spread = max(s.value_over_slot for s in recap.seats) - min(s.value_over_slot for s in recap.seats)
+    assert spread < max(p.value for p in recap.data if p.value)
