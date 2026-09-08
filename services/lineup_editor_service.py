@@ -356,7 +356,18 @@ class LineupEditorService:
                          provider_status=exc.espn_status, error=exc.message)
             raise RosterWriteUnavailable() from exc
 
-        fresh = await LineupReadService.read(team_id, league_info, fallback_slot_counts=fallback_slot_counts)
+        try:
+            fresh = await LineupReadService.read(team_id, league_info, fallback_slot_counts=fallback_slot_counts)
+        except Exception as exc:
+            # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
+            # `failed` seed would drop it out of the counted statuses, and the next auto run would
+            # send the same moves a second time — so settle it as applied, just unverified.
+            await run_db("lineup.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error=f"verify_read_failed: {exc}")
+            log.warning("lineup_write_unverified", team_id=team_id, source=source, move_count=len(moves),
+                        espn_status=result.espn_status, error=str(exc))
+            return state, False, audit_id
+
         after = {p.player_id: p.lineup_slot_id for p in fresh.players}
         verified = all(after.get(m.player_id) == m.to_slot_id for m in moves)
         await run_db("lineup.audit_update", _audit_update, audit_id,

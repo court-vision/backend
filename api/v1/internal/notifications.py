@@ -260,28 +260,18 @@ def upsert_team_preference(
         .first()
     )
 
+    # Only the fields the caller actually sent are written, as the request model promises: an
+    # omitted field keeps whatever the override already held, while an explicit null clears it
+    # back to the global preference.
+    supplied = req.model_dump(exclude_unset=True)
+
     if existing:
-        existing.lineup_alerts_enabled = req.lineup_alerts_enabled
-        existing.alert_benched_starters = req.alert_benched_starters
-        existing.alert_active_non_playing = req.alert_active_non_playing
-        existing.alert_injured_active = req.alert_injured_active
-        existing.alert_minutes_before = req.alert_minutes_before
-        existing.auto_lineup_enabled = req.auto_lineup_enabled
-        existing.email = req.email
+        for field, value in supplied.items():
+            setattr(existing, field, value)
         existing.save()
         row = existing
     else:
-        row = NotificationTeamPreference.create(
-            user=user_id,
-            team_id=team_id,
-            lineup_alerts_enabled=req.lineup_alerts_enabled,
-            alert_benched_starters=req.alert_benched_starters,
-            alert_active_non_playing=req.alert_active_non_playing,
-            alert_injured_active=req.alert_injured_active,
-            alert_minutes_before=req.alert_minutes_before,
-            auto_lineup_enabled=req.auto_lineup_enabled,
-            email=req.email,
-        )
+        row = NotificationTeamPreference.create(user=user_id, team_id=team_id, **supplied)
 
     data = NotificationTeamPreferenceResp(
         team_id=row.team_id,

@@ -14,10 +14,13 @@ from datetime import date, datetime
 import pytest
 from peewee import IntegrityError
 
+from api.deps import UserContext
+from api.v1.internal.notifications import upsert_team_preference
 from db.models.notifications import NotificationPreference, NotificationTeamPreference
 from db.models.roster_moves import RosterMove
 from db.models.teams import Team
 from db.models.users import User
+from schemas.notifications import NotificationTeamPreferenceReq
 from services import lineup_editor_service as svc
 
 pytestmark = [pytest.mark.integration]
@@ -95,3 +98,30 @@ def test_auto_lineup_preference_defaults(user, team):
     override.auto_lineup_enabled = True
     override.save()
     assert NotificationTeamPreference.get_by_id(override.id).auto_lineup_enabled is True
+
+
+def test_team_preference_upsert_only_writes_the_fields_the_caller_sent(user, team):
+    """The request model promises a partial update; an omitted field must survive it."""
+    upsert = upsert_team_preference.__wrapped__      # the sync body, without the run_db boundary
+    ctx = UserContext(user_id=user.user_id)
+
+    def stored():
+        return NotificationTeamPreference.get(
+            (NotificationTeamPreference.user == user.user_id)
+            & (NotificationTeamPreference.team_id == team.team_id)
+        )
+
+    upsert(team.team_id, NotificationTeamPreferenceReq(auto_lineup_enabled=True, alert_minutes_before=45), ctx)
+    row = stored()
+    assert (row.auto_lineup_enabled, row.alert_minutes_before) == (True, 45)
+    assert row.lineup_alerts_enabled is None                      # never sent, so still inheriting
+
+    resp = upsert(team.team_id, NotificationTeamPreferenceReq(lineup_alerts_enabled=True), ctx)
+    row = stored()
+    assert row.auto_lineup_enabled is True and row.alert_minutes_before == 45
+    assert row.lineup_alerts_enabled is True
+    assert resp.data.auto_lineup_enabled is True                  # and the response reports the merge
+
+    upsert(team.team_id, NotificationTeamPreferenceReq(auto_lineup_enabled=None), ctx)
+    assert stored().auto_lineup_enabled is None                   # an explicit null still clears it
+    assert NotificationTeamPreference.select().count() == 1

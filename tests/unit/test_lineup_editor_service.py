@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.errors import ProviderAuthError
+from core.errors import ProviderAuthError, ProviderTimeout
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import ApplyLineupMovesReq, LineupEvaluateReq, LineupMoveReq, LineupPlayer, LineupState
 from services import fantasy_writer_client, lineup_editor_service as svc
@@ -68,7 +68,10 @@ def harness(monkeypatch):
     h = SimpleNamespace(reads=[], writer=[], writer_calls=[], audits=[], updates=[], counted=False, noops=[])
 
     async def fake_read(team_id, league_info, **kwargs):
-        return h.reads.pop(0)
+        nxt = h.reads.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
 
     async def fake_apply(payload):
         h.writer_calls.append(payload)
@@ -134,6 +137,19 @@ def test_manual_apply_reports_unverified_when_the_reread_disagrees(harness):
     resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
     assert resp.data.verified is False and "not yet confirmed" in resp.message
     assert harness.updates[-1][1] == "applied_unverified"
+
+
+@pytest.mark.unit
+def test_a_failed_verify_read_still_settles_the_audit_as_applied(harness):
+    """ESPN took the write; only the read-back died. The row must leave `in_flight`."""
+    harness.reads = [state(board()), ProviderTimeout("espn")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+
+    assert resp.data.verified is False and "not yet confirmed" in resp.message
+    assert resp.data.lineup.roster_version == "v1"  # the pre-write board, since the re-read failed
+    audit_id, status, provider_status, error = harness.updates[-1]
+    assert (audit_id, status, provider_status) == (1, "applied_unverified", 200)
+    assert error.startswith("verify_read_failed:")
 
 
 @pytest.mark.unit
@@ -237,6 +253,15 @@ def test_evaluate_applies_for_auto_users(harness):
     d = evaluate(apply=True).data
     assert d.outcome == "applied" and d.verified is True and d.audit_id == 1
     assert harness.audits[0]["source"] == "auto" and harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
+def test_evaluate_settles_the_day_when_the_verify_read_fails(harness):
+    """The auto run must not raise, and the day must count, or the next poll re-sends the moves."""
+    harness.reads = [state(board()), ProviderTimeout("espn")]
+    d = evaluate(apply=True).data
+    assert d.outcome == "applied" and d.verified is False and d.audit_id == 1
+    assert harness.updates[-1][:2] == (1, "applied_unverified")
 
 
 @pytest.mark.unit
