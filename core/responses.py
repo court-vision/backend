@@ -62,6 +62,13 @@ ERROR_CODE_STATUS: dict[str, int] = {
     "PLAYER_NOT_FOUND": 404,
     "LINEUP_NOT_FOUND": 404,
     "LINEUP_ALREADY_EXISTS": 409,
+    # Lineup editor / writes (services.lineup_editor_service)
+    "ROSTER_WRITE_DISABLED": 403,
+    "ROSTER_WRITE_BLOCKED": 409,
+    "ROSTER_STALE": 409,
+    "ROSTER_MOVE_INVALID": 422,
+    "ROSTER_WRITE_REJECTED": 409,
+    "ROSTER_WRITE_UNAVAILABLE": 503,
 }
 
 # error_code to fill in when the service left it empty, by envelope status

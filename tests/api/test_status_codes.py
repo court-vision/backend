@@ -73,6 +73,12 @@ def _stub(monkeypatch, target, name, outcome):
     (ApiStatus.ERROR, "TEAM_NAME_NOT_IN_LEAGUE", 400),
     (ApiStatus.ERROR, "TEAM_NOT_FOUND", 404),
     (ApiStatus.ERROR, "LINEUP_ALREADY_EXISTS", 409),
+    (ApiStatus.ERROR, "ROSTER_WRITE_DISABLED", 403),
+    (ApiStatus.ERROR, "ROSTER_WRITE_BLOCKED", 409),
+    (ApiStatus.ERROR, "ROSTER_STALE", 409),
+    (ApiStatus.ERROR, "ROSTER_MOVE_INVALID", 422),
+    (ApiStatus.ERROR, "ROSTER_WRITE_REJECTED", 409),
+    (ApiStatus.ERROR, "ROSTER_WRITE_UNAVAILABLE", 503),
     (ApiStatus.SUCCESS, "LINEUP_SERVICE_UNAVAILABLE", 200),      # SUCCESS is 200 whatever the code says
 ])
 def test_envelope_status_map(status, error_code, expected):

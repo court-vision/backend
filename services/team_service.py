@@ -67,6 +67,7 @@ class TeamService:
             # ESPN-specific
             "espn_s2": league_info.espn_s2,
             "swid": league_info.swid,
+            "espn_team_id": league_info.espn_team_id,
             # Yahoo-specific
             "yahoo_access_token": league_info.yahoo_access_token,
             "yahoo_refresh_token": league_info.yahoo_refresh_token,
@@ -103,6 +104,7 @@ class TeamService:
             # ESPN-specific
             espn_s2=league_info.get('espn_s2', ''),
             swid=league_info.get('swid', ''),
+            espn_team_id=league_info.get('espn_team_id'),
             # Yahoo-specific
             yahoo_access_token=league_info.get('yahoo_access_token'),
             yahoo_refresh_token=league_info.get('yahoo_refresh_token'),
@@ -203,6 +205,9 @@ class TeamService:
         for field in credential_service.ALL_SECRET_FIELDS:
             if not getattr(merged, field, None) and stored.get(field):
                 setattr(merged, field, stored[field])
+        # The edit form does not know ESPN's team id either; keep what was learned
+        if merged.espn_team_id is None and stored.get("espn_team_id"):
+            merged.espn_team_id = stored["espn_team_id"]
         return merged
 
     @staticmethod

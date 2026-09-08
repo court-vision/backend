@@ -139,6 +139,17 @@ class EspnService:
         return {'espn_s2': league_info.espn_s2, 'SWID': league_info.swid}
 
     @staticmethod
+    async def fetch_league(league_info: LeagueInfo, views: list[str], *, expect_key: str = "teams") -> dict:
+        """One authenticated read of the league endpoint with the given ESPN views."""
+        return await provider_get(
+            "espn",
+            ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
+            params={'view': list(views)},
+            cookies=EspnService._cookies(league_info),
+            expect_key=expect_key,
+        )
+
+    @staticmethod
     def _scoring_for(league_info: LeagueInfo) -> ResolvedScoring:
         """The league's resolved scoring (honouring the team's scoring_preview); the
         default points scoring if the lookup fails, so ESPN data is still served."""

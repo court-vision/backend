@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Query
 
-from api.deps import UserContext, get_db_user
+from api.deps import OwnedTeamContext, UserContext, get_db_user, get_owned_team, load_owned_league_info
 from core.nba_calendar import nba_date_et
 from db.base import db_operation, run_db
 from services.providers.blocking import run_blocking_provider
@@ -20,6 +20,9 @@ from db.models.nba.games import Game
 from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
 from services import credential_service
 from services.lineup_check_service import LineupCheckService
+from services.lineup_editor_service import move_results, planner_players, slot_counts_of, unfilled_results
+from services.lineup_planner import plan_fill
+from services.lineup_read_service import LineupReadService
 from services.notification_service import NotificationService
 from services.providers.http import provider_get
 from schemas.common import ApiStatus
@@ -124,6 +127,7 @@ def get_preferences(user: UserContext = Depends(get_db_user)):
             alert_active_non_playing=prefs.alert_active_non_playing,
             alert_injured_active=prefs.alert_injured_active,
             alert_minutes_before=prefs.alert_minutes_before,
+            auto_lineup_enabled=prefs.auto_lineup_enabled,
             email=prefs.email,
         )
     else:
@@ -158,6 +162,7 @@ def update_preferences(
         prefs.alert_active_non_playing = req.alert_active_non_playing
         prefs.alert_injured_active = req.alert_injured_active
         prefs.alert_minutes_before = req.alert_minutes_before
+        prefs.auto_lineup_enabled = req.auto_lineup_enabled
         prefs.email = req.email
         prefs.save()
     else:
@@ -168,6 +173,7 @@ def update_preferences(
             alert_active_non_playing=req.alert_active_non_playing,
             alert_injured_active=req.alert_injured_active,
             alert_minutes_before=req.alert_minutes_before,
+            auto_lineup_enabled=req.auto_lineup_enabled,
             email=req.email,
         )
 
@@ -177,6 +183,7 @@ def update_preferences(
         alert_active_non_playing=prefs.alert_active_non_playing,
         alert_injured_active=prefs.alert_injured_active,
         alert_minutes_before=prefs.alert_minutes_before,
+        auto_lineup_enabled=prefs.auto_lineup_enabled,
         email=prefs.email,
     )
 
@@ -207,6 +214,7 @@ def get_team_preferences(user: UserContext = Depends(get_db_user)):
             alert_active_non_playing=row.alert_active_non_playing,
             alert_injured_active=row.alert_injured_active,
             alert_minutes_before=row.alert_minutes_before,
+            auto_lineup_enabled=row.auto_lineup_enabled,
             email=row.email,
         )
         for row in rows
@@ -252,26 +260,18 @@ def upsert_team_preference(
         .first()
     )
 
+    # Only the fields the caller actually sent are written, as the request model promises: an
+    # omitted field keeps whatever the override already held, while an explicit null clears it
+    # back to the global preference.
+    supplied = req.model_dump(exclude_unset=True)
+
     if existing:
-        existing.lineup_alerts_enabled = req.lineup_alerts_enabled
-        existing.alert_benched_starters = req.alert_benched_starters
-        existing.alert_active_non_playing = req.alert_active_non_playing
-        existing.alert_injured_active = req.alert_injured_active
-        existing.alert_minutes_before = req.alert_minutes_before
-        existing.email = req.email
+        for field, value in supplied.items():
+            setattr(existing, field, value)
         existing.save()
         row = existing
     else:
-        row = NotificationTeamPreference.create(
-            user=user_id,
-            team_id=team_id,
-            lineup_alerts_enabled=req.lineup_alerts_enabled,
-            alert_benched_starters=req.alert_benched_starters,
-            alert_active_non_playing=req.alert_active_non_playing,
-            alert_injured_active=req.alert_injured_active,
-            alert_minutes_before=req.alert_minutes_before,
-            email=req.email,
-        )
+        row = NotificationTeamPreference.create(user=user_id, team_id=team_id, **supplied)
 
     data = NotificationTeamPreferenceResp(
         team_id=row.team_id,
@@ -281,6 +281,7 @@ def upsert_team_preference(
         alert_active_non_playing=row.alert_active_non_playing,
         alert_injured_active=row.alert_injured_active,
         alert_minutes_before=row.alert_minutes_before,
+        auto_lineup_enabled=row.auto_lineup_enabled,
         email=row.email,
     )
 
@@ -404,116 +405,57 @@ async def check_lineup(
 
 @router.post("/send-test/{team_id}")
 async def send_test_alert(
-    team_id: int,
-    user: UserContext = Depends(get_db_user),
+    team: OwnedTeamContext = Depends(get_owned_team),
     email: str = Query(..., description="Email address to send the test alert to"),
 ):
     """
-    Force-send a lineup alert for a team, bypassing the time window check.
+    Force-send today's lineup alert for a team to an address of your choice.
 
-    Useful for testing Resend integration and verifying lineup issue detection.
-    The notification log dedup is also bypassed so you can re-send freely.
+    Bypasses the pipeline's tip-off window and daily dedup. The content is the
+    same fill plan the pipeline would mail (services.lineup_planner): the
+    suggested moves, or a "nothing to fill" confirmation when the lineup is set.
     """
-    user_id = user.user_id
-    context = await run_db("notifications.test_context", _lineup_check_context, user_id, team_id)
-    if context is None:
-        return {"status": "not_found", "message": "Team not found"}
+    from datetime import datetime as _dt
 
-    league_info = context["league_info"]
-    provider = league_info.get("provider", "espn")
-
-    if provider != "espn":
+    league_info = await load_owned_league_info(team)
+    if league_info.provider != "espn":
         return {"status": "error", "message": "Only ESPN teams are supported"}
 
-    # Get today's game context
-    teams_playing = context["teams_playing"]
-    earliest_game_time = context["earliest_game_time"]
+    state = await LineupReadService.read(team.team_id, league_info,
+                                         fallback_slot_counts=dict(getattr(team.league, "roster_slots", None) or {}))
+    plan = plan_fill(planner_players(state), slot_counts_of(state))
+    moves = [m.model_dump() for m in move_results(list(plan.moves), state)]
+    unfilled = [u.model_dump() for u in unfilled_results(plan)]
+    first_game_time = _dt.strptime(state.first_game_time_et, "%H:%M").time() if state.first_game_time_et else None
+    team_context = SimpleNamespace(league_info=team.league_info_json)
+    user_obj = SimpleNamespace(user_id=team.user_id, email=email)
+    prefs = SimpleNamespace(email=email)
+    notification_svc = NotificationService()
 
-    # Fetch roster from ESPN through the shared async client.
-    roster = await _fetch_espn_roster_with_slots(league_info)
-
-    if not roster:
-        return {"status": "error", "message": "Failed to fetch roster from ESPN"}
-
-    # Get prefs (for issue type filtering)
-    prefs = SimpleNamespace(**context["prefs"])
-
-    # Check lineup issues
-    issues = lineup_checker.check_lineup(
-        roster=roster,
-        teams_playing_today=teams_playing,
-        prefs=prefs,
-    )
-
-    team_name = league_info.get("team_name", "Your Team")
-
-    if not issues:
-        # Still send a "no issues" test email so we can verify delivery
-        from dataclasses import dataclass
-        # Build a dummy user-like object with the override email
-        class _FakeUser:
-            email = None
-
-        fake_user = _FakeUser()
-        fake_user.email = email
-
-        notification_svc = NotificationService()
+    if not moves:
         result = await run_blocking_provider(
             "email", "notification_test_email", notification_svc._send_email,
-            to=email, subject=f"Court Vision Test: No lineup issues for {team_name}",
-            body=f"Team: {team_name}\nFirst game today: {earliest_game_time or 'No games today'}\n\nNo lineup issues found — your roster looks good!\n\n-- Court Vision",
+            to=email, subject=f"Court Vision Test: nothing to fill for {state.team_name}",
+            body=f"Team: {state.team_name}\nFirst game today: {first_game_time or 'No games today'}\n\n"
+                 f"{plan.summary}\n\n-- Court Vision",
         )
-        return {
-            "status": "sent",
-            "message": "No lineup issues found. Sent confirmation email.",
-            "issues": [],
-            "email_result": {"success": result.success, "message_id": result.message_id, "error": result.error},
-            "teams_playing_today": sorted(teams_playing),
-            "first_game_time": str(earliest_game_time) if earliest_game_time else None,
-        }
-
-    # Send with the override email
-    class _UserWithEmail:
-        def __init__(self, uid, mail):
-            self.user_id = uid
-            self.email = mail
-
-    user_obj = _UserWithEmail(user_id, email)
-
-    # Override prefs email for this test
-    class _PrefsWithEmail:
-        def __init__(self, base_prefs):
-            self.email = email
-            self.alert_benched_starters = getattr(base_prefs, "alert_benched_starters", True)
-            self.alert_active_non_playing = getattr(base_prefs, "alert_active_non_playing", True)
-            self.alert_injured_active = getattr(base_prefs, "alert_injured_active", True)
-
-    test_prefs = _PrefsWithEmail(prefs)
-
-    notification_svc = NotificationService()
-    team_context = SimpleNamespace(league_info=context["team_json"])
-    result = await run_blocking_provider(
-        "email", "notification_test_alert", notification_svc.send_lineup_alert,
-        user=user_obj, team=team_context, issues=issues,
-        first_game_time=earliest_game_time, prefs=test_prefs,
-    )
+    else:
+        result = await run_blocking_provider(
+            "email", "notification_test_alert", notification_svc.send_lineup_alert,
+            user=user_obj, team=team_context, moves=moves, unfilled=unfilled,
+            first_game_time=first_game_time, prefs=prefs,
+        )
 
     return {
         "status": "sent" if result.success else "failed",
-        "message": f"Alert sent with {len(issues)} issue(s)" if result.success else f"Send failed: {result.error}",
-        "issues": [
-            {
-                "type": issue.issue_type.value,
-                "player": issue.player_name,
-                "team": issue.player_team,
-                "slot": issue.current_slot,
-                "action": issue.suggested_action,
-            }
-            for issue in issues
-        ],
+        "message": (f"Alert sent with {len(moves)} move(s)" if moves else "Nothing to fill; sent confirmation email")
+                   if result.success else f"Send failed: {result.error}",
+        "moves": moves,
+        "unfilled": unfilled,
+        "summary": plan.summary,
         "email_result": {"success": result.success, "message_id": result.message_id, "error": result.error},
-        "teams_playing_today": sorted(teams_playing),
-        "first_game_time": str(earliest_game_time) if earliest_game_time else None,
+        "first_game_time": str(first_game_time) if first_game_time else None,
+        "scoring_period_id": state.scoring_period_id,
     }
 
 

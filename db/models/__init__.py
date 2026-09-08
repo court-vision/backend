@@ -5,6 +5,7 @@ from .leagues import League
 from .teams import Team
 from .lineups import Lineup
 from .drafts import DraftPick, DraftSession
+from .roster_moves import RosterMove
 
 __all__ = [
     'User',
@@ -13,5 +14,6 @@ __all__ = [
     'Team',
     'Lineup',
     'DraftSession',
-    'DraftPick'
+    'DraftPick',
+    'RosterMove',
 ]

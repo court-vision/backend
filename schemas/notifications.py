@@ -21,6 +21,8 @@ class NotificationPreferenceReq(ApiModel):
     alert_active_non_playing: bool = True
     alert_injured_active: bool = True
     alert_minutes_before: int = Field(default=90, ge=15, le=150)
+    # Auto-set my lineup: apply the fill plan before tip-off instead of emailing it
+    auto_lineup_enabled: bool = False
     email: Optional[str] = None
 
 
@@ -34,6 +36,7 @@ class NotificationPreferenceResp(ApiModel):
     alert_active_non_playing: bool = True
     alert_injured_active: bool = True
     alert_minutes_before: int = Field(default=90, ge=15, le=150)
+    auto_lineup_enabled: bool = False
     email: Optional[str] = None
 
 
@@ -44,6 +47,7 @@ class NotificationTeamPreferenceReq(ApiModel):
     alert_active_non_playing: Optional[bool] = None
     alert_injured_active: Optional[bool] = None
     alert_minutes_before: Optional[int] = Field(default=None, ge=15, le=150)
+    auto_lineup_enabled: Optional[bool] = None
     email: Optional[str] = None
 
 
@@ -56,6 +60,7 @@ class NotificationTeamPreferenceResp(ApiModel):
     alert_active_non_playing: Optional[bool] = None
     alert_injured_active: Optional[bool] = None
     alert_minutes_before: Optional[int] = None
+    auto_lineup_enabled: Optional[bool] = None
     email: Optional[str] = None
 
 
