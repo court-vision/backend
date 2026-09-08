@@ -174,6 +174,20 @@ ALLOWED_ORIGINS = [
     "https://sqlmate.courtvision.dev",  # SQLMate
 ]
 
+# Vercel preview deployments of the `courtvision` project. Every preview gets a
+# hostname of its own -- `courtvision-git-<branch>-...` for a branch alias and
+# `courtvision-<hash>-...` for a single deployment -- so no static list can
+# cover them, and without this the browser refuses every call a preview makes
+# to this API. Starlette matches with `fullmatch`; the anchors are here anyway
+# so the intent survives a reader who does not know that.
+#
+# Narrow on purpose. `allow_credentials=True` means an allowed origin can make
+# authenticated requests, so this must never widen to `*.vercel.app`: that is
+# every Vercel deployment on the internet. The team slug is the boundary --
+# only this Vercel team can create hostnames ending in
+# `-jameslk3s-projects.vercel.app`.
+PREVIEW_ORIGIN_REGEX = r"^https://courtvision-[a-z0-9-]+-jameslk3s-projects\.vercel\.app$"
+
 
 def setup_middleware(app: FastAPI) -> None:
     """Register the exception handlers and CORS."""
@@ -183,6 +197,7 @@ def setup_middleware(app: FastAPI) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
+        allow_origin_regex=PREVIEW_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
