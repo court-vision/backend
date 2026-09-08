@@ -308,3 +308,11 @@ def get_settings() -> Settings:
 # Default settings instance for convenience
 # Import this for quick access: from core.settings import settings
 settings = Settings()
+
+# core/pipeline_auth.py is mirrored byte-for-byte from data-platform and reads
+# the pipeline token from the process environment. Railway sets it there; a
+# local `.env` only reaches pydantic, so hand the value on before any router
+# imports it (this module is imported first everywhere, main.py and tests alike).
+import os as _os  # noqa: E402
+
+_os.environ.setdefault("PIPELINE_API_TOKEN", settings.pipeline_api_token.get_secret_value())
