@@ -272,6 +272,22 @@ def _summary(moves: Sequence[Move], unfilled: Sequence[Unfilled], names: Mapping
     return text
 
 
+def _slot_label(slot_id: int) -> str:
+    from utils.espn_helpers import POSITION_MAP  # a plain dict; the planner stays I/O-free
+    label = POSITION_MAP.get(slot_id)
+    return label if isinstance(label, str) and label else str(slot_id)
+
+
+def _ineligible_message(player: PlannerPlayer, to_slot_id: int) -> str:
+    """Why a move is refused before it reaches ESPN. Eligibility is ESPN's own list
+    (`eligibleSlots`); IR appears on it only for players ESPN has marked OUT."""
+    if to_slot_id == IR_SLOT_ID:
+        return f"{player.name} can't go on IR — ESPN only lists players it has marked OUT as IR-eligible"
+    eligible = [_slot_label(s) for s in sorted(player.eligible_slot_ids) if s in ACTIVE_SLOT_IDS]
+    where = f" (eligible: {', '.join(eligible)})" if eligible else ""
+    return f"{player.name} isn't eligible at {_slot_label(to_slot_id)}{where}"
+
+
 def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int],
                    moves: Sequence[Move]) -> list[MoveError]:
     """Why a user-submitted set of moves cannot be sent as one ESPN transaction (empty = fine)."""
@@ -301,7 +317,7 @@ def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, i
             errors.append(MoveError(m.player_id, "LOCKED", f"{player.name} is locked (game started)"))
             continue
         if m.to_slot_id != BENCH_SLOT_ID and m.to_slot_id not in player.eligible_slot_ids:
-            errors.append(MoveError(m.player_id, "INELIGIBLE", f"{player.name} is not eligible for that slot"))
+            errors.append(MoveError(m.player_id, "INELIGIBLE", _ineligible_message(player, m.to_slot_id)))
             continue
     if errors:
         return errors
