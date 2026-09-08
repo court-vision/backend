@@ -53,6 +53,66 @@ null. A known player without a projection returns 200 with `data: null`; unknown
 players return 404. Projection percentages use 0–1. These routes expose curated
 fields, not raw provider payloads, pipeline IDs, or private draft/league state.
 
+## Completed follow-up — bulk projections and market movement
+
+Completed September 8, 2026, without new ingestion or a database migration:
+
+- `GET /v1/players/projections` exposes the selected global ESPN projection
+  snapshot with optional season/date/name filters and bounded pagination. Rows
+  use the same serializer as the single-player projection route, so per-game
+  units, 0–1 shooting rates, and null handling cannot diverge.
+- `GET /v1/rankings/espn/movement` compares two required on-or-before date
+  selectors. It returns the union of both snapshots using a full outer join,
+  preserves absent rows and values as null, and calculates all four market
+  changes. Positive rank/ADP values mean improvement; positive auction values
+  mean an increase. Metric/direction controls produce stable, NBA-ID-tiebroken
+  pagination.
+
+Both response payloads report the actual selected dates. If the requested
+season has no applicable projection snapshot, or the two movement selectors do
+not resolve to distinct snapshots, the endpoint returns a successful empty
+collection with an explanatory message. Existing market and single-player
+projection routes remain unchanged; these new reads use the same public
+per-endpoint/IP rate limit and deliberately add no cache.
+
+Example requests:
+
+```text
+/v1/players/projections?season=2026-27&as_of=2026-09-05&name=Jokic&limit=25
+/v1/rankings/espn/movement?season=2026-27&from_as_of=2026-09-01&to_as_of=2026-09-08&metric=rank&direction=up
+```
+
+Representative movement response (the selected snapshots may predate the
+requested selectors):
+
+```json
+{
+  "status": "success",
+  "message": "ESPN draft market movement",
+  "data": {
+    "season": "2026-27",
+    "source": "espn",
+    "from_as_of_date": "2026-09-01",
+    "to_as_of_date": "2026-09-07",
+    "metric": "rank",
+    "direction": "up",
+    "players": [
+      {
+        "player_id": 203999,
+        "espn_id": 3112335,
+        "name": "Nikola Jokic",
+        "before": {"overall_rank": 8, "adp": 7.4, "auction_value": 54.0, "auction_value_avg": 52.1},
+        "after": {"overall_rank": 5, "adp": 5.8, "auction_value": 58.0, "auction_value_avg": 55.2},
+        "changes": {"overall_rank": 3, "adp": 1.6, "auction_value": 4.0, "auction_value_avg": 3.1}
+      }
+    ],
+    "total": 1,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
 ## Completed follow-up — dimension player directory
 
 Completed September 7, 2026:
@@ -77,8 +137,10 @@ Example requests:
 ```text
 /v1/rankings/espn?season=2026-27&sort_by=adp&limit=25
 /v1/rankings/espn?season=2026-27&as_of=2026-09-01&name=Jokic
+/v1/rankings/espn/movement?from_as_of=2026-09-01&to_as_of=2026-09-08
 /v1/players/search?q=Jokic&limit=10
 /v1/players/203999/profile
+/v1/players/projections?season=2026-27&limit=25
 /v1/players/203999/projection?season=2026-27
 /v1/players/203999/stats?window=l10
 ```
@@ -107,7 +169,6 @@ These need no new provider ingestion unless noted:
 
 | Priority | Addition | Scope and acceptance criteria |
 |---|---|---|
-| Next | Bulk projections and market movement | A paginated projections collection and drift between two explicit snapshots. Missing observations must stay unknown, not become zero rank/ADP. Reuse the new snapshot/units contract. |
 | Next | Team roster provenance | Evaluate `player_profiles.team_id` and its update cadence against season-stat assignments. Define when profile data is authoritative before using it for current rosters. The current route deliberately reports last known statistical membership. |
 | Later | Advanced-stat comparison | Advanced player stats are already embedded in `/players/stats`; a bounded batch comparison endpoint can reuse them. Specify season/freshness and percent units before adding another representation. |
 | Later | Historical performance queries | Add explicit season/date bounds and game-log pagination. Avoid silently mixing regular season, playoffs, or career totals. Existing game facts have team/date but no game ID/season FK, so persistent normalization is a separate migration/backfill. |
@@ -123,17 +184,18 @@ adding a standalone advanced endpoint is an API packaging choice, not new data.
 Completed the backend unit/API suite plus the integration suite against a disposable
 PostgreSQL 16 database built from the real migration chain. The new regressions
 cover sparse rosters, trades, stale rankings, rolling snapshot omissions, accent
-search, historical matchup joins, projections for players with no games, snapshot
-selection, null semantics, timezone-aware API-key expiry, HTTP errors, request
-validation, and attempted quota bypasses.
+search, historical matchup joins, projections for players with no games, bulk
+projection pagination, independently resolved market comparisons, movement sign
+conventions, entrants/exits, null semantics, timezone-aware API-key expiry, HTTP
+errors, request validation, and attempted quota bypasses.
 
-- Backend: **797 passed, 4 expected legacy-calendar skips** (51 new regressions).
+- Backend: **1,025 passed, 4 expected legacy-calendar skips**.
 - Data-platform unit/API suite: **280 passed** with the disposable test DB. Six
   tests initially required a DB despite their unit/API placement; pointing them
   at the local migrated database resolved those failures.
 - Frontend: OpenAPI and TypeScript regenerated; typecheck and targeted ESLint
-  passed. All 18 developer response examples parse as JSON.
+  passed. All 20 developer response examples parse as JSON.
 - Model mirror: **38 mirrored + 1 renamed pairs identical**.
-- All three repositories pass `git diff --check`.
+- Backend and frontend worktrees pass `git diff --check`.
 
 No production schema, ingestion jobs, credentials, or deployments were changed.

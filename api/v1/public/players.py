@@ -5,7 +5,7 @@ from schemas.player import PlayerStatsResp, PlayerPercentilesResp, PlayerStatusR
 from schemas.players_list import PlayersListResp
 from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
-from schemas.market import PlayerProjectionResp, SeasonKey
+from schemas.market import PlayerProjectionResp, PlayerProjectionsResp, SeasonKey
 from schemas.player_profiles import PlayerProfileResp, PlayerSearchResp
 from services.public_market_service import PublicMarketService
 from services.player_profile_service import PlayerProfileService
@@ -69,6 +69,36 @@ async def get_player_profile(
     player_id: int = Path(..., gt=0, description="NBA player ID"),
 ) -> PlayerProfileResp:
     return respond(await PlayerProfileService.get_profile(player_id=player_id))
+
+
+@router.get(
+    "/projections",
+    response_model=PlayerProjectionsResp,
+    summary="List ESPN preseason player projections",
+    description=(
+        "Return every row from one ESPN projection snapshot, ordered by player name and NBA ID. "
+        "`as_of` selects the newest snapshot on or before that date and the response reports the "
+        "actual snapshot date. Statistics are per-game, shooting rates use a 0–1 scale, and missing "
+        "measurements remain null. An unavailable snapshot returns an empty success response."
+    ),
+    responses={429: {"description": "Rate limit exceeded"}},
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def list_player_projections(
+    request: Request,
+    season: Optional[SeasonKey] = Query(None, description="NBA season; defaults to the configured active season"),
+    as_of: Optional[date] = Query(None, description="Latest snapshot on or before this date; omit for latest"),
+    name: Optional[str] = Query(None, min_length=1, max_length=100, description="Case- and accent-insensitive name search"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+) -> PlayerProjectionsResp:
+    return respond(await PublicMarketService.get_projections(
+        season=season,
+        as_of=as_of,
+        name=name,
+        limit=limit,
+        offset=offset,
+    ))
 
 
 @router.get(

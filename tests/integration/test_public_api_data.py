@@ -267,6 +267,165 @@ def test_projection_omissions_are_empty_and_unknown_players_are_404():
         PublicMarketService.get_projection.__wrapped__(999)
 
 
+def test_bulk_projections_resolve_snapshots_search_accents_and_page_stably():
+    player(1, "Nikola Jokić")
+    player(2, "Aaron Alpha")
+    player(3, "Aaron Alpha")
+    player(4, "Rookie Four")
+    PlayerProjection.record_projection(1, SEASON, OLD, {"pts": 30})
+    PlayerProjection.record_projection(2, SEASON, OLD, {"pts": 10})
+    PlayerProjection.record_projection(1, SEASON, NEW, {"pts": 25, "fgm": 9, "fga": 18})
+    PlayerProjection.record_projection(2, SEASON, NEW, {"pts": 11})
+    PlayerProjection.record_projection(3, SEASON, NEW, {"pts": 12})
+    PlayerProjection.record_projection(
+        4,
+        SEASON,
+        NEW,
+        {"pts": 15, "fg3m": 1, "fg3a": 0},
+        projected_gp=None,
+    )
+
+    response = PublicMarketService.get_projections.__wrapped__(limit=2, offset=1)
+
+    assert response.data.as_of_date == NEW
+    assert response.data.total == 4
+    assert [item.player_id for item in response.data.players] == [3, 1]
+    assert response.data.players[1].stats.fg_pct == 0.5
+    assert response.data.players[1].stats.reb is None
+
+    historical = PublicMarketService.get_projections.__wrapped__(as_of=date(2026, 3, 3))
+    assert historical.data.as_of_date == OLD
+    assert [item.player_id for item in historical.data.players] == [2, 1]
+    assert historical.data.players[1].stats.pts == 30
+
+    searched = PublicMarketService.get_projections.__wrapped__(name="JOKIC")
+    assert [item.player_id for item in searched.data.players] == [1]
+
+    rookie = PublicMarketService.get_projections.__wrapped__(name="Rookie").data.players[0]
+    assert rookie.projected_gp is None
+    assert rookie.stats.fg3_pct is None
+    assert PlayerSeasonStats.select().where(PlayerSeasonStats.player == 4).count() == 0
+
+    empty = PublicMarketService.get_projections.__wrapped__(season="2026-27")
+    assert empty.status == "success"
+    assert empty.data.as_of_date is None and empty.data.players == [] and empty.data.total == 0
+
+
+def test_market_movement_signs_sorting_union_nulls_and_pagination():
+    for pid, name in (
+        (1, "Nikola Jokić"),
+        (2, "Faller Two"),
+        (3, "Exit Three"),
+        (4, "Entry Four"),
+        (5, "Steady Five"),
+        (6, "Riser Six"),
+    ):
+        player(pid, name)
+    DraftMarket.record_market(
+        1,
+        SEASON,
+        OLD,
+        overall_rank=10,
+        adp=20,
+        auction_value=10,
+        auction_value_avg=None,
+    )
+    DraftMarket.record_market(
+        1,
+        SEASON,
+        NEW,
+        overall_rank=5,
+        adp=18,
+        auction_value=12,
+        auction_value_avg=15,
+    )
+    DraftMarket.record_market(2, SEASON, OLD, overall_rank=5, adp=30, auction_value=20)
+    DraftMarket.record_market(2, SEASON, NEW, overall_rank=8, adp=30, auction_value=15)
+    DraftMarket.record_market(3, SEASON, OLD, overall_rank=30, auction_value=1)
+    DraftMarket.record_market(4, SEASON, NEW, overall_rank=40, auction_value=2)
+    DraftMarket.record_market(5, SEASON, OLD, overall_rank=7)
+    DraftMarket.record_market(5, SEASON, NEW, overall_rank=7)
+    DraftMarket.record_market(6, SEASON, OLD, overall_rank=20)
+    DraftMarket.record_market(6, SEASON, NEW, overall_rank=15)
+
+    movement = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=date(2026, 3, 3),
+        to_as_of=date(2026, 3, 5),
+        limit=3,
+        offset=1,
+    )
+
+    assert movement.data.from_as_of_date == OLD
+    assert movement.data.to_as_of_date == NEW
+    assert movement.data.total == 6
+    assert [item.player_id for item in movement.data.players] == [6, 2, 5]
+    by_id = {
+        item.player_id: item
+        for item in PublicMarketService.get_market_movement.__wrapped__(
+            from_as_of=OLD,
+            to_as_of=NEW,
+        ).data.players
+    }
+    assert by_id[1].changes.overall_rank == 5
+    assert by_id[1].changes.adp == 2
+    assert by_id[1].changes.auction_value == 2
+    assert by_id[1].changes.auction_value_avg is None
+    assert by_id[2].changes.overall_rank == -3
+    assert by_id[5].changes.overall_rank == 0
+    assert by_id[3].before is not None and by_id[3].after is None
+    assert by_id[4].before is None and by_id[4].after is not None
+    assert by_id[3].changes.overall_rank is None
+
+    risers = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+        direction="up",
+    )
+    assert [item.player_id for item in risers.data.players] == [1, 6]
+    fallers = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+        direction="down",
+    )
+    assert [item.player_id for item in fallers.data.players] == [2]
+    auction_fallers = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+        metric="auction_value",
+        direction="down",
+    )
+    assert [item.player_id for item in auction_fallers.data.players] == [2]
+    searched = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+        name="JOKIC",
+    )
+    assert [item.player_id for item in searched.data.players] == [1]
+
+
+def test_market_movement_returns_empty_when_two_distinct_snapshots_cannot_resolve():
+    player(1)
+    DraftMarket.record_market(1, SEASON, OLD, overall_rank=10)
+
+    same = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+    )
+    assert same.status == "success"
+    assert same.data.from_as_of_date == same.data.to_as_of_date == OLD
+    assert same.data.players == [] and same.data.total == 0
+    assert "distinct" in same.message
+
+    empty = PublicMarketService.get_market_movement.__wrapped__(
+        from_as_of=OLD,
+        to_as_of=NEW,
+        season="2026-27",
+    )
+    assert empty.status == "success"
+    assert empty.data.from_as_of_date is None and empty.data.to_as_of_date is None
+    assert empty.data.players == []
+
+
 def test_expiring_api_keys_accept_postgres_timezone_aware_timestamps():
     now = datetime.now(timezone.utc)
     raw, _ = APIKey.create_key("future", ["analytics"], expires_at=now + timedelta(days=1))

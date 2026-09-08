@@ -260,6 +260,8 @@ No authentication required. Rate-limited to **100 requests/minute per endpoint p
 | `GET` | `/v1/teams/{team_abbrev}/roster` | Last known season-stat roster, including inactive players |
 | `GET` | `/v1/teams/{team_abbrev}/live-game` | Live, upcoming, or most recent team game |
 | `GET` | `/v1/rankings/espn` | ESPN draft ranks, ADP, auction values, eligibility, injury snapshot; paginated and historical |
+| `GET` | `/v1/rankings/espn/movement` | ESPN rank, ADP, and auction movement between two resolved snapshots |
+| `GET` | `/v1/players/projections` | Paginated ESPN preseason projections from one resolved snapshot |
 | `GET` | `/v1/players/{player_id}/projection` | ESPN projected games and per-game stats, with source and snapshot date |
 | `GET` | `/v1/playoff/bracket` | Playoff bracket for the latest or requested season |
 | `GET` | `/v1/ownership/trending` | Players with significant ownership changes (velocity-ranked) |
@@ -400,7 +402,74 @@ Failures use HTTP 4xx/5xx with a machine-readable `error_code`; empty datasets r
 
 `player_id` and player path parameters are **NBA IDs**; `espn_id` is a distinct ESPN ID. `/players/search` reads the player dimension, so it includes mapped rookies and players without season statistics; `/players/` keeps its existing stats-backed ranking/list contract. Profile timestamps are UTC. A profile's team is the team recorded when that profile snapshot was refreshed, not an authoritative current-roster assignment. Both player-stat routes support `window=season` or `window=lN`. Player-stat shooting/advanced percentages use 0–100; team stats, category rankings, and projections use 0–1. Stored fantasy points use the platform's default scoring weights.
 
-ESPN snapshots accept `season=2026-27` and `as_of=2026-09-01` (newest snapshot on or before the date). They do not fall back across seasons or carry missing players forward from older snapshots. Unknown players return 404; known players without projections return 200 with `data: null`. Market results include mapped rookies even without NBA game stats.
+ESPN snapshots accept `season=2026-27` and `as_of=2026-09-01` (newest snapshot on or before the date). They do not fall back across seasons or carry missing players forward from older snapshots. Unknown players return 404; known players without projections return 200 with `data: null`. Market and projection collections include mapped rookies even without NBA game stats.
+
+Bulk projection example:
+
+```text
+GET /v1/players/projections?season=2026-27&as_of=2026-09-05&name=Jokic&limit=25
+```
+
+```json
+{
+  "status": "success",
+  "message": "ESPN per-game projection snapshot",
+  "data": {
+    "season": "2026-27",
+    "source": "espn",
+    "as_of_date": "2026-09-04",
+    "players": [
+      {
+        "player_id": 203999,
+        "espn_id": 3112335,
+        "name": "Nikola Jokic",
+        "season": "2026-27",
+        "source": "espn",
+        "as_of_date": "2026-09-04",
+        "projected_gp": 72,
+        "stats": {"min": 34.5, "pts": 26.1, "reb": 12.2, "ast": 9.1, "stl": 1.3, "blk": 0.8, "tov": 3.2, "fgm": 10.1, "fga": 17.8, "fg3m": 1.7, "fg3a": 4.3, "ftm": 4.2, "fta": 5.1, "fg_pct": 0.5674, "fg3_pct": 0.3953, "ft_pct": 0.8235}
+      }
+    ],
+    "total": 1,
+    "limit": 25,
+    "offset": 0
+  }
+}
+```
+
+Movement independently resolves both requested dates. Positive rank/ADP changes mean improvement; positive auction changes mean increased value. Players present on only one side have a null observation and null changes.
+
+```text
+GET /v1/rankings/espn/movement?season=2026-27&from_as_of=2026-09-01&to_as_of=2026-09-08&metric=rank&direction=up&limit=25
+```
+
+```json
+{
+  "status": "success",
+  "message": "ESPN draft market movement",
+  "data": {
+    "season": "2026-27",
+    "source": "espn",
+    "from_as_of_date": "2026-09-01",
+    "to_as_of_date": "2026-09-07",
+    "metric": "rank",
+    "direction": "up",
+    "players": [
+      {
+        "player_id": 203999,
+        "espn_id": 3112335,
+        "name": "Nikola Jokic",
+        "before": {"overall_rank": 8, "adp": 7.4, "auction_value": 54.0, "auction_value_avg": 52.1},
+        "after": {"overall_rank": 5, "adp": 5.8, "auction_value": 58.0, "auction_value_avg": 55.2},
+        "changes": {"overall_rank": 3, "adp": 1.6, "auction_value": 4.0, "auction_value_avg": 3.1}
+      }
+    ],
+    "total": 1,
+    "limit": 25,
+    "offset": 0
+  }
+}
+```
 
 See [the public API audit](docs/PUBLIC_API_AUDIT.md) for changes, validation, migration cleanup, and scoped follow-ups.
 
