@@ -11,7 +11,15 @@ from fastapi import Request, Security
 from core import api_key_auth
 from core.rate_limit import get_rate_limit_key, limiter
 from schemas.common import ApiStatus, BaseResponse
-from schemas.market import ESPNMarketData, ESPNMarketResp, PlayerProjectionResp
+from schemas.market import (
+    ESPNMarketData,
+    ESPNMarketMovementData,
+    ESPNMarketMovementResp,
+    ESPNMarketResp,
+    PlayerProjectionResp,
+    PlayerProjectionsData,
+    PlayerProjectionsResp,
+)
 from schemas.player import PlayerStatsResp
 from services.public_market_service import PublicMarketService
 
@@ -100,6 +108,97 @@ def test_projection_empty_state_and_filter_forwarding(client, monkeypatch):
     response = client.get("/v1/players/2544/projection?season=2026-27&as_of=2026-09-03")
     assert response.status_code == 200 and response.json()["data"] is None
     projection.assert_awaited_once_with(player_id=2544, season="2026-27", as_of=date(2026, 9, 3))
+
+
+def test_bulk_projection_route_serializes_dates_and_passes_filters(client, monkeypatch):
+    projections = AsyncMock(return_value=PlayerProjectionsResp(
+        status=ApiStatus.SUCCESS,
+        message="snapshot",
+        data=PlayerProjectionsData(
+            season="2026-27",
+            as_of_date=date(2026, 9, 1),
+            total=0,
+            limit=10,
+            offset=2,
+        ),
+    ))
+    monkeypatch.setattr(PublicMarketService, "get_projections", projections)
+
+    response = client.get(
+        "/v1/players/projections?season=2026-27&as_of=2026-09-03&name=Jokic&limit=10&offset=2"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["as_of_date"] == "2026-09-01"
+    projections.assert_awaited_once_with(
+        season="2026-27",
+        as_of=date(2026, 9, 3),
+        name="Jokic",
+        limit=10,
+        offset=2,
+    )
+
+
+def test_movement_route_serializes_dates_and_passes_filters(client, monkeypatch):
+    movement = AsyncMock(return_value=ESPNMarketMovementResp(
+        status=ApiStatus.SUCCESS,
+        message="movement",
+        data=ESPNMarketMovementData(
+            season="2026-27",
+            from_as_of_date=date(2026, 9, 1),
+            to_as_of_date=date(2026, 9, 4),
+            metric="adp",
+            direction="down",
+            total=0,
+            limit=10,
+            offset=2,
+        ),
+    ))
+    monkeypatch.setattr(PublicMarketService, "get_market_movement", movement)
+
+    response = client.get(
+        "/v1/rankings/espn/movement?from_as_of=2026-09-02&to_as_of=2026-09-05"
+        "&season=2026-27&name=Jokic&metric=adp&direction=down&limit=10&offset=2"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["from_as_of_date"] == "2026-09-01"
+    movement.assert_awaited_once_with(
+        from_as_of=date(2026, 9, 2),
+        to_as_of=date(2026, 9, 5),
+        season="2026-27",
+        name="Jokic",
+        metric="adp",
+        direction="down",
+        limit=10,
+        offset=2,
+    )
+
+
+@pytest.mark.parametrize("path", [
+    "/v1/players/projections?season=bad",
+    "/v1/players/projections?as_of=bad",
+    "/v1/players/projections?limit=101",
+    "/v1/players/projections?offset=-1",
+    "/v1/rankings/espn/movement",
+    "/v1/rankings/espn/movement?from_as_of=2026-09-02&to_as_of=2026-09-02",
+    "/v1/rankings/espn/movement?from_as_of=2026-09-03&to_as_of=2026-09-02",
+    "/v1/rankings/espn/movement?from_as_of=2026-09-01&to_as_of=2026-09-02&metric=raw",
+    "/v1/rankings/espn/movement?from_as_of=2026-09-01&to_as_of=2026-09-02&direction=sideways",
+    "/v1/rankings/espn/movement?from_as_of=2026-09-01&to_as_of=2026-09-02&limit=101",
+])
+def test_bulk_market_parameters_are_validated_before_service_calls(client, monkeypatch, path):
+    projections = AsyncMock()
+    movement = AsyncMock()
+    monkeypatch.setattr(PublicMarketService, "get_projections", projections)
+    monkeypatch.setattr(PublicMarketService, "get_market_movement", movement)
+
+    response = client.get(path)
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] in {"VALIDATION_ERROR", "HTTP_422"}
+    projections.assert_not_awaited()
+    movement.assert_not_awaited()
 
 
 def test_changing_anonymous_api_key_headers_cannot_reset_public_quota(app, client):

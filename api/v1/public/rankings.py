@@ -20,12 +20,60 @@ from core.rate_limit import PUBLIC_RATE_LIMIT, limiter
 from core.responses import respond
 from core.settings import settings
 from schemas.rankings import RankingsResp, RollingWindow
-from schemas.market import ESPNMarketResp, MarketSort, SeasonKey
+from schemas.market import (
+    ESPNMarketMovementResp,
+    ESPNMarketResp,
+    MarketMovementDirection,
+    MarketSort,
+    SeasonKey,
+)
 from services.public_market_service import PublicMarketService
 from services.rankings_service import RankingsService
 from services.scoring.category_rank import RANKABLE_KEYS
 
 router = APIRouter(prefix="/rankings", tags=["Rankings"])
+
+
+@router.get(
+    "/espn/movement",
+    response_model=ESPNMarketMovementResp,
+    summary="Compare ESPN draft-market snapshots",
+    description=(
+        "Compare the union of players in two independently resolved ESPN market snapshots. "
+        "Each selector uses the newest snapshot on or before its date. Positive rank and ADP "
+        "changes mean an earlier, improved position; positive auction changes mean an increase. "
+        "Entrants, exits, and missing measurements remain null instead of becoming zero. If the "
+        "selectors cannot resolve two distinct snapshots, the response is a successful empty collection."
+    ),
+    responses={
+        422: {"description": "Invalid date order, metric, direction, or pagination"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_espn_market_movement(
+    request: Request,
+    from_as_of: date = Query(..., description="Resolve the before snapshot on or before this date"),
+    to_as_of: date = Query(..., description="Resolve the after snapshot on or before this date"),
+    season: Optional[SeasonKey] = Query(None, description="NBA season; defaults to the configured active season"),
+    name: Optional[str] = Query(None, min_length=1, max_length=100, description="Case- and accent-insensitive name search"),
+    metric: MarketSort = Query("rank", description="Metric used to filter and order movement"),
+    direction: MarketMovementDirection = Query("both", description="Return risers, fallers, or both"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+) -> ESPNMarketMovementResp:
+    if from_as_of >= to_as_of:
+        raise HTTPException(status_code=422, detail="from_as_of must be before to_as_of")
+    return respond(await PublicMarketService.get_market_movement(
+        from_as_of=from_as_of,
+        to_as_of=to_as_of,
+        season=season,
+        name=name,
+        metric=metric,
+        direction=direction,
+        limit=limit,
+        offset=offset,
+    ))
 
 
 @router.get(

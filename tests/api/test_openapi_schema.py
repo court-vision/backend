@@ -99,6 +99,26 @@ class TestEnvelopeFieldsAreRequired:
 
 
 @pytest.mark.api
+class TestBulkMarketContracts:
+    @pytest.mark.parametrize("path,ref", [
+        ("/v1/players/projections", "PlayerProjectionsResp"),
+        ("/v1/rankings/espn/movement", "ESPNMarketMovementResp"),
+    ])
+    def test_new_reads_have_concrete_response_schemas(self, paths, path, ref):
+        schema = _response_schema(paths, path)
+        assert schema is not None
+        assert schema.get("$ref", "").endswith(f"/{ref}"), schema
+
+    def test_movement_dates_are_required_query_parameters(self, paths):
+        parameters = {
+            parameter["name"]: parameter
+            for parameter in paths["/v1/rankings/espn/movement"]["get"]["parameters"]
+        }
+        assert parameters["from_as_of"]["required"] is True
+        assert parameters["to_as_of"]["required"] is True
+
+
+@pytest.mark.api
 class TestSchemaNamesDoNotCollide:
     """Two models with one class name make the export non-deterministic.
 
