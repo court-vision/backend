@@ -37,6 +37,10 @@ UNTOUCHABLE_SLOT_IDS: frozenset[int] = frozenset({14, 15})
 # Mirrors services.team_insights_service._OUT_STATUSES; DTD / GTD / QUESTIONABLE
 # / DOUBTFUL count as healthy — ESPN still scores them if they play.
 OUT_STATUSES: frozenset[str] = frozenset({"OUT", "O", "IL", "IL+", "SUSPENSION", "INJURY_RESERVE"})
+# ESPN's IR rule asks whether the player is *injured*, not whether he can play: a
+# suspension keeps him out of the lineup but the transaction is still refused with
+# TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED, so it must not open slot 13.
+IR_STATUSES: frozenset[str] = OUT_STATUSES - {"SUSPENSION"}
 
 TIER_A, TIER_B, TIER_C = 0, 1, 2
 MAX_CHAIN_HOPS = 4  # filler + up to three shifts + the evicted player
@@ -53,10 +57,21 @@ class PlannerPlayer:
     locked: bool
     value: float = 0.0
     game_note: Optional[str] = None  # "vs LAL · 7:30 PM", supplied by the caller for move notes
+    injured: bool = False            # ESPN's `injured` flag — its IR rule ("player is not injured")
 
     @property
     def is_out(self) -> bool:
         return (self.injury_status or "ACTIVE").upper() in OUT_STATUSES
+
+    @property
+    def ir_eligible(self) -> bool:
+        """ESPN lists slot 13 in every player's eligibleSlots and enforces "must be
+        injured" only when the transaction lands (TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED),
+        so IR eligibility is the injury flag, not the slot list. A suspension is not an
+        injury: `is_out` would let it through, IR_STATUSES does not."""
+        if IR_SLOT_ID not in self.eligible_slot_ids:
+            return False
+        return self.injured or (self.injury_status or "ACTIVE").upper() in IR_STATUSES
 
     @property
     def tier(self) -> int:
@@ -272,6 +287,22 @@ def _summary(moves: Sequence[Move], unfilled: Sequence[Unfilled], names: Mapping
     return text
 
 
+def _slot_label(slot_id: int) -> str:
+    from utils.espn_helpers import POSITION_MAP  # a plain dict; the planner stays I/O-free
+    label = POSITION_MAP.get(slot_id)
+    return label if isinstance(label, str) and label else str(slot_id)
+
+
+def _ineligible_message(player: PlannerPlayer, to_slot_id: int) -> str:
+    """Why a move is refused before it reaches ESPN. Eligibility is ESPN's own list
+    (`eligibleSlots`); IR appears on it only for players ESPN has marked OUT."""
+    if to_slot_id == IR_SLOT_ID:
+        return f"{player.name} can't go on IR — ESPN only allows players it lists as injured (OUT) there"
+    eligible = [_slot_label(s) for s in sorted(player.eligible_slot_ids) if s in ACTIVE_SLOT_IDS]
+    where = f" (eligible: {', '.join(eligible)})" if eligible else ""
+    return f"{player.name} isn't eligible at {_slot_label(to_slot_id)}{where}"
+
+
 def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int],
                    moves: Sequence[Move]) -> list[MoveError]:
     """Why a user-submitted set of moves cannot be sent as one ESPN transaction (empty = fine)."""
@@ -300,8 +331,10 @@ def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, i
         if player.locked:
             errors.append(MoveError(m.player_id, "LOCKED", f"{player.name} is locked (game started)"))
             continue
-        if m.to_slot_id != BENCH_SLOT_ID and m.to_slot_id not in player.eligible_slot_ids:
-            errors.append(MoveError(m.player_id, "INELIGIBLE", f"{player.name} is not eligible for that slot"))
+        eligible = (player.ir_eligible if m.to_slot_id == IR_SLOT_ID
+                    else m.to_slot_id == BENCH_SLOT_ID or m.to_slot_id in player.eligible_slot_ids)
+        if not eligible:
+            errors.append(MoveError(m.player_id, "INELIGIBLE", _ineligible_message(player, m.to_slot_id)))
             continue
     if errors:
         return errors

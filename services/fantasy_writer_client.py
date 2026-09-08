@@ -12,6 +12,7 @@ caller re-reads the roster to learn what happened.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -30,11 +31,13 @@ log = get_logger("fantasy_writer")
 class FantasyWriterError(Exception):
     """Base: the writer answered, or failed to, without ESPN accepting the transaction."""
 
-    def __init__(self, message: str, *, espn_status: Optional[int] = None, excerpt: Optional[str] = None):
+    def __init__(self, message: str, *, espn_status: Optional[int] = None, excerpt: Optional[str] = None,
+                 espn_error_code: Optional[str] = None):
         super().__init__(message)
         self.message = message
         self.espn_status = espn_status
         self.excerpt = excerpt
+        self.espn_error_code = espn_error_code
 
 
 class FantasyWriterRejected(FantasyWriterError):
@@ -108,6 +111,36 @@ def _headers() -> dict[str, str]:
     return headers
 
 
+def espn_error(body: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """(message, code) from a writer answer. The writer relays what it parsed as
+    `espn_message` / `espn_error_code`; failing that, ESPN's own error body is JSON
+    shaped {"messages": [...], "details": [{"shortMessage", "type", ...}]} and is
+    read from the excerpt, so the user sees prose, never the raw dict."""
+    message, code = body.get("espn_message"), body.get("espn_error_code")
+    if message:
+        return message, code
+    excerpt = body.get("espn_body_excerpt")
+    if isinstance(excerpt, str) and excerpt.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(excerpt)
+        except ValueError:
+            return None, code
+        # ESPN's body is not a contract: every field is checked before it is indexed,
+        # or a malformed one would raise here and mask the rejection we are describing.
+        details = parsed.get("details")
+        first = details[0] if isinstance(details, list) and details and isinstance(details[0], dict) else {}
+        messages = parsed.get("messages")
+        candidates = [first.get("shortMessage"), first.get("message")]
+        if isinstance(messages, list):
+            candidates.extend(messages)
+        message = next((c.strip() for c in candidates if isinstance(c, str) and c.strip()), None)
+        kind = first.get("type")
+        return message, (code or (kind if isinstance(kind, str) else None))
+    if isinstance(excerpt, str) and excerpt.strip() and len(excerpt) <= 200:
+        return excerpt.strip(), code  # a short plain-text body is still ESPN's own words
+    return None, code
+
+
 def _parse(response: httpx.Response) -> dict[str, Any]:
     try:
         body = response.json()
@@ -155,7 +188,9 @@ async def apply_lineup(payload: dict[str, Any]) -> WriterResult:
     if response.status_code == 200 and body.get("ok"):
         return WriterResult(True, response.status_code, espn_status, excerpt, bool(body.get("idempotent_replay")))
     if response.status_code == 409:
-        raise FantasyWriterRejected(excerpt or "ESPN rejected the lineup change", espn_status=espn_status, excerpt=excerpt)
+        message, code = espn_error(body)
+        raise FantasyWriterRejected(message or "ESPN rejected the lineup change", espn_status=espn_status,
+                                    excerpt=excerpt, espn_error_code=code)
     if response.status_code == 403:
         raise FantasyWriterAuthRejected("ESPN no longer accepts the stored credentials", espn_status=espn_status, excerpt=excerpt)
     if response.status_code == 422:

@@ -62,6 +62,61 @@ def test_409_is_a_rejection_carrying_espn_text(writer):
     assert exc.value.espn_status == 400 and exc.value.message == "Invalid selection"
 
 
+ESPN_IR_BODY = ('{"messages":["Austin Reaves is not eligible for the IL/IR slot, player is not injured."],'
+                '"details":[{"message":"Austin Reaves is not eligible for the IL/IR slot, player is not injured.",'
+                '"shortMessage":"Austin Reaves is not eligible for the IL/IR slot, player is not injured.",'
+                '"resolution":null,"type":"TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED","metaData":null}]}')
+
+
+@pytest.mark.unit
+def test_409_with_espn_json_excerpt_becomes_prose(writer):
+    """The first captured ESPN rejection (2026-09-08): the user must see the sentence, not the dict."""
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED", "http_status": 400,
+                                                     "espn_body_excerpt": ESPN_IR_BODY}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_lineup(PAYLOAD))
+    assert exc.value.message == "Austin Reaves is not eligible for the IL/IR slot, player is not injured."
+    assert exc.value.espn_error_code == "TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED"
+    assert exc.value.excerpt == ESPN_IR_BODY  # the raw body is kept for the audit row, not the user
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("excerpt", [
+    '{"details":1}',                       # truthy but not a list -> details[0] used to raise TypeError
+    '{"details":{"shortMessage":"x"}}',    # a dict -> details[0] used to raise KeyError
+    '{"messages":7}',
+    '{"details":[],"messages":[]}',
+    '{"details":[{"shortMessage":"","message":"  "}],"messages":[""]}',
+])
+def test_a_malformed_espn_body_yields_no_prose_instead_of_raising(writer, excerpt):
+    """ESPN's error body is not a contract; parsing it must never mask the rejection."""
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED",
+                                                     "http_status": 400, "espn_body_excerpt": excerpt}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_lineup(PAYLOAD))
+    assert exc.value.espn_status == 400 and exc.value.excerpt == excerpt
+
+
+@pytest.mark.unit
+def test_an_empty_short_message_falls_through_to_the_next_candidate(writer):
+    excerpt = '{"details":[{"shortMessage":"","message":"Roster is locked."}]}'
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED",
+                                                     "http_status": 400, "espn_body_excerpt": excerpt}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_lineup(PAYLOAD))
+    assert exc.value.message == "Roster is locked."
+
+
+@pytest.mark.unit
+def test_409_prefers_the_writers_parsed_fields(writer):
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED", "http_status": 400,
+                                                     "espn_message": "Locked.", "espn_error_code": "TRAN_X",
+                                                     "espn_body_excerpt": ESPN_IR_BODY}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_lineup(PAYLOAD))
+    assert (exc.value.message, exc.value.espn_error_code) == ("Locked.", "TRAN_X")
+
+
 @pytest.mark.unit
 def test_403_means_the_cookies_are_dead(writer):
     writer.responses.append(httpx.Response(403, json={"ok": False, "error_code": "ESPN_AUTH_REJECTED", "http_status": 401}))
