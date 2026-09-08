@@ -6,7 +6,9 @@ from schemas.players_list import PlayersListResp
 from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
 from schemas.market import PlayerProjectionResp, SeasonKey
+from schemas.player_profiles import PlayerProfileResp, PlayerSearchResp
 from services.public_market_service import PublicMarketService
+from services.player_profile_service import PlayerProfileService
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 from services.player_games_service import PlayerGamesService
@@ -16,6 +18,57 @@ from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from core.responses import respond
 
 router = APIRouter(prefix="/players", tags=["Players"])
+
+
+@router.get(
+    "/search",
+    response_model=PlayerSearchResp,
+    summary="Search the player directory",
+    description=(
+        "Search the NBA player dimension rather than season statistics. Results include mapped rookies "
+        "and players without games, with NBA/ESPN identities and profile freshness timestamps."
+    ),
+    responses={
+        200: {"description": "Players retrieved successfully"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def search_players(
+    request: Request,
+    q: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r".*\S.*",
+        description="Player name, NBA ID, or ESPN ID",
+    ),
+    limit: int = Query(10, ge=1, le=50, description="Maximum results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+) -> PlayerSearchResp:
+    return respond(await PlayerProfileService.search_players(q=q, limit=limit, offset=offset))
+
+
+@router.get(
+    "/{player_id}/profile",
+    response_model=PlayerProfileResp,
+    summary="Get a player's profile",
+    description=(
+        "Return NBA/ESPN identity fields and the latest biographical profile snapshot. "
+        "A known player whose profile has not been ingested returns data with profile=null."
+    ),
+    responses={
+        200: {"description": "Player profile retrieved successfully"},
+        404: {"description": "Player not found"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_profile(
+    request: Request,
+    player_id: int = Path(..., gt=0, description="NBA player ID"),
+) -> PlayerProfileResp:
+    return respond(await PlayerProfileService.get_profile(player_id=player_id))
 
 
 @router.get(

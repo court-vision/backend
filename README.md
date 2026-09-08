@@ -245,7 +245,9 @@ No authentication required. Rate-limited to **100 requests/minute per endpoint p
 |---|---|---|
 | `GET` | `/v1/rankings/` | Fantasy player rankings (full season or rolling N-day window) |
 | `GET` | `/v1/players/` | List NBA players with optional filters (team, position, name) |
+| `GET` | `/v1/players/search` | Search the complete player dimension by name, NBA ID, or ESPN ID |
 | `GET` | `/v1/players/stats` | Player stats by ESPN ID, NBA ID, or name+team |
+| `GET` | `/v1/players/{player_id}/profile` | Player identity and latest biographical profile snapshot |
 | `GET` | `/v1/players/{player_id}/stats` | Player stats by NBA player ID |
 | `GET` | `/v1/players/{player_id}/games` | Recent game log (box scores) |
 | `GET` | `/v1/players/{player_id}/trends` | Performance trends and ownership change |
@@ -396,7 +398,7 @@ All endpoints follow the `BaseApiResponse<T>` pattern:
 
 Failures use HTTP 4xx/5xx with a machine-readable `error_code`; empty datasets remain 200 successes. Rate-limited responses include `Retry-After`. Database unavailability is 503, provider errors 502/504.
 
-`player_id` and player path parameters are **NBA IDs**; `espn_id` is a distinct ESPN ID. Both player-stat routes support `window=season` or `window=lN`. Player-stat shooting/advanced percentages use 0–100; team stats, category rankings, and projections use 0–1. Stored fantasy points use the platform's default scoring weights.
+`player_id` and player path parameters are **NBA IDs**; `espn_id` is a distinct ESPN ID. `/players/search` reads the player dimension, so it includes mapped rookies and players without season statistics; `/players/` keeps its existing stats-backed ranking/list contract. Profile timestamps are UTC. A profile's team is the team recorded when that profile snapshot was refreshed, not an authoritative current-roster assignment. Both player-stat routes support `window=season` or `window=lN`. Player-stat shooting/advanced percentages use 0–100; team stats, category rankings, and projections use 0–1. Stored fantasy points use the platform's default scoring weights.
 
 ESPN snapshots accept `season=2026-27` and `as_of=2026-09-01` (newest snapshot on or before the date). They do not fall back across seasons or carry missing players forward from older snapshots. Unknown players return 404; known players without projections return 200 with `data: null`. Market results include mapped rookies even without NBA game stats.
 

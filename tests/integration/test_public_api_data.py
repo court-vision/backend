@@ -12,6 +12,7 @@ from db.models.api_keys import APIKey
 from db.models.nba.draft_market import DraftMarket
 from db.models.nba.games import Game
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
@@ -20,6 +21,7 @@ from db.models.nba.teams import NBATeam
 from services.nba_team_live_game_service import _get_team_player_ids
 from services.nba_team_roster_service import NBATeamRosterService
 from services.player_games_service import PlayerGamesService
+from services.player_profile_service import PlayerProfileService
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 from services.public_market_service import PublicMarketService
@@ -77,6 +79,76 @@ def test_player_list_uses_fresh_league_ranks_and_accent_search():
     assert response.data.players[0].rank == 1
     assert response.data.season == SEASON
     assert response.data.as_of_date == NEW.isoformat()
+
+
+@freeze_time("2026-09-07T12:30:00Z")
+def test_dimension_search_includes_mapped_players_without_season_stats():
+    rookie = player(1, "Rookie One")
+    player(2, "Rookie Two")
+    profile_updated_at = datetime(2026, 9, 7, 12, 30)
+    PlayerProfile.create(
+        player=rookie,
+        first_name="Rookie",
+        last_name="One",
+        position="F",
+        team="LAL",
+        updated_at=profile_updated_at,
+    )
+
+    response = PlayerProfileService.search_players.__wrapped__("rookie")
+
+    assert response.status == "success"
+    assert [item.id for item in response.data.players] == [1, 2]
+    assert response.data.players[0].espn_id == 9001
+    assert response.data.players[0].team == "LAL"
+    assert response.data.players[0].profile_updated_at.isoformat() == "2026-09-07T12:30:00+00:00"
+    assert response.data.players[1].profile_updated_at is None
+    assert PlayersListService.list_players.__wrapped__().data.players == []
+
+
+def test_dimension_search_matches_accents_and_both_identifier_systems():
+    player(1, "Nikola Jokić")
+    search = PlayerProfileService.search_players.__wrapped__
+
+    assert search("jokic").data.players[0].id == 1
+    assert search("1").data.players[0].id == 1
+    assert search("9001").data.players[0].id == 1
+
+
+def test_profile_exposes_identity_snapshot_and_allows_a_missing_profile():
+    profiled = player(1, "Rookie One")
+    player(2, "Rookie Two")
+    PlayerProfile.create(
+        player=profiled,
+        first_name="Rookie",
+        last_name="One",
+        birthdate=date(2005, 1, 1),
+        height="6-8",
+        weight=205,
+        position="F",
+        jersey_number="2",
+        team="LAL",
+        draft_year=2026,
+        draft_round=1,
+        draft_number=1,
+        season_exp=0,
+        country="USA",
+        school="Example University",
+        from_year=2026,
+        to_year=2026,
+        updated_at=datetime(2026, 9, 7, 12, 30),
+    )
+
+    response = PlayerProfileService.get_profile.__wrapped__(1)
+
+    assert response.data.id == 1 and response.data.espn_id == 9001
+    assert response.data.updated_at.tzinfo == timezone.utc
+    assert response.data.profile.height_inches == 80
+    assert response.data.profile.team == "LAL"
+    assert response.data.profile.updated_at.tzinfo == timezone.utc
+    assert PlayerProfileService.get_profile.__wrapped__(2).data.profile is None
+    with pytest.raises(NotFoundError):
+        PlayerProfileService.get_profile.__wrapped__(999)
 
 
 def test_roster_and_list_disclose_previous_season_fallback(monkeypatch):

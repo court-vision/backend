@@ -53,11 +53,32 @@ null. A known player without a projection returns 200 with `data: null`; unknown
 players return 404. Projection percentages use 0–1. These routes expose curated
 fields, not raw provider payloads, pipeline IDs, or private draft/league state.
 
+## Completed follow-up — dimension player directory
+
+Completed September 7, 2026:
+
+- `GET /v1/players/search`: accent-insensitive name search plus exact NBA/ESPN
+  ID lookup over `nba.players`, with bounded pagination and stable ordering. It
+  does not join season-stat facts, so mapped rookies and players without games
+  are included. Results carry player/profile freshness timestamps.
+- `GET /v1/players/{player_id}/profile`: NBA/ESPN identity, dimension timestamps,
+  and the latest `nba.player_profiles` biography. Known identities without an
+  ingested profile return 200 with `profile: null`; unknown NBA IDs return 404.
+
+The existing `GET /v1/players/` contract remains stats-backed and unchanged.
+Profile team values are labeled as snapshot metadata rather than authoritative
+current-roster assignments; roster provenance remains a separate follow-up.
+The complete backend suite passes with 898 tests and 4 expected legacy-calendar
+skips, including the PostgreSQL integration suite. The refreshed OpenAPI
+snapshot generates cleanly and the frontend typecheck passes.
+
 Example requests:
 
 ```text
 /v1/rankings/espn?season=2026-27&sort_by=adp&limit=25
 /v1/rankings/espn?season=2026-27&as_of=2026-09-01&name=Jokic
+/v1/players/search?q=Jokic&limit=10
+/v1/players/203999/profile
 /v1/players/203999/projection?season=2026-27
 /v1/players/203999/stats?window=l10
 ```
@@ -86,7 +107,6 @@ These need no new provider ingestion unless noted:
 
 | Priority | Addition | Scope and acceptance criteria |
 |---|---|---|
-| Next | Dimension-based player search and profiles | Expose `nba.players`/`player_profiles`, with NBA/ESPN IDs and profile timestamps. Search must include mapped rookies and players without season stats. Keep the existing stats-backed list contract. |
 | Next | Bulk projections and market movement | A paginated projections collection and drift between two explicit snapshots. Missing observations must stay unknown, not become zero rank/ADP. Reuse the new snapshot/units contract. |
 | Next | Team roster provenance | Evaluate `player_profiles.team_id` and its update cadence against season-stat assignments. Define when profile data is authoritative before using it for current rosters. The current route deliberately reports last known statistical membership. |
 | Later | Advanced-stat comparison | Advanced player stats are already embedded in `/players/stats`; a bounded batch comparison endpoint can reuse them. Specify season/freshness and percent units before adding another representation. |
