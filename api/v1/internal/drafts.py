@@ -50,7 +50,7 @@ from services.draft_mock_service import DraftMockService
 from services.draft_recap_service import DraftRecapService
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
-from services.scoring.resolver import resolve_scoring
+from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
 
@@ -243,7 +243,7 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
 )
 async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(get_owned_session)):
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
-    scoring = resolve_scoring(session.league)
+    scoring = resolve_scoring_for_room(session.league, session.scoring_format)
     return respond(await DraftBoardService.get_board(scoring, session=BoardSession.of(session)))
 
 
@@ -389,7 +389,7 @@ async def advance_mock_draft(
 )
 async def get_draft_recap(session: OwnedDraftSessionContext = Depends(get_owned_session)):
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
-    scoring = resolve_scoring(session.league)
+    scoring = resolve_scoring_for_room(session.league, session.scoring_format)
     return respond(await DraftRecapService.get_recap(scoring, session))
 
 

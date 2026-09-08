@@ -37,6 +37,7 @@ class DraftSession(BaseModel):
     rounds = IntegerField(null=True)
     keepers = BinaryJSONField(default=list)                 # pre-designated keepers [{player_id?, espn_player_id?, name, slot?}]
     punts = BinaryJSONField(default=list)                   # category keys this room concedes, e.g. ["ft_pct", "tov"]
+    scoring_format = CharField(max_length=16, null=True)    # points | categories, for a room with no league to inherit one from
     started_at = DateTimeField(null=True)
     completed_at = DateTimeField(null=True)
     created_at = DateTimeField(default=datetime.utcnow)

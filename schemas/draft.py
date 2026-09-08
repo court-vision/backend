@@ -18,6 +18,7 @@ PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
 # recap both read, so it is written by the server or not at all.
 ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
 MockUntil = Literal["my_turn", "end"]
+ScoringFormat = Literal["points", "categories"]
 MockStopReason = Literal["my_turn", "end", "pool_exhausted", "cap_blocked"]
 
 
@@ -64,11 +65,28 @@ class DraftSessionCreate(BaseRequest):
     my_slot: Optional[int] = Field(default=None, ge=1, description="1-based slot the caller drafts from")
     rounds: Optional[int] = Field(default=None, ge=1, le=40, description="Defaults to the league's draftable roster size")
     keepers: List[DraftKeeper] = []
+    scoring_format: Optional[ScoringFormat] = Field(
+        default=None,
+        description=(
+            "What a room with no team drafts for: `points` (the default) or `categories`, the "
+            "standard 9-cat. Rejected with a `team_id` — a room that has a league takes that "
+            "league's format, and the team's `scoring_preview` is how that one is overridden."
+        ),
+    )
 
     @model_validator(mode="after")
     def _live_follows_a_team(self) -> "DraftSessionCreate":
         if self.kind == "live" and self.team_id is None:
             raise ValueError("a live room needs a team_id: it follows that team's own ESPN draft")
+        return self
+
+    @model_validator(mode="after")
+    def _format_only_without_a_team(self) -> "DraftSessionCreate":
+        if self.scoring_format is not None and self.team_id is not None:
+            raise ValueError(
+                "scoring_format is only for a room with no team; a room with one drafts for its "
+                "league's format (set the team's scoring_preview to override that)"
+            )
         return self
 
 
@@ -186,6 +204,13 @@ class DraftSessionResp(ApiModel):
     punts: List[str] = Field(
         default=[],
         description="Category keys this room concedes; they weigh 0 in the board's fit column",
+    )
+    scoring_format: Optional[ScoringFormat] = Field(
+        default=None,
+        description=(
+            "The format a league-less room drafts for; null when the room takes its league's "
+            "format instead (or when a league-less room drafts for points, the default)"
+        ),
     )
     league_size: Optional[int] = Field(default=None, description="Teams in the draft: len(pick_order) when known")
     keeper_count: Optional[int] = Field(default=None, description="Keepers the league allows, from its draft settings")

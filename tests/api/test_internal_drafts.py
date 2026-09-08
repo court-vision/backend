@@ -15,6 +15,7 @@ import pytest
 from core.errors import ConflictError
 from schemas.common import ApiStatus
 from schemas.draft import DraftBoardMeta, DraftBoardResp, DraftBoardRow, DraftSessionResp
+from services.scoring.vocab import DEFAULT_CATEGORIES
 
 NINE_CAT = [
     {"key": k, "label": k.upper(), "higher_is_better": k != "tov", "is_rate": k.endswith("_pct")}
@@ -249,6 +250,31 @@ def test_create_rejects_invalid_bodies(authed_client, draft_service, monkeypatch
 
 
 @pytest.mark.api
+def test_create_carries_the_format_a_team_less_room_asked_for(authed_client, draft_service, monkeypatch):
+    _own(monkeypatch)
+
+    res = authed_client.post("/v1/internal/drafts", json={"kind": "mock", "scoring_format": "categories"})
+
+    assert res.status_code == 200
+    assert draft_service[0][1][1].scoring_format == "categories"
+
+
+@pytest.mark.api
+def test_a_format_beside_a_team_is_a_422(authed_client, draft_service, monkeypatch):
+    """A room with a team already has an answer -- its league's, overridden by
+    that team's `scoring_preview`. Taking a second one here would make the room
+    disagree with the rankings the same league draws."""
+    _own(monkeypatch)
+
+    res = authed_client.post(
+        "/v1/internal/drafts", json={"team_id": 7, "scoring_format": "categories"}
+    )
+
+    assert res.status_code == 422
+    assert draft_service == []
+
+
+@pytest.mark.api
 def test_list_is_scoped_to_the_caller(authed_client, draft_service, monkeypatch):
     _own(monkeypatch)
 
@@ -392,6 +418,40 @@ def test_the_session_board_resolves_scoring_from_the_sessions_league(authed_clie
     assert call["picked"] == set() and call["mine"] == set()
     assert call["session"].session_id == 12 and call["session"].league_size == 10
     assert call["session"].my_slot == 3 and call["session"].rounds == 13
+
+
+@pytest.mark.api
+def test_a_league_less_room_boards_for_the_format_it_was_created_with(authed_client, service, monkeypatch):
+    """A room with no team has no league to inherit a format from. Before it
+    could say so it resolved to points every time, which is why a mock could
+    never practise a 9-cat draft."""
+    _own_session(monkeypatch, team_id=None, league_id=None, league=None,
+                 kind="mock", scoring_format="categories")
+
+    assert authed_client.get("/v1/internal/drafts/12/board").status_code == 200
+
+    scoring = service["calls"][0]["scoring"]
+    assert scoring.is_categories
+    assert [c.key for c in scoring.categories.categories] == list(DEFAULT_CATEGORIES)
+
+
+@pytest.mark.api
+def test_a_league_less_room_still_defaults_to_points(authed_client, service, monkeypatch):
+    _own_session(monkeypatch, team_id=None, league_id=None, league=None, kind="mock")
+
+    assert authed_client.get("/v1/internal/drafts/12/board").status_code == 200
+    assert not service["calls"][0]["scoring"].is_categories
+
+
+@pytest.mark.api
+def test_a_room_with_a_league_ignores_no_format_because_it_cannot_carry_one(authed_client, service, monkeypatch):
+    """The format is exclusive to league-less rooms all the way down: the
+    schema refuses it beside a `team_id` and the 0021 CHECK refuses to store
+    it beside a league, so a room with one always resolves from the league."""
+    _own_session(monkeypatch, league=_league(scoring_type="points", point_weights={"pts": 2.0}))
+
+    assert authed_client.get("/v1/internal/drafts/12/board").status_code == 200
+    assert not service["calls"][0]["scoring"].is_categories
 
 
 @pytest.mark.api

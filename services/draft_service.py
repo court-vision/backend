@@ -51,7 +51,7 @@ from schemas.draft import (
 )
 from services.draft_fit import normalize_punts
 from services.scoring.category_value import rankable_categories
-from services.scoring.resolver import resolve_scoring, resolve_scoring_for_team
+from services.scoring.resolver import resolve_scoring_for_room, resolve_scoring_for_team
 
 # Roster slots that are not drafted for: the injury slot is filled from the
 # roster, never from the draft board.
@@ -316,13 +316,16 @@ def clean_name(name: Optional[str]) -> Optional[str]:
 def punt_options(session: DraftSession) -> list[str]:
     """The category keys this room can concede.
 
-    Resolved exactly as the board resolves its scoring, team preview included:
-    a points league viewed as 9-cat *is* showing categories, so punting them is
-    meaningful. Empty for a points-scored room, which has nothing to punt.
+    Resolved exactly as the board resolves its scoring, team preview and the
+    room's own `scoring_format` included: a points league viewed as 9-cat *is*
+    showing categories, and so is a league-less room created as one, so punting
+    them is meaningful. Empty for a points-scored room, which has nothing to punt.
     """
     scoring = (
         resolve_scoring_for_team(session.team_id) if session.team_id is not None
-        else resolve_scoring(session.league if session.league_id is not None else None)
+        else resolve_scoring_for_room(
+            session.league if session.league_id is not None else None, session.scoring_format
+        )
     )
     if not scoring.is_categories:
         return []
@@ -591,6 +594,7 @@ def _session_resp(
         rounds=session.rounds,
         keepers=_keepers_of(session),
         punts=[str(k) for k in (session.punts or []) if isinstance(k, str)],
+        scoring_format=session.scoring_format,
         league_size=league_size,
         keeper_count=keeper_count,
         total_picks=total_picks,
@@ -655,6 +659,9 @@ class DraftService:
                 my_slot=req.my_slot,
                 rounds=rounds,
                 keepers=_stored_keepers(req.keepers),
+                # Only ever set on a league-less room -- the schema rejects it
+                # alongside a team, and the 0021 CHECK is the backstop.
+                scoring_format=req.scoring_format,
             )
         except IntegrityError as exc:
             # Two live rooms for one league racing past the check above: the

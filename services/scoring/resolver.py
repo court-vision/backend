@@ -118,6 +118,23 @@ def _preview_of(league_info_json: Optional[str]) -> Optional[str]:
     return LeagueService.preview_of(league_info_json)
 
 
+def resolve_scoring_for_room(
+    league: Optional["League"], room_format: Optional[str] = None
+) -> ResolvedScoring:
+    """Scoring for a draft room.
+
+    A room with a league takes that league's format -- the team's
+    `scoring_preview` included, already applied by whoever loaded the league
+    (`get_owned_session`, `resolve_scoring_for_team`). A room with no league has
+    nothing to inherit, so it uses the format it was created with: `points`
+    unless it asked for the standard 9-cat. The two are exclusive by database
+    constraint, which is what keeps a room from having two answers.
+    """
+    if league is not None:
+        return resolve_scoring(league)
+    return resolve_scoring(None, room_format)
+
+
 def resolve_scoring_for_team(team_id: int | None) -> ResolvedScoring:
     if team_id is None:
         return resolve_scoring(None)
