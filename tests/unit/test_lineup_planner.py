@@ -263,6 +263,21 @@ def test_ir_needs_an_injured_player_not_just_the_slot_in_the_list():
 
 
 @pytest.mark.unit
+def test_a_suspension_is_not_an_injury_so_it_does_not_open_ir():
+    """SUSPENSION sits in OUT_STATUSES for tiering, but ESPN still refuses the IR move."""
+    everyone_ir = frozenset({PG, UT, IR, BE})
+    suspended = player(8, UT, everyone_ir, status="SUSPENSION")
+    assert suspended.is_out is True and suspended.ir_eligible is False   # unavailable, not injured
+    errors = validate_moves(full_lineup({8: suspended}), SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)])
+    assert codes(errors) == ["INELIGIBLE"] and "injured" in errors[0].message
+
+    # ESPN's own flag still wins: a suspended player it also marks injured may go on IR.
+    also_hurt = PlannerPlayer(8, "P8", UT, everyone_ir, True, "SUSPENSION", False, 10.0, injured=True)
+    assert also_hurt.ir_eligible is True
+    assert validate_moves(full_lineup({8: also_hurt}), SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)]) == []
+
+
+@pytest.mark.unit
 def test_capacity_holds_after_a_three_move_chain():
     roster = full_lineup({5: player(5, C, frozenset({C, UT, BE})), 13: player(13, BE, frozenset({C, BE}))})
     chain = [Move(13, BE, C), Move(5, C, UT), Move(8, UT, BE)]

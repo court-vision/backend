@@ -125,11 +125,17 @@ def espn_error(body: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
             parsed = json.loads(excerpt)
         except ValueError:
             return None, code
-        details = parsed.get("details") or []
-        first = details[0] if details and isinstance(details[0], dict) else {}
-        messages = parsed.get("messages") or []
-        message = first.get("shortMessage") or first.get("message") or (messages[0] if messages else None)
-        return (message or None), (code or first.get("type"))
+        # ESPN's body is not a contract: every field is checked before it is indexed,
+        # or a malformed one would raise here and mask the rejection we are describing.
+        details = parsed.get("details")
+        first = details[0] if isinstance(details, list) and details and isinstance(details[0], dict) else {}
+        messages = parsed.get("messages")
+        candidates = [first.get("shortMessage"), first.get("message")]
+        if isinstance(messages, list):
+            candidates.extend(messages)
+        message = next((c.strip() for c in candidates if isinstance(c, str) and c.strip()), None)
+        kind = first.get("type")
+        return message, (code or (kind if isinstance(kind, str) else None))
     if isinstance(excerpt, str) and excerpt.strip() and len(excerpt) <= 200:
         return excerpt.strip(), code  # a short plain-text body is still ESPN's own words
     return None, code

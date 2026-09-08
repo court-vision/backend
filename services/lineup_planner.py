@@ -37,6 +37,10 @@ UNTOUCHABLE_SLOT_IDS: frozenset[int] = frozenset({14, 15})
 # Mirrors services.team_insights_service._OUT_STATUSES; DTD / GTD / QUESTIONABLE
 # / DOUBTFUL count as healthy — ESPN still scores them if they play.
 OUT_STATUSES: frozenset[str] = frozenset({"OUT", "O", "IL", "IL+", "SUSPENSION", "INJURY_RESERVE"})
+# ESPN's IR rule asks whether the player is *injured*, not whether he can play: a
+# suspension keeps him out of the lineup but the transaction is still refused with
+# TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED, so it must not open slot 13.
+IR_STATUSES: frozenset[str] = OUT_STATUSES - {"SUSPENSION"}
 
 TIER_A, TIER_B, TIER_C = 0, 1, 2
 MAX_CHAIN_HOPS = 4  # filler + up to three shifts + the evicted player
@@ -63,8 +67,11 @@ class PlannerPlayer:
     def ir_eligible(self) -> bool:
         """ESPN lists slot 13 in every player's eligibleSlots and enforces "must be
         injured" only when the transaction lands (TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED),
-        so IR eligibility is the injury flag, not the slot list."""
-        return IR_SLOT_ID in self.eligible_slot_ids and (self.injured or self.is_out)
+        so IR eligibility is the injury flag, not the slot list. A suspension is not an
+        injury: `is_out` would let it through, IR_STATUSES does not."""
+        if IR_SLOT_ID not in self.eligible_slot_ids:
+            return False
+        return self.injured or (self.injury_status or "ACTIVE").upper() in IR_STATUSES
 
     @property
     def tier(self) -> int:
