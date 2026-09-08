@@ -70,6 +70,7 @@ class OwnedDraftSessionContext:
     my_slot: Optional[int]
     rounds: Optional[int]
     punts: tuple[str, ...] = ()
+    scoring_format: Optional[str] = None   # points | categories, only when there is no league
 
     @property
     def league_size(self) -> Optional[int]:
@@ -189,8 +190,9 @@ def _owned_session(session_id: int, user_id: int) -> Optional[OwnedDraftSessionC
 
     league = None
     if session.league_id is not None:
-        # A team's `scoring_preview` overrides the league's real format; a mock
-        # session has no team and therefore no preview.
+        # A team's `scoring_preview` overrides the league's real format. A room
+        # without a team has no preview -- and no league either, so it carries
+        # its own `scoring_format` instead (see `resolve_scoring_for_room`).
         preview = None
         if session.team_id is not None:
             team = Team.get_or_none(Team.team_id == session.team_id)
@@ -211,6 +213,7 @@ def _owned_session(session_id: int, user_id: int) -> Optional[OwnedDraftSessionC
         my_slot=session.my_slot,
         rounds=session.rounds,
         punts=tuple(str(k) for k in (session.punts or []) if isinstance(k, str)),
+        scoring_format=session.scoring_format,
     )
 
 

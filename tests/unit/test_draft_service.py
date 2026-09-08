@@ -203,6 +203,7 @@ def _session(**overrides):
     base = dict(name=None, espn_league_id=None, 
         id=12, team_id=7, league_id=3, kind="manual", status="active", draft_type="snake",
         pick_order=[10, 6, 5, 8, 2, 3, 7, 4, 9, 1], my_slot=3, rounds=13, keepers=[], punts=[],
+        scoring_format=None,
         started_at=None, completed_at=None, created_at=None, updated_at=None,
     )
     base.update(overrides)
@@ -512,9 +513,11 @@ def _scored_league(**overrides):
     return SimpleNamespace(**base)
 
 
-def _punt_session(league):
-    """A session with no team, so scoring resolves straight off its league."""
-    return SimpleNamespace(team_id=None, league_id=getattr(league, "id", None), league=league)
+def _punt_session(league, scoring_format=None):
+    """A session with no team, so scoring resolves straight off its league --
+    or, with no league either, off the format the room was created with."""
+    return SimpleNamespace(team_id=None, league_id=getattr(league, "id", None), league=league,
+                           scoring_format=scoring_format)
 
 
 @pytest.mark.unit
@@ -533,6 +536,18 @@ def test_a_points_league_has_nothing_to_punt():
 
     assert punt_options(_punt_session(_scored_league())) == []
     assert punt_options(_punt_session(None)) == []          # a mock draft: no league at all
+
+
+@pytest.mark.unit
+def test_a_league_less_room_punts_the_categories_it_was_created_for():
+    """The whole point of the format on a team-less room: a mock has no league
+    to inherit categories from, so without this it could only ever draft for
+    points -- and a points room has nothing to punt."""
+    from services.draft_service import punt_options
+    from services.scoring.vocab import DEFAULT_CATEGORIES
+
+    assert punt_options(_punt_session(None, scoring_format="categories")) == list(DEFAULT_CATEGORIES)
+    assert punt_options(_punt_session(None, scoring_format="points")) == []
 
 
 @pytest.mark.unit

@@ -69,7 +69,7 @@ from services.draft_service import (
 )
 from services.scoring.category_value import rankable_categories
 from services.scoring.providers.espn_settings import POSITION_ID_MAP
-from services.scoring.resolver import resolve_scoring
+from services.scoring.resolver import resolve_scoring_for_room
 
 # Reseeding namespace. Bumping it reseeds every mock in the world, on purpose:
 # it is the one switch that says "the autopicker changed, old mocks will not
@@ -311,7 +311,9 @@ class DraftMockService:
         session = DraftService._session_or_404(session_id)
         DraftMockService._check_simulatable(session, req.until)
 
-        scoring = resolve_scoring(session.league if session.league_id is not None else None)
+        scoring = resolve_scoring_for_room(
+            session.league if session.league_id is not None else None, session.scoring_format
+        )
         limits = DraftBoardService._position_limits(scoring)
         league_size = len(session.pick_order or [])
         total_picks = total_picks_of(session)

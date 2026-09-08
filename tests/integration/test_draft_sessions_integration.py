@@ -301,6 +301,38 @@ async def test_linking_by_patch_is_exclusive_and_an_explicit_null_unlinks(user):
     assert (await DraftService.update_session(b.id, DraftSessionUpdate(espn_league_id=777))).data.espn_league_id == 777
 
 
+async def test_a_league_less_mock_created_for_categories_can_punt(user):
+    """The reason the format exists. A room with no team has no league to take
+    categories from, so before this it drafted for points and `punt_options`
+    was empty -- every punt refused, on the one kind of room whose whole job is
+    practising a category draft."""
+    session = await _session(user, kind="mock", scoring_format="categories")
+    assert session.scoring_format == "categories"
+
+    punted = (await DraftService.update_session(session.id, DraftSessionUpdate(punts=["ft_pct", "tov"]))).data
+    assert punted.punts == ["ft_pct", "tov"]
+
+
+async def test_a_league_less_mock_left_on_points_still_has_nothing_to_punt(user):
+    session = await _session(user, kind="mock")
+    assert session.scoring_format is None
+
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.update_session(session.id, DraftSessionUpdate(punts=["ft_pct"]))
+    assert exc.value.error_code == "PUNTS_NEED_CATEGORIES"
+
+
+async def test_the_database_refuses_a_format_on_a_room_that_has_a_league(user):
+    """The schema rejects `scoring_format` beside a `team_id`; this is the
+    backstop under it, so no path can leave a room with two answers."""
+    session = await _session(user, kind="mock", scoring_format="categories")
+    league = League.create(provider="espn", provider_league_id="99", season=2027, name="L",
+                           scoring_type="categories")
+
+    with pytest.raises(IntegrityError):
+        DraftSession.update(league_id=league.id).where(DraftSession.id == session.id).execute()
+
+
 async def test_a_name_is_trimmed_and_an_empty_one_clears_it(user):
     session = await _session(user, name="  Tuesday practice  ")
     assert session.name == "Tuesday practice"
