@@ -53,10 +53,18 @@ class PlannerPlayer:
     locked: bool
     value: float = 0.0
     game_note: Optional[str] = None  # "vs LAL · 7:30 PM", supplied by the caller for move notes
+    injured: bool = False            # ESPN's `injured` flag — its IR rule ("player is not injured")
 
     @property
     def is_out(self) -> bool:
         return (self.injury_status or "ACTIVE").upper() in OUT_STATUSES
+
+    @property
+    def ir_eligible(self) -> bool:
+        """ESPN lists slot 13 in every player's eligibleSlots and enforces "must be
+        injured" only when the transaction lands (TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED),
+        so IR eligibility is the injury flag, not the slot list."""
+        return IR_SLOT_ID in self.eligible_slot_ids and (self.injured or self.is_out)
 
     @property
     def tier(self) -> int:
@@ -282,7 +290,7 @@ def _ineligible_message(player: PlannerPlayer, to_slot_id: int) -> str:
     """Why a move is refused before it reaches ESPN. Eligibility is ESPN's own list
     (`eligibleSlots`); IR appears on it only for players ESPN has marked OUT."""
     if to_slot_id == IR_SLOT_ID:
-        return f"{player.name} can't go on IR — ESPN only lists players it has marked OUT as IR-eligible"
+        return f"{player.name} can't go on IR — ESPN only allows players it lists as injured (OUT) there"
     eligible = [_slot_label(s) for s in sorted(player.eligible_slot_ids) if s in ACTIVE_SLOT_IDS]
     where = f" (eligible: {', '.join(eligible)})" if eligible else ""
     return f"{player.name} isn't eligible at {_slot_label(to_slot_id)}{where}"
@@ -316,7 +324,9 @@ def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, i
         if player.locked:
             errors.append(MoveError(m.player_id, "LOCKED", f"{player.name} is locked (game started)"))
             continue
-        if m.to_slot_id != BENCH_SLOT_ID and m.to_slot_id not in player.eligible_slot_ids:
+        eligible = (player.ir_eligible if m.to_slot_id == IR_SLOT_ID
+                    else m.to_slot_id == BENCH_SLOT_ID or m.to_slot_id in player.eligible_slot_ids)
+        if not eligible:
             errors.append(MoveError(m.player_id, "INELIGIBLE", _ineligible_message(player, m.to_slot_id)))
             continue
     if errors:

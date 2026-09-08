@@ -249,9 +249,17 @@ def test_locked_player_cannot_be_moved():
 
 
 @pytest.mark.unit
-def test_manual_ir_move_is_allowed_when_espn_lists_ir_as_eligible():
-    roster = full_lineup({8: player(8, UT, frozenset({PG, UT, IR, BE}), status="OUT")})
-    assert validate_moves(roster, SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)]) == []
+def test_ir_needs_an_injured_player_not_just_the_slot_in_the_list():
+    """ESPN lists 13 for everyone and refuses healthy players at transaction time
+    (TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED, captured 2026-09-08) — so we refuse first."""
+    everyone_ir = frozenset({PG, UT, IR, BE})
+    healthy = full_lineup({8: player(8, UT, everyone_ir)})
+    errors = validate_moves(healthy, SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)])
+    assert codes(errors) == ["INELIGIBLE"] and "IR" in errors[0].message and "injured" in errors[0].message
+    out = full_lineup({8: player(8, UT, everyone_ir, status="OUT")})
+    assert validate_moves(out, SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)]) == []
+    flagged = full_lineup({8: PlannerPlayer(8, "P8", UT, everyone_ir, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    assert validate_moves(flagged, SLOT_COUNTS, [Move(8, UT, IR), Move(11, BE, UT)]) == []
 
 
 @pytest.mark.unit

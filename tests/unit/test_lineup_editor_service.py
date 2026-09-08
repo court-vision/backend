@@ -199,7 +199,8 @@ def test_rejected_write_is_audited_and_raised(harness):
     harness.writer = [FantasyWriterRejected("Invalid Selection.", espn_status=400, excerpt="Invalid Selection.")]
     with pytest.raises(svc.RosterWriteRejected) as exc:
         asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
-    assert exc.value.message == "Invalid Selection." and exc.value.data == {"espn_status": 400}
+    assert exc.value.message == "Invalid Selection."
+    assert exc.value.data == {"espn_status": 400, "espn_error_code": None}
     assert harness.updates == [(1, "rejected", 400, "Invalid Selection.")]
 
 

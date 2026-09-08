@@ -120,6 +120,7 @@ def planner_players(state: LineupState) -> list[PlannerPlayer]:
             player_id=p.player_id, name=p.name, slot_id=p.lineup_slot_id,
             eligible_slot_ids=frozenset(p.eligible_slot_ids), has_game=p.has_game_today,
             injury_status=p.injury_status, locked=p.locked, value=p.avg_points, game_note=note,
+            injured=p.injured,
         ))
     return out
 
@@ -346,7 +347,8 @@ class LineupEditorService:
         except FantasyWriterRejected as exc:
             await run_db("lineup.audit_update", _audit_update, audit_id, "rejected",
                          provider_status=exc.espn_status, error=exc.message)
-            raise RosterWriteRejected(message=exc.message, data={"espn_status": exc.espn_status}) from exc
+            raise RosterWriteRejected(message=exc.message, data={"espn_status": exc.espn_status,
+                                                                  "espn_error_code": exc.espn_error_code}) from exc
         except FantasyWriterAuthRejected as exc:
             await run_db("lineup.audit_update", _audit_update, audit_id, "failed",
                          provider_status=exc.espn_status, error="provider_auth_rejected")
