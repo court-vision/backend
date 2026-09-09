@@ -282,9 +282,17 @@ async def add_draft_pick(
     "/{session_id}/picks/{overall_pick}",
     response_model=DraftPickDeleteResponse,
     summary="Undo a pick",
-    description="Removes one pick by its overall number. The number becomes the next default, so a mis-entered pick is re-recorded in place.",
+    description=(
+        "Removes one pick by its overall number. The number becomes the next default, so a "
+        "mis-entered pick is re-recorded in place.\n\n"
+        "A room that follows an ESPN draft may only undo what Court Vision recorded itself — a "
+        "hand-entered pick or the autopicker's. A pick ESPN reported is ESPN's record: removing it "
+        "here would change nothing on their side and the next sync would restore it, so it is "
+        "refused with `DRAFT_PICK_NOT_UNDOABLE`."
+    ),
     responses={
         200: {"description": "Pick undone"},
+        400: {"description": "The pick is ESPN's, not this room's, to undo"},
         404: {"description": "No such session or pick, or the session does not belong to the caller"},
     },
 )
