@@ -293,7 +293,9 @@ class StreamerService:
                 game_days=game_days,
                 streamer_score=streamer_score,
                 injured=fa.injured,
-                injury_status=None  # Could be enhanced later
+                injury_status=None,  # Could be enhanced later
+                acquisition_status=fa.acquisition_status,
+                waivers_until=fa.waivers_until,
             ))
 
         # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation

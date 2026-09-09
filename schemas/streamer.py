@@ -4,7 +4,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional
 from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
-from .espn import ValueKind
+from .espn import AcquisitionStatus, ValueKind
 
 
 class StreamerMode(str, Enum):
@@ -38,6 +38,10 @@ class StreamerPlayerResp(ApiModel):
     # Status
     injured: bool
     injury_status: Optional[str] = None
+    # Whether the pickup is immediate (free_agent) or a waiver claim (waivers, clearing
+    # on waivers_until). None when the provider does not say (Yahoo).
+    acquisition_status: Optional[AcquisitionStatus] = None
+    waivers_until: Optional[date] = None
 
 
 class StreamerData(ApiModel):
@@ -58,9 +62,9 @@ class StreamerData(ApiModel):
     value_kind: ValueKind = "fpts"
 
 
-class StreamerReq(BaseRequest):
-    """Request for finding streamers."""
-    league_info: LeagueInfo
+class StreamerFindReq(ApiModel):
+    """Streamer search options for a saved team (`POST /teams/{id}/streamers/find`);
+    the league and its credentials come from the team, never from the body."""
     fa_count: int = Field(default=300, ge=5, le=300)
     exclude_injured: bool = Field(default=True)
     b2b_only: bool = Field(
@@ -82,6 +86,11 @@ class StreamerReq(BaseRequest):
         le=30,
         description="Number of days to use for rolling average calculation"
     )
+
+
+class StreamerReq(StreamerFindReq):
+    """The legacy `POST /streamers/find` body: the same options plus the league itself."""
+    league_info: LeagueInfo
 
 
 class StreamerResp(BaseResponse):
