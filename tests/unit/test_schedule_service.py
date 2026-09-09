@@ -95,3 +95,20 @@ def test_2026_27_calendar(season):
     assert ss.get_season_phase(date(2026, 10, 3)) == "preseason"
     assert ss.get_season_phase(date(2026, 10, 20)) == "regular"
     assert ss.get_season_phase(date(2027, 4, 12)) == "offseason"
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not HAS_26_27, reason="schedule26-27.json not generated yet")
+def test_streaming_matchup_is_week_one_before_opening_night(season):
+    season("2026-27")
+    wk1 = ss.get_matchup_by_number(1)
+    for day in (date(2026, 9, 9), date(2026, 10, 3)):          # offseason and preseason alike
+        m = ss.get_streaming_matchup(day)
+        assert (m["matchup_number"], m["current_day_index"], m["upcoming"]) == (1, 0, True)
+        assert (m["start_date"], m["end_date"], m["game_span"]) == (wk1["start_date"], wk1["end_date"], wk1["game_span"])
+        assert ss.get_current_matchup(day) is None             # the public schedule keeps its None
+    opening = ss.get_streaming_matchup(date(2026, 10, 20))
+    assert (opening["matchup_number"], opening["current_day_index"], opening["upcoming"]) == (1, 0, False)
+    mid = ss.get_streaming_matchup(date(2026, 10, 22))
+    assert (mid["matchup_number"], mid["current_day_index"], mid["upcoming"]) == (1, 2, False)
+    assert ss.get_streaming_matchup(date(2027, 4, 12)) is None  # after the last week: nothing to pick for

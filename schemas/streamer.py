@@ -1,3 +1,4 @@
+from datetime import date
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -44,6 +45,10 @@ class StreamerData(ApiModel):
     matchup_number: int
     current_day_index: int
     game_span: int
+    start_date: date
+    end_date: date
+    # Before opening night the picks are for week 1, which has not started yet
+    upcoming: bool = False
     avg_days: int
     mode: StreamerMode
     target_day: Optional[int] = None
