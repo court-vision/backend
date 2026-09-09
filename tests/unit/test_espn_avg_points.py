@@ -6,6 +6,7 @@ proxy over its raw averages) is only the last resort. The ESPN HTTP layer
 """
 
 import asyncio
+import json
 from datetime import date
 
 import pytest
@@ -158,6 +159,91 @@ def test_scoring_preview_survives_a_failed_league_lookup(espn, monkeypatch):
     scoring = espn["calls"][0][0]
     assert scoring.is_categories and resp.data[0].value_kind == "cat_value"
     assert asyncio.run(EspnService.get_team_data(LEAGUE)).data[0].value_kind == "fpts"
+
+
+# ---- pool status (free agent vs waivers) ---------------------------------------------
+
+
+WAIVER_MS = 1761393600000   # 2025-10-25 12:00 UTC = 08:00 ET, an ESPN Sunday waiver run
+
+
+@pytest.mark.unit
+def test_free_agents_carry_their_pool_status(espn):
+    """The pool entry IS the free-agent listing: `status` and `waiverProcessDate` sit next
+    to `player` (2026-09-09 probe). WAIVERS -> a claim clearing on waivers_until; FREEAGENT
+    -> an immediate pickup; anything else (ONTEAM, absent) -> None."""
+    espn["payload"] = {"players": [
+        {"id": 1, "status": "FREEAGENT", "onTeamId": 0, "rosterLocked": False, "player": _espn_player(1, "Free Guy", 10.0)},
+        {"id": 2, "status": "WAIVERS", "onTeamId": 0, "waiverProcessDate": WAIVER_MS, "player": _espn_player(2, "Waiver Guy", 9.0)},
+        {"id": 3, "status": "ONTEAM", "onTeamId": 4, "player": _espn_player(3, "Rostered Guy", 8.0)},
+        {"id": 4, "player": _espn_player(4, "Bare Guy", 7.0)},
+    ]}
+    resp = asyncio.run(EspnService.get_free_agents(LEAGUE, 50))
+    by_id = {p.player_id: p for p in resp.data}
+    assert [(by_id[i].acquisition_status, by_id[i].waivers_until) for i in (1, 2, 3, 4)] == [
+        ("free_agent", None), ("waivers", date(2025, 10, 25)), (None, None), (None, None)]
+
+
+@pytest.mark.unit
+def test_roster_entries_read_the_pool_status_under_player_pool_entry(espn):
+    espn["payload"] = {"teams": [{"id": 1, "name": "My Team", "roster": {"entries": [
+        {"lineupSlotId": 0, "status": "NORMAL",
+         "playerPoolEntry": {"id": 1, "status": "ONTEAM", "onTeamId": 1, "rosterLocked": True,
+                             "player": _espn_player(1, "Mine", 20.0)}},
+    ]}}]}
+    resp = asyncio.run(EspnService.get_team_data(LEAGUE))
+    assert resp.data[0].acquisition_status is None and resp.data[0].waivers_until is None
+    player = espn_service.Player({"lineupSlotId": 0, "status": "NORMAL",
+                                  "playerPoolEntry": {"status": "ONTEAM", "onTeamId": 1, "rosterLocked": True,
+                                                      "player": _espn_player(1, "Mine", 20.0)}}, YEAR)
+    assert (player.poolStatus, player.onTeamId, player.rosterLocked) == ("ONTEAM", 1, True)   # not the entry's NORMAL
+
+
+@pytest.mark.unit
+def test_waiver_date_is_the_et_day_the_window_closes():
+    assert espn_service.waiver_date(WAIVER_MS) == date(2025, 10, 25)
+    assert espn_service.waiver_date(1761350400000) == date(2025, 10, 24)   # 2025-10-25 00:00 UTC is still the 24th in ET
+    assert espn_service.waiver_date(None) is None and espn_service.waiver_date(0) is None
+    assert espn_service.waiver_date("not-a-number") is None
+
+
+@pytest.mark.unit
+def test_player_pool_entries_are_a_targeted_filter_ids_read(monkeypatch):
+    """One `filterIds` read keyed by id. ESPN refuses `limit` without a sort and, given
+    `scoringPeriodId=0`, reports every entry as locked — so the header carries a sort
+    and the params carry the board's real period (2026-09-09 probe)."""
+    seen = {}
+
+    async def provider_get(provider, url, *, params=None, headers=None, cookies=None, expect_key=None, **_):
+        seen.update(provider=provider, url=url, params=params, headers=headers, expect_key=expect_key,
+                    cookie_keys=sorted((cookies or {}).keys()))
+        return {"players": [
+            {"id": 6450, "status": "FREEAGENT", "onTeamId": 0, "rosterLocked": False, "lineupLocked": False,
+             "player": {"id": 6450, "fullName": "Kawhi Leonard", "proTeamId": 12}},
+            {"id": 3112335, "status": "ONTEAM", "onTeamId": 1, "rosterLocked": True,
+             "player": {"id": 3112335, "fullName": "Nikola Jokic", "proTeamId": 7}},
+            {"id": 77, "status": "WAIVERS", "onTeamId": 0, "waiverProcessDate": WAIVER_MS,
+             "player": {"id": 77, "fullName": "Waiver Guy", "proTeamId": 2}},
+            {"player": {"fullName": "No id"}},
+        ]}
+
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
+    entries = asyncio.run(EspnService.get_player_pool_entries(LEAGUE, [3112335, 6450, 6450, 77], scoring_period_id=12))
+
+    assert seen["provider"] == "espn" and seen["url"].endswith("/seasons/2027/segments/0/leagues/555")
+    assert seen["params"] == {"view": "kona_player_info", "scoringPeriodId": 12}   # never 0
+    assert seen["expect_key"] == "players" and seen["cookie_keys"] == ["SWID", "espn_s2"]
+    assert json.loads(seen["headers"]["x-fantasy-filter"]) == {"players": {
+        "filterIds": {"value": [77, 6450, 3112335]}, "limit": 3, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+    assert set(entries) == {6450, 3112335, 77}
+    assert entries[6450] == espn_service.PoolEntry(6450, "FREEAGENT", 0, False, "Kawhi Leonard", "LAC")
+    assert entries[3112335] == espn_service.PoolEntry(3112335, "ONTEAM", 1, True, "Nikola Jokic", "DEN")
+    assert entries[77].status == "WAIVERS" and entries[77].waivers_until == date(2025, 10, 25)
+
+    seen.clear()
+    assert asyncio.run(EspnService.get_player_pool_entries(LEAGUE, [])) == {} and seen == {}   # nothing to ask
+    asyncio.run(EspnService.get_player_pool_entries(LEAGUE, [1]))
+    assert seen["params"] == {"view": "kona_player_info"}                                     # no period: omitted
 
 
 # ---- matchup ------------------------------------------------------------------------

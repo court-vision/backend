@@ -18,7 +18,7 @@ from services.player_value_service import PlayerValueService
 from db.models.nba.players import Player as PlayerModel
 from db.base import run_db
 from services.schedule_service import (
-    get_current_matchup,
+    get_streaming_matchup,
     get_nba_today,
     get_remaining_games,
     get_remaining_game_days,
@@ -143,26 +143,29 @@ class StreamerService:
 
         Returns:
             StreamerResp with ranked list of streaming candidates; SUCCESS with data=None
-            when no matchup is active today.
+            when there is no matchup on the calendar (offseason / All-Star break). Before
+            opening night the picks are for week 1 (`upcoming=True`).
 
         Raises:
             BadRequestError (TARGET_DAY_OUT_OF_RANGE / LEAGUE_VALIDATION_FAILED) and the
             provider services' typed AppErrors.
         """
-        # Get current matchup info (using today to determine which matchup we're in)
-        matchup = get_current_matchup()
+        # The week we are picking for: the current matchup, or week 1 before opening night
+        matchup = get_streaming_matchup()
         if not matchup:
             # An empty state, not a failure (offseason / All-Star break): 200 with data: null
             return StreamerResp(
                 status=ApiStatus.SUCCESS,
-                message="No active matchup for today — streaming picks return with the next matchup week",
+                message="No matchup on the calendar — streaming picks return with the new season",
                 data=None
             )
 
         matchup_number = matchup["matchup_number"]
         game_span = matchup["game_span"]
         start_date = matchup["start_date"]
+        end_date = matchup["end_date"]
         current_day_index = matchup["current_day_index"]
+        upcoming = bool(matchup.get("upcoming", False))
 
         # Determine effective date based on mode
         if mode == StreamerMode.DAILY and target_day is not None:
@@ -182,9 +185,10 @@ class StreamerService:
                 target_day = current_day_index
                 effective_date = start_date + timedelta(days=target_day)
             else:
-                # ET fantasy day, consistent with get_current_matchup() above
-                # (date.today() is UTC on Railway and drifts after ~7 PM ET).
-                effective_date = get_nba_today()
+                # ET fantasy day, consistent with get_streaming_matchup() above
+                # (date.today() is UTC on Railway and drifts after ~7 PM ET) — never
+                # before the week starts, so pre-season values the whole of week 1.
+                effective_date = max(get_nba_today(), start_date)
 
         # Select scoring weights based on mode (distinct from the league's
         # point weights below — they were once the same variable, which
@@ -289,7 +293,9 @@ class StreamerService:
                 game_days=game_days,
                 streamer_score=streamer_score,
                 injured=fa.injured,
-                injury_status=None  # Could be enhanced later
+                injury_status=None,  # Could be enhanced later
+                acquisition_status=fa.acquisition_status,
+                waivers_until=fa.waivers_until,
             ))
 
         # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
@@ -312,6 +318,9 @@ class StreamerService:
                 matchup_number=matchup_number,
                 current_day_index=current_day_index,
                 game_span=game_span,
+                start_date=start_date,
+                end_date=end_date,
+                upcoming=upcoming,
                 avg_days=avg_days,
                 mode=mode,
                 target_day=target_day if mode == StreamerMode.DAILY else None,

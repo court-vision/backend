@@ -1,4 +1,9 @@
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from typing import Optional
+
+import pytz
+
 from core.errors import BadRequestError
 from core.logging import get_logger
 from db.base import run_db
@@ -21,6 +26,41 @@ from services.schedule_service import (
     get_espn_matchup_dates,
     get_remaining_games,
 )
+
+# ESPN's pool-entry `status` -> the acquisition status we expose. ONTEAM (or a
+# missing status) maps to nothing: the player is not in the free-agent pool.
+ACQUISITION_STATUS = {"FREEAGENT": "free_agent", "WAIVERS": "waivers"}
+_EASTERN = pytz.timezone("US/Eastern")
+
+
+def _pool_entry(data: dict) -> dict:
+    """The playerPoolEntry level of an ESPN entry: a free-agent listing IS the pool
+    entry; a roster entry wraps one under `playerPoolEntry`."""
+    return data.get('playerPoolEntry') or data if 'playerPoolEntry' in data else data
+
+
+def waiver_date(ms: Optional[int]) -> Optional[date]:
+    """ESPN's `waiverProcessDate` (ms epoch) as the ET fantasy day the claim window closes."""
+    if not ms:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000.0, tz=timezone.utc).astimezone(_EASTERN).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+@dataclass(frozen=True)
+class PoolEntry:
+    """A player as ESPN's pool sees him right now — the answer `get_player_pool_entries`
+    gives a roster transaction before it is sent."""
+    player_id: int
+    status: Optional[str]            # FREEAGENT | WAIVERS | ONTEAM (None when ESPN omits it)
+    on_team_id: int                  # 0 when unrostered
+    roster_locked: bool
+    name: str
+    pro_team: str
+    waivers_until: Optional[date] = None
+
 
 class Player(object):
     '''Player are part of team'''
@@ -52,6 +92,14 @@ class Player(object):
         player = data['playerPoolEntry']['player'] if 'playerPoolEntry' in data else data['player']
         self.injuryStatus = player.get('injuryStatus', self.injuryStatus)
         self.injured = player.get('injured', False)
+
+        # Pool-entry level (probed 2026-09-09): status FREEAGENT | WAIVERS | ONTEAM, onTeamId (0 =
+        # unrostered), rosterLocked, and waiverProcessDate (ms epoch) while on waivers.
+        pool = _pool_entry(data)
+        self.poolStatus = pool.get('status') if isinstance(pool.get('status'), str) else None
+        self.onTeamId = int(pool.get('onTeamId') or 0)
+        self.rosterLocked = bool(pool.get('rosterLocked', False))
+        self.waiverProcessDate = waiver_date(pool.get('waiverProcessDate'))
 
         for split in  player.get('stats', []):
             if split['seasonId'] == year:
@@ -200,6 +248,8 @@ class EspnService:
                 injury_status=player.injuryStatus if player.injuryStatus and player.injuryStatus != "ACTIVE" else None,
                 value_kind=value_kind,
                 value_source=source,
+                acquisition_status=ACQUISITION_STATUS.get(player.poolStatus or ""),
+                waivers_until=player.waiverProcessDate,
             ))
         return out
 
@@ -244,6 +294,51 @@ class EspnService:
             message="Free agents fetched successfully",
             data=await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info),
         )
+
+    @staticmethod
+    async def get_player_pool_entries(
+        league_info: LeagueInfo, player_ids: list[int], *, scoring_period_id: Optional[int] = None,
+    ) -> dict[int, PoolEntry]:
+        """The pool entries for specific ESPN player ids, keyed by id (ids ESPN does not
+        know are simply absent).
+
+        Same read as `get_free_agents` with a `filterIds` filter. Two things the
+        2026-09-09 probe fixed: ESPN refuses `limit` without a sort
+        (FILTER_LIMIT_MISSING_SORT), and with `scoringPeriodId=0` it reports every
+        entry as rosterLocked/lineupLocked — so pass the board's real period (or
+        none) whenever the locks matter.
+        """
+        ids = sorted({int(i) for i in player_ids})
+        if not ids:
+            return {}
+        params: dict = {'view': 'kona_player_info'}
+        if scoring_period_id:
+            params['scoringPeriodId'] = int(scoring_period_id)
+        filters = {"players": {"filterIds": {"value": ids}, "limit": len(ids),
+                               "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+        headers = {'x-fantasy-filter': json.dumps(filters)}
+
+        endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
+        data = await provider_get("espn", endpoint, params=params, headers=headers,
+                                  cookies=EspnService._cookies(league_info), expect_key="players")
+
+        out: dict[int, PoolEntry] = {}
+        for entry in data.get('players') or []:
+            player = entry.get('player') or {}
+            pid = int(entry.get('id') or player.get('id') or 0)
+            if not pid:
+                continue
+            team = PRO_TEAM_MAP.get(player.get('proTeamId', 0), 'FA')
+            out[pid] = PoolEntry(
+                player_id=pid,
+                status=entry.get('status') if isinstance(entry.get('status'), str) else None,
+                on_team_id=int(entry.get('onTeamId') or 0),
+                roster_locked=bool(entry.get('rosterLocked', False)),
+                name=player.get('fullName') or str(pid),
+                pro_team=TEAM_ABBREV_CORRECTIONS.get(team, team),
+                waivers_until=waiver_date(entry.get('waiverProcessDate')),
+            )
+        return out
 
     @staticmethod
     async def fetch_espn_rostered_data(league_id: int, year: int, for_stats: bool = False) -> dict:

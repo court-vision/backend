@@ -161,6 +161,33 @@ def get_current_matchup(current_date: Optional[date] = None) -> Optional[dict]:
     return None
 
 
+def get_streaming_matchup(current_date: Optional[date] = None) -> Optional[dict]:
+    """
+    The week streaming picks are for: the current matchup, or — before opening
+    night — week 1 as the *upcoming* one.
+
+    `get_current_matchup` answers None outside the calendar, and the public
+    schedule and team insights depend on that. Streamers want "the week you are
+    (or will be) picking for" instead: pre-season resolves to week 1 at day 0
+    with `upcoming=True`, so a manager can shop the free-agent pool for opening
+    week before it starts. None after the last week (offseason proper).
+    """
+    if current_date is None:
+        current_date = _get_nba_today()
+
+    current = get_current_matchup(current_date)
+    if current is not None:
+        current["upcoming"] = False
+        return current
+
+    first = next(iter_weeks(), None)
+    if first is not None and current_date < first["start_date"]:
+        first["current_day_index"] = 0
+        first["upcoming"] = True
+        return first
+    return None
+
+
 def get_matchup_by_number(matchup_number: int) -> Optional[dict]:
     """Matchup info for a week number (1-based), or None if it isn't in the calendar."""
     schedule = _load_schedule().get("schedule", {})

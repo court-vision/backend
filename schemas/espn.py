@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
@@ -7,6 +9,10 @@ from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
 # What `avg_points` measures: fantasy points under the league's weights, or the
 # fpts-scale category value proxy for H2H-category leagues.
 ValueKind = Literal["fpts", "cat_value"]
+# ESPN's player-pool status for someone not on a roster: claimable now, or on
+# waivers until the league's next waiver run. None for rostered players and
+# for providers that do not report one.
+AcquisitionStatus = Literal["free_agent", "waivers"]
 
 class ValidateLeagueReq(BaseRequest):
     league_info: LeagueInfo
@@ -22,6 +28,8 @@ class PlayerResp(ApiModel):
     value_kind: ValueKind = "fpts"
     # Where avg_points came from: rolling | recent | baseline (last season) | provider (ESPN's own number)
     value_source: Optional[str] = None
+    acquisition_status: Optional[AcquisitionStatus] = None
+    waivers_until: Optional[date] = None   # the day the waiver claim window closes (ESPN's waiverProcessDate)
 
 class TeamDataReq(BaseRequest):
     league_info: LeagueInfo

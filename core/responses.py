@@ -69,6 +69,8 @@ ERROR_CODE_STATUS: dict[str, int] = {
     "ROSTER_MOVE_INVALID": 422,
     "ROSTER_WRITE_REJECTED": 409,
     "ROSTER_WRITE_UNAVAILABLE": 503,
+    # Roster transactions (services.roster_transaction_service)
+    "ROSTER_TRANSACTION_INVALID": 422,
 }
 
 # error_code to fill in when the service left it empty, by envelope status

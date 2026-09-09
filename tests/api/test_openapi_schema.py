@@ -147,3 +147,33 @@ class TestSchemaNamesDoNotCollide:
         for holder, field in (("PlayerStats", "game_logs"), ("PlayerGamesData", "games")):
             ref = schemas[holder]["properties"][field]["items"]["$ref"]
             assert ref.endswith("/GameLog"), f"{holder}.{field} -> {ref}"
+
+
+@pytest.mark.api
+class TestRosterWriteContracts:
+    """The two team-scoped write-side routes the streamers page calls (PR-B)."""
+
+    @pytest.mark.parametrize("path,ref", [
+        ("/v1/internal/teams/{team_id}/streamers/find", "StreamerResp"),
+        ("/v1/internal/teams/{team_id}/roster/transactions", "RosterTransactionResp"),
+    ])
+    def test_declare_concrete_response_schemas(self, paths, path, ref):
+        schema = _response_schema(paths, path, "post")
+        assert schema is not None, f"POST {path} has no 200 schema"
+        assert schema.get("$ref", "").endswith(f"/{ref}"), schema
+
+    def test_team_scoped_streamers_body_cannot_carry_a_league(self, paths, schemas):
+        body = paths["/v1/internal/teams/{team_id}/streamers/find"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        assert body["$ref"].endswith("/StreamerFindReq"), body
+        assert "league_info" not in schemas["StreamerFindReq"]["properties"]
+        assert "league_info" in schemas["StreamerReq"]["properties"]      # the legacy route keeps it
+
+    def test_transaction_request_and_data_shapes(self, schemas):
+        req = schemas["RosterTransactionReq"]["properties"]
+        assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version"}
+        assert set(schemas["RosterTransactionReq"]["required"]) == {"expected_scoring_period_id", "roster_version"}
+        data = schemas["RosterTransactionData"]["properties"]
+        assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id"}
+        assert data["lineup"]["$ref"].endswith("/LineupState")
+        assert set(schemas["StreamerPlayerResp"]["properties"]) >= {"acquisition_status", "waivers_until"}
+        assert set(schemas["StreamerData"]["properties"]) >= {"start_date", "end_date", "upcoming"}

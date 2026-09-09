@@ -180,10 +180,13 @@ def writer_payload(league_info: LeagueInfo, state: LineupState, moves: list[Move
 
 
 def _audit_insert(user_id: int, team_id: int, nba_date: date, period: Optional[int], source: str,
-                  moves: list[dict], key: Optional[str]) -> int:
+                  moves: list[dict], key: Optional[str], kind: str = "lineup") -> int:
+    """Seed the audit row as an in-flight failure; the write chain settles it. `kind` is
+    'lineup' (slot moves) or 'transaction' (add/drop, see roster_transaction_service)."""
     from db.models.roster_moves import RosterMove
     row = RosterMove.create(user=user_id, team=team_id, nba_date=nba_date, scoring_period_id=period,
-                            source=source, status="failed", moves=moves, error="in_flight", idempotency_key=key)
+                            source=source, kind=kind, status="failed", moves=moves, error="in_flight",
+                            idempotency_key=key)
     return int(row.id)
 
 
