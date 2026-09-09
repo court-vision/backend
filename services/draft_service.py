@@ -313,6 +313,33 @@ def clean_name(name: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+# Picks Court Vision recorded itself, and may therefore unrecord. Everything
+# else in a room that follows an ESPN draft is ESPN's record.
+CV_OWNED_PICK_SOURCES = frozenset({"manual", "mock"})
+
+
+def pick_is_undoable(session: DraftSession, pick: DraftPick) -> bool:
+    """Whether this room is allowed to unrecord this pick.
+
+    A room that follows an ESPN draft does not own the picks ESPN made. Deleting
+    one here changes nothing on ESPN's side, so the room immediately starts
+    lying about the draft it claims to follow -- and because `fold_picks` is
+    idempotent, the very next INIT reconcile puts the pick straight back. An
+    undo that silently un-undoes itself is worse than one that refuses.
+
+    What Court Vision recorded itself stays undoable even in such a room: a
+    hand-entered pick, which is the designed answer to a frame the tap missed
+    and must be correctable, and the autopicker's own picks, which a room has to
+    be able to clear before it can follow a real draft again.
+
+    A room following nothing -- an unlinked mock, a manual room, or one the user
+    has deliberately unlinked -- owns every pick in it.
+    """
+    if session.espn_league_id is None:
+        return True
+    return pick.source in CV_OWNED_PICK_SOURCES
+
+
 def punt_options(session: DraftSession) -> list[str]:
     """The category keys this room can concede.
 
@@ -935,11 +962,18 @@ class DraftService:
         )
         if pick is None:
             raise NotFoundError("DRAFT_PICK_NOT_FOUND", f"Pick {overall_pick} is not recorded")
+        session = DraftService._session_or_404(session_id)
+        if not pick_is_undoable(session, pick):
+            raise BadRequestError(
+                "DRAFT_PICK_NOT_UNDOABLE",
+                "ESPN recorded this pick, so this room cannot unrecord it: the draft is ESPN's "
+                "and the next sync would restore it. Only the league's commissioner can undo a "
+                "pick in ESPN, and the room follows that when it happens.",
+            )
         # Undoing a pick in a finished draft means the draft is not finished:
         # the room reopens, so the last pick can close it again. A reopened
         # room holds its draft again, and a newer room may have taken it in
         # the meantime — refused up front, before anything is deleted.
-        session = DraftService._session_or_404(session_id)
         total = total_picks_of(session)
         held = DraftPick.select().where(DraftPick.session == session_id).count()
         reopens = session.status == "completed" and bool(total) and held - 1 < total

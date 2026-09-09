@@ -333,6 +333,43 @@ async def test_the_database_refuses_a_format_on_a_room_that_has_a_league(user):
         DraftSession.update(league_id=league.id).where(DraftSession.id == session.id).execute()
 
 
+async def test_a_tracked_room_refuses_to_undo_espns_own_pick(user, players):
+    """The E2E found this the hard way: ⌘Z on an ESPN pick removed it locally,
+    which changes nothing on ESPN and would be undone again by the next INIT
+    reconcile. The pick must still be there after the refusal."""
+    session = await _session(user, kind="mock")
+    await DraftService.update_session(session.id, DraftSessionUpdate(espn_league_id=426893737))
+    await DraftService.add_pick(session.id, DraftPickCreate(player_id=1, source="espn_sync"))
+
+    with pytest.raises(BadRequestError) as exc:
+        await DraftService.remove_pick(session.id, 1)
+    assert exc.value.error_code == "DRAFT_PICK_NOT_UNDOABLE"
+    assert (await DraftService.get_session(session.id)).data.pick_count == 1
+
+
+async def test_a_tracked_room_still_undoes_a_pick_it_recorded_by_hand(user, players):
+    """The other half of the rule, and the reason it is not a blanket ban: the
+    manual input is the fallback when the tap misses a frame, so a pick entered
+    there has to be correctable."""
+    session = await _session(user, kind="mock")
+    await DraftService.update_session(session.id, DraftSessionUpdate(espn_league_id=426893738))
+    await DraftService.add_pick(session.id, DraftPickCreate(player_id=1))
+
+    assert (await DraftService.remove_pick(session.id, 1)).data == 1
+    assert (await DraftService.get_session(session.id)).data.pick_count == 0
+
+
+async def test_an_unlinked_room_undoes_a_synced_pick_it_kept_after_unlinking(user, players):
+    """Unlinking is the deliberate way to take a room's picks back into its own
+    hands — the room then follows nothing, so it owns them again."""
+    session = await _session(user, kind="mock")
+    await DraftService.update_session(session.id, DraftSessionUpdate(espn_league_id=426893739))
+    await DraftService.add_pick(session.id, DraftPickCreate(player_id=1, source="espn_sync"))
+    await DraftService.update_session(session.id, DraftSessionUpdate(espn_league_id=None))
+
+    assert (await DraftService.remove_pick(session.id, 1)).data == 1
+
+
 async def test_a_name_is_trimmed_and_an_empty_one_clears_it(user):
     session = await _session(user, name="  Tuesday practice  ")
     assert session.name == "Tuesday practice"

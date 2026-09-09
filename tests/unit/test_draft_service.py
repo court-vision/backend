@@ -538,6 +538,43 @@ def test_a_points_league_has_nothing_to_punt():
     assert punt_options(_punt_session(None)) == []          # a mock draft: no league at all
 
 
+# ---- who owns a pick -------------------------------------------------------
+
+
+def _undo_case(espn_league_id, source):
+    from services.draft_service import pick_is_undoable
+
+    return pick_is_undoable(
+        SimpleNamespace(espn_league_id=espn_league_id),
+        SimpleNamespace(source=source),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["manual", "mock", "keeper", "espn_sync", "import"])
+def test_a_room_following_nothing_owns_every_pick_in_it(source):
+    """An unlinked mock, a manual room, or one deliberately unlinked: there is no
+    ESPN record to contradict, so every pick is the room's to unrecord."""
+    assert _undo_case(None, source) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["manual", "mock"])
+def test_a_tracked_room_still_undoes_what_court_vision_recorded(source):
+    """The hand-entered pick is the designed fallback for a frame the tap missed,
+    so a typo in one must be fixable; the autopicker's picks have to be clearable
+    before a room can follow a real draft again."""
+    assert _undo_case(426893737, source) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["espn_sync", "import", "keeper"])
+def test_a_tracked_room_cannot_undo_what_espn_reported(source):
+    """Including `keeper`: a keeper ESPN named in its payload is still ESPN's
+    record, and the keeper editor is the way to change that, not undo."""
+    assert _undo_case(426893737, source) is False
+
+
 @pytest.mark.unit
 def test_a_league_less_room_punts_the_categories_it_was_created_for():
     """The whole point of the format on a team-less room: a mock has no league
