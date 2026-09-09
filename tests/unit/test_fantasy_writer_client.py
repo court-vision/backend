@@ -151,3 +151,66 @@ def test_422_from_the_writer_is_a_rejection(writer):
     with pytest.raises(fw.FantasyWriterRejected) as exc:
         asyncio.run(fw.apply_lineup(PAYLOAD))
     assert "duplicate" in exc.value.message
+
+
+# ---- transactions -----------------------------------------------------------------------
+
+
+TXN_PAYLOAD = {"season": 2027, "league_id": 1, "espn_team_id": 4, "member_id": "{S}",
+               "credentials": {"espn_s2": "s2", "swid": "{S}"}, "scoring_period_id": 12,
+               "add_player_id": 6450, "drop_player_id": 3112335, "idempotency_key": "21:txn:12:v1:6450:3112335"}
+
+
+@pytest.mark.unit
+def test_transaction_posts_the_envelope_to_the_transaction_path(writer):
+    result = asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert result.ok and result.espn_status == 200 and result.idempotent_replay is False
+    assert len(writer.requests) == 1
+    req = writer.requests[0]
+    assert req.method == "POST" and req.url.path == "/v1/espn/transaction"
+    assert req.headers["Authorization"] == "Bearer tok-123"
+    assert json.loads(req.content) == TXN_PAYLOAD                       # add/drop ids, never a `moves` list
+
+
+@pytest.mark.unit
+def test_transaction_409_carries_espn_prose(writer):
+    body = ('{"messages":["Roster is full."],"details":[{"shortMessage":"Roster is full.",'
+            '"type":"TRAN_ROSTER_FULL","metaData":null}]}')
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED", "http_status": 400,
+                                                     "espn_body_excerpt": body}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert (exc.value.message, exc.value.espn_error_code, exc.value.espn_status) == ("Roster is full.", "TRAN_ROSTER_FULL", 400)
+
+
+@pytest.mark.unit
+def test_transaction_409_without_prose_has_its_own_default(writer):
+    writer.responses.append(httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED", "http_status": 400}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert exc.value.message == "ESPN rejected the change"
+
+
+@pytest.mark.unit
+def test_transaction_403_422_and_503_map_like_the_lineup_route(writer):
+    writer.responses.append(httpx.Response(403, json={"ok": False, "error_code": "ESPN_AUTH_REJECTED", "http_status": 401}))
+    with pytest.raises(fw.FantasyWriterAuthRejected):
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+
+    writer.responses.append(httpx.Response(422, json={"ok": False, "error_code": "INVALID_TRANSACTION", "detail": "add equals drop"}))
+    with pytest.raises(fw.FantasyWriterRejected) as exc:
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert exc.value.message == "add equals drop" and exc.value.espn_status is None
+
+    writer.responses.append(httpx.Response(503, json={"ok": False, "error_code": "ESPN_UPSTREAM_ERROR", "http_status": 503}))
+    with pytest.raises(fw.FantasyWriterUnavailable):
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert len(writer.requests) == 3                                     # one request per call, never a retry
+
+
+@pytest.mark.unit
+def test_transaction_connection_failure_is_one_attempt(writer):
+    writer.responses.append(httpx.ConnectError("down"))
+    with pytest.raises(fw.FantasyWriterUnavailable):
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert len(writer.requests) == 1

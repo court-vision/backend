@@ -79,6 +79,7 @@ def _stub(monkeypatch, target, name, outcome):
     (ApiStatus.ERROR, "ROSTER_MOVE_INVALID", 422),
     (ApiStatus.ERROR, "ROSTER_WRITE_REJECTED", 409),
     (ApiStatus.ERROR, "ROSTER_WRITE_UNAVAILABLE", 503),
+    (ApiStatus.ERROR, "ROSTER_TRANSACTION_INVALID", 422),
     (ApiStatus.SUCCESS, "LINEUP_SERVICE_UNAVAILABLE", 200),      # SUCCESS is 200 whatever the code says
 ])
 def test_envelope_status_map(status, error_code, expected):

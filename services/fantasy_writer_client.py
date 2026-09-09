@@ -2,9 +2,10 @@
 
 fantasy-writer is the only place the ESPN transaction protocol lives; this API
 is its only client, reached over Railway private networking with a bearer
-token. A lineup write is a POST that ESPN executes immediately, so the client
-**never retries** — an ambiguous timeout is reported as unavailable and the
-caller re-reads the roster to learn what happened.
+token. Two routes share one contract — `/v1/espn/lineup` (slot moves) and
+`/v1/espn/transaction` (add/drop) — and both are POSTs that ESPN executes
+immediately, so the client **never retries**: an ambiguous timeout is reported
+as unavailable and the caller re-reads the roster to learn what happened.
 
 `client_factory` exists for tests (an `httpx.AsyncClient` over a MockTransport).
 """
@@ -24,6 +25,7 @@ from core.settings import settings
 
 UNAVAILABLE_MESSAGE = "Lineup write service unavailable — try again in a minute"
 LINEUP_PATH = "/v1/espn/lineup"
+TRANSACTION_PATH = "/v1/espn/transaction"
 
 log = get_logger("fantasy_writer")
 
@@ -150,7 +152,23 @@ def _parse(response: httpx.Response) -> dict[str, Any]:
 
 
 async def apply_lineup(payload: dict[str, Any]) -> WriterResult:
-    """POST one lineup transaction. Exactly one attempt; the body never appears in logs."""
+    """POST one lineup transaction (`moves`). Exactly one attempt; the body never appears in logs."""
+    return await _post(LINEUP_PATH, payload, item_count=len(payload.get("moves") or []),
+                       rejected_default="ESPN rejected the lineup change",
+                       refused_default="The writer refused the moves")
+
+
+async def apply_transaction(payload: dict[str, Any]) -> WriterResult:
+    """POST one add/drop transaction: the lineup envelope with `add_player_id` /
+    `drop_player_id` (at least one) in place of `moves`. Same answers, same one attempt."""
+    item_count = sum(1 for key in ("add_player_id", "drop_player_id") if payload.get(key))
+    return await _post(TRANSACTION_PATH, payload, item_count=item_count,
+                       rejected_default="ESPN rejected the change",
+                       refused_default="The writer refused the change")
+
+
+async def _post(path: str, payload: dict[str, Any], *, item_count: int, rejected_default: str,
+                refused_default: str) -> WriterResult:
     client, capacity = _ensure_runtime()
     try:
         await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
@@ -162,12 +180,12 @@ async def apply_lineup(payload: dict[str, Any]) -> WriterResult:
     try:
         if client_factory is not None:
             async with client_factory() as test_client:
-                response = await test_client.post(LINEUP_PATH, json=payload, headers=_headers())
+                response = await test_client.post(path, json=payload, headers=_headers())
         else:
-            response = await client.post(LINEUP_PATH, json=payload, headers=_headers())
+            response = await client.post(path, json=payload, headers=_headers())
     except httpx.RequestError as exc:
-        log.error("fantasy_writer_request_failed", error=type(exc).__name__, detail=str(exc),
-                  move_count=len(payload.get("moves") or []))
+        log.error("fantasy_writer_request_failed", path=path, error=type(exc).__name__, detail=str(exc),
+                  move_count=item_count)
         raise FantasyWriterUnavailable(UNAVAILABLE_MESSAGE) from exc
     finally:
         capacity.release()
@@ -177,10 +195,11 @@ async def apply_lineup(payload: dict[str, Any]) -> WriterResult:
     excerpt = body.get("espn_body_excerpt")
     log.info(
         "fantasy_writer_request",
+        path=path,
         status_code=response.status_code,
         espn_status=espn_status,
         error_code=body.get("error_code"),
-        move_count=len(payload.get("moves") or []),
+        move_count=item_count,
         idempotent_replay=bool(body.get("idempotent_replay")),
         elapsed_ms=round((time.perf_counter() - started) * 1000),
     )
@@ -189,10 +208,10 @@ async def apply_lineup(payload: dict[str, Any]) -> WriterResult:
         return WriterResult(True, response.status_code, espn_status, excerpt, bool(body.get("idempotent_replay")))
     if response.status_code == 409:
         message, code = espn_error(body)
-        raise FantasyWriterRejected(message or "ESPN rejected the lineup change", espn_status=espn_status,
+        raise FantasyWriterRejected(message or rejected_default, espn_status=espn_status,
                                     excerpt=excerpt, espn_error_code=code)
     if response.status_code == 403:
         raise FantasyWriterAuthRejected("ESPN no longer accepts the stored credentials", espn_status=espn_status, excerpt=excerpt)
     if response.status_code == 422:
-        raise FantasyWriterRejected(body.get("detail") or "The writer refused the moves", espn_status=None, excerpt=excerpt)
+        raise FantasyWriterRejected(body.get("detail") or refused_default, espn_status=None, excerpt=excerpt)
     raise FantasyWriterUnavailable(UNAVAILABLE_MESSAGE, espn_status=espn_status, excerpt=excerpt)
