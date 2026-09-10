@@ -78,6 +78,56 @@ async def test_rejected_credentials_map_without_retry(http, status):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_rejected_credentials_say_so_when_some_were_sent(http, status):
+    """Cookies were sent and refused: the credentials themselves are suspect."""
+    http.queue = [response(status, "<html>login</html>")]
+    with pytest.raises(ProviderAuthError) as excinfo:
+        await provider_http.provider_get(
+            "espn", URL, cookies={"espn_s2": "s2", "SWID": "{w}"}, expect_key="teams"
+        )
+    assert "rejected this league's credentials" in excinfo.value.message
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cookies", [None, {}, {"espn_s2": "", "SWID": ""}])
+async def test_missing_credentials_are_named_as_missing(http, cookies):
+    """Nothing was sent, so the league is private and nothing was loaded for it.
+
+    Blaming the stored cookies here sends people to re-enter credentials that
+    are fine — which is exactly what happened when a stale client posted an
+    empty league_info.
+    """
+    http.queue = [response(401, "<html>login</html>")]
+    with pytest.raises(ProviderAuthError) as excinfo:
+        await provider_http.provider_get("espn", URL, cookies=cookies, expect_key="teams")
+    assert "private and no credentials were sent" in excinfo.value.message
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_public_league_needs_no_credentials(http):
+    """A public league answers 200 without cookies and never reaches the branch."""
+    http.queue = [response(200, {"teams": [{"name": "My Team"}]})]
+    body = await provider_http.provider_get("espn", URL, expect_key="teams")
+    assert body == {"teams": [{"name": "My Team"}]}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_bearer_header_counts_as_credentials(http):
+    """Yahoo authenticates with a header, not cookies."""
+    http.queue = [response(401, {"error": "invalid_token"})]
+    with pytest.raises(ProviderAuthError) as excinfo:
+        await provider_http.provider_get(
+            "yahoo", URL, headers={"Authorization": "Bearer t"}
+        )
+    assert "connection expired" in excinfo.value.message
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_404_maps_to_league_not_found(http):
     http.queue = [response(404, {"message": "not found"})]
     with pytest.raises(BadRequestError) as excinfo:
