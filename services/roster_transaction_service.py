@@ -22,6 +22,7 @@ from datetime import date
 from typing import Any, Optional
 
 from core.errors import AppError, ProviderAuthError
+from utils.constants import PROVIDER_AUTH_MESSAGES
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
@@ -205,7 +206,7 @@ class RosterTransactionService:
         except FantasyWriterAuthRejected as exc:
             await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed",
                          provider_status=exc.espn_status, error="provider_auth_rejected")
-            raise ProviderAuthError("espn") from exc
+            raise ProviderAuthError("espn", PROVIDER_AUTH_MESSAGES["espn"]) from exc
         except FantasyWriterUnavailable as exc:
             await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed",
                          provider_status=exc.espn_status, error=exc.message)

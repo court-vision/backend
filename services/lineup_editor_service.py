@@ -58,6 +58,7 @@ from services.fantasy_writer_client import (
 )
 from services.lineup_planner import Move, Plan, PlannerPlayer, plan_fill, validate_moves
 from services.lineup_read_service import LineupReadService
+from utils.constants import PROVIDER_AUTH_MESSAGES
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("lineup_editor")
@@ -355,7 +356,7 @@ class LineupEditorService:
         except FantasyWriterAuthRejected as exc:
             await run_db("lineup.audit_update", _audit_update, audit_id, "failed",
                          provider_status=exc.espn_status, error="provider_auth_rejected")
-            raise ProviderAuthError("espn") from exc
+            raise ProviderAuthError("espn", PROVIDER_AUTH_MESSAGES["espn"]) from exc
         except FantasyWriterUnavailable as exc:
             await run_db("lineup.audit_update", _audit_update, audit_id, "failed",
                          provider_status=exc.espn_status, error=exc.message)

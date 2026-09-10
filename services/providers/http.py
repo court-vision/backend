@@ -14,6 +14,7 @@ from core.errors import AppError, BadRequestError, ProviderAuthError, ProviderEr
 from core.logging import get_logger
 from core.resilience import ClientError, NetworkError, RateLimitError, ServerError
 from core.settings import settings
+from utils.constants import PROVIDER_AUTH_MESSAGES, PROVIDER_AUTH_MISSING_MESSAGES
 
 BAD_RESPONSE_CODE = "PROVIDER_BAD_RESPONSE"
 LEAGUE_NOT_FOUND_CODE = "LEAGUE_NOT_FOUND"
@@ -130,9 +131,16 @@ def _classify_response(response: httpx.Response) -> None:
 
 
 def _cookie_header(cookies: Optional[dict]) -> Optional[str]:
-    if not cookies:
+    """Serialize cookies, dropping empty values.
+
+    A blank `espn_s2=; SWID=` carries no credential but still looks like one to
+    everything downstream — including the auth-failure message, which would then
+    blame stored cookies for a request that never carried any.
+    """
+    pairs = [(key, value) for key, value in (cookies or {}).items() if value]
+    if not pairs:
         return None
-    return "; ".join(f"{key}={value}" for key, value in cookies.items())
+    return "; ".join(f"{key}={value}" for key, value in pairs)
 
 
 async def _attempt(
@@ -240,7 +248,12 @@ async def _call(
     except ClientError as exc:
         status = exc.status_code
         if status in auth_statuses:
-            error = ProviderAuthError(provider)
+            messages = (
+                PROVIDER_AUTH_MESSAGES
+                if _sent_credentials(request_kwargs)
+                else PROVIDER_AUTH_MISSING_MESSAGES
+            )
+            error = ProviderAuthError(provider, messages.get(provider))
         elif status == 404 and league_404:
             error = BadRequestError(
                 LEAGUE_NOT_FOUND_CODE,
@@ -287,6 +300,22 @@ async def _call(
         body_preview=preview,
     )
     raise error
+
+
+
+def _sent_credentials(request_kwargs: dict) -> bool:
+    """Whether the refused request actually carried credentials.
+
+    Both arrive as headers by this point: ESPN's cookies via `_cookie_header`,
+    Yahoo's bearer token via Authorization. Only consulted
+    after a provider has already answered 401/403, so a public ESPN league —
+    which needs no credentials and answers 200 — never reaches it.
+    """
+    headers = request_kwargs.get("headers") or {}
+    return any(
+        key.lower() in ("cookie", "authorization") and value
+        for key, value in headers.items()
+    )
 
 
 async def provider_get(
