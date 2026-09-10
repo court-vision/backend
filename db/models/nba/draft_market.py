@@ -1,13 +1,18 @@
 """
 Draft Market Table
 
-Draft-market snapshots: ESPN's editorial draft rank and auction value plus the
+Draft-market snapshots: ESPN's editorial draft ranks and auction values plus the
 crowd averages from real ESPN drafts (average draft position and average auction
 price), plus the position fields the draft room needs (primary position,
 eligibility, injury). One row per (player, season, source, as_of_date); keeping
 snapshots per date makes September rank drift (risers/fallers) queryable. There
 is no positional rank on the wire — derive it at read time. Written by the
 data-platform preseason-market pipeline; backend reads.
+
+ESPN ranks the same pool twice, in one payload: STANDARD is the points-league
+board, ROTO the category-league one. They are genuinely different opinions, not
+a rescaling of each other, so both are stored and the board reads whichever
+matches the league's resolved format.
 """
 
 from datetime import datetime
@@ -35,8 +40,13 @@ class DraftMarket(BaseModel):
     One player's draft-market snapshot for a season.
 
     Attributes:
-        overall_rank: editorial draftRanksByRankType.STANDARD.rank
-        auction_value: editorial auction value
+        overall_rank: editorial draftRanksByRankType.STANDARD.rank — the
+            points-league board
+        auction_value: editorial STANDARD auction value
+        roto_rank: editorial draftRanksByRankType.ROTO.rank — the category-league
+            board. Null on snapshots written before the pipeline captured it, and
+            for a player ESPN ranks in only one of the two
+        roto_auction_value: editorial ROTO auction value
         adp: ownership.averageDraftPosition (mean across real ESPN drafts)
         auction_value_avg: ownership.auctionValueAverage
         default_position_id: ESPN primary position, 1-based (1=PG ... 5=C) — the
@@ -61,6 +71,8 @@ class DraftMarket(BaseModel):
 
     overall_rank = IntegerField(null=True)
     auction_value = DecimalField(max_digits=6, decimal_places=1, null=True)
+    roto_rank = IntegerField(null=True)
+    roto_auction_value = DecimalField(max_digits=6, decimal_places=1, null=True)
     adp = DecimalField(max_digits=6, decimal_places=2, null=True)
     auction_value_avg = DecimalField(max_digits=7, decimal_places=2, null=True)
 
@@ -89,6 +101,7 @@ class DraftMarket(BaseModel):
             f"player_id={self.player_id}, "
             f"season='{self.season}', "
             f"rank={self.overall_rank}, "
+            f"roto_rank={self.roto_rank}, "
             f"adp={self.adp})>"
         )
 
@@ -100,6 +113,8 @@ class DraftMarket(BaseModel):
         as_of_date,
         overall_rank: int | None = None,
         auction_value: float | None = None,
+        roto_rank: int | None = None,
+        roto_auction_value: float | None = None,
         adp: float | None = None,
         auction_value_avg: float | None = None,
         default_position_id: int | None = None,
@@ -112,6 +127,8 @@ class DraftMarket(BaseModel):
         values = {
             "overall_rank": overall_rank,
             "auction_value": auction_value,
+            "roto_rank": roto_rank,
+            "roto_auction_value": roto_auction_value,
             "adp": adp,
             "auction_value_avg": auction_value_avg,
             "default_position_id": default_position_id,

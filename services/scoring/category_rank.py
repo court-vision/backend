@@ -52,6 +52,10 @@ class PoolRow:
     espn_id: int | None = None
     name_normalized: str | None = None
     position: str | None = None
+    # Which season the line came from. None for rolling/projection rows, whose
+    # season is the board's own; set on baseline rows, which may be walked back
+    # to an older season than the rest of the pool (services.scoring.pool).
+    season: str | None = None
 
 
 @dataclass

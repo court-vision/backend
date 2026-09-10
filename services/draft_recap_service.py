@@ -117,6 +117,7 @@ class DraftRecapService:
             season_value=season_value,
             draft_type=session.draft_type,
             my_slot=session.my_slot,
+            rank_type=DraftBoardService._rank_type(scoring),
         )
         return DraftRecapService._respond(scoring, session, inputs, recap, pool, cat_defs)
 

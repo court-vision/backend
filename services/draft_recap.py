@@ -39,6 +39,7 @@ is never quietly graded down for a gap in our data.
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
+from services.draft_market import market_rank_of
 from services.scoring.models import CategoryDef
 
 # Relative letters, worst last. A four-seat league therefore tops out at D:
@@ -174,12 +175,17 @@ def build_recap(
     season_value: Optional[Mapping[int, float]] = None,
     draft_type: str = "snake",
     my_slot: Optional[int] = None,
+    rank_type: str = "standard",
 ) -> Recap:
     """Score every pick, grade every seat, and project the standings.
 
     `ladder` is the board in CV order — `(player_id, value)`, best first, the
     same order `cv_rank` enumerates — so the player ranked at pick *k* is
     `ladder[k - 1]` whether or not anybody drafted him.
+
+    `rank_type` picks which of ESPN's two boards a pick is graded against, and
+    must be the one the room drafted off: grading a category draft against
+    ESPN's points ranking would call every punt-build pick a reach.
     """
     market = market or {}
     category_z = category_z or {}
@@ -198,7 +204,7 @@ def build_recap(
         value = value_of.get(pid) if pid is not None else None
         rank = cv_rank.get(pid) if pid is not None else None
         row = market.get(pid, {}) if pid is not None else {}
-        market_rank = row.get("overall_rank")
+        market_rank = market_rank_of(row, rank_type) if row else None
         adp = row.get("adp")
         slot_value = (
             ladder[pick.overall_pick - 1][1]

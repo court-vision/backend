@@ -110,6 +110,29 @@ def test_a_pick_is_priced_against_the_player_cv_ranked_at_that_pick_number():
     assert scored.market_rank == 5
 
 
+def test_a_category_draft_is_graded_against_espns_category_board():
+    """The recap must grade a draft against the board the room drafted off.
+    Priced against ESPN's points ranking instead, a category-league punt build
+    would read as a room full of reaches."""
+    market = {1: {"overall_rank": 60, "roto_rank": 4, "adp": 7.5}}
+    ladder = ladder_of(10)
+
+    points = build_recap([pick(3, 1, 1)], ladder, market)
+    cats = build_recap([pick(3, 1, 1)], ladder, market, rank_type="roto")
+
+    assert points.picks[0].market_rank == 60
+    assert cats.picks[0].market_rank == 4
+
+
+def test_a_category_draft_falls_back_to_the_points_rank_on_an_older_snapshot():
+    """Snapshots written before ROTO was captured carry one board. Reading the
+    one that is there beats reporting that ESPN had no opinion at all."""
+    recap = build_recap([pick(3, 1, 1)], ladder_of(10),
+                        {1: {"overall_rank": 5, "adp": 7.5}}, rank_type="roto")
+
+    assert recap.picks[0].market_rank == 5
+
+
 def test_a_pick_past_the_end_of_the_ladder_has_no_slot_to_be_priced_against():
     recap = build_recap([pick(50, 1, 1)], ladder_of(10))
     assert recap.picks[0].value_over_slot is None
