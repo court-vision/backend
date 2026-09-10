@@ -435,10 +435,11 @@ class DraftBoardRow(ApiModel):
     value_season: Optional[str] = Field(
         default=None,
         description=(
-            "The season a baseline `value` was taken from, e.g. `2024-25`. Usually last season "
-            "and worth showing only when it is not: a player who missed a whole season is valued "
-            "off the most recent one he played, and that value is a year older than the rest of "
-            "the board. None for projection and market-only rows."
+            "Set only when a baseline `value` came from an OLDER season than the board's own "
+            "previous one, e.g. `2024-25` on a 2026-27 board — a player who missed last season "
+            "entirely is valued off the most recent one he played, and that value is a year "
+            "staler than every other row. None for everyone valued from last season, and for "
+            "projection and market-only rows."
         ),
     )
     last_season_gp: Optional[int] = Field(default=None, description="Games played last season; None for rookies")

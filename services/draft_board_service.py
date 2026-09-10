@@ -140,7 +140,7 @@ from services.scoring.category_value import (
 )
 from services.scoring.models import StatLine
 from services.scoring.points import DEFAULT_POINTS
-from services.scoring.pool import load_baseline_pool
+from services.scoring.pool import baseline_season, load_baseline_pool
 from services.scoring.providers.espn_settings import POSITION_ID_MAP
 from utils.espn_helpers import POSITION_MAP
 
@@ -373,7 +373,12 @@ class DraftBoardService:
         pool: dict[int, PoolRow] = dict(baseline)
         source = {pid: "baseline" for pid in baseline}
         last_season_gp = {pid: row.gp for pid, row in baseline.items()}
-        value_season = {pid: row.season for pid, row in baseline.items() if row.season}
+        # Only when it is NOT the season the board expects: the field's job is
+        # to flag a value that is older than the rest, not to restate the
+        # obvious for everyone who simply played last year.
+        expected = baseline_season()
+        value_season = {pid: row.season for pid, row in baseline.items()
+                        if row.season and row.season != expected}
 
         projections_as_of, projections = DraftBoardService._latest_projections(season)
         projected_gp: dict[int, Optional[int]] = {}
