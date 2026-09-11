@@ -78,6 +78,8 @@ class PercentileData(ApiModel):
     avg_fg_pct: int
     avg_fg3_pct: int
     avg_ft_pct: int
+    # Threes made: the 9-cat category (3P% is not one). Feeds the player card.
+    avg_fg3m: int
 
 
 class PlayerPercentilesResp(BaseResponse):

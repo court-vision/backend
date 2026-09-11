@@ -192,11 +192,12 @@ def test_game_logs_join_historical_team_and_keep_unscheduled_rows():
 def test_percentiles_read_normalized_game_rows():
     player(1)
     player(2)
-    PlayerGameStats.upsert_game_stats(1, OLD, {"pts": 20, "fpts": 40})
-    PlayerGameStats.upsert_game_stats(2, OLD, {"pts": 10, "fpts": 20})
+    PlayerGameStats.upsert_game_stats(1, OLD, {"pts": 20, "fpts": 40, "fg3m": 3})
+    PlayerGameStats.upsert_game_stats(2, OLD, {"pts": 10, "fpts": 20, "fg3m": 1})
     response = PlayerService.get_player_percentiles.__wrapped__(1, min_games=1)
     assert response.status == "success"
     assert response.data.avg_points == 50
+    assert response.data.avg_fg3m == 50
 
 
 def test_stats_keep_nba_and_espn_ids_distinct_and_normalize_name_and_team():

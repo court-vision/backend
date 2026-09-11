@@ -589,6 +589,7 @@ class PlayerService:
             "avg_blocks": fn.AVG(PlayerGameStats.blk),
             "avg_turnovers": fn.AVG(PlayerGameStats.tov),
             "avg_minutes": fn.AVG(PlayerGameStats.min),
+            "avg_fg3m": fn.AVG(PlayerGameStats.fg3m),
             "avg_fg_pct": Case(
                 None,
                 [(fn.SUM(PlayerGameStats.fga) > 0,
