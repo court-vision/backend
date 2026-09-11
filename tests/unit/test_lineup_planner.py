@@ -1,6 +1,6 @@
 """
-The fill-only planner (services.lineup_planner): pure, so every rule is a table
-of players in, moves out.
+The fill-only planner and the IR housekeeping planner (services.lineup_planner):
+pure, so every rule is a table of players in, moves out.
 
 Slot ids are ESPN's: 0 PG, 1 SG, 2 SF, 3 PF, 4 C, 5 G, 6 F, 11 UT, 12 BE, 13 IR.
 Slot counts come from the real ESPN settings fixture (1 of each position, 1 G,
@@ -19,6 +19,7 @@ from services.lineup_planner import (
     PlannerPlayer,
     apply_moves,
     plan_fill,
+    plan_ir,
     validate_moves,
 )
 
@@ -284,3 +285,89 @@ def test_capacity_holds_after_a_three_move_chain():
     assert validate_moves(roster, SLOT_COUNTS, chain) == []
     broken = [Move(13, BE, C), Move(5, C, UT)]  # nobody leaves UT: 4 in UT
     assert codes(validate_moves(roster, SLOT_COUNTS, broken)) == ["CAPACITY"]
+
+
+# ---- plan_ir ---------------------------------------------------------------------
+
+# ESPN lists slot 13 for everyone; the fixture sets above leave it out so the
+# eligibility rule is explicit in every test that needs it.
+IR_GUARD = GUARD | {IR}
+IR_BIG = BIG | {IR}
+
+
+def ir_of(actions):
+    return [(a.kind, a.player_id, (a.move.from_slot_id, a.move.to_slot_id) if a.move else None, a.blocked_reason)
+            for a in actions]
+
+
+def without(roster, pid):
+    return [p for p in roster if p.player_id != pid]
+
+
+@pytest.mark.unit
+def test_healthy_full_board_has_no_ir_actions():
+    assert plan_ir(full_lineup(), SLOT_COUNTS) == ()
+
+
+@pytest.mark.unit
+def test_out_starter_takes_the_open_ir_seat():
+    actions = plan_ir(full_lineup({5: player(5, C, IR_BIG, status="OUT")}), SLOT_COUNTS)
+    assert ir_of(actions) == [("ir_in", 5, (C, IR), None)]
+    assert actions[0].move.role == "shift" and actions[0].move.note == "OUT"
+
+
+@pytest.mark.unit
+def test_one_seat_goes_to_a_starter_before_a_bench_player_then_to_the_lowest_value():
+    starter_and_bench = full_lineup({11: player(11, BE, IR_GUARD, status="OUT", value=5.0),
+                                     5: player(5, C, IR_BIG, status="OUT", value=30.0)})
+    assert ir_of(plan_ir(starter_and_bench, SLOT_COUNTS)) == [("ir_in", 5, (C, IR), None)]
+    two_starters = full_lineup({1: player(1, PG, IR_GUARD, status="OUT", value=30.0),
+                                5: player(5, C, IR_BIG, status="OUT", value=12.0)})
+    assert ir_of(plan_ir(two_starters, SLOT_COUNTS)) == [("ir_in", 5, (C, IR), None)]
+
+
+@pytest.mark.unit
+def test_a_full_ir_offers_nothing():
+    roster = full_lineup({5: player(5, C, IR_BIG, status="OUT")}) + [player(14, IR, IR_GUARD, status="OUT")]
+    assert plan_ir(roster, SLOT_COUNTS) == ()
+
+
+@pytest.mark.unit
+def test_healthy_ir_player_returns_to_a_bench_seat():
+    roster = without(full_lineup(), 13) + [player(14, IR, IR_GUARD)]
+    actions = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(actions) == [("ir_out", 14, (IR, BE), None)]
+    assert actions[0].move.role == "shift" and actions[0].move.note == "healthy"
+
+
+@pytest.mark.unit
+def test_healthy_ir_player_with_a_full_roster_is_blocked_not_moved():
+    roster = full_lineup() + [player(14, IR, IR_GUARD)]
+    assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, None, "roster_full")]
+
+
+@pytest.mark.unit
+def test_healthy_ir_player_takes_an_open_active_slot_when_the_bench_is_full():
+    roster = without(full_lineup(), 1) + [player(14, IR, IR_GUARD)]   # PG empty, bench full
+    assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, PG), None)]
+
+
+@pytest.mark.unit
+def test_locked_players_never_move_on_or_off_ir():
+    roster = without(full_lineup({5: player(5, C, IR_BIG, status="OUT", locked=True)}), 13)
+    roster += [player(14, IR, IR_GUARD, locked=True)]
+    assert plan_ir(roster, SLOT_COUNTS) == ()
+
+
+@pytest.mark.unit
+def test_ir_eligibility_is_espns_injury_rule_not_the_status_alone():
+    assert plan_ir(full_lineup({5: player(5, C, IR_BIG, status="SUSPENSION")}), SLOT_COUNTS) == ()
+    flagged = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    assert ir_of(plan_ir(flagged, SLOT_COUNTS)) == [("ir_in", 5, (C, IR), None)]
+    assert plan_ir(full_lineup({5: player(5, C, BIG, status="OUT")}), SLOT_COUNTS) == ()   # 13 not listed
+
+
+@pytest.mark.unit
+def test_an_ir_out_does_not_free_the_seat_for_an_ir_in_in_the_same_pass():
+    roster = without(full_lineup({5: player(5, C, IR_BIG, status="OUT")}), 13) + [player(14, IR, IR_GUARD)]
+    assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, BE), None)]
