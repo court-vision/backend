@@ -103,8 +103,16 @@ def provider_label(provider: str) -> str:
 
 
 def _redacted_url(url: str) -> str:
+    """scheme://host/path for a log line: no query string, and no SWID -- ESPN's
+    fan API takes the account's SWID as a path segment."""
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    path = "/".join("{SWID}" if _is_swid_segment(seg) else seg for seg in parts.path.split("/"))
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+def _is_swid_segment(segment: str) -> bool:
+    lowered = segment.lower()
+    return lowered.startswith(("{", "%7b")) and lowered.endswith(("}", "%7d"))
 
 
 def _rate_limited(provider: str, exc: RateLimitError) -> ProviderError:

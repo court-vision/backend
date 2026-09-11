@@ -92,6 +92,19 @@ def test_secrets_inside_strings_are_redacted():
 def test_scrub_string_leaves_ordinary_text_alone():
     assert scrub_string("week=3&team_id=7") == "week=3&team_id=7"
     assert scrub_string("No matchup this week") == "No matchup this week"
+    # Correlation ids are UUIDs too; only a braced one is a SWID
+    assert scrub_string("cid 3f2a9c1e-1b2c-4d5e-8f90-a1b2c3d4e5f6") == "cid 3f2a9c1e-1b2c-4d5e-8f90-a1b2c3d4e5f6"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("url", [
+    "https://fan.api.espn.com/apis/v2/fans/{3F2A9C1E-1B2C-4D5E-8F90-A1B2C3D4E5F6}",
+    "https://fan.api.espn.com/apis/v2/fans/%7B3f2a9c1e-1b2c-4d5e-8f90-a1b2c3d4e5f6%7D",
+])
+def test_a_bare_swid_is_redacted(url):
+    """ESPN's fan API takes the SWID as a path segment, where there is no `swid=` to key on."""
+    scrubbed = scrub_string(f"GET {url} failed")
+    assert scrubbed == f"GET https://fan.api.espn.com/apis/v2/fans/{FILTERED} failed"
 
 
 @pytest.mark.unit
