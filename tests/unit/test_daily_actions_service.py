@@ -30,14 +30,14 @@ OPENING = date(2026, 10, 20)   # a Tuesday
 
 
 def player(pid, name, slot, *, eligible=(PG, SG, UT, BE, IR), game=True, status=None, injured=False,
-           locked=False, value=20.0, team="DEN", tip="19:30"):
+           locked=False, value=20.0, team="DEN", tip="19:30", pos=None):
     return LineupPlayer(
         player_id=pid, nba_player_id=pid * 10, name=name, team=team, lineup_slot_id=slot, lineup_slot=_slot_name(slot),
         eligible_slot_ids=list(eligible), eligible_slots=[_slot_name(s) for s in eligible], injured=injured,
         injury_status=status, lineup_locked=locked, has_game_today=game, opponent="vs LAL" if game else None,
         game_time_et=tip if game else None, game_started=False, locked=locked,
         playable=game and (status or "ACTIVE").upper() != "OUT", avg_points=value, value_kind="fpts",
-        value_source="rolling",
+        value_source="rolling", default_position_id=pos,
     )
 
 
@@ -52,21 +52,21 @@ def full_board(overrides=None):
     return list(base.values())
 
 
-def state(players, *, nba_date="2026-10-20", can_write=True, reason=None, version="v1"):
+def state(players, *, nba_date="2026-10-20", can_write=True, reason=None, version="v1", limits=None):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
         scoring_period_id=1, scoring_period_source="provider", first_game_time_et="19:00", slot_counts=COUNTS,
         slots=[], lock_type="INDIVIDUAL_GAME", players=players, can_write=can_write, write_blocked_reason=reason,
-        roster_version=version, fetched_at="now",
+        roster_version=version, fetched_at="now", position_limits=limits or {},
     )
 
 
-def pick(pid, name="FA", *, status="free_agent", value=20.0, team="LAL", score=50.0, game_days=(0, 3)):
+def pick(pid, name="FA", *, status="free_agent", value=20.0, team="LAL", score=50.0, game_days=(0, 3), pos=None):
     return StreamerPlayerResp(
         player_id=pid, nba_player_id=pid * 10, name=name, team=team, valid_positions=["PG"],
         avg_points_last_n=value, avg_points_season=value or 0.0, avg_source="rolling", games_remaining=len(game_days),
         has_b2b=False, b2b_game_count=0, game_days=list(game_days), streamer_score=score, injured=False,
-        acquisition_status=status,
+        acquisition_status=status, default_position_id=pos,
     )
 
 
@@ -294,8 +294,8 @@ def test_the_swap_needs_one_value_scale(harness):
 # ---- suggest_transaction (pure) ---------------------------------------------------------------------------
 
 
-def suggest(players, streamers, **kw):
-    return svc.suggest_transaction(state(players), streamers, ir_eligible=eligible(players), **kw)
+def suggest(players, streamers, limits=None, **kw):
+    return svc.suggest_transaction(state(players, limits=limits), streamers, ir_eligible=eligible(players), **kw)
 
 
 @pytest.mark.unit
@@ -369,3 +369,45 @@ def test_chains_split_on_every_start():
     chain_b = [m(12, BE, PG, role="start"), m(1, PG, SG, role="shift"), m(2, SG, BE, role="bench")]
     assert svc.chains_of(chain_a + chain_b) == [chain_a, chain_b]
     assert svc.chains_of([]) == []
+
+
+# ---- seats and position limits ---------------------------------------------------------------------------
+
+PG_ID, C_ID = 1, 5
+
+
+@pytest.mark.unit
+def test_an_empty_ir_seat_is_not_a_seat_for_a_healthy_pickup():
+    # Seven seats incl. IR; six players off IR and nobody on IR: ESPN's roster is full.
+    players = [p for p in full_board({12: player(12, "P12", BE, game=False, value=10.0)}) if p.player_id != 14]
+    assert svc.has_open_seat(state(players)) is False
+    assert suggest(players, [pick(99, value=20.0)]).drop.player_id == 12
+    # The same six players with one of them on IR: a seat opens.
+    players = full_board({12: player(12, "P12", BE, game=False, value=10.0)})
+    players = [p for p in players if p.player_id != 11]
+    assert svc.has_open_seat(state(players)) is True
+    assert suggest(players, [pick(99, value=20.0)]).drop is None
+
+
+@pytest.mark.unit
+def test_a_pickup_at_the_position_limit_is_skipped_for_the_next_one():
+    players = [p for p in full_board({1: player(1, "P1", PG, pos=C_ID), 2: player(2, "P2", SG, pos=C_ID),
+                                       5: player(5, "P5", C, pos=C_ID), 8: player(8, "P8", UT, pos=C_ID)})
+               if p.player_id != 12]                                              # a seat is open
+    streamers = [pick(99, "fifth C", pos=C_ID, value=40.0), pick(98, "a guard", pos=PG_ID, value=30.0)]
+    assert suggest(players, streamers, limits={"5": 4, "1": -1}).pickup.player_id == 98
+    assert suggest(players, streamers).pickup.player_id == 99                    # no limits known
+    assert suggest(players, [streamers[0]], limits={"5": 4}) is None
+
+
+@pytest.mark.unit
+def test_a_swap_that_drops_the_same_default_position_still_fits():
+    players = full_board({1: player(1, "P1", PG, pos=C_ID), 2: player(2, "P2", SG, pos=C_ID),
+                          5: player(5, "P5", C, pos=C_ID), 8: player(8, "P8", UT, pos=C_ID, game=False, value=10.0)})
+    s = suggest(players, [pick(99, "fifth C", pos=C_ID, value=20.0)], limits={"5": 4})
+    assert (s.pickup.player_id, s.drop.player_id) == (99, 8)
+    # ...but not when the drop plays a different default position.
+    players = full_board({1: player(1, "P1", PG, pos=C_ID), 2: player(2, "P2", SG, pos=C_ID),
+                          5: player(5, "P5", C, pos=C_ID), 8: player(8, "P8", UT, pos=C_ID),
+                          12: player(12, "P12", BE, pos=PG_ID, game=False, value=10.0)})
+    assert suggest(players, [pick(99, "fifth C", pos=C_ID, value=20.0)], limits={"5": 4}) is None

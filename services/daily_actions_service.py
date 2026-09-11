@@ -20,6 +20,7 @@ for the streamer pool — so the swap is offered only when both agree on the dat
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Mapping, Optional, Sequence
@@ -82,6 +83,17 @@ def chains_of(moves: Sequence[Move]) -> list[list[Move]]:
     return chains
 
 
+def has_open_seat(state: LineupState) -> bool:
+    """ESPN's roster limit as the add/drop needs it: the players off IR must number fewer
+    than the non-IR seats. An empty IR seat is not a seat for a healthy player, and the
+    bench absorbs an add even when its own slot count is full (ESPN parks the pickup
+    there rather than in an open active slot he is not eligible for)."""
+    counts = slot_counts_of(state)
+    seats = sum(v for k, v in counts.items() if k != IR_SLOT_ID)
+    off_ir = sum(1 for p in state.players if p.lineup_slot_id != IR_SLOT_ID)
+    return off_ir < seats
+
+
 def suggest_transaction(
     state: LineupState,
     streamers: Sequence[StreamerPlayerResp],
@@ -90,23 +102,36 @@ def suggest_transaction(
     ratio: float = STREAMABLE_RATIO,
 ) -> Optional[TransactionSuggestion]:
     """The day's streamer swap, or None. `streamers` is the daily search in its own
-    order (free agents with a game today, best first)."""
+    order (free agents with a game today, best first). Pickups ESPN would refuse under
+    `rosterSettings.positionLimits` are skipped — a swap that drops a player of the
+    same default position frees that seat and still counts."""
     roster_ids = {p.player_id for p in state.players}
+    drop: Optional[LineupPlayer] = None
+    if not has_open_seat(state):
+        droppable = [p for p in state.players
+                     if not p.locked and p.lineup_slot_id != IR_SLOT_ID
+                     and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
+        if not droppable:
+            return None
+        drop = min(droppable, key=lambda p: (p.avg_points, p.name))
+
+    limits = {int(k): int(v) for k, v in state.position_limits.items() if int(v) > 0}
+    held = Counter(p.default_position_id for p in state.players if p.default_position_id is not None)
+
+    def capped(s: StreamerPlayerResp) -> bool:
+        pos = s.default_position_id
+        if pos is None or pos not in limits:
+            return False
+        freed = 1 if drop is not None and drop.default_position_id == pos else 0
+        return held[pos] - freed >= limits[pos]
+
     pickup = next((s for s in streamers
                    if s.acquisition_status == "free_agent" and s.avg_points_last_n is not None
-                   and s.player_id not in roster_ids), None)
+                   and s.player_id not in roster_ids and not capped(s)), None)
     if pickup is None:
         return None
-    # Capacity counts every seat incl. IR — the same rule as the add/drop dialog's
-    # "open seat"; ESPN stays the authority and refuses an add it will not take.
-    if len(state.players) < sum(slot_counts_of(state).values()):
+    if drop is None:
         return TransactionSuggestion(pickup, None)
-    droppable = [p for p in state.players
-                 if not p.locked and p.lineup_slot_id != IR_SLOT_ID
-                 and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
-    if not droppable:
-        return None
-    drop = min(droppable, key=lambda p: (p.avg_points, p.name))
     if pickup.avg_points_last_n < drop.avg_points * ratio:
         return None
     return TransactionSuggestion(pickup, drop)

@@ -29,14 +29,14 @@ COUNTS = SETTINGS["settings"]["rosterSettings"]["lineupSlotCounts"]
 SWID = "{ABCDEF01-2345-6789-ABCD-EF0123456789}"
 
 
-def entry(pid, slot, eligible, *, locked=False, injured=False, status="ACTIVE", team=7, name=None):
+def entry(pid, slot, eligible, *, locked=False, injured=False, status="ACTIVE", team=7, name=None, pos=1):
     return {
         "playerId": pid, "lineupSlotId": slot, "injuryStatus": status,
         "playerPoolEntry": {
             "id": pid, "lineupLocked": locked, "onTeamId": 4,
             "player": {"id": pid, "fullName": name or f"Player {pid}", "proTeamId": team,
                        "eligibleSlots": list(eligible), "injured": injured, "injuryStatus": status,
-                       "defaultPositionId": 1},
+                       "defaultPositionId": pos},
         },
     }
 
@@ -135,3 +135,14 @@ def test_roster_version_tracks_period_and_assignment_only():
     assert a != roster_version(13, [_player(1, 0), _player(2, 12)])     # new ESPN day
     assert a != roster_version(12, [_player(1, 12), _player(2, 0)])     # a swap
     assert len(a) == 16
+
+
+@pytest.mark.unit
+def test_position_limits_keep_only_the_capped_positions_and_entries_carry_their_default_position():
+    body = payload(entries=[entry(1, 0, [0, 5, 11, 12], pos=1), entry(2, 11, [4, 11, 12], pos=5)])
+    body["settings"]["rosterSettings"]["positionLimits"] = {"0": 0, "1": -1, "2": -1, "3": -1, "4": -1, "5": 4}
+    parsed = parse_espn_lineup(body, team_name="Lvl. 3 Goblins", espn_team_id=4, swid=SWID)
+    assert parsed.position_limits == {5: 4}
+    assert [e.default_position_id for e in parsed.entries] == [1, 5]
+    # No limits block at all (older payloads, the name-keyed fallback): nothing is capped.
+    assert parse_espn_lineup(payload(), team_name="Lvl. 3 Goblins", espn_team_id=4).position_limits == {}

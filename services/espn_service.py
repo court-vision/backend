@@ -68,7 +68,8 @@ class Player(object):
         self.name = json_parsing(data, 'fullName')
         self.playerId = json_parsing(data, 'id')
         self.year = year
-        self.position = POSITION_MAP[json_parsing(data, 'defaultPositionId') - 1]
+        self.defaultPositionId = json_parsing(data, 'defaultPositionId')
+        self.position = POSITION_MAP[self.defaultPositionId - 1]
         self.lineupSlot = POSITION_MAP.get(data.get('lineupSlotId'), '')
         self.eligibleSlots = [POSITION_MAP[pos] for pos in json_parsing(data, 'eligibleSlots')]
         self.acquisitionType = json_parsing(data, 'acquisitionType')
@@ -250,6 +251,7 @@ class EspnService:
                 value_source=source,
                 acquisition_status=ACQUISITION_STATUS.get(player.poolStatus or ""),
                 waivers_until=player.waiverProcessDate,
+                default_position_id=player.defaultPositionId,
             ))
         return out
 

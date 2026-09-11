@@ -30,6 +30,7 @@ class PlayerResp(ApiModel):
     value_source: Optional[str] = None
     acquisition_status: Optional[AcquisitionStatus] = None
     waivers_until: Optional[date] = None   # the day the waiver claim window closes (ESPN's waiverProcessDate)
+    default_position_id: Optional[int] = None   # ESPN's defaultPositionId (1 PG … 5 C); None for Yahoo
 
 class TeamDataReq(BaseRequest):
     league_info: LeagueInfo
