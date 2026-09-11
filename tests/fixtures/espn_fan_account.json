@@ -1,0 +1,133 @@
+{
+  "id": "{3F2A9C1E-1B2C-4D5E-8F90-A1B2C3D4E5F6}",
+  "anon": false,
+  "preferences": [
+    {
+      "id": "B1C91DAE-0000-0000-0000-000000000000",
+      "metaData": {
+        "sportId": "46",
+        "sport": { "name": "NBA", "slug": "nba", "sportSlug": "basketball" }
+      },
+      "type": { "id": 1, "name": "Favorite Sports", "code": "sports" }
+    },
+    {
+      "id": "1:1111111:3:2027",
+      "metaData": {
+        "entry": {
+          "entryId": 1,
+          "entryMetadata": {
+            "teamName": "Alpha",
+            "teamAbbrev": "ALP",
+            "scoringTypeName": "H2H_POINTS",
+            "leagueTypeId": 0,
+            "leagueSubTypeName": "NONE"
+          },
+          "gameId": 3,
+          "groups": [
+            { "groupId": 1111111, "groupSize": 4, "groupName": "Test League", "groupManager": true }
+          ],
+          "seasonId": 2027,
+          "abbrev": "FBA"
+        },
+        "inSeason": true
+      },
+      "type": { "id": 9, "name": "Fantasy League Manager", "code": "fantasy" }
+    },
+    {
+      "id": "2:1111111:3:2027",
+      "metaData": {
+        "entry": {
+          "entryId": 2,
+          "entryMetadata": {
+            "teamName": "Bravo",
+            "teamAbbrev": "BRV",
+            "scoringTypeName": "H2H_POINTS",
+            "leagueTypeId": 0,
+            "leagueSubTypeName": "NONE"
+          },
+          "gameId": 3,
+          "groups": [
+            { "groupId": 1111111, "groupSize": 4, "groupName": "Test League", "groupManager": true }
+          ],
+          "seasonId": 2027,
+          "abbrev": "FBA"
+        },
+        "inSeason": true
+      },
+      "type": { "id": 9, "name": "Fantasy League Manager", "code": "fantasy" }
+    },
+    {
+      "id": "8:2222222:3:2027",
+      "metaData": {
+        "entry": {
+          "entryId": 8,
+          "entryMetadata": {
+            "teamName": "Charlie",
+            "teamAbbrev": "CHA",
+            "scoringTypeName": "H2H_CATEGORY",
+            "leagueTypeId": 1,
+            "leagueSubTypeName": "DRAFT_LOBBY"
+          },
+          "gameId": 3,
+          "groups": [
+            { "groupId": 2222222, "groupSize": 10, "groupName": "Public Lobby League", "groupManager": false }
+          ],
+          "seasonId": 2027,
+          "abbrev": "FBA"
+        },
+        "inSeason": true
+      },
+      "type": { "id": 9, "name": "Fantasy League Manager", "code": "fantasy" }
+    },
+    {
+      "id": "5:3333333:3:2026",
+      "metaData": {
+        "entry": {
+          "entryId": 5,
+          "entryMetadata": {
+            "teamName": "Delta",
+            "teamAbbrev": "DEL",
+            "scoringTypeName": "H2H_CATEGORY",
+            "leagueTypeId": 0,
+            "leagueSubTypeName": "NONE"
+          },
+          "gameId": 3,
+          "groups": [
+            { "groupId": 3333333, "groupSize": 12, "groupName": "Older League", "groupManager": false }
+          ],
+          "seasonId": 2026,
+          "abbrev": "FBA"
+        },
+        "inSeason": false
+      },
+      "type": { "id": 9, "name": "Fantasy League Manager", "code": "fantasy" }
+    },
+    {
+      "id": "3:4444444:1:2026",
+      "metaData": {
+        "entry": {
+          "entryId": 3,
+          "entryMetadata": {
+            "teamName": "Echo",
+            "teamAbbrev": "ECH",
+            "scoringTypeName": "H2H_POINTS",
+            "leagueTypeId": 0,
+            "leagueSubTypeName": "NONE"
+          },
+          "gameId": 1,
+          "groups": [
+            { "groupId": 4444444, "groupSize": 10, "groupName": "Football League", "groupManager": false }
+          ],
+          "seasonId": 2026,
+          "abbrev": "FFL"
+        },
+        "inSeason": false
+      },
+      "type": { "id": 9, "name": "Fantasy League Manager", "code": "fantasy" }
+    }
+  ],
+  "fantasyData": {
+    "totalFantasyLeagues": 4,
+    "leaguesBySportLeague": { "NFL": 1, "NBA": 3 }
+  }
+}

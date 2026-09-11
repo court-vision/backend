@@ -35,8 +35,10 @@ class ProviderConnection(BaseModel):
     user = ForeignKeyField(User, column_name="user_id", backref="provider_connections", on_delete="CASCADE")
     provider = CharField(max_length=16)
 
-    # ESPN: the SWID guid. Yahoo: the account guid when known. Empty string
-    # rather than NULL so the unique constraint constrains.
+    # ESPN: the SWID guid, normalized to upper case in braces (credential_service.
+    # normalize_swid) so every spelling of one account is one row. Yahoo: the
+    # account guid when known. Empty string rather than NULL so the unique
+    # constraint constrains.
     external_account_id = CharField(max_length=128, default="")
 
     secret_ciphertext = TextField()
@@ -45,6 +47,11 @@ class ProviderConnection(BaseModel):
     # Cleartext mirror of the Yahoo token expiry so refresh scheduling does not
     # need to decrypt. NULL for ESPN.
     expires_at = DateTimeField(null=True)
+
+    # The provider's last verdicts on these credentials, from an explicit check
+    # (migration 0024). Both are cleared when the credentials are replaced.
+    verified_at = DateTimeField(null=True)
+    auth_failed_at = DateTimeField(null=True)
 
     created_at = DateTimeField(default=_utcnow)
     updated_at = DateTimeField(default=_utcnow)

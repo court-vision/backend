@@ -32,6 +32,14 @@ from services.schedule_service import (
 ACQUISITION_STATUS = {"FREEAGENT": "free_agent", "WAIVERS": "waivers"}
 _EASTERN = pytz.timezone("US/Eastern")
 
+# ESPN's account ("fan") API: one ESPN account, looked up by its SWID, with its
+# fantasy entries. It answers 200 for any SWID it knows whatever the cookies, so
+# it proves the account exists but not that the cookies work -- see
+# connection_service._check_espn_cookies. Its server answers an unencoded `{`
+# with 400; httpx percent-encodes the braces.
+ESPN_FAN_ENDPOINT = "https://fan.api.espn.com/apis/v2/fans/{}"
+ESPN_ACCOUNT_NOT_FOUND = "ESPN_ACCOUNT_NOT_FOUND"
+
 
 def _pool_entry(data: dict) -> dict:
     """The playerPoolEntry level of an ESPN entry: a free-agent listing IS the pool
@@ -197,6 +205,43 @@ class EspnService:
             cookies=EspnService._cookies(league_info),
             expect_key=expect_key,
         )
+
+    @staticmethod
+    async def fetch_fan(espn_s2: str, swid: str) -> dict:
+        """The ESPN account behind a SWID, read with that account's cookies.
+
+        ESPN answers 200 for any SWID it knows, whatever the cookies: `anon:
+        true` in the body marks a read it treated as logged out, and
+        `preferences` lists the account's fantasy entries. A 404 -- no account
+        with that SWID -- raises BadRequestError ESPN_ACCOUNT_NOT_FOUND; an
+        outage raises from provider_get as for any ESPN read.
+        """
+        return await provider_get(
+            "espn",
+            ESPN_FAN_ENDPOINT.format(swid),
+            cookies={"espn_s2": espn_s2, "SWID": swid},
+            not_found=BadRequestError(
+                ESPN_ACCOUNT_NOT_FOUND,
+                "ESPN doesn't recognize that SWID — copy both cookies from ESPN again",
+            ),
+        )
+
+    @staticmethod
+    async def fetch_league_settings(espn_s2: str, swid: str, season: int, league_id: int) -> dict:
+        """One league's settings (mSettings), read with these cookies.
+
+        Its `isPublic` says whether the read proved anything about them: ESPN
+        shows a public league to anyone, and refuses a private one (401/403 ->
+        ProviderAuthError) unless the cookies are good.
+        """
+        data = await provider_get(
+            "espn",
+            ESPN_FANTASY_ENDPOINT.format(season, league_id),
+            params={"view": ["mSettings"]},
+            cookies={"espn_s2": espn_s2, "SWID": swid},
+            expect_key="settings",
+        )
+        return data["settings"]
 
     @staticmethod
     def _scoring_for(league_info: LeagueInfo) -> ResolvedScoring:

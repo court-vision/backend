@@ -164,20 +164,48 @@ class TeamService:
             credential_service.persist(user_id, team, json.loads(serialized))
 
     @staticmethod
-    def _resolve_connection_handle(user_id: int, league_info: LeagueInfo) -> LeagueInfo:
-        """Swap an opaque `yahoo_connection_id` for the tokens it refers to.
+    def _resolve_connection_handle(
+        user_id: int, league_info: LeagueInfo, *, default_espn: bool = True
+    ) -> LeagueInfo:
+        """Swap an opaque connection id for the credentials it refers to.
 
-        The OAuth callback stores Yahoo tokens server-side and hands the browser
-        only this id, so the add-team request cannot carry the credentials that
-        `_validate_league` needs. Resolution is scoped to the caller: another
-        user's connection id resolves to nothing.
+        Yahoo: the OAuth callback stores the tokens server-side and hands the
+        browser only `yahoo_connection_id`, so the add-team request cannot carry
+        the credentials that `_validate_league` needs.
+
+        ESPN: cookies are stored once per ESPN account, so a team on an account
+        already connected needs none pasted. Cookies in the request win; then
+        `espn_connection_id`; then, when `default_espn`, the user's only ESPN
+        connection. With none or several, the request goes on as sent.
+
+        Resolution is scoped to the caller: another user's connection id
+        resolves to nothing.
         """
-        if not league_info.yahoo_connection_id:
+        if league_info.yahoo_connection_id:
+            secrets = credential_service.load_provider_tokens(user_id, league_info.yahoo_connection_id)
+            if not secrets:
+                raise BadRequestError("YAHOO_CONNECTION_NOT_FOUND",
+                                      "Yahoo connection not found; reconnect your account")
+            return TeamService._with_secrets(league_info, secrets)
+
+        if league_info.provider != FantasyProvider.ESPN or (league_info.espn_s2 and league_info.swid):
             return league_info
-        secrets = credential_service.load_provider_tokens(user_id, league_info.yahoo_connection_id)
+
+        connection_id = league_info.espn_connection_id
+        if connection_id is None:
+            candidates = credential_service.connection_ids(user_id, "espn") if default_espn else []
+            if len(candidates) != 1:
+                return league_info
+            connection_id = candidates[0]
+
+        secrets = credential_service.load_provider_tokens(user_id, connection_id, provider="espn")
         if not secrets:
-            raise BadRequestError("YAHOO_CONNECTION_NOT_FOUND",
-                                  "Yahoo connection not found; reconnect your account")
+            raise BadRequestError("ESPN_CONNECTION_NOT_FOUND",
+                                  "ESPN connection not found; connect your ESPN account in Manage Teams")
+        return TeamService._with_secrets(league_info, secrets)
+
+    @staticmethod
+    def _with_secrets(league_info: LeagueInfo, secrets: dict) -> LeagueInfo:
         merged = league_info.model_copy()
         for field, value in secrets.items():
             if value:
@@ -251,6 +279,13 @@ class TeamService:
 
     @staticmethod
     async def update_team(user_id: int, team_id: int, league_info: LeagueInfo) -> TeamUpdateResp:
+        # An `espn_connection_id` (moving the team to another stored ESPN
+        # account) resolves before the merge, so it wins over the cookies on
+        # file. No default here: a team with none on file keeps having none.
+        league_info = await run_db(
+            "teams.resolve_connection", TeamService._resolve_connection_handle,
+            user_id, league_info, default_espn=False,
+        )
         # Must precede validation: _validate_league calls the provider, and the
         # caller may have sent none of the credentials it needs.
         league_info = await run_db(

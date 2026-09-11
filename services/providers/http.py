@@ -14,6 +14,7 @@ from core.errors import AppError, BadRequestError, ProviderAuthError, ProviderEr
 from core.logging import get_logger
 from core.resilience import ClientError, NetworkError, RateLimitError, ServerError
 from core.settings import settings
+from core.telemetry import scrub_string
 from utils.constants import PROVIDER_AUTH_MESSAGES, PROVIDER_AUTH_MISSING_MESSAGES
 
 BAD_RESPONSE_CODE = "PROVIDER_BAD_RESPONSE"
@@ -103,8 +104,16 @@ def provider_label(provider: str) -> str:
 
 
 def _redacted_url(url: str) -> str:
+    """scheme://host/path for a log line: no query string, and no SWID -- ESPN's
+    fan API takes the account's SWID as a path segment."""
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    path = "/".join("{SWID}" if _is_swid_segment(seg) else seg for seg in parts.path.split("/"))
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+def _is_swid_segment(segment: str) -> bool:
+    lowered = segment.lower()
+    return lowered.startswith(("{", "%7b")) and lowered.endswith(("}", "%7d"))
 
 
 def _rate_limited(provider: str, exc: RateLimitError) -> ProviderError:
@@ -231,6 +240,7 @@ async def _call(
     timeout: Optional[float],
     auth_statuses: tuple[int, ...],
     league_404: bool,
+    not_found: Optional[AppError] = None,
     **request_kwargs: Any,
 ) -> dict:
     log = get_logger("provider")
@@ -254,6 +264,8 @@ async def _call(
                 else PROVIDER_AUTH_MISSING_MESSAGES
             )
             error = ProviderAuthError(provider, messages.get(provider))
+        elif status == 404 and not_found is not None:
+            error = not_found
         elif status == 404 and league_404:
             error = BadRequestError(
                 LEAGUE_NOT_FOUND_CODE,
@@ -297,7 +309,8 @@ async def _call(
         elapsed_ms=round((time.perf_counter() - started) * 1000),
         error_code=error.error_code,
         url=_redacted_url(url),
-        body_preview=preview,
+        # An ESPN body can carry a SWID (the fan API's `id`, a league's `owners`)
+        body_preview=scrub_string(preview) if preview else preview,
     )
     raise error
 
@@ -327,7 +340,10 @@ async def provider_get(
     cookies: Optional[dict] = None,
     expect_key: Optional[str] = None,
     timeout: Optional[float] = None,
+    not_found: Optional[AppError] = None,
 ) -> dict:
+    # A 404 reads as "league not found", which is what it means on the league
+    # endpoint; other endpoints pass the error their 404 means as `not_found`.
     request_headers = dict(headers or {})
     cookie = _cookie_header(cookies)
     if cookie:
@@ -335,7 +351,7 @@ async def provider_get(
     return await _call(
         "GET", provider, url,
         expect_key=expect_key, timeout=timeout,
-        auth_statuses=DEFAULT_AUTH_STATUSES, league_404=True,
+        auth_statuses=DEFAULT_AUTH_STATUSES, league_404=True, not_found=not_found,
         params=params, headers=request_headers,
     )
 

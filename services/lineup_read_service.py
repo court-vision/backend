@@ -29,6 +29,7 @@ from core.settings import settings
 from db.base import run_db
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import LineupPlayer, LineupSlotDef, LineupState, WriteBlockedReason
+from services.credential_service import normalize_swid
 from services.espn_service import EspnService
 from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, OUT_STATUSES
 from services.matchup_days import index_games
@@ -78,13 +79,6 @@ class ParsedLineup:
     position_limits: dict[int, int] = field(default_factory=dict)
 
 
-def _normalize_swid(value: Optional[str]) -> str:
-    v = (value or "").strip().upper()
-    if v and not v.startswith("{"):
-        v = "{" + v.strip("{}") + "}"
-    return v
-
-
 def slot_counts_from_names(named: Optional[Mapping[str, int]]) -> dict[int, int]:
     """{"PG": 1, "UT": 3} (usr.leagues.roster_slots) -> {0: 1, 11: 3}."""
     out: dict[int, int] = {}
@@ -124,8 +118,8 @@ def parse_espn_lineup(
     owner_check: OwnerCheck = "unknown"
     owners = target.get("owners")
     if isinstance(owners, list) and owners:
-        mine = _normalize_swid(swid)
-        owner_check = "ok" if mine and mine in {_normalize_swid(o) for o in owners} else "not_owner"
+        mine = normalize_swid(swid)
+        owner_check = "ok" if mine and mine in {normalize_swid(o) for o in owners} else "not_owner"
 
     roster_settings = ((payload.get("settings") or {}).get("rosterSettings") or {})
     raw_counts = roster_settings.get("lineupSlotCounts") or {}

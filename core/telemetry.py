@@ -63,6 +63,10 @@ _QUERY_SECRET_RE = re.compile(
     r"(?i)\b(espn_s2|swid|[a-z_]*token|api[_-]?key|password|secret|client_secret|code)=([^&\s\"'<>]+)"
 )
 
+# A SWID on its own -- `{GUID}`, raw or percent-encoded -- as ESPN's fan API
+# takes it in the URL path, where there is no `swid=` to key on.
+_SWID_RE = re.compile(r"(?i)(?:\{|%7B)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:\}|%7D)")
+
 _MAX_DEPTH = 16
 
 
@@ -72,7 +76,8 @@ def is_sensitive_key(key: Any) -> bool:
 
 
 def scrub_string(value: str) -> str:
-    return _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}={FILTERED}", value)
+    value = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}={FILTERED}", value)
+    return _SWID_RE.sub(FILTERED, value)
 
 
 def scrub_value(value: Any, depth: int = 0) -> Any:
