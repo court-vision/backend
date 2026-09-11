@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, Literal, Mapping, Optional
 
@@ -61,6 +61,7 @@ class ParsedEntry:
     injured: bool
     injury_status: Optional[str]
     lineup_locked: bool
+    default_position_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ class ParsedLineup:
     lock_type: Optional[str]
     entries: tuple[ParsedEntry, ...]
     owner_check: OwnerCheck
+    # Only the capped positions (ESPN sends -1 / 0 for the rest): defaultPositionId -> max players
+    position_limits: dict[int, int] = field(default_factory=dict)
 
 
 def _normalize_swid(value: Optional[str]) -> str:
@@ -127,6 +130,8 @@ def parse_espn_lineup(
     roster_settings = ((payload.get("settings") or {}).get("rosterSettings") or {})
     raw_counts = roster_settings.get("lineupSlotCounts") or {}
     slot_counts = {int(k): int(v or 0) for k, v in raw_counts.items()} if raw_counts else slot_counts_from_names(fallback_slot_counts)
+    raw_limits = roster_settings.get("positionLimits") or {}
+    position_limits = {int(k): int(v) for k, v in raw_limits.items() if int(v or 0) > 0}
 
     entries: list[ParsedEntry] = []
     for entry in (target.get("roster") or {}).get("entries") or []:
@@ -144,6 +149,7 @@ def parse_espn_lineup(
             injured=bool(player.get("injured", False)),
             injury_status=player.get("injuryStatus") or entry.get("injuryStatus"),
             lineup_locked=bool(pool.get("lineupLocked", False)),
+            default_position_id=int(player["defaultPositionId"]) if player.get("defaultPositionId") is not None else None,
         ))
 
     period = payload.get("scoringPeriodId") or (payload.get("status") or {}).get("latestScoringPeriod")
@@ -156,6 +162,7 @@ def parse_espn_lineup(
         lock_type=roster_settings.get("lineupLocktimeType"),
         entries=tuple(entries),
         owner_check=owner_check,
+        position_limits=position_limits,
     )
 
 
@@ -269,6 +276,7 @@ class LineupReadService:
                 eligible_slots=[POSITION_MAP.get(s, str(s)) for s in e.eligible_slot_ids],
                 injured=e.injured,
                 injury_status=e.injury_status if e.injury_status and e.injury_status != "ACTIVE" else None,
+                default_position_id=e.default_position_id,
                 lineup_locked=e.lineup_locked,
                 has_game_today=game is not None,
                 opponent=opponent,
@@ -292,6 +300,7 @@ class LineupReadService:
             first_game_time_et=first_tip.strftime("%H:%M") if first_tip else None,
             slot_counts={str(k): v for k, v in sorted(parsed.slot_counts.items())},
             slots=slot_rows(parsed.slot_counts),
+            position_limits={str(k): v for k, v in sorted(parsed.position_limits.items())},
             lock_type=parsed.lock_type,
             players=players,
             can_write=can_write,

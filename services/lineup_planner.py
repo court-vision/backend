@@ -22,6 +22,9 @@ sits); the shortest chain wins.
 
 Every consumer of a plan (manual "Optimize today", the alert email, the auto
 write) reads the same `Plan`, so "an issue exists" means exactly "a move exists".
+
+`plan_ir` is the IR counterpart for the daily-actions view: it never runs inside
+`plan_fill`, so nothing auto-applied ever touches slot 13.
 """
 
 from __future__ import annotations
@@ -285,6 +288,53 @@ def _summary(moves: Sequence[Move], unfilled: Sequence[Unfilled], names: Mapping
     if unfilled:
         text += f"; {len(unfilled)} still on the bench"
     return text
+
+
+@dataclass(frozen=True)
+class IrAction:
+    kind: str                     # ir_in (slots 0-12 -> IR) | ir_out (IR -> bench / an open active slot)
+    player_id: int
+    move: Optional[Move]          # None when the roster has no seat for the returning player
+    blocked_reason: Optional[str] = None   # roster_full
+
+
+def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> tuple[IrAction, ...]:
+    """IR housekeeping, every action judged against the CURRENT board so each one can be
+    staged on its own: healthy players leave IR while the bench (or an eligible open
+    active slot) has room, otherwise they are reported as blocked; injured players on
+    slots 0-12 take the open IR seats, active-slot holders first, then the lowest value.
+    Locked players never move, and an ir_out here does not free a seat for an ir_in in
+    the same pass — the next read does."""
+    occupants = _occupants(players)
+    capacity = _active_capacity(slot_counts)
+    bench_open = int(slot_counts.get(BENCH_SLOT_ID, 0) or 0) - len(occupants.get(BENCH_SLOT_ID, []))
+    ir_open = int(slot_counts.get(IR_SLOT_ID, 0) or 0) - len(occupants.get(IR_SLOT_ID, []))
+    out: list[IrAction] = []
+
+    returning = sorted((p for p in occupants.get(IR_SLOT_ID, []) if not p.locked and not p.ir_eligible),
+                       key=lambda p: (-p.value, p.name))
+    for p in returning:
+        if bench_open > 0:
+            out.append(IrAction("ir_out", p.player_id, Move(p.player_id, IR_SLOT_ID, BENCH_SLOT_ID, role="shift", note="healthy")))
+            bench_open -= 1
+            continue
+        open_slot = next((s for s in sorted(p.eligible_slot_ids)
+                          if s in ACTIVE_SLOT_IDS and len(occupants.get(s, [])) < capacity.get(s, 0)), None)
+        if open_slot is not None:
+            out.append(IrAction("ir_out", p.player_id, Move(p.player_id, IR_SLOT_ID, open_slot, role="shift", note="healthy")))
+            occupants.setdefault(open_slot, []).append(p)
+            continue
+        out.append(IrAction("ir_out", p.player_id, None, "roster_full"))
+
+    injured = sorted(
+        (p for p in players
+         if (p.slot_id in ACTIVE_SLOT_IDS or p.slot_id == BENCH_SLOT_ID) and not p.locked and p.ir_eligible),
+        key=lambda p: (0 if p.slot_id in ACTIVE_SLOT_IDS else 1, p.value, p.name),
+    )
+    for p in injured[:max(ir_open, 0)]:
+        out.append(IrAction("ir_in", p.player_id,
+                            Move(p.player_id, p.slot_id, IR_SLOT_ID, role="shift", note=(p.injury_status or "OUT").upper())))
+    return tuple(out)
 
 
 def _slot_label(slot_id: int) -> str:

@@ -296,6 +296,7 @@ class StreamerService:
                 injury_status=None,  # Could be enhanced later
                 acquisition_status=fa.acquisition_status,
                 waivers_until=fa.waivers_until,
+                default_position_id=fa.default_position_id,
             ))
 
         # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation

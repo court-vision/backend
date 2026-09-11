@@ -54,6 +54,7 @@ class LineupPlayer(ApiModel):
     eligible_slots: list[str]
     injured: bool = False
     injury_status: Optional[str] = None
+    default_position_id: Optional[int] = None    # ESPN's defaultPositionId (1 PG … 5 C), what positionLimits count
     lineup_locked: bool = False                  # ESPN's flag on the roster entry
     has_game_today: bool = False
     opponent: Optional[str] = None               # "vs LAL" / "@ BOS"
@@ -76,6 +77,8 @@ class LineupState(ApiModel):
     first_game_time_et: Optional[str] = None
     slot_counts: dict[str, int] = {}             # id-keyed ("11": 3); JSON keys are strings
     slots: list[LineupSlotDef] = []              # ordered rows for rendering
+    # rosterSettings.positionLimits, only the capped ones: default-position id -> max players
+    position_limits: dict[str, int] = {}
     lock_type: Optional[str] = None              # rosterSettings.lineupLocktimeType
     players: list[LineupPlayer] = []
     can_write: bool = False

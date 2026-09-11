@@ -177,3 +177,27 @@ class TestRosterWriteContracts:
         assert data["lineup"]["$ref"].endswith("/LineupState")
         assert set(schemas["StreamerPlayerResp"]["properties"]) >= {"acquisition_status", "waivers_until"}
         assert set(schemas["StreamerData"]["properties"]) >= {"start_date", "end_date", "upcoming"}
+
+
+@pytest.mark.api
+class TestDailyActionsContract:
+    """GET /teams/{id}/actions: the rows the home widget stages, with the board they came from."""
+
+    def test_declares_a_concrete_response_schema(self, paths):
+        schema = _response_schema(paths, "/v1/internal/teams/{team_id}/actions", "get")
+        assert schema is not None and schema.get("$ref", "").endswith("/DailyActionsResp"), schema
+
+    def test_data_and_row_shapes(self, schemas):
+        data = schemas["DailyActionsData"]["properties"]
+        assert set(data) >= {"lineup", "actions", "unfilled", "can_write", "write_blocked_reason", "streamers_error",
+                             "roster_version", "scoring_period_id", "nba_date", "value_kind"}
+        row = schemas["DailyAction"]["properties"]
+        assert set(row) == {"id", "kind", "title", "detail", "player", "counterpart", "moves", "transaction",
+                            "blocked_reason", "game_time_et"}
+        assert row["moves"]["items"]["$ref"].endswith("/LineupMoveResult")
+        assert schemas["DailyActionTransaction"]["properties"]["pickup"]["$ref"].endswith("/StreamerPlayerResp")
+
+    def test_kinds_are_the_five_the_widget_renders(self, schemas):
+        kind = schemas["DailyAction"]["properties"]["kind"]
+        enum = kind.get("enum") or schemas[kind["$ref"].rsplit("/", 1)[-1]]["enum"]
+        assert enum == ["start", "ir_in", "ir_out", "add", "add_drop"]

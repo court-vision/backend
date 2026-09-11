@@ -42,6 +42,8 @@ class StreamerPlayerResp(ApiModel):
     # on waivers_until). None when the provider does not say (Yahoo).
     acquisition_status: Optional[AcquisitionStatus] = None
     waivers_until: Optional[date] = None
+    # ESPN's defaultPositionId (1 PG … 5 C) — the position its roster limits count; None for Yahoo
+    default_position_id: Optional[int] = None
 
 
 class StreamerData(ApiModel):
