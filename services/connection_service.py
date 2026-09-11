@@ -366,12 +366,13 @@ class ConnectionService:
         user's unlinked teams on the account, as on connect.
         """
         _require_store()
-        secrets = await run_db(
-            "connections.load", credential_service.load_provider_tokens,
+        loaded = await run_db(
+            "connections.load", credential_service.load_with_fingerprint,
             user_id, connection_id, provider="espn",
         )
-        if secrets is None:
+        if loaded is None:
             raise NotFoundError(CONNECTION_NOT_FOUND, "No ESPN connection with that id")
+        secrets, fingerprint = loaded
 
         try:
             verdict, fan = await _check_espn_cookies(secrets.get("espn_s2", ""), secrets.get("swid", ""))
@@ -380,19 +381,29 @@ class ConnectionService:
                 raise
             verdict, fan = "refused", {}
 
+        # The verdict is about the pair just checked. If new cookies were saved
+        # while ESPN answered, it is not theirs: nothing is recorded or adopted.
+        recorded = False
         if verdict != "unconfirmed":
-            await run_db("connections.mark_checked", credential_service.mark_checked,
-                         connection_id, verdict == "accepted")
-        adopted = await _adopt(user_id, connection_id, fan) if verdict == "accepted" else []
+            recorded = await run_db(
+                "connections.mark_checked", credential_service.mark_checked,
+                connection_id, verdict == "accepted", fingerprint=fingerprint,
+            )
+        superseded = verdict != "unconfirmed" and not recorded
+        adopted = await _adopt(user_id, connection_id, fan) if verdict == "accepted" and recorded else []
         (view,) = await run_db("connections.view", _views, user_id, connection_id)
-        log.info("espn_connection_checked", connection_id=connection_id, verdict=verdict, adopted=len(adopted))
-        message = {
-            "accepted": "ESPN accepted these cookies",
-            "refused": "ESPN rejected these cookies",
-            "unconfirmed": UNCONFIRMED[0].upper() + UNCONFIRMED[1:],
-        }[verdict]
-        if adopted:
-            message = f"{message} — {_adopted_note(len(adopted))}"
+        log.info("espn_connection_checked", connection_id=connection_id, verdict=verdict,
+                 superseded=superseded, adopted=len(adopted))
+        if superseded:
+            message = "These cookies were replaced while ESPN was checking them — check again"
+        else:
+            message = {
+                "accepted": "ESPN accepted these cookies",
+                "refused": "ESPN rejected these cookies",
+                "unconfirmed": UNCONFIRMED[0].upper() + UNCONFIRMED[1:],
+            }[verdict]
+            if adopted:
+                message = f"{message} — {_adopted_note(len(adopted))}"
         return ProviderConnectionResp(status=ApiStatus.SUCCESS, message=message, data=view)
 
     @staticmethod

@@ -353,12 +353,16 @@ class TestEspnReads:
             await EspnService.fetch_league_settings("AEB", SWID, 2027, 1111111)
 
 
+FINGERPRINT = ("ciphertext-that-was-checked", 1)
+
+
 @pytest.fixture
 def service(monkeypatch, keys, espn):
     """ConnectionService with the DB replaced by recorders and ESPN by `espn`,
     whose first league is private -- so a pair is accepted unless a test says not.
-    Adoption links one team (15) whenever it runs."""
-    state = SimpleNamespace(stored=[], checked=[], adopted=[], espn=espn)
+    Adoption links one team (15) whenever it runs; a verdict is recorded unless
+    `recorded` is set False (the row's cookies changed during the check)."""
+    state = SimpleNamespace(stored=[], checked=[], fingerprints=[], recorded=True, adopted=[], espn=espn)
     espn.answers = {1111111: {"isPublic": False}}
 
     async def direct_run_db(name, fn, *args, **kwargs):
@@ -372,11 +376,20 @@ def service(monkeypatch, keys, espn):
         state.adopted.append((user_id, connection_id, [t.team_name for t in account_teams]))
         return [15]
 
+    def mark_checked(connection_id, ok, *, fingerprint):
+        state.checked.append((connection_id, ok))
+        state.fingerprints.append(fingerprint)
+        return state.recorded
+
+    def load(user_id, connection_id, provider=None):
+        return dict(STORED) if (user_id, connection_id) == (10, 21) else None
+
     monkeypatch.setattr(cs, "run_db", direct_run_db)
     monkeypatch.setattr(credential_service, "store_espn_cookies", store)
-    monkeypatch.setattr(credential_service, "mark_checked", lambda cid, ok: state.checked.append((cid, ok)))
-    monkeypatch.setattr(credential_service, "load_provider_tokens",
-                        lambda uid, cid, provider=None: dict(STORED) if (uid, cid) == (10, 21) else None)
+    monkeypatch.setattr(credential_service, "mark_checked", mark_checked)
+    monkeypatch.setattr(credential_service, "load_provider_tokens", load)
+    monkeypatch.setattr(credential_service, "load_with_fingerprint",
+                        lambda uid, cid, provider=None: (load(uid, cid), FINGERPRINT) if load(uid, cid) else None)
     monkeypatch.setattr(cs, "_views", lambda user_id, connection_id=None: [_view(connection_id or 21)])
     monkeypatch.setattr(cs, "_tracked_espn_teams", lambda user_id: [])
     monkeypatch.setattr(cs, "_adopt_account_teams", adopt)
@@ -460,8 +473,17 @@ class TestVerify:
     async def test_accepted_cookies_are_recorded_and_take_over_the_accounts_teams(self, service):
         resp = await cs.ConnectionService.verify(10, 21)
         assert service.espn.fan_calls == [("AEB-STORED", SWID)] and service.checked == [(21, True)]
+        assert service.fingerprints == [FINGERPRINT], "the verdict names the cookies it was reached with"
         assert service.adopted == [(10, 21, ACCOUNT_TEAMS)]
         assert "linked 1 team you already track" in resp.message
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_on_cookies_replaced_mid_check_is_dropped(self, service):
+        """New cookies were saved while ESPN answered: the verdict is not theirs."""
+        service.recorded = False
+        resp = await cs.ConnectionService.verify(10, 21)
+        assert not service.adopted
+        assert "replaced while ESPN was checking" in resp.message
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("how", ["league", "anon", "unknown_swid"])

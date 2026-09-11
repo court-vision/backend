@@ -14,6 +14,7 @@ from core.errors import AppError, BadRequestError, ProviderAuthError, ProviderEr
 from core.logging import get_logger
 from core.resilience import ClientError, NetworkError, RateLimitError, ServerError
 from core.settings import settings
+from core.telemetry import scrub_string
 from utils.constants import PROVIDER_AUTH_MESSAGES, PROVIDER_AUTH_MISSING_MESSAGES
 
 BAD_RESPONSE_CODE = "PROVIDER_BAD_RESPONSE"
@@ -308,7 +309,8 @@ async def _call(
         elapsed_ms=round((time.perf_counter() - started) * 1000),
         error_code=error.error_code,
         url=_redacted_url(url),
-        body_preview=preview,
+        # An ESPN body can carry a SWID (the fan API's `id`, a league's `owners`)
+        body_preview=scrub_string(preview) if preview else preview,
     )
     raise error
 

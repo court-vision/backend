@@ -62,6 +62,19 @@ async def test_a_swid_in_the_path_stays_out_of_the_failure_log(http):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a_swid_in_an_unreadable_body_stays_out_of_the_failure_log(http):
+    """The first characters of a body that is not JSON are logged, and an ESPN
+    page can carry a SWID in them."""
+    http.queue.append(response(200, "<html>signed in as {3F2A9C1E-1B2C-4D5E-8F90-A1B2C3D4E5F6}</html>"))
+    with capture_logs() as logs, pytest.raises(ProviderError):
+        await provider_http.provider_get("espn", URL)
+    (event,) = failures(logs)
+    assert "3F2A9C1E" not in event["body_preview"]
+    assert event["body_preview"].startswith("<html>signed in as ")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_success_passes_request_and_returns_json(http):
     http.queue = [response(200, {"teams": [{"name": "My Team"}]})]
     body = await provider_http.provider_get(

@@ -101,6 +101,21 @@ def _holds(connection, secrets: dict) -> bool:
         return False
 
 
+def _fingerprint(connection) -> tuple[str, int]:
+    """Exactly which credentials a row holds, for `mark_checked`."""
+    return connection.secret_ciphertext, connection.key_version
+
+
+def _find_connection(user_id: int, provider: str, account: str):
+    from db.models.provider_connections import ProviderConnection
+
+    return ProviderConnection.get_or_none(
+        (ProviderConnection.user == user_id)
+        & (ProviderConnection.provider == provider)
+        & (ProviderConnection.external_account_id == account)
+    )
+
+
 def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: bool = False) -> tuple[Any, bool]:
     """Create or update the row for this (user, provider, account); returns (row, created).
 
@@ -108,22 +123,23 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
     changes nothing -- every team edit re-persists the credentials it merged
     from the store, and that is not a change of credentials. New secrets clear
     the verdicts, which were about the old ones; `verified=True` when the
-    provider has just accepted these.
+    provider has just accepted these. Two requests for one account can both
+    find no row: the one that loses the insert takes the update path rather
+    than failing on the unique key.
     """
+    from peewee import IntegrityError
+
+    from db.base import db
     from db.models.provider_connections import ProviderConnection
 
     if provider == "espn" and secrets.get("swid"):
         secrets = {**secrets, "swid": normalize_swid(secrets["swid"])}
     account = _external_account_id(provider, secrets)
 
-    connection = ProviderConnection.get_or_none(
-        (ProviderConnection.user == user_id)
-        & (ProviderConnection.provider == provider)
-        & (ProviderConnection.external_account_id == account)
-    )
+    connection = _find_connection(user_id, provider, account)
     if connection is not None and _holds(connection, secrets):
         if verified:
-            mark_checked(connection.id, ok=True)
+            mark_checked(connection.id, ok=True, fingerprint=_fingerprint(connection))
         return connection, False
 
     ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
@@ -135,10 +151,16 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
         "auth_failed_at": None,
     }
     if connection is None:
-        connection = ProviderConnection.create(
-            user=user_id, provider=provider, external_account_id=account, **fields
-        )
-        return connection, True
+        try:
+            with db.atomic():
+                connection = ProviderConnection.create(
+                    user=user_id, provider=provider, external_account_id=account, **fields
+                )
+            return connection, True
+        except IntegrityError:
+            connection = _find_connection(user_id, provider, account)
+            if connection is None:
+                raise
     for name, value in fields.items():
         setattr(connection, name, value)
     connection.save()
@@ -177,6 +199,15 @@ def store_espn_cookies(user_id: int, espn_s2: str, swid: str, *, verified: bool 
     return connection.id, created
 
 
+def _owned_connection(user_id: int, connection_id: int, provider: Optional[str]):
+    from db.models.provider_connections import ProviderConnection
+
+    where = (ProviderConnection.id == connection_id) & (ProviderConnection.user == user_id)
+    if provider is not None:
+        where &= ProviderConnection.provider == provider
+    return ProviderConnection.get_or_none(where)
+
+
 def load_provider_tokens(user_id: int, connection_id: int, provider: Optional[str] = None) -> Optional[dict]:
     """Decrypt a connection's secrets, but only for the user who owns it.
 
@@ -185,18 +216,26 @@ def load_provider_tokens(user_id: int, connection_id: int, provider: Optional[st
     narrows it further, so an ESPN handle cannot resolve to a Yahoo row. With
     the store off there is nothing to load.
     """
+    loaded = load_with_fingerprint(user_id, connection_id, provider)
+    return loaded[0] if loaded else None
+
+
+def load_with_fingerprint(
+    user_id: int, connection_id: int, provider: Optional[str] = None
+) -> Optional[tuple[dict, tuple[str, int]]]:
+    """`load_provider_tokens`, plus a fingerprint of exactly what was loaded.
+
+    A check hands the fingerprint back to `mark_checked`, so its verdict lands
+    only on the credentials it was made with -- not on a pair saved while it
+    was running.
+    """
     if not crypto.is_enabled():
         return None
-
-    from db.models.provider_connections import ProviderConnection
-
-    where = (ProviderConnection.id == connection_id) & (ProviderConnection.user == user_id)
-    if provider is not None:
-        where &= ProviderConnection.provider == provider
-    connection = ProviderConnection.get_or_none(where)
+    connection = _owned_connection(user_id, connection_id, provider)
     if connection is None:
         return None
-    return json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version))
+    secrets = json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version))
+    return secrets, _fingerprint(connection)
 
 
 def connection_ids(user_id: int, provider: str) -> list[int]:
@@ -218,11 +257,14 @@ def connection_ids(user_id: int, provider: str) -> list[int]:
     return [row.id for row in rows]
 
 
-def mark_checked(connection_id: int, ok: bool) -> None:
-    """Record the provider's verdict on a connection's credentials.
+def mark_checked(connection_id: int, ok: bool, *, fingerprint: tuple[str, int]) -> bool:
+    """Record the provider's verdict on a connection's credentials; False when not recorded.
 
-    Leaves `updated_at` alone on purpose: it means "credentials last written",
-    which is what migration 0024 went by to keep the newest of two duplicates.
+    Recorded only if the row still holds the credentials the check was made
+    with (`fingerprint`, from load_with_fingerprint): a check of the old pair
+    must not stamp a pair saved while it ran. Leaves `updated_at` alone on
+    purpose: it means "credentials last written", which is what migration 0024
+    went by to keep the newest of two duplicates.
     """
     from db.models.provider_connections import ProviderConnection
 
@@ -231,7 +273,17 @@ def mark_checked(connection_id: int, ok: bool) -> None:
         fields = {ProviderConnection.verified_at: now, ProviderConnection.auth_failed_at: None}
     else:
         fields = {ProviderConnection.auth_failed_at: now}
-    ProviderConnection.update(fields).where(ProviderConnection.id == connection_id).execute()
+    ciphertext, key_version = fingerprint
+    updated = (
+        ProviderConnection.update(fields)
+        .where(
+            (ProviderConnection.id == connection_id)
+            & (ProviderConnection.secret_ciphertext == ciphertext)
+            & (ProviderConnection.key_version == key_version)
+        )
+        .execute()
+    )
+    return updated > 0
 
 
 def delete_connection(user_id: int, connection_id: int) -> Optional[list[int]]:

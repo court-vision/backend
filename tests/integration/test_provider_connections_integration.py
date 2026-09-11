@@ -130,28 +130,62 @@ def test_a_refresh_through_one_team_reaches_every_team_on_the_account(user):
     assert credential_service.hydrate(b, {})["espn_s2"] == "AEB-new"
 
 
+def _fingerprint(user, connection_id):
+    _, fingerprint = credential_service.load_with_fingerprint(user.user_id, connection_id)
+    return fingerprint
+
+
 def test_resaving_the_same_cookies_changes_nothing(user):
     """Every team edit re-persists the cookies it merged from the store."""
     team = _team(user, "A")
     credential_service.persist(user.user_id, team, _payload(team, "AEB", SWID))
-    credential_service.mark_checked(team.provider_connection_id, ok=True)
-    before = ProviderConnection.get_by_id(team.provider_connection_id)
+    connection_id = team.provider_connection_id
+    assert credential_service.mark_checked(connection_id, ok=True, fingerprint=_fingerprint(user, connection_id))
+    before = ProviderConnection.get_by_id(connection_id)
 
     credential_service.persist(user.user_id, team, _payload(team, "AEB", SWID))
 
-    after = ProviderConnection.get_by_id(team.provider_connection_id)
+    after = ProviderConnection.get_by_id(connection_id)
     assert (after.updated_at, after.verified_at) == (before.updated_at, before.verified_at)
 
 
 def test_new_cookies_clear_the_old_verdict(user):
     connection_id, _ = credential_service.store_espn_cookies(user.user_id, "AEB-1", SWID)
-    credential_service.mark_checked(connection_id, ok=False)
+    credential_service.mark_checked(connection_id, ok=False, fingerprint=_fingerprint(user, connection_id))
     team = _team(user, "A")
 
     credential_service.persist(user.user_id, team, _payload(team, "AEB-2", SWID))
 
     row = ProviderConnection.get_by_id(connection_id)
     assert row.auth_failed_at is None and row.verified_at is None
+
+
+def test_a_verdict_lands_only_on_the_cookies_it_checked(user):
+    """A check of the old pair must not stamp a pair saved while it ran."""
+    connection_id, _ = credential_service.store_espn_cookies(user.user_id, "AEB-1", SWID, verified=False)
+    checked = _fingerprint(user, connection_id)
+    credential_service.store_espn_cookies(user.user_id, "AEB-2", SWID, verified=False)   # replaced mid-check
+
+    assert credential_service.mark_checked(connection_id, ok=True, fingerprint=checked) is False
+    assert ProviderConnection.get_by_id(connection_id).verified_at is None
+
+
+def test_a_connect_that_loses_the_insert_race_updates_instead(user, monkeypatch):
+    """Two connects for one account can both find no row; the second insert
+    fails on the unique key and takes the update path instead of erroring."""
+    first, _ = credential_service.store_espn_cookies(user.user_id, "AEB-1", SWID)
+    real_find = credential_service._find_connection
+    lookups = []
+
+    def missed_first(*args):
+        lookups.append(args)
+        return None if len(lookups) == 1 else real_find(*args)
+
+    monkeypatch.setattr(credential_service, "_find_connection", missed_first)
+    again, created = credential_service.store_espn_cookies(user.user_id, "AEB-2", SWID)
+
+    assert (again, created) == (first, False)
+    assert credential_service.load_provider_tokens(user.user_id, first)["espn_s2"] == "AEB-2"
 
 
 def test_the_view_lists_teams_and_never_the_swid(user):
