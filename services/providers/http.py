@@ -231,6 +231,7 @@ async def _call(
     timeout: Optional[float],
     auth_statuses: tuple[int, ...],
     league_404: bool,
+    not_found: Optional[AppError] = None,
     **request_kwargs: Any,
 ) -> dict:
     log = get_logger("provider")
@@ -254,6 +255,8 @@ async def _call(
                 else PROVIDER_AUTH_MISSING_MESSAGES
             )
             error = ProviderAuthError(provider, messages.get(provider))
+        elif status == 404 and not_found is not None:
+            error = not_found
         elif status == 404 and league_404:
             error = BadRequestError(
                 LEAGUE_NOT_FOUND_CODE,
@@ -327,7 +330,10 @@ async def provider_get(
     cookies: Optional[dict] = None,
     expect_key: Optional[str] = None,
     timeout: Optional[float] = None,
+    not_found: Optional[AppError] = None,
 ) -> dict:
+    # A 404 reads as "league not found", which is what it means on the league
+    # endpoint; other endpoints pass the error their 404 means as `not_found`.
     request_headers = dict(headers or {})
     cookie = _cookie_header(cookies)
     if cookie:
@@ -335,7 +341,7 @@ async def provider_get(
     return await _call(
         "GET", provider, url,
         expect_key=expect_key, timeout=timeout,
-        auth_statuses=DEFAULT_AUTH_STATUSES, league_404=True,
+        auth_statuses=DEFAULT_AUTH_STATUSES, league_404=True, not_found=not_found,
         params=params, headers=request_headers,
     )
 

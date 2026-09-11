@@ -113,6 +113,10 @@ class LeagueInfo(BaseModel):
     # and the auto-lineup run never depend on matching `team_name`, which a user
     # can rename mid-season. None until learned.
     espn_team_id: int | None = None
+    # Which of the user's stored ESPN connections to take the cookies from, so a
+    # team on an account already connected needs none pasted. Without it, a user
+    # with exactly one ESPN connection gets that one. Never persisted.
+    espn_connection_id: int | None = None
 
     # Yahoo-specific fields
     yahoo_access_token: str | None = None
@@ -199,6 +203,7 @@ class LeagueInfoWrite(BaseModel):
 
     espn_s2: str | None = ""
     swid: str | None = ""
+    espn_connection_id: int | None = None
 
     yahoo_connection_id: int | None = None
     yahoo_team_key: str | None = None

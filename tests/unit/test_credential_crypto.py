@@ -108,8 +108,9 @@ class TestSplitSecrets:
         public, _ = credential_service.split_secrets(mixed)
         assert "yahoo_refresh_token" not in public
 
-    def test_espn_account_id_is_the_swid(self):
-        assert credential_service._external_account_id("espn", {"swid": "{guid-1}"}) == "{guid-1}"
+    def test_espn_account_id_is_the_normalized_swid(self):
+        """One account, one row -- see test_espn_connections.TestNormalizeSwid."""
+        assert credential_service._external_account_id("espn", {"swid": "{guid-1}"}) == "{GUID-1}"
         assert credential_service._external_account_id("yahoo", {}) == ""
 
 

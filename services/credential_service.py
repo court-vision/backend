@@ -18,6 +18,11 @@ Every path is dual-mode so the migration can be deployed before it is completed:
 So a team is migrated the first time it is written, and `scripts/backfill_provider_connections.py`
 moves the rest. Nothing has to happen in a particular order.
 
+A connection is also something the user manages directly
+(`api/v1/internal/connections.py`): one refresh of an ESPN account's cookies
+reaches every team on it, and a new team on that account reuses them. That
+only holds if every spelling of one SWID is one row -- hence `normalize_swid`.
+
 The one rule callers must respect: hydrate only where credentials are actually
 needed (provider calls), never on the path that builds an API response.
 """
@@ -25,6 +30,8 @@ needed (provider calls), never on the path that builds an API response.
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from core import crypto
@@ -42,6 +49,8 @@ SECRET_FIELDS: dict[str, tuple[str, ...]] = {
 
 ALL_SECRET_FIELDS: frozenset[str] = frozenset(f for fields in SECRET_FIELDS.values() for f in fields)
 
+_SWID_NOISE = re.compile(r"[\s{}]")
+
 
 def _provider_of(payload: dict) -> str:
     provider = payload.get("provider", "espn")
@@ -56,6 +65,18 @@ def split_secrets(payload: dict) -> tuple[dict, dict]:
     return public, secrets
 
 
+def normalize_swid(value: Optional[str]) -> str:
+    """ESPN's SWID in its canonical form: an upper-case GUID in braces.
+
+    ESPN issues the cookie as `{XXXXXXXX-XXXX-...}`; people paste it with or
+    without the braces, in either case, with stray whitespace. It keys the
+    connection row, so every spelling of one account must be one string. Empty
+    stays empty. Migration 0024 applies the same rule to rows written before.
+    """
+    guid = _SWID_NOISE.sub("", value or "").upper()
+    return "{" + guid + "}" if guid else ""
+
+
 def _external_account_id(provider: str, secrets: dict) -> str:
     """The provider-side account a credential belongs to.
 
@@ -64,8 +85,64 @@ def _external_account_id(provider: str, secrets: dict) -> str:
     user's Yahoo credentials share one row.
     """
     if provider == "espn":
-        return (secrets.get("swid") or "")[:128]
+        return normalize_swid(secrets.get("swid"))[:128]
     return ""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _holds(connection, secrets: dict) -> bool:
+    """Whether `connection` already stores exactly `secrets`."""
+    try:
+        return json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version)) == secrets
+    except crypto.CredentialDecryptionError:
+        return False
+
+
+def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: bool = False) -> tuple[Any, bool]:
+    """Create or update the row for this (user, provider, account); returns (row, created).
+
+    The one write path into the store. Saving the secrets a row already holds
+    changes nothing -- every team edit re-persists the credentials it merged
+    from the store, and that is not a change of credentials. New secrets clear
+    the verdicts, which were about the old ones; `verified=True` when the
+    provider has just accepted these.
+    """
+    from db.models.provider_connections import ProviderConnection
+
+    if provider == "espn" and secrets.get("swid"):
+        secrets = {**secrets, "swid": normalize_swid(secrets["swid"])}
+    account = _external_account_id(provider, secrets)
+
+    connection = ProviderConnection.get_or_none(
+        (ProviderConnection.user == user_id)
+        & (ProviderConnection.provider == provider)
+        & (ProviderConnection.external_account_id == account)
+    )
+    if connection is not None and _holds(connection, secrets):
+        if verified:
+            mark_checked(connection.id, ok=True)
+        return connection, False
+
+    ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
+    fields = {
+        "secret_ciphertext": ciphertext,
+        "key_version": key_version,
+        "expires_at": secrets.get("yahoo_token_expiry") or None,
+        "verified_at": _utcnow() if verified else None,
+        "auth_failed_at": None,
+    }
+    if connection is None:
+        connection = ProviderConnection.create(
+            user=user_id, provider=provider, external_account_id=account, **fields
+        )
+        return connection, True
+    for name, value in fields.items():
+        setattr(connection, name, value)
+    connection.save()
+    return connection, False
 
 
 def store_provider_tokens(user_id: int, provider: str, secrets: dict) -> Optional[int]:
@@ -81,45 +158,103 @@ def store_provider_tokens(user_id: int, provider: str, secrets: dict) -> Optiona
     """
     if not crypto.is_enabled() or not secrets:
         return None
-
-    from db.models.provider_connections import ProviderConnection
-
-    account = _external_account_id(provider, secrets)
-    ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
-    expires_at = secrets.get("yahoo_token_expiry") or None
-
-    connection = ProviderConnection.get_or_none(
-        (ProviderConnection.user == user_id)
-        & (ProviderConnection.provider == provider)
-        & (ProviderConnection.external_account_id == account)
-    )
-    if connection is None:
-        connection = ProviderConnection.create(
-            user=user_id, provider=provider, external_account_id=account,
-            secret_ciphertext=ciphertext, key_version=key_version, expires_at=expires_at,
-        )
-    else:
-        connection.secret_ciphertext = ciphertext
-        connection.key_version = key_version
-        connection.expires_at = expires_at
-        connection.save()
+    connection, _ = _upsert_connection(user_id, provider, secrets)
     return connection.id
 
 
-def load_provider_tokens(user_id: int, connection_id: int) -> Optional[dict]:
+def store_espn_cookies(user_id: int, espn_s2: str, swid: str, *, verified: bool = True) -> tuple[int, bool]:
+    """Save an ESPN cookie pair as that account's connection; returns (connection id, created).
+
+    Keyed by the normalized SWID, so refreshing an account already connected
+    updates its one row -- and with it every team linked to it. `verified` is
+    whether ESPN confirmed the pair; connection_service passes False when the
+    account had no private league to confirm it with, which leaves the status
+    unknown. The caller checks that the store is enabled.
+    """
+    connection, created = _upsert_connection(
+        user_id, "espn", {"espn_s2": espn_s2, "swid": swid}, verified=verified
+    )
+    return connection.id, created
+
+
+def load_provider_tokens(user_id: int, connection_id: int, provider: Optional[str] = None) -> Optional[dict]:
     """Decrypt a connection's secrets, but only for the user who owns it.
 
     The user scoping is the access control: a connection id is a small integer,
-    so it must never be usable by anyone other than its owner.
+    so it must never be usable by anyone other than its owner. `provider`
+    narrows it further, so an ESPN handle cannot resolve to a Yahoo row. With
+    the store off there is nothing to load.
+    """
+    if not crypto.is_enabled():
+        return None
+
+    from db.models.provider_connections import ProviderConnection
+
+    where = (ProviderConnection.id == connection_id) & (ProviderConnection.user == user_id)
+    if provider is not None:
+        where &= ProviderConnection.provider == provider
+    connection = ProviderConnection.get_or_none(where)
+    if connection is None:
+        return None
+    return json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version))
+
+
+def connection_ids(user_id: int, provider: str) -> list[int]:
+    """The user's connections for one provider, most recently written first.
+
+    Answers from the rows alone -- nothing is decrypted -- and is empty with
+    the store off.
+    """
+    if not crypto.is_enabled():
+        return []
+
+    from db.models.provider_connections import ProviderConnection
+
+    rows = (
+        ProviderConnection.select(ProviderConnection.id)
+        .where((ProviderConnection.user == user_id) & (ProviderConnection.provider == provider))
+        .order_by(ProviderConnection.updated_at.desc())
+    )
+    return [row.id for row in rows]
+
+
+def mark_checked(connection_id: int, ok: bool) -> None:
+    """Record the provider's verdict on a connection's credentials.
+
+    Leaves `updated_at` alone on purpose: it means "credentials last written",
+    which is what migration 0024 went by to keep the newest of two duplicates.
     """
     from db.models.provider_connections import ProviderConnection
+
+    now = _utcnow()
+    if ok:
+        fields = {ProviderConnection.verified_at: now, ProviderConnection.auth_failed_at: None}
+    else:
+        fields = {ProviderConnection.auth_failed_at: now}
+    ProviderConnection.update(fields).where(ProviderConnection.id == connection_id).execute()
+
+
+def delete_connection(user_id: int, connection_id: int) -> Optional[list[int]]:
+    """Delete one of the user's connections; returns the teams it leaves unlinked.
+
+    None when the user has no such connection. The teams themselves stay:
+    `usr.teams.provider_connection_id` is ON DELETE SET NULL, so a public
+    league keeps working and a private one asks for cookies again.
+    """
+    from db.models.provider_connections import ProviderConnection
+    from db.models.teams import Team
 
     connection = ProviderConnection.get_or_none(
         (ProviderConnection.id == connection_id) & (ProviderConnection.user == user_id)
     )
     if connection is None:
         return None
-    return json.loads(crypto.decrypt(connection.secret_ciphertext, connection.key_version))
+    team_ids = [
+        team.team_id
+        for team in Team.select(Team.team_id).where(Team.provider_connection == connection.id)
+    ]
+    connection.delete_instance()
+    return team_ids
 
 
 def has_credentials(team, payload: dict) -> bool:
@@ -141,6 +276,9 @@ def persist(user_id: int, team, payload: dict) -> Optional[int]:
     Returns the connection id, or None when the store is disabled. `team` is
     updated in place and saved: `league_info` loses its secrets and
     `provider_connection_id` gains the link.
+
+    Half an ESPN pair is dropped rather than stored: it authenticates nothing,
+    and writing it would replace the whole pair for every team on the account.
     """
     if not crypto.is_enabled():
         return None
@@ -149,29 +287,14 @@ def persist(user_id: int, team, payload: dict) -> Optional[int]:
     if not secrets:
         return team.provider_connection_id
 
-    from db.models.provider_connections import ProviderConnection
-
     provider = _provider_of(payload)
-    account = _external_account_id(provider, secrets)
-    ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
-    expires_at = secrets.get("yahoo_token_expiry") or None
+    if provider == "espn" and not (secrets.get("espn_s2") and secrets.get("swid")):
+        log.warning("espn_partial_credentials_dropped", team_id=getattr(team, "team_id", None))
+        team.league_info = json.dumps(public)
+        team.save()
+        return team.provider_connection_id
 
-    connection = ProviderConnection.get_or_none(
-        (ProviderConnection.user == user_id)
-        & (ProviderConnection.provider == provider)
-        & (ProviderConnection.external_account_id == account)
-    )
-    if connection is None:
-        connection = ProviderConnection.create(
-            user=user_id, provider=provider, external_account_id=account,
-            secret_ciphertext=ciphertext, key_version=key_version, expires_at=expires_at,
-        )
-    else:
-        connection.secret_ciphertext = ciphertext
-        connection.key_version = key_version
-        connection.expires_at = expires_at
-        connection.save()
-
+    connection, _ = _upsert_connection(user_id, provider, secrets)
     team.provider_connection_id = connection.id
     team.league_info = json.dumps(public)
     team.save()
