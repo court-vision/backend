@@ -190,3 +190,37 @@ def test_tracked_teams_are_the_users_espn_teams_only(user):
 
     assert connection_service._tracked_espn_teams(user.user_id) == [
         (espn_team.team_id, json.loads(espn_team.league_info))]
+
+
+def test_an_accepted_connection_takes_over_the_users_teams_on_that_account(user):
+    """Teams saved before the connection existed -- with their own copy of the
+    cookies, or none -- join it; teams elsewhere stay put."""
+    from schemas.connections import EspnAccountTeam
+
+    def account_team(espn_team_id, name):
+        return EspnAccountTeam(league_id=1234, season=2027, espn_team_id=espn_team_id, team_name=name)
+
+    # Saved last season with its own plaintext copy; ESPN has since renamed it
+    legacy = Team.create(user_id=user.user_id, team_identifier="1234A", league_info=json.dumps(
+        {"provider": "espn", "league_id": 1234, "team_name": "A", "year": 2026, "espn_team_id": 2,
+         "espn_s2": "AEB-OLD", "swid": SWID}))
+    by_name = _team(user, "B")                                    # a public league, no cookies
+    other_id, _ = credential_service.store_espn_cookies(user.user_id, "AEB-X", OTHER)
+    elsewhere = _team(user, "Linked", other_id)                   # already on another account
+    stranger = Team.create(user_id=user.user_id, team_identifier="9999B", league_info=json.dumps(
+        {"provider": "espn", "league_id": 9999, "team_name": "B", "year": 2027}))
+    connection_id, _ = credential_service.store_espn_cookies(user.user_id, "AEB-NEW", SWID)
+
+    adopted = connection_service._adopt_account_teams(user.user_id, connection_id, [
+        account_team(2, "A (renamed)"), account_team(5, "B"), account_team(7, "Linked"),
+    ])
+
+    assert adopted == [legacy.team_id, by_name.team_id]
+    legacy = Team.get_by_id(legacy.team_id)
+    assert legacy.provider_connection_id == connection_id
+    assert not {"espn_s2", "swid"} & set(json.loads(legacy.league_info)), "the old copy is dropped"
+    assert credential_service.hydrate(legacy, {})["espn_s2"] == "AEB-NEW"
+    assert Team.get_by_id(elsewhere.team_id).provider_connection_id == other_id
+    assert Team.get_by_id(stranger.team_id).provider_connection_id is None
+    (view,) = connection_service._views(user.user_id, connection_id)
+    assert [t.team_id for t in view.teams] == [legacy.team_id, by_name.team_id]

@@ -5,7 +5,7 @@ The rules that make one row safe to share across teams -- one spelling of a
 SWID, no half pairs -- the add-team path that reuses a stored connection, the
 check that runs before a pair is saved, the account's teams as ESPN lists them,
 and a client-facing view that cannot carry a credential. The DB-backed halves
-(the upsert, migration 0024) are in
+(the upsert, migration 0024, adopting teams) are in
 tests/integration/test_provider_connections_integration.py.
 
 `fixtures/espn_fan_account.json` is synthetic, shaped like a captured fan-API
@@ -219,6 +219,14 @@ class TestFanTeams:
         marked = {t.team_name: t.tracked_team_id for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked)}
         assert marked == {"Charlie": None, "Alpha": 7, "Bravo": None, "Delta": 9}
 
+    def test_a_team_saved_last_season_is_the_same_team(self):
+        """Court Vision's team identity is league + name, with no season: a team
+        saved for 2026 is the one ESPN now lists under the league's 2027 renewal,
+        and adding it again would only say it already exists."""
+        tracked = [(7, {"league_id": 1111111, "year": 2026, "team_name": "Alpha"})]
+        marked = {t.team_name: t.tracked_team_id for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked)}
+        assert marked["Alpha"] == 7
+
 
 @pytest.fixture
 def espn(monkeypatch):
@@ -243,6 +251,11 @@ def espn(monkeypatch):
     return state
 
 
+async def _verdict(espn_s2="AEB"):
+    verdict, _ = await cs._check_espn_cookies(espn_s2, SWID)
+    return verdict
+
+
 @pytest.mark.unit
 class TestCheckCookies:
     """ESPN's fan API answers 200 for a known SWID whatever the cookies, so the
@@ -251,40 +264,41 @@ class TestCheckCookies:
     @pytest.mark.asyncio
     async def test_a_private_league_read_accepts_them(self, espn):
         espn.answers = {1111111: {"isPublic": False}}
-        assert await cs._check_espn_cookies("AEB", SWID) == "accepted"
+        verdict, fan = await cs._check_espn_cookies("AEB", SWID)
+        assert verdict == "accepted" and fan is espn.fan
         assert espn.reads == [1111111]
 
     @pytest.mark.asyncio
     async def test_a_refused_private_league_refuses_them(self, espn):
         espn.answers = {1111111: ProviderAuthError("espn")}
-        assert await cs._check_espn_cookies("AEB", SWID) == "refused"
+        assert await _verdict() == "refused"
 
     @pytest.mark.asyncio
     async def test_an_anonymous_fan_read_refuses_them_without_a_league_read(self, espn):
         espn.fan = {**FAN, "anon": True}
-        assert await cs._check_espn_cookies("AEB", SWID) == "refused"
+        assert await _verdict() == "refused"
         assert not espn.reads
 
     @pytest.mark.asyncio
     async def test_only_public_leagues_leave_them_unconfirmed(self, espn):
-        assert await cs._check_espn_cookies("AEB", SWID) == "unconfirmed"
+        assert await _verdict() == "unconfirmed"
         assert espn.reads == [1111111, 3333333, 2222222]
 
     @pytest.mark.asyncio
     async def test_a_missing_league_is_skipped(self, espn):
         espn.answers = {1111111: BadRequestError(LEAGUE_NOT_FOUND_CODE, "gone"), 3333333: {"isPublic": False}}
-        assert await cs._check_espn_cookies("AEB", SWID) == "accepted"
+        assert await _verdict() == "accepted"
 
     @pytest.mark.asyncio
     async def test_an_outage_is_raised_not_judged(self, espn):
         espn.answers = {1111111: ProviderError("espn", "ESPN isn't responding")}
         with pytest.raises(ProviderError):
-            await cs._check_espn_cookies("AEB", SWID)
+            await _verdict()
 
     @pytest.mark.asyncio
     async def test_reads_are_capped(self, espn, monkeypatch):
         monkeypatch.setattr(cs, "MAX_LEAGUE_PROBES", 1)
-        assert await cs._check_espn_cookies("AEB", SWID) == "unconfirmed"
+        assert await _verdict() == "unconfirmed"
         assert espn.reads == [1111111]
 
 
@@ -342,8 +356,9 @@ class TestEspnReads:
 @pytest.fixture
 def service(monkeypatch, keys, espn):
     """ConnectionService with the DB replaced by recorders and ESPN by `espn`,
-    whose first league is private -- so a pair is accepted unless a test says not."""
-    state = SimpleNamespace(stored=[], checked=[], espn=espn)
+    whose first league is private -- so a pair is accepted unless a test says not.
+    Adoption links one team (15) whenever it runs."""
+    state = SimpleNamespace(stored=[], checked=[], adopted=[], espn=espn)
     espn.answers = {1111111: {"isPublic": False}}
 
     async def direct_run_db(name, fn, *args, **kwargs):
@@ -353,6 +368,10 @@ def service(monkeypatch, keys, espn):
         state.stored.append((user_id, espn_s2, swid, verified))
         return 21, True
 
+    def adopt(user_id, connection_id, account_teams):
+        state.adopted.append((user_id, connection_id, [t.team_name for t in account_teams]))
+        return [15]
+
     monkeypatch.setattr(cs, "run_db", direct_run_db)
     monkeypatch.setattr(credential_service, "store_espn_cookies", store)
     monkeypatch.setattr(credential_service, "mark_checked", lambda cid, ok: state.checked.append((cid, ok)))
@@ -360,6 +379,7 @@ def service(monkeypatch, keys, espn):
                         lambda uid, cid, provider=None: dict(STORED) if (uid, cid) == (10, 21) else None)
     monkeypatch.setattr(cs, "_views", lambda user_id, connection_id=None: [_view(connection_id or 21)])
     monkeypatch.setattr(cs, "_tracked_espn_teams", lambda user_id: [])
+    monkeypatch.setattr(cs, "_adopt_account_teams", adopt)
     return state
 
 
@@ -372,6 +392,9 @@ def _refuse(espn, how):
         espn.fan_error = BadRequestError(ESPN_ACCOUNT_NOT_FOUND, "unknown SWID")
 
 
+ACCOUNT_TEAMS = ["Charlie", "Alpha", "Bravo", "Delta"]
+
+
 @pytest.mark.unit
 class TestConnectEspn:
     @pytest.mark.asyncio
@@ -382,12 +405,19 @@ class TestConnectEspn:
         assert resp.created is True and resp.data.id == 21
 
     @pytest.mark.asyncio
+    async def test_an_accepted_pair_takes_over_the_accounts_teams(self, service):
+        """Teams saved before the connection existed would otherwise be left out."""
+        resp = await cs.ConnectionService.connect_espn(10, "AEB", SWID)
+        assert service.adopted == [(10, 21, ACCOUNT_TEAMS)]
+        assert "linked 1 team you already track" in resp.message
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("how", ["league", "anon"])
     async def test_a_refused_pair_is_never_stored(self, service, how):
         _refuse(service.espn, how)
         with pytest.raises(ProviderAuthError) as exc:
             await cs.ConnectionService.connect_espn(10, "AEB-bad", SWID)
-        assert not service.stored
+        assert not service.stored and not service.adopted
         assert "season" not in exc.value.message, "the league-read wording does not apply to an account check"
 
     @pytest.mark.asyncio
@@ -398,11 +428,12 @@ class TestConnectEspn:
         assert not service.stored
 
     @pytest.mark.asyncio
-    async def test_an_unconfirmable_pair_is_stored_unverified(self, service):
+    async def test_an_unconfirmable_pair_is_stored_unverified_and_takes_over_nothing(self, service):
         """Only public leagues to read: stored, its status left unknown, and the message says why."""
         service.espn.answers = {}
         resp = await cs.ConnectionService.connect_espn(10, "AEB", SWID)
         assert service.stored == [(10, "AEB", SWID, False)]
+        assert not service.adopted, "teams keep their own cookies until ESPN has accepted the new ones"
         assert "couldn't confirm" in resp.message
 
     @pytest.mark.asyncio
@@ -426,9 +457,11 @@ class TestConnectEspn:
 @pytest.mark.unit
 class TestVerify:
     @pytest.mark.asyncio
-    async def test_accepted_cookies_are_recorded(self, service):
-        await cs.ConnectionService.verify(10, 21)
+    async def test_accepted_cookies_are_recorded_and_take_over_the_accounts_teams(self, service):
+        resp = await cs.ConnectionService.verify(10, 21)
         assert service.espn.fan_calls == [("AEB-STORED", SWID)] and service.checked == [(21, True)]
+        assert service.adopted == [(10, 21, ACCOUNT_TEAMS)]
+        assert "linked 1 team you already track" in resp.message
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("how", ["league", "anon", "unknown_swid"])
@@ -436,12 +469,13 @@ class TestVerify:
         _refuse(service.espn, how)
         resp = await cs.ConnectionService.verify(10, 21)
         assert service.checked == [(21, False)] and resp.status == "success"
+        assert not service.adopted
 
     @pytest.mark.asyncio
     async def test_an_unconfirmable_pair_records_nothing(self, service):
         service.espn.answers = {}
         resp = await cs.ConnectionService.verify(10, 21)
-        assert not service.checked and "couldn't confirm" in resp.message
+        assert not service.checked and not service.adopted and "couldn't confirm" in resp.message
 
     @pytest.mark.asyncio
     async def test_an_outage_records_nothing(self, service):

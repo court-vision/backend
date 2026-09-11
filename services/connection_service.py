@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from core import crypto
 from core.errors import BadRequestError, NotFoundError, ProviderAuthError, ServiceUnavailableError
@@ -69,6 +69,10 @@ def _account_hint(provider: str, external_account_id: str) -> Optional[str]:
     if provider != "espn" or len(guid) < 4:
         return None
     return "…" + guid[-4:]
+
+
+def _adopted_note(n: int) -> str:
+    return f"linked {n} {'team' if n == 1 else 'teams'} you already track"
 
 
 # ---- the account as ESPN's fan API describes it ------------------------------
@@ -127,8 +131,24 @@ def _probe_leagues(payload: dict) -> list[tuple[int, int]]:
     return order[:MAX_LEAGUE_PROBES]
 
 
-async def _check_espn_cookies(espn_s2: str, swid: str) -> CookieVerdict:
-    """Whether ESPN accepts a cookie pair.
+def _team_keys(league_id: Any, espn_team_id: Any, team_name: Optional[str]) -> list[tuple]:
+    """How a Court Vision team and an ESPN team are recognized as the same one.
+
+    ESPN's team id inside the league when known -- it survives renames -- and
+    the name otherwise. No season: Court Vision's own identity for a team is
+    league id + name (`team_identifier`), so a team saved last season is the
+    same team ESPN now lists under the league's renewal.
+    """
+    keys: list[tuple] = []
+    if espn_team_id is not None:
+        keys.append(("id", league_id, espn_team_id))
+    if team_name and team_name.strip():
+        keys.append(("name", league_id, team_name.strip()))
+    return keys
+
+
+async def _check_espn_cookies(espn_s2: str, swid: str) -> tuple[CookieVerdict, dict]:
+    """Whether ESPN accepts a cookie pair, and the account's fan payload.
 
     The fan API answers 200 for any SWID it knows whatever the cookies, so it
     proves the account exists, not that the cookies work -- beyond flagging a
@@ -144,22 +164,22 @@ async def _check_espn_cookies(espn_s2: str, swid: str) -> CookieVerdict:
     try:
         fan = await EspnService.fetch_fan(espn_s2, swid)
     except ProviderAuthError:
-        return "refused"
+        return "refused", {}
     if fan.get("anon") is True:
-        return "refused"
+        return "refused", fan
 
     for season, league_id in _probe_leagues(fan):
         try:
             settings = await EspnService.fetch_league_settings(espn_s2, swid, season, league_id)
         except ProviderAuthError:
-            return "refused"
+            return "refused", fan
         except BadRequestError as exc:
             if exc.error_code != LEAGUE_NOT_FOUND_CODE:
                 raise
             continue
         if settings.get("isPublic") is False:
-            return "accepted"
-    return "unconfirmed"
+            return "accepted", fan
+    return "unconfirmed", fan
 
 
 # ---- repository functions (run through run_db) --------------------------------
@@ -221,26 +241,64 @@ def _tracked_espn_teams(user_id: int) -> list[tuple[int, dict]]:
 
 
 def _mark_tracked(teams: list[EspnAccountTeam], tracked: list[tuple[int, dict]]) -> list[EspnAccountTeam]:
-    """Mark each ESPN team with the Court Vision team already tracking it.
-
-    ESPN's team id identifies a team through renames, but Court Vision learns it
-    only on a first roster read, so an unmatched id falls back to the name.
-    """
-    by_id: dict[tuple, int] = {}
-    by_name: dict[tuple, int] = {}
+    """Mark each ESPN team with the Court Vision team already tracking it
+    (matched by `_team_keys`, ESPN's team id before the name)."""
+    index: dict[tuple, int] = {}
     for team_id, info in tracked:
-        league_id, year = info.get("league_id"), info.get("year")
-        if info.get("espn_team_id") is not None:
-            by_id[(league_id, year, info["espn_team_id"])] = team_id
-        if info.get("team_name"):
-            by_name[(league_id, year, info["team_name"].strip())] = team_id
+        for key in _team_keys(info.get("league_id"), info.get("espn_team_id"), info.get("team_name")):
+            index.setdefault(key, team_id)
     return [
-        team.model_copy(update={"tracked_team_id": (
-            by_id.get((team.league_id, team.season, team.espn_team_id))
-            or by_name.get((team.league_id, team.season, team.team_name.strip()))
+        team.model_copy(update={"tracked_team_id": next(
+            (index[key] for key in _team_keys(team.league_id, team.espn_team_id, team.team_name) if key in index),
+            None,
         )})
         for team in teams
     ]
+
+
+def _adopt_account_teams(user_id: int, connection_id: int, account_teams: list[EspnAccountTeam]) -> list[int]:
+    """Link the user's unlinked ESPN teams that are on this account to its connection.
+
+    A team saved without cookies (a public league), or whose cookies were never
+    moved into a connection (an environment the 0005 backfill did not reach),
+    would otherwise be left out: the account card would not count it and a
+    cookie refresh would not reach it. ESPN's own list says which teams are the
+    account's; a team linked to another account is left where it is. Any copy
+    of the cookies an adopted team still holds is dropped -- the connection's
+    pair has just been accepted. Returns the adopted team ids.
+    """
+    from db.models.teams import Team
+
+    account_keys = {
+        key for team in account_teams for key in _team_keys(team.league_id, team.espn_team_id, team.team_name)
+    }
+    adopted: list[int] = []
+    unlinked = (
+        Team.select()
+        .where((Team.user_id == user_id) & Team.provider_connection.is_null())
+        .order_by(Team.team_id)
+    )
+    for team in unlinked:
+        info = json.loads(team.league_info)
+        if info.get("provider", "espn") != "espn":
+            continue
+        if not account_keys.intersection(_team_keys(info.get("league_id"), info.get("espn_team_id"), info.get("team_name"))):
+            continue
+        public, _ = credential_service.split_secrets(info)
+        team.league_info = json.dumps(public)
+        team.provider_connection = connection_id
+        team.save()
+        adopted.append(team.team_id)
+    return adopted
+
+
+async def _adopt(user_id: int, connection_id: int, fan: dict) -> list[int]:
+    adopted = await run_db(
+        "connections.adopt", _adopt_account_teams, user_id, connection_id, espn_fan_teams(fan)
+    )
+    if adopted:
+        log.info("espn_connection_adopted_teams", connection_id=connection_id, team_ids=adopted)
+    return adopted
 
 
 def _require_store() -> None:
@@ -267,6 +325,7 @@ class ConnectionService:
         ESPN sees the pair before anything is written: a pair it refuses, or a
         SWID it has never heard of, raises and is not stored. One it can neither
         accept nor refuse (no private league to read) is stored, status unknown.
+        An accepted pair also takes over the user's unlinked teams on the account.
         """
         _require_store()
         espn_s2 = (espn_s2 or "").strip()
@@ -274,7 +333,7 @@ class ConnectionService:
         if not espn_s2 or not swid:
             raise BadRequestError("ESPN_COOKIES_REQUIRED", "Paste both espn_s2 and SWID")
 
-        verdict = await _check_espn_cookies(espn_s2, swid)
+        verdict, fan = await _check_espn_cookies(espn_s2, swid)
         if verdict == "refused":
             # Not the league-read wording ("check ... the season"): no league was named
             raise ProviderAuthError(
@@ -285,10 +344,13 @@ class ConnectionService:
             "connections.store_espn", credential_service.store_espn_cookies,
             user_id, espn_s2, swid, verified=verdict == "accepted",
         )
+        adopted = await _adopt(user_id, connection_id, fan) if verdict == "accepted" else []
         (view,) = await run_db("connections.view", _views, user_id, connection_id)
         log.info("espn_connection_saved", connection_id=connection_id, created=created,
-                 verdict=verdict, teams=len(view.teams))
+                 verdict=verdict, adopted=len(adopted), teams=len(view.teams))
         message = "ESPN account connected" if created else "ESPN cookies updated"
+        if adopted:
+            message = f"{message} — {_adopted_note(len(adopted))}"
         if verdict == "unconfirmed":
             message = f"{message} — {UNCONFIRMED}"
         return ProviderConnectionResp(status=ApiStatus.SUCCESS, message=message, data=view, created=created)
@@ -300,7 +362,8 @@ class ConnectionService:
         A refusal is the answer, not a failure of the request: it comes back as
         a success whose connection reads "expired". An outage raises and records
         nothing, as does an account with no private league to check against --
-        neither says anything about the cookies.
+        neither says anything about the cookies. Accepted cookies take over the
+        user's unlinked teams on the account, as on connect.
         """
         _require_store()
         secrets = await run_db(
@@ -311,22 +374,25 @@ class ConnectionService:
             raise NotFoundError(CONNECTION_NOT_FOUND, "No ESPN connection with that id")
 
         try:
-            verdict = await _check_espn_cookies(secrets.get("espn_s2", ""), secrets.get("swid", ""))
+            verdict, fan = await _check_espn_cookies(secrets.get("espn_s2", ""), secrets.get("swid", ""))
         except BadRequestError as exc:
             if exc.error_code != ESPN_ACCOUNT_NOT_FOUND:
                 raise
-            verdict = "refused"
+            verdict, fan = "refused", {}
 
         if verdict != "unconfirmed":
             await run_db("connections.mark_checked", credential_service.mark_checked,
                          connection_id, verdict == "accepted")
+        adopted = await _adopt(user_id, connection_id, fan) if verdict == "accepted" else []
         (view,) = await run_db("connections.view", _views, user_id, connection_id)
-        log.info("espn_connection_checked", connection_id=connection_id, verdict=verdict)
+        log.info("espn_connection_checked", connection_id=connection_id, verdict=verdict, adopted=len(adopted))
         message = {
             "accepted": "ESPN accepted these cookies",
             "refused": "ESPN rejected these cookies",
             "unconfirmed": UNCONFIRMED[0].upper() + UNCONFIRMED[1:],
         }[verdict]
+        if adopted:
+            message = f"{message} — {_adopted_note(len(adopted))}"
         return ProviderConnectionResp(status=ApiStatus.SUCCESS, message=message, data=view)
 
     @staticmethod
