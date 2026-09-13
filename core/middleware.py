@@ -21,6 +21,8 @@ the event-loop-side error handler only renders the stable response contract.
 
 from __future__ import annotations
 
+import os
+
 import uuid
 from typing import Any, Optional
 
@@ -189,6 +191,18 @@ ALLOWED_ORIGINS = [
 PREVIEW_ORIGIN_REGEX = r"^https://courtvision-[a-z0-9-]+-jameslk3s-projects\.vercel\.app$"
 
 
+def extra_origins() -> list[str]:
+    """
+    Origins added for one process by `CORS_EXTRA_ORIGINS` (comma-separated),
+    for a dev server reached from another device -- a phone on the LAN at
+    `http://10.0.0.51:3000`, a tunnel hostname. Local dev only by intent:
+    nothing sets it on Railway, and the static list above stays the record of
+    what production trusts.
+    """
+    raw = os.environ.get("CORS_EXTRA_ORIGINS", "")
+    return [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+
+
 def setup_middleware(app: FastAPI) -> None:
     """Register the exception handlers and CORS."""
     for exc_class in (AppError, StarletteHTTPException, RequestValidationError, OperationalError, InterfaceError, Exception):
@@ -196,7 +210,7 @@ def setup_middleware(app: FastAPI) -> None:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=ALLOWED_ORIGINS,
+        allow_origins=[*ALLOWED_ORIGINS, *extra_origins()],
         allow_origin_regex=PREVIEW_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
