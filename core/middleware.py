@@ -21,6 +21,9 @@ the event-loop-side error handler only renders the stable response contract.
 
 from __future__ import annotations
 
+import os
+import re
+
 import uuid
 from typing import Any, Optional
 
@@ -189,6 +192,32 @@ ALLOWED_ORIGINS = [
 PREVIEW_ORIGIN_REGEX = r"^https://courtvision-[a-z0-9-]+-jameslk3s-projects\.vercel\.app$"
 
 
+# One explicit origin: scheme, host (or bracketed IPv6), optional port -- no
+# path, no wildcard. `allow_credentials=True` below means anything listed can
+# make authenticated requests, so "*" must never get in.
+_ORIGIN_RE = re.compile(r"^https?://(?:\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(?::\d{1,5})?$")
+
+
+def extra_origins() -> list[str]:
+    """
+    Origins added for one process by `CORS_EXTRA_ORIGINS` (comma-separated),
+    for a dev server reached from another device -- a phone on the LAN at
+    `http://10.0.0.51:3000`, a tunnel hostname. Local dev only by intent:
+    nothing sets it on Railway, and the static list above stays the record of
+    what production trusts. An entry that is not an explicit origin (a "*",
+    a path, a bare host) fails startup rather than widening the allowlist.
+    """
+    raw = os.environ.get("CORS_EXTRA_ORIGINS", "")
+    origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    bad = [o for o in origins if not _ORIGIN_RE.fullmatch(o)]
+    if bad:
+        raise ValueError(
+            "CORS_EXTRA_ORIGINS must list explicit origins like http://10.0.0.51:3000; "
+            f"rejected: {', '.join(bad)}"
+        )
+    return origins
+
+
 def setup_middleware(app: FastAPI) -> None:
     """Register the exception handlers and CORS."""
     for exc_class in (AppError, StarletteHTTPException, RequestValidationError, OperationalError, InterfaceError, Exception):
@@ -196,7 +225,7 @@ def setup_middleware(app: FastAPI) -> None:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=ALLOWED_ORIGINS,
+        allow_origins=[*ALLOWED_ORIGINS, *extra_origins()],
         allow_origin_regex=PREVIEW_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
