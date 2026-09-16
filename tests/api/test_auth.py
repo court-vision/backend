@@ -48,7 +48,7 @@ def test_internal_routes_reject_no_token(unauthed_client, path):
 
 @pytest.mark.api
 @pytest.mark.parametrize("path", [
-    "/v1/internal/espn/validate_league",
+    "/v1/internal/teams/add",
     "/v1/internal/streamers/find",
 ])
 def test_internal_post_routes_reject_no_token(unauthed_client, path):
@@ -56,6 +56,42 @@ def test_internal_post_routes_reject_no_token(unauthed_client, path):
     res = unauthed_client.post(path, json={})
     assert res.status_code == 401
     assert res.json()["error_code"] == "AUTH_REQUIRED"
+
+
+# The Yahoo OAuth callback is Yahoo redirecting the user's browser back with a
+# code; its guard is the signed state, not a bearer.
+UNAUTHENTICATED_INTERNAL_ROUTES = {"/v1/internal/yahoo/callback"}
+
+
+def _dependency_calls(dependant) -> set:
+    calls = set()
+    for dep in dependant.dependencies:
+        calls.add(dep.call)
+        calls |= _dependency_calls(dep)
+    return calls
+
+
+@pytest.mark.api
+def test_every_internal_route_carries_an_auth_dependency(unauthed_app):
+    """A route under /v1/internal that forgets its auth dependency is reachable by
+    anyone. This was true of POST /yahoo/validate_league until it was removed:
+    the ESPN router declared auth at router level and the Yahoo router did not."""
+    from fastapi.routing import APIRoute
+
+    from api.deps import get_db_user
+    from core.clerk_auth import get_current_user, verify_clerk_token
+    from core.pipeline_auth import verify_pipeline_token
+
+    guards = {get_db_user, get_current_user, verify_clerk_token, verify_pipeline_token}
+    unguarded = sorted(
+        f"{sorted(route.methods)} {route.path}"
+        for route in unauthed_app.routes
+        if isinstance(route, APIRoute)
+        and route.path.startswith("/v1/internal")
+        and route.path not in UNAUTHENTICATED_INTERNAL_ROUTES
+        and not (guards & _dependency_calls(route.dependant))
+    )
+    assert unguarded == []
 
 
 @pytest.mark.api

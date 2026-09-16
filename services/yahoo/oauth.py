@@ -24,6 +24,13 @@ from services.providers.http import provider_post
 YAHOO_AUTH_URL = "https://api.login.yahoo.com/oauth2/request_auth"
 YAHOO_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token"
 
+# What the app asks Yahoo for. Yahoo grants exactly the permission the app was
+# approved for in its developer console: Court Vision holds Read (2026-09-15),
+# and asking for the read/write scope (`fspt-w`) from a read-only app fails at
+# the authorize step, so this changes only when that approval does. The scope
+# a connection was granted is stored on its row so the write gate can read it.
+YAHOO_SCOPE = "fspt-r"
+
 
 def _b64encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
@@ -61,7 +68,7 @@ class YahooOAuthService:
             "client_id": settings.yahoo_client_id,
             "redirect_uri": settings.yahoo_redirect_uri,
             "response_type": "code",
-            "scope": "fspt-r",
+            "scope": YAHOO_SCOPE,
             "state": state,
         }
         return f"{YAHOO_AUTH_URL}?{urlencode(params)}", state
@@ -124,6 +131,12 @@ class YahooOAuthService:
             "refresh_token": token_data.get("refresh_token"),
             "expires_in": expires_in,
             "token_expiry": (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat(),
+            # The Yahoo account behind the grant. It keys the connection row so
+            # a second Yahoo account is a second row, not an overwrite.
+            "guid": token_data.get("xoauth_yahoo_guid") or "",
+            # Yahoo echoes the granted scope on some responses and not others;
+            # a grant that succeeded is for what was asked.
+            "scope": token_data.get("scope") or YAHOO_SCOPE,
         }
 
     @staticmethod

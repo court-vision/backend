@@ -77,7 +77,7 @@ def make_test_app() -> FastAPI:
     """
     from fastapi import APIRouter
     from api.v1.internal import (
-        users, teams, lineups, espn, yahoo,
+        users, teams, lineups, yahoo,
         matchups, streamers, notifications, api_keys,
         rankings as internal_rankings, sqlmate as internal_sqlmate,
         drafts, lineup_editor, jobs, team_streamers, roster_transactions,
@@ -125,7 +125,6 @@ def make_test_app() -> FastAPI:
     api_v1_internal.include_router(users.router)
     api_v1_internal.include_router(teams.router)
     api_v1_internal.include_router(lineups.router)
-    api_v1_internal.include_router(espn.router)
     api_v1_internal.include_router(yahoo.router)
     api_v1_internal.include_router(matchups.router)
     api_v1_internal.include_router(streamers.router)

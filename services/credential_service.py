@@ -78,11 +78,15 @@ def normalize_swid(value: Optional[str]) -> str:
 
 
 def _external_account_id(provider: str, secrets: dict) -> str:
-    """The provider-side account a credential belongs to.
+    """The provider-side account a credential belongs to, as far as the
+    credentials themselves say.
 
     ESPN's SWID is the account guid, so two leagues on one ESPN account collapse
-    to a single connection. Yahoo exposes no comparable id here, so all of a
-    user's Yahoo credentials share one row.
+    to a single connection. Yahoo's tokens carry no account id: the OAuth
+    callback learns the guid from the token response and passes it in as
+    `account`, and a write that arrives without one (a legacy team whose
+    tokens still sit in league_info) lands on the row already holding those
+    tokens, or on the unkeyed row as before.
     """
     if provider == "espn":
         return normalize_swid(secrets.get("swid"))[:128]
@@ -116,7 +120,32 @@ def _find_connection(user_id: int, provider: str, account: str):
     )
 
 
-def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: bool = False) -> tuple[Any, bool]:
+def _row_holding(user_id: int, provider: str, secrets: dict):
+    """The user's row for `provider` that stores exactly `secrets`, if any.
+
+    For a provider whose account id is not in the credentials (Yahoo), a write
+    that arrives without one still has to find the callback's row rather than
+    open a second, unkeyed one for the same tokens.
+    """
+    from db.models.provider_connections import ProviderConnection
+
+    rows = (
+        ProviderConnection.select()
+        .where((ProviderConnection.user == user_id) & (ProviderConnection.provider == provider))
+        .order_by(ProviderConnection.updated_at.desc(), ProviderConnection.id.desc())
+    )
+    return next((row for row in rows if _holds(row, secrets)), None)
+
+
+def _upsert_connection(
+    user_id: int,
+    provider: str,
+    secrets: dict,
+    *,
+    verified: bool = False,
+    account: Optional[str] = None,
+    scope: Optional[str] = None,
+) -> tuple[Any, bool]:
     """Create or update the row for this (user, provider, account); returns (row, created).
 
     The one write path into the store. Saving the secrets a row already holds
@@ -126,6 +155,11 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
     provider has just accepted these. Two requests for one account can both
     find no row: the one that loses the insert takes the update path rather
     than failing on the unique key.
+
+    `account` is the provider-side account id when the caller knows it and
+    the credentials do not carry it (Yahoo's guid, from the OAuth callback or
+    from the row a team is already linked to). `scope` is what the provider
+    granted, recorded with new credentials.
     """
     from peewee import IntegrityError
 
@@ -134,12 +168,26 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
 
     if provider == "espn" and secrets.get("swid"):
         secrets = {**secrets, "swid": normalize_swid(secrets["swid"])}
-    account = _external_account_id(provider, secrets)
 
-    connection = _find_connection(user_id, provider, account)
+    if account is None:
+        account = _external_account_id(provider, secrets)
+        connection = _find_connection(user_id, provider, account)
+        if connection is None and provider != "espn":
+            connection = _row_holding(user_id, provider, secrets)
+            if connection is not None:
+                account = connection.external_account_id
+    else:
+        account = account[:128]
+        connection = _find_connection(user_id, provider, account)
+
     if connection is not None and _holds(connection, secrets):
         if verified:
             mark_checked(connection.id, ok=True, fingerprint=_fingerprint(connection))
+        if scope is not None and connection.scope != scope:
+            # The same credentials with a grant now known (a row from before
+            # 0025, or a backfill): the tokens are unchanged, the metadata is not.
+            connection.scope = scope
+            connection.save()
         return connection, False
 
     ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
@@ -150,6 +198,8 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
         "verified_at": _utcnow() if verified else None,
         "auth_failed_at": None,
     }
+    if scope is not None:
+        fields["scope"] = scope
     if connection is None:
         try:
             with db.atomic():
@@ -167,7 +217,9 @@ def _upsert_connection(user_id: int, provider: str, secrets: dict, *, verified: 
     return connection, False
 
 
-def store_provider_tokens(user_id: int, provider: str, secrets: dict) -> Optional[int]:
+def store_provider_tokens(
+    user_id: int, provider: str, secrets: dict, *, account: str = "", scope: Optional[str] = None
+) -> Optional[int]:
     """Put freshly-obtained credentials straight into the encrypted store.
 
     Used by the OAuth callback so tokens never travel to the browser. The
@@ -175,12 +227,16 @@ def store_provider_tokens(user_id: int, provider: str, secrets: dict) -> Optiona
     the caller already owns and grants nothing on its own, unlike the tokens it
     replaces in the redirect URL.
 
+    `account` keys the row (Yahoo: the guid from the token response), so one
+    Yahoo account is one row however often it reconnects and a second account
+    is a second row. `scope` is the grant the provider issued.
+
     Returns None when the store is disabled, in which case the caller must fall
     back to its previous behaviour.
     """
     if not crypto.is_enabled() or not secrets:
         return None
-    connection, _ = _upsert_connection(user_id, provider, secrets)
+    connection, _ = _upsert_connection(user_id, provider, secrets, account=account, scope=scope)
     return connection.id
 
 
@@ -346,11 +402,42 @@ def persist(user_id: int, team, payload: dict) -> Optional[int]:
         team.save()
         return team.provider_connection_id
 
-    connection, _ = _upsert_connection(user_id, provider, secrets)
+    # ESPN's row is found from the SWID in the pair. A Yahoo row is keyed by
+    # the guid the OAuth callback stored, which the tokens do not carry, so
+    # the row is chosen for them (see _account_for).
+    account = _account_for(user_id, provider, team, secrets) if provider != "espn" else None
+    connection, _ = _upsert_connection(user_id, provider, secrets, account=account)
     team.provider_connection_id = connection.id
     team.league_info = json.dumps(public)
     team.save()
     return connection.id
+
+
+def _account_for(user_id: int, provider: str, team, secrets: dict) -> Optional[str]:
+    """Which row a team's credentials belong on when they do not name their
+    account.
+
+    The tokens decide first: a row already holding exactly these tokens is the
+    account they came from. The add-team path resolved them from that row's
+    handle, and an update that resolved a *different* connection's handle
+    must move the team to that row rather than write the new account's tokens
+    over the row the team was on -- which every other team on the old
+    account would then read. Only tokens no row holds (a refresh) stay on the
+    row the team is linked to. Neither: the unkeyed row, as before 0025.
+    """
+    holder = _row_holding(user_id, provider, secrets)
+    if holder is not None:
+        return holder.external_account_id
+    return _linked_account(user_id, team)
+
+
+def _linked_account(user_id: int, team) -> Optional[str]:
+    """The account id of the connection this team is linked to, if it is."""
+    connection_id = getattr(team, "provider_connection_id", None)
+    if not connection_id:
+        return None
+    connection = _owned_connection(user_id, connection_id, None)
+    return connection.external_account_id if connection is not None else None
 
 
 def hydrate(team, payload: dict) -> dict:

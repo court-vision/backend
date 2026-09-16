@@ -20,7 +20,6 @@ from core.clerk_auth import get_current_user
 from core.logging import get_logger
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
-from schemas.espn import TeamDataReq, TeamDataResp, ValidateLeagueReq, ValidateLeagueResp
 from services.yahoo_service import YahooService
 from services import credential_service
 from services.user_sync_service import UserSyncService
@@ -120,10 +119,18 @@ async def yahoo_callback(
 
     try:
         tokens = await YahooService.exchange_code_for_tokens(code)
+        # Yahoo names the account in the token response; when it does not, ask.
+        guid = tokens.get("guid") or await YahooService.get_user_guid(tokens.get("access_token", ""))
     except Exception as exc:  # mid-redirect: never render an error body, never echo the cause
         log.warning("yahoo_oauth_exchange_failed", error=type(exc).__name__,
                     error_code=getattr(exc, "error_code", None))
         return _manage_teams_redirect(yahoo_error="oauth_failed")
+
+    if not guid:
+        # A row with no account id is the pre-0025 shape: two such accounts
+        # would share one row. Refuse rather than store what cannot be told apart.
+        log.warning("yahoo_oauth_no_account_id")
+        return _manage_teams_redirect(yahoo_error="no_account_id")
 
     # Tokens are stored server-side and the redirect carries only an opaque,
     # user-scoped connection id. They used to travel as query parameters, which
@@ -131,6 +138,9 @@ async def yahoo_callback(
     # header, and every proxy and access log on the path.
     # `state_data["user_id"]` is the Clerk id — get_auth_url is called with
     # clerk_user_id, not the numeric usr.users key.
+    # The row is keyed by the account guid from the token response, so one
+    # Yahoo account is one row however often it reconnects, and it records
+    # the scope Yahoo granted so a write is refused before it is tried.
     connection_id = await run_db(
         "yahoo.store_tokens", _store_tokens_for_clerk_user,
         state_data.get("user_id"), "yahoo",
@@ -139,6 +149,8 @@ async def yahoo_callback(
             "yahoo_refresh_token": tokens.get("refresh_token", ""),
             "yahoo_token_expiry": tokens.get("token_expiry", ""),
         },
+        guid,
+        tokens.get("scope"),
     )
     if connection_id is None:
         # CREDENTIAL_KEYS unset: nothing can be stored, so the flow cannot
@@ -152,10 +164,13 @@ async def yahoo_callback(
     )
 
 
-def _store_tokens_for_clerk_user(clerk_user_id: str, provider: str, secrets: dict):
+def _store_tokens_for_clerk_user(clerk_user_id: str, provider: str, secrets: dict,
+                                 account: str, scope: Optional[str]):
     """Resolve the Clerk id to the local user, then store the tokens under it."""
     user = UserSyncService.get_or_create_user(clerk_user_id)
-    return credential_service.store_provider_tokens(user.user_id, provider, secrets)
+    return credential_service.store_provider_tokens(
+        user.user_id, provider, secrets, account=account, scope=scope
+    )
 
 
 async def _access_token_for(user_id: int, connection_id: int) -> str:
@@ -215,42 +230,6 @@ async def get_league_teams(
         message=f"Found {len(teams)} teams",
         teams=[YahooTeamResponse(**team) for team in teams]
     )
-
-
-# ---------------------- Validation Endpoints ---------------------- #
-
-@router.post("/validate_league", response_model=ValidateLeagueResp)
-async def validate_yahoo_league(req: ValidateLeagueReq):
-    """
-    Validate Yahoo league credentials.
-
-    Checks if the provided credentials can access the specified team.
-    """
-    return await YahooService.check_league(req.league_info)
-
-
-# ---------------------- Data Endpoints ---------------------- #
-
-@router.post("/get_roster_data", response_model=TeamDataResp)
-async def get_roster_data(
-    req: TeamDataReq,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get roster data for a Yahoo team.
-    """
-    return await YahooService.get_team_data(req.league_info, req.fa_count)
-
-
-@router.post("/get_freeagent_data", response_model=TeamDataResp)
-async def get_free_agents(
-    req: TeamDataReq,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get available free agents from a Yahoo league.
-    """
-    return await YahooService.get_free_agents(req.league_info, req.fa_count)
 
 
 # ---------------------- Token Management ---------------------- #
