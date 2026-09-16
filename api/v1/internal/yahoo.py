@@ -119,10 +119,18 @@ async def yahoo_callback(
 
     try:
         tokens = await YahooService.exchange_code_for_tokens(code)
+        # Yahoo names the account in the token response; when it does not, ask.
+        guid = tokens.get("guid") or await YahooService.get_user_guid(tokens.get("access_token", ""))
     except Exception as exc:  # mid-redirect: never render an error body, never echo the cause
         log.warning("yahoo_oauth_exchange_failed", error=type(exc).__name__,
                     error_code=getattr(exc, "error_code", None))
         return _manage_teams_redirect(yahoo_error="oauth_failed")
+
+    if not guid:
+        # A row with no account id is the pre-0025 shape: two such accounts
+        # would share one row. Refuse rather than store what cannot be told apart.
+        log.warning("yahoo_oauth_no_account_id")
+        return _manage_teams_redirect(yahoo_error="no_account_id")
 
     # Tokens are stored server-side and the redirect carries only an opaque,
     # user-scoped connection id. They used to travel as query parameters, which
@@ -141,7 +149,7 @@ async def yahoo_callback(
             "yahoo_refresh_token": tokens.get("refresh_token", ""),
             "yahoo_token_expiry": tokens.get("token_expiry", ""),
         },
-        tokens.get("guid") or "",
+        guid,
         tokens.get("scope"),
     )
     if connection_id is None:

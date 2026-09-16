@@ -183,6 +183,11 @@ def _upsert_connection(
     if connection is not None and _holds(connection, secrets):
         if verified:
             mark_checked(connection.id, ok=True, fingerprint=_fingerprint(connection))
+        if scope is not None and connection.scope != scope:
+            # The same credentials with a grant now known (a row from before
+            # 0025, or a backfill): the tokens are unchanged, the metadata is not.
+            connection.scope = scope
+            connection.save()
         return connection, False
 
     ciphertext, key_version = crypto.encrypt(json.dumps(secrets))
@@ -398,15 +403,32 @@ def persist(user_id: int, team, payload: dict) -> Optional[int]:
         return team.provider_connection_id
 
     # ESPN's row is found from the SWID in the pair. A Yahoo row is keyed by
-    # the guid the OAuth callback stored, which the tokens do not carry: a team
-    # already on a row stays on it (refreshed tokens land there), and a new
-    # team finds the row holding the tokens it was given.
-    account = _linked_account(user_id, team) if provider != "espn" else None
+    # the guid the OAuth callback stored, which the tokens do not carry, so
+    # the row is chosen for them (see _account_for).
+    account = _account_for(user_id, provider, team, secrets) if provider != "espn" else None
     connection, _ = _upsert_connection(user_id, provider, secrets, account=account)
     team.provider_connection_id = connection.id
     team.league_info = json.dumps(public)
     team.save()
     return connection.id
+
+
+def _account_for(user_id: int, provider: str, team, secrets: dict) -> Optional[str]:
+    """Which row a team's credentials belong on when they do not name their
+    account.
+
+    The tokens decide first: a row already holding exactly these tokens is the
+    account they came from. The add-team path resolved them from that row's
+    handle, and an update that resolved a *different* connection's handle
+    must move the team to that row rather than write the new account's tokens
+    over the row the team was on -- which every other team on the old
+    account would then read. Only tokens no row holds (a refresh) stay on the
+    row the team is linked to. Neither: the unkeyed row, as before 0025.
+    """
+    holder = _row_holding(user_id, provider, secrets)
+    if holder is not None:
+        return holder.external_account_id
+    return _linked_account(user_id, team)
 
 
 def _linked_account(user_id: int, team) -> Optional[str]:

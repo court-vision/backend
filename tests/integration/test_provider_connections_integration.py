@@ -348,3 +348,28 @@ def test_a_legacy_yahoo_team_without_a_keyed_row_still_gets_an_unkeyed_one(user)
 
     row = ProviderConnection.get_by_id(linked)
     assert row.external_account_id == "" and row.scope is None
+
+
+def test_an_update_that_resolved_another_accounts_handle_moves_the_team_there(user):
+    """The tokens name the account: writing them over the row the team was on
+    would hand every other team on that account the wrong credentials."""
+    row_a = credential_service.store_provider_tokens(user.user_id, "yahoo", YAHOO, account=GUID, scope="fspt-r")
+    tokens_b = {**YAHOO, "yahoo_access_token": "at-b", "yahoo_refresh_token": "rt-b"}
+    row_b = credential_service.store_provider_tokens(user.user_id, "yahoo", tokens_b, account="OTHERGUID", scope="fspt-r")
+    team = _yahoo_team(user, "Y", row_a)
+
+    linked = credential_service.persist(user.user_id, team, {**json.loads(team.league_info), **tokens_b})
+
+    assert linked == row_b and len(_rows(user)) == 2
+    assert credential_service.load_provider_tokens(user.user_id, row_a) == YAHOO
+    assert credential_service.load_provider_tokens(user.user_id, row_b) == tokens_b
+
+
+def test_a_grant_learned_for_tokens_already_stored_is_recorded(user):
+    connection_id = credential_service.store_provider_tokens(user.user_id, "yahoo", YAHOO, account=GUID)
+    assert ProviderConnection.get_by_id(connection_id).scope is None
+
+    again = credential_service.store_provider_tokens(user.user_id, "yahoo", YAHOO, account=GUID, scope="fspt-r")
+
+    assert again == connection_id
+    assert ProviderConnection.get_by_id(connection_id).scope == "fspt-r"

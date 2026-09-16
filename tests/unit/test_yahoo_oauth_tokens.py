@@ -57,10 +57,20 @@ def test_a_scope_yahoo_echoes_wins_over_the_requested_one(configured, monkeypatc
 
 @pytest.mark.unit
 def test_a_response_without_a_guid_yields_an_empty_account(configured, monkeypatch):
-    """An unkeyed row is the pre-0025 shape, never a crash."""
+    """Empty, never a crash: the callback then asks Yahoo who the account is."""
     _posting(monkeypatch, {k: v for k, v in TOKEN_RESPONSE.items() if k != "xoauth_yahoo_guid"})
 
     assert _run(YahooOAuthService.exchange_code_for_tokens("code-1"))["guid"] == ""
+
+
+@pytest.mark.unit
+def test_the_login_guid_is_read_from_yahoos_users_payload():
+    from services.yahoo.discovery import login_guid
+
+    payload = {"fantasy_content": {"users": {"0": {"user": [{"guid": "ABC123"}, {"games": {}}]}, "count": 1}}}
+    assert login_guid(payload) == "ABC123"
+    assert login_guid({"fantasy_content": {"users": {"count": 0}}}) == ""
+    assert login_guid({}) == ""
 
 
 @pytest.mark.unit

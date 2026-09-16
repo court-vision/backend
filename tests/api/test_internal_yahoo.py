@@ -61,14 +61,29 @@ def test_callback_keys_the_row_by_the_guid_and_records_the_scope(client, stored)
 
 
 @pytest.mark.api
-def test_callback_without_a_guid_stores_an_unkeyed_row(client, stored, monkeypatch):
+def test_callback_asks_yahoo_for_the_account_when_the_token_response_lacks_it(client, stored, monkeypatch):
     monkeypatch.setattr(YahooService, "exchange_code_for_tokens",
                         AsyncMock(return_value={**TOKENS, "guid": ""}))
+    monkeypatch.setattr(YahooService, "get_user_guid", AsyncMock(return_value="FROMUSERSCALL"))
 
     res = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
 
     assert res.status_code in (302, 307)
-    assert stored[0]["account"] == ""
+    assert stored[0]["account"] == "FROMUSERSCALL"
+
+
+@pytest.mark.api
+def test_callback_refuses_a_grant_yahoo_will_not_put_a_name_to(client, stored, monkeypatch):
+    """Two nameless accounts would share one row (the pre-0025 shape); nothing is stored."""
+    monkeypatch.setattr(YahooService, "exchange_code_for_tokens",
+                        AsyncMock(return_value={**TOKENS, "guid": ""}))
+    monkeypatch.setattr(YahooService, "get_user_guid", AsyncMock(return_value=""))
+
+    res = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+
+    assert res.status_code in (302, 307)
+    assert res.headers["location"].endswith("/manage-teams?yahoo_error=no_account_id")
+    assert stored == []
 
 
 @pytest.mark.api

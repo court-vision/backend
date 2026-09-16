@@ -6,7 +6,31 @@ from services.yahoo.oauth import YahooOAuthService
 YAHOO_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
 
+def login_guid(data: dict) -> str:
+    """The logged-in account's guid from a `users;use_login=1` payload, or ""."""
+    users = data.get("fantasy_content", {}).get("users", {})
+    entry = users.get("0", {}) if isinstance(users, dict) else {}
+    for item in entry.get("user", []) if isinstance(entry, dict) else []:
+        if isinstance(item, dict) and item.get("guid"):
+            return str(item["guid"])
+    return ""
+
+
 class YahooDiscoveryService(YahooOAuthService):
+    @classmethod
+    async def get_user_guid(cls, access_token: str) -> str:
+        """The account behind an access token, or "" when Yahoo does not say.
+
+        The token response normally carries it (`xoauth_yahoo_guid`); the OAuth
+        callback asks here when it does not, since a connection without an
+        account id cannot be told from another one.
+        """
+        endpoint = f"{YAHOO_API_BASE}/users;use_login=1?format=json"
+        data = await provider_get(
+            "yahoo", endpoint, headers=cls._get_headers(access_token), expect_key="fantasy_content"
+        )
+        return login_guid(data)
+
     @classmethod
     async def get_user_leagues(cls, access_token: str) -> list[dict]:
         endpoint = f"{YAHOO_API_BASE}/users;use_login=1/games;game_codes=nba/leagues?format=json"
