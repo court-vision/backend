@@ -2,7 +2,7 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
+from .common import ApiModel, BaseResponse, LeagueInfo  # noqa: F401  (re-exported: espn_service imports it from here)
 
 # ------------------------------- ESPN Data Models ------------------------------- #
 
@@ -13,9 +13,6 @@ ValueKind = Literal["fpts", "cat_value"]
 # waivers until the league's next waiver run. None for rostered players and
 # for providers that do not report one.
 AcquisitionStatus = Literal["free_agent", "waivers"]
-
-class ValidateLeagueReq(BaseRequest):
-    league_info: LeagueInfo
 
 class PlayerResp(ApiModel):
     player_id: int
@@ -31,10 +28,6 @@ class PlayerResp(ApiModel):
     acquisition_status: Optional[AcquisitionStatus] = None
     waivers_until: Optional[date] = None   # the day the waiver claim window closes (ESPN's waiverProcessDate)
     default_position_id: Optional[int] = None   # ESPN's defaultPositionId (1 PG … 5 C); None for Yahoo
-
-class TeamDataReq(BaseRequest):
-    league_info: LeagueInfo
-    fa_count: int
 
 class ValidateLeagueResp(BaseResponse):
     valid: bool

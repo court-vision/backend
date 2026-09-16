@@ -37,8 +37,9 @@ class ProviderConnection(BaseModel):
 
     # ESPN: the SWID guid, normalized to upper case in braces (credential_service.
     # normalize_swid) so every spelling of one account is one row. Yahoo: the
-    # account guid when known. Empty string rather than NULL so the unique
-    # constraint constrains.
+    # account guid from the OAuth token response (`xoauth_yahoo_guid`); rows
+    # written before it was kept hold "". Empty string rather than NULL so the
+    # unique constraint constrains.
     external_account_id = CharField(max_length=128, default="")
 
     secret_ciphertext = TextField()
@@ -47,6 +48,11 @@ class ProviderConnection(BaseModel):
     # Cleartext mirror of the Yahoo token expiry so refresh scheduling does not
     # need to decrypt. NULL for ESPN.
     expires_at = DateTimeField(null=True)
+
+    # The permission the provider granted these credentials, as it named it
+    # (Yahoo: `fspt-r` or `fspt-w`), so a write can be refused before it is
+    # tried. NULL for ESPN and for rows written before migration 0025.
+    scope = CharField(max_length=64, null=True)
 
     # The provider's last verdicts on these credentials, from an explicit check
     # (migration 0024). Both are cleared when the credentials are replaced.
