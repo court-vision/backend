@@ -36,7 +36,7 @@ def stub_players(monkeypatch):
 
     def _install(rows):
         monkeypatch.setattr(
-            "services.nba_id_resolver.PlayerModel",
+            "services.providers.identity.PlayerModel",
             SimpleNamespace(
                 id=_field(), espn_id=_field(), name_normalized=_field(),
                 select=lambda *a: SimpleNamespace(where=lambda *w: rows),

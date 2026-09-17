@@ -14,6 +14,7 @@ from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.daily_actions import DailyAction, DailyActionPlayer, DailyActionsData, DailyActionsResp
 from schemas.lineup_editor import LineupMoveResult, LineupState
 from services import daily_actions_service as svc
+from services.providers.capabilities import unavailable_message
 
 ESPN = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="T", year=2027, espn_s2="x", swid="{y}")
 BOARD = LineupState(provider=FantasyProvider.ESPN, team_name="T", espn_team_id=3, nba_date="2026-10-20",
@@ -73,7 +74,7 @@ def test_the_rows_and_the_board_come_back_together(authed_client, owned, monkeyp
 @pytest.mark.api
 def test_a_non_espn_answer_is_a_populated_read_only_data(authed_client, owned, monkeypatch):
     _league(monkeypatch, ESPN)
-    _stub(monkeypatch, DailyActionsResp(status=ApiStatus.SUCCESS, message=svc.NOT_ESPN_MESSAGE, data=DailyActionsData(
+    _stub(monkeypatch, DailyActionsResp(status=ApiStatus.SUCCESS, message=unavailable_message("daily_actions", "yahoo"), data=DailyActionsData(
         can_write=False, write_blocked_reason="provider_not_supported")))
     r = authed_client.get("/v1/internal/teams/7/actions")
     body = r.json()["data"]

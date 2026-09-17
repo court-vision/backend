@@ -34,7 +34,7 @@ from core.errors import (
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
-from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo
 from schemas.lineup_editor import (
     ApplyLineupMovesData,
     ApplyLineupMovesReq,
@@ -57,13 +57,13 @@ from services.fantasy_writer_client import (
     FantasyWriterUnavailable,
 )
 from services.lineup_planner import Move, Plan, PlannerPlayer, plan_fill, validate_moves
-from services.lineup_read_service import LineupReadService
+from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
+from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
+from services.providers.writers import espn_lineup_payload
 from utils.constants import PROVIDER_AUTH_MESSAGES
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("lineup_editor")
-
-NOT_ESPN_MESSAGE = "Lineup editing is available for ESPN teams"
 
 
 # ------------------------------- errors ------------------------------- #
@@ -164,17 +164,8 @@ def idempotency_key(team_id: int, state: LineupState, moves: list[Move]) -> str:
     return f"{team_id}:{state.scoring_period_id}:{state.roster_version}:{digest}"
 
 
-def writer_payload(league_info: LeagueInfo, state: LineupState, moves: list[Move], key: str) -> dict[str, Any]:
-    return {
-        "season": league_info.year,
-        "league_id": league_info.league_id,
-        "espn_team_id": state.espn_team_id,
-        "member_id": league_info.swid,
-        "credentials": {"espn_s2": league_info.espn_s2, "swid": league_info.swid},
-        "scoring_period_id": state.scoring_period_id,
-        "moves": [{"player_id": m.player_id, "from_slot_id": m.from_slot_id, "to_slot_id": m.to_slot_id} for m in moves],
-        "idempotency_key": key,
-    }
+# The ESPN envelope moved to services.providers.writers; the name stays for callers.
+writer_payload = espn_lineup_payload
 
 
 # ------------------------------- DB (run in the executor) ------------------------------- #
@@ -227,16 +218,20 @@ class LineupEditorService:
 
     @staticmethod
     async def read_state(team, league_info: LeagueInfo) -> LineupStateResp:
-        if league_info.provider != FantasyProvider.ESPN:
-            return LineupStateResp(status=ApiStatus.SUCCESS, message=NOT_ESPN_MESSAGE, data=None)
-        state = await LineupReadService.read(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).lineup_read:
+            return LineupStateResp(status=ApiStatus.SUCCESS,
+                                   message=unavailable_message("lineup_editing", league_info.provider), data=None)
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
         return LineupStateResp(status=ApiStatus.SUCCESS, message="Lineup fetched", data=state)
 
     @staticmethod
     async def plan_today(team, league_info: LeagueInfo) -> LineupPlanResp:
-        if league_info.provider != FantasyProvider.ESPN:
-            return LineupPlanResp(status=ApiStatus.SUCCESS, message=NOT_ESPN_MESSAGE, data=None)
-        state = await LineupReadService.read(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).lineup_read:
+            return LineupPlanResp(status=ApiStatus.SUCCESS,
+                                  message=unavailable_message("lineup_editing", league_info.provider), data=None)
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
         plan = plan_fill(planner_players(state), slot_counts_of(state))
         return LineupPlanResp(status=ApiStatus.SUCCESS, message=plan.summary, data=LineupPlanData(
             moves=move_results(list(plan.moves), state), unfilled=unfilled_results(plan), summary=plan.summary,
@@ -249,10 +244,12 @@ class LineupEditorService:
     async def apply_manual(team, league_info: LeagueInfo, req: ApplyLineupMovesReq) -> ApplyLineupMovesResp:
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
-        if league_info.provider != FantasyProvider.ESPN:
-            raise RosterWriteBlocked(message=NOT_ESPN_MESSAGE, data={"reason": "provider_not_supported"})
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).lineup_write:
+            raise RosterWriteBlocked(message=unavailable_message("lineup_changes", league_info.provider),
+                                     data={"reason": "provider_not_supported"})
 
-        state = await LineupReadService.read(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
         if not state.can_write:
             raise RosterWriteBlocked(data={"reason": state.write_blocked_reason})
         if state.roster_version != req.roster_version or state.scoring_period_id != req.expected_scoring_period_id:
@@ -271,7 +268,8 @@ class LineupEditorService:
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,
-            message=f"{len(moves)} move(s) sent to ESPN" + ("" if verified else " — not yet confirmed"),
+            message=f"{len(moves)} move(s) sent to {provider_name(league_info.provider)}"
+                    + ("" if verified else " — not yet confirmed"),
             data=ApplyLineupMovesData(lineup=fresh, applied_moves=applied, verified=verified, audit_id=audit_id),
         )
 
@@ -297,10 +295,11 @@ class LineupEditorService:
                      move_count=len(moves))
             return LineupEvaluationResp(status=ApiStatus.SUCCESS, message=f"Lineup {outcome}", data=data)
 
-        if league_info.provider != FantasyProvider.ESPN:
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).lineup_read:
             return done("skipped", reason="provider_not_supported")
 
-        state = await LineupReadService.read(req.team_id, league_info, fallback_slot_counts=roster_slots)
+        state = await adapter.read_lineup(req.team_id, league_info, fallback_slot_counts=roster_slots)
         plan = plan_fill(planner_players(state), slot_counts_of(state))
         if plan.is_noop:
             if req.apply and state.can_write and state.nba_date:
@@ -346,8 +345,9 @@ class LineupEditorService:
         audit_id = await run_db("lineup.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
                                 _moves_json(moves), key)
+        writer = get_roster_writer(league_info.provider)
         try:
-            result = await fantasy_writer_client.apply_lineup(writer_payload(league_info, state, moves, key))
+            result = await writer.apply_lineup(league_info, state, moves, key)
         except FantasyWriterRejected as exc:
             await run_db("lineup.audit_update", _audit_update, audit_id, "rejected",
                          provider_status=exc.espn_status, error=exc.message)
@@ -363,7 +363,9 @@ class LineupEditorService:
             raise RosterWriteUnavailable() from exc
 
         try:
-            fresh = await LineupReadService.read(team_id, league_info, fallback_slot_counts=fallback_slot_counts)
+            fresh = await get_provider_adapter(league_info.provider).read_lineup(
+                team_id, league_info, fallback_slot_counts=fallback_slot_counts
+            )
         except Exception as exc:
             # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
             # `failed` seed would drop it out of the counted statuses, and the next auto run would

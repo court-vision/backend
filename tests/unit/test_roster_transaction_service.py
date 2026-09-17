@@ -28,6 +28,7 @@ from services.fantasy_writer_client import (
     FantasyWriterUnavailable,
     WriterResult,
 )
+from services.providers.capabilities import unavailable_message
 
 PG, UT, BE = 0, 11, 12
 COUNTS = {"11": 1, "12": 1}
@@ -130,7 +131,7 @@ def test_yahoo_teams_are_blocked_with_a_reason(harness):
     yahoo = LEAGUE.model_copy(update={"provider": FantasyProvider.YAHOO})
     with pytest.raises(svc.RosterWriteBlocked) as exc:
         asyncio.run(svc.RosterTransactionService.apply(TEAM, yahoo, req(add=KAWHI)))
-    assert exc.value.data == {"reason": "provider_not_supported"} and exc.value.message == svc.NOT_ESPN_MESSAGE
+    assert exc.value.data == {"reason": "provider_not_supported"} and exc.value.message == unavailable_message("roster_changes", "yahoo")
 
 
 @pytest.mark.unit

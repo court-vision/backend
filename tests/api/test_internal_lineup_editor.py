@@ -16,6 +16,7 @@ from api.v1.internal import lineup_editor as routes
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.lineup_editor import LineupState, LineupStateResp
 from services import lineup_editor_service as svc
+from services.providers.capabilities import unavailable_message
 
 ESPN = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="T", year=2027, espn_s2="x", swid="{y}")
 YAHOO = LeagueInfo(provider=FantasyProvider.YAHOO, league_id=1, team_name="T", year=2027, yahoo_team_key="k")
@@ -66,7 +67,7 @@ def test_get_lineup_returns_the_board(authed_client, owned, monkeypatch):
 @pytest.mark.api
 def test_yahoo_team_is_an_empty_success(authed_client, owned, monkeypatch):
     _league(monkeypatch, YAHOO)
-    _stub(monkeypatch, "read_state", LineupStateResp(status=ApiStatus.SUCCESS, message=svc.NOT_ESPN_MESSAGE, data=None))
+    _stub(monkeypatch, "read_state", LineupStateResp(status=ApiStatus.SUCCESS, message=unavailable_message("lineup_editing", "yahoo"), data=None))
     r = authed_client.get("/v1/internal/teams/7/lineup")
     assert r.status_code == 200 and r.json()["data"] is None
 

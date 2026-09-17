@@ -22,6 +22,7 @@ from schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateRes
 from services import credential_service
 from services.league_service import LeagueService
 from services.providers import get_provider_adapter
+from schemas.common import ProviderCapabilitiesResp
 
 LEAGUE_VALIDATION_FAILED = "LEAGUE_VALIDATION_FAILED"
 
@@ -53,6 +54,9 @@ class TeamService:
             team_id=team.team_id,
             league_info=public,
             league=LeagueService.summary_for_team(league, info),
+            capabilities=ProviderCapabilitiesResp(
+                **get_provider_adapter(info.provider).capabilities(info).as_dict()
+            ),
         )
 
     @staticmethod

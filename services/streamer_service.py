@@ -13,9 +13,8 @@ from services.providers import get_provider_adapter
 # Compatibility exports for callers that patch provider clients here.
 from services.espn_service import EspnService
 from services.yahoo_service import YahooService
-from services.player_service import PlayerService, _normalize_name
+from services.player_service import PlayerService
 from services.player_value_service import PlayerValueService
-from db.models.nba.players import Player as PlayerModel
 from db.base import run_db
 from services.schedule_service import (
     get_streaming_matchup,
@@ -48,25 +47,15 @@ class StreamerService:
     }
 
     @staticmethod
-    def _stored_values(league_info, team_id, free_agents, avg_days, is_yahoo):
+    def _stored_values(league_info, team_id, free_agents, avg_days, adapter):
+        """Our values for the pool, keyed the way the provider keys players
+        (`adapter.player_value_key`): ESPN id, or normalized name for Yahoo."""
         scoring = PlayerValueService.scoring_for(league_info, team_id)
         value_kind = PlayerValueService.value_kind_for(scoring)
-        if is_yahoo:
-            lookups = [(player.name, player.team) for player in free_agents]
-            values = PlayerValueService.avg_points_for(scoring, names=lookups, days=avg_days)
-        else:
-            values = PlayerValueService.avg_points_for(
-                scoring, espn_ids=[player.player_id for player in free_agents], days=avg_days
-            )
+        values = PlayerValueService.avg_points_for(
+            scoring, **adapter.player_value_keys(free_agents), days=avg_days
+        )
         return value_kind, values
-
-    @staticmethod
-    def _nba_ids(espn_ids: list[int]) -> dict[int, int]:
-        return {
-            row.espn_id: row.id
-            for row in PlayerModel.select(PlayerModel.id, PlayerModel.espn_id)
-            .where(PlayerModel.espn_id.in_(espn_ids))
-        }
 
     @staticmethod
     def _get_daily_b2b_metrics(game_days: list[int], pickup_day: int) -> tuple[bool, int]:
@@ -211,7 +200,6 @@ class StreamerService:
             teams_with_b2b = get_teams_with_b2b(effective_date)
 
         adapter = get_provider_adapter(league_info.provider)
-        is_yahoo = adapter.uses_name_identity
         fa_response = await adapter.get_free_agents(league_info, fa_count, team_id=team_id)
 
         # Provider failures raise (403/400/502/504) before we get here; a non-success envelope is a
@@ -225,10 +213,9 @@ class StreamerService:
         # Value free agents from our stored stats under this league's scoring:
         # fantasy points under its weights, or the category value for H2H-category
         # leagues (rolling window, then last season's baseline).
-        # Yahoo uses name-based lookup, ESPN uses player ID.
         value_kind, last_n_values = await run_db(
             "streamers.values", StreamerService._stored_values,
-            league_info, team_id, free_agents, avg_days, is_yahoo,
+            league_info, team_id, free_agents, avg_days, adapter,
         )
 
         # Build streamer list
@@ -265,8 +252,8 @@ class StreamerService:
             if b2b_only and not team_has_b2b:
                 continue
 
-            # Our value for the player (Yahoo values are keyed by the diacritic-stripped name)
-            valued = last_n_values.get(_normalize_name(fa.name) if is_yahoo else fa.player_id)
+            # Our value for the player, keyed the way the provider keys players
+            valued = last_n_values.get(adapter.player_value_key(fa))
             avg_points_last_n = valued.value if valued is not None else None
             avg_source = valued.source if valued is not None else None
 
@@ -299,12 +286,11 @@ class StreamerService:
                 default_position_id=fa.default_position_id,
             ))
 
-        # Batch-resolve ESPN IDs → NBA player IDs for terminal navigation
-        espn_ids = [s.player_id for s in streamers]
-        if espn_ids:
-            nba_id_map = await run_db("streamers.nba_ids", StreamerService._nba_ids, espn_ids)
+        # Batch-resolve provider ids -> NBA player ids for terminal navigation
+        if streamers:
+            nba_id_map = await run_db("streamers.nba_ids", adapter.nba_ids, streamers)
             for s in streamers:
-                s.nba_player_id = nba_id_map.get(s.player_id)
+                s.nba_player_id = nba_id_map.get(adapter.player_value_key(s))
 
         # Week mode: group B2B first, then by score. Daily mode: purely by score.
         if mode == StreamerMode.WEEK:

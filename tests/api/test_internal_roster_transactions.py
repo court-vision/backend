@@ -18,6 +18,7 @@ from schemas.lineup_editor import LineupState
 from schemas.roster_transaction import RosterTransactionData, RosterTransactionPlayer, RosterTransactionReq, RosterTransactionResp
 from services import lineup_editor_service as editor
 from services import roster_transaction_service as svc
+from services.providers.capabilities import unavailable_message
 
 ESPN = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="T", year=2027, espn_s2="x", swid="{y}")
 
@@ -93,7 +94,7 @@ def test_unowned_team_is_404(authed_client, owned, monkeypatch):
 @pytest.mark.api
 @pytest.mark.parametrize("error, status, code", [
     (editor.RosterWriteDisabled(), 403, "ROSTER_WRITE_DISABLED"),
-    (editor.RosterWriteBlocked(message=svc.NOT_ESPN_MESSAGE, data={"reason": "provider_not_supported"}), 409, "ROSTER_WRITE_BLOCKED"),
+    (editor.RosterWriteBlocked(message=unavailable_message("roster_changes", "yahoo"), data={"reason": "provider_not_supported"}), 409, "ROSTER_WRITE_BLOCKED"),
     (editor.RosterWriteRejected(message="Roster is full.", data={"espn_status": 400, "espn_error_code": "TRAN_ROSTER_FULL"}), 409, "ROSTER_WRITE_REJECTED"),
     (editor.RosterWriteUnavailable(), 503, "ROSTER_WRITE_UNAVAILABLE"),
 ])

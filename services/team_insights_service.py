@@ -28,7 +28,6 @@ from services.scoring.vocab import DEFAULT_CATEGORIES
 from services import schedule_service
 from core.logging import get_logger
 from db.base import DB_RUNTIME_ERRORS, run_db
-from services.nba_id_resolver import nba_ids_by_espn_id, nba_ids_by_name
 
 
 # Injury statuses that mean the player is out
@@ -72,15 +71,13 @@ class TeamInsightsService:
         """
         if not roster:
             return {}
-        if league_info.provider == FantasyProvider.YAHOO:
-            return nba_ids_by_name([_normalize_name(p.name) for p in roster])
-        return nba_ids_by_espn_id([p.player_id for p in roster])
+        return get_provider_adapter(league_info.provider).nba_ids(roster)
 
     @staticmethod
     def _stored_windows(team_id: int, league_info, roster: list[PlayerResp]):
         scoring = resolve_scoring_for_team(team_id)
         weights = scoring.point_weights
-        if league_info.provider == FantasyProvider.YAHOO:
+        if get_provider_adapter(league_info.provider).uses_name_identity:
             lookups = [(player.name, player.team) for player in roster]
             return (
                 scoring,
@@ -137,19 +134,13 @@ class TeamInsightsService:
                 "team_insights.windows", TeamInsightsService._stored_windows,
                 team_id, league_info, base_roster,
             )
-            if league_info.provider == FantasyProvider.YAHOO:
-                def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "name") -> Optional[float]:
-                    normalized = _normalize_name(player.name)
-                    return avgs.get(normalized)
+            # Stored-stat lookups and the NBA-id map are keyed the way the
+            # provider keys players (ESPN id, or normalized name for Yahoo).
+            def _lookup_key(player: PlayerResp):
+                return adapter.player_value_key(player)
 
-                def _lookup_key(player: PlayerResp):
-                    return _normalize_name(player.name)
-            else:
-                def _get_avg(player: PlayerResp, avgs: dict, key_type: str = "espn_id") -> Optional[float]:
-                    return avgs.get(player.player_id)
-
-                def _lookup_key(player: PlayerResp):
-                    return player.player_id
+            def _get_avg(player: PlayerResp, avgs: dict) -> Optional[float]:
+                return avgs.get(_lookup_key(player))
 
             # Terminal panels navigate by NBA player ID, not the provider's.
             nba_id_map = await run_db(
@@ -281,7 +272,7 @@ def _roster_lines(roster: Iterable, provider: FantasyProvider,
     `name`, and `team`. Players with no data in the window are skipped.
     """
     players = list(roster)
-    if provider == FantasyProvider.YAHOO:
+    if get_provider_adapter(provider).uses_name_identity:
         lines = PlayerValueService.rolling_lines_by_name([(p.name, p.team) for p in players], days=days)
     else:
         lines = PlayerValueService.rolling_lines_by_espn_id([p.player_id for p in players], days=days)

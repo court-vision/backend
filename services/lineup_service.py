@@ -76,7 +76,7 @@ class LineupService:
                 None if scoring_preview else team_id,
             )
             value_kind = PlayerValueService.value_kind_for(scoring)
-            identity = "name" if adapter.uses_name_identity else "espn_id"
+            identity = adapter.identity_kind
             values = await run_db(
                 f"lineups.recent_values_by_{identity}", PlayerValueService.avg_points_for, scoring,
                 **adapter.player_value_keys(all_players), days=14, recent=True,

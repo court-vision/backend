@@ -22,6 +22,7 @@ from schemas.espn import ValueKind
 ScoringPeriodSource = Literal["provider", "calendar", "none"]
 WriteBlockedReason = Literal[
     "provider_not_supported",
+    "provider_read_only",        # the connection's grant has no write (Yahoo fspt-r)
     "no_credentials",
     "writes_disabled",
     "no_scoring_period",

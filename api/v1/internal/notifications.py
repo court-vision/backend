@@ -22,7 +22,8 @@ from services import credential_service
 from services.lineup_check_service import LineupCheckService
 from services.lineup_editor_service import move_results, planner_players, slot_counts_of, unfilled_results
 from services.lineup_planner import plan_fill
-from services.lineup_read_service import LineupReadService
+from services.lineup_read_service import LineupReadService  # noqa: F401
+from services.providers import get_provider_adapter, unavailable_message
 from services.notification_service import NotificationService
 from services.providers.http import provider_get
 from schemas.common import ApiStatus
@@ -347,10 +348,10 @@ async def check_lineup(
     league_info = context["league_info"]
     provider = league_info.get("provider", "espn")
 
-    if provider != "espn":
+    if not get_provider_adapter(provider).capabilities().lineup_read:
         return LineupCheckResponse(
             status=ApiStatus.ERROR,
-            message="Only ESPN teams are supported for lineup checks",
+            message=unavailable_message("lineup_checks", provider),
             data=None,
         )
 
@@ -418,11 +419,12 @@ async def send_test_alert(
     from datetime import datetime as _dt
 
     league_info = await load_owned_league_info(team)
-    if league_info.provider != "espn":
-        return {"status": "error", "message": "Only ESPN teams are supported"}
+    adapter = get_provider_adapter(league_info.provider)
+    if not adapter.capabilities(league_info).lineup_read:
+        return {"status": "error", "message": unavailable_message("lineup_checks", league_info.provider)}
 
-    state = await LineupReadService.read(team.team_id, league_info,
-                                         fallback_slot_counts=dict(getattr(team.league, "roster_slots", None) or {}))
+    state = await adapter.read_lineup(team.team_id, league_info,
+                                      fallback_slot_counts=dict(getattr(team.league, "roster_slots", None) or {}))
     plan = plan_fill(planner_players(state), slot_counts_of(state))
     moves = [m.model_dump() for m in move_results(list(plan.moves), state)]
     unfilled = [u.model_dump() for u in unfilled_results(plan)]

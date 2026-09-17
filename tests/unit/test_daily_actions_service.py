@@ -19,6 +19,7 @@ from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp, StreamerResp
 from services import daily_actions_service as svc
 from services.lineup_editor_service import _slot_name
+from services.providers.capabilities import unavailable_message
 
 PG, SG, C, UT, BE, IR = 0, 1, 4, 11, 12, 13
 COUNTS = {"0": 1, "1": 1, "4": 1, "11": 1, "12": 2, "13": 1}   # seven seats, IR included
@@ -128,7 +129,7 @@ def eligible(players):
 @pytest.mark.unit
 def test_a_yahoo_team_gets_a_read_only_answer_without_any_provider_call(harness):
     resp = read(YAHOO)
-    assert resp.status == ApiStatus.SUCCESS and resp.message == svc.NOT_ESPN_MESSAGE
+    assert resp.status == ApiStatus.SUCCESS and resp.message == unavailable_message("daily_actions", "yahoo")
     assert resp.data is not None and resp.data.lineup is None and resp.data.actions == []
     assert (resp.data.can_write, resp.data.write_blocked_reason) == (False, "provider_not_supported")
     assert harness.find_calls == []

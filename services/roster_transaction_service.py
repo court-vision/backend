@@ -26,7 +26,7 @@ from utils.constants import PROVIDER_AUTH_MESSAGES
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
-from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.roster_transaction import (
     RosterTransactionData,
@@ -52,11 +52,12 @@ from services.lineup_editor_service import (
     _roster_slots,
     writer_payload,
 )
-from services.lineup_read_service import LineupReadService
+from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
+from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
+from services.providers.writers import espn_transaction_payload
 
 log = get_logger("roster_transaction")
 
-NOT_ESPN_MESSAGE = "Roster changes are available for ESPN teams"
 
 
 class RosterTransactionInvalid(AppError):
@@ -82,14 +83,8 @@ def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: 
     return f"{team_id}:txn:{state.scoring_period_id}:{state.roster_version}:{add or 0}:{drop or 0}"
 
 
-def transaction_payload(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
-                        key: str) -> dict[str, Any]:
-    """The lineup envelope with `add_player_id` / `drop_player_id` in place of `moves`."""
-    payload = writer_payload(league_info, state, [], key)
-    del payload["moves"]
-    payload["add_player_id"] = add
-    payload["drop_player_id"] = drop
-    return payload
+# The ESPN envelope moved to services.providers.writers; the name stays for callers.
+transaction_payload = espn_transaction_payload
 
 
 def _moves_json(add: Optional[int], drop: Optional[int], names: dict[int, str]) -> list[dict[str, Any]]:
@@ -114,11 +109,13 @@ class RosterTransactionService:
     async def apply(team, league_info: LeagueInfo, req: RosterTransactionReq) -> RosterTransactionResp:
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
-        if league_info.provider != FantasyProvider.ESPN:
-            raise RosterWriteBlocked(message=NOT_ESPN_MESSAGE, data={"reason": "provider_not_supported"})
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).transactions:
+            raise RosterWriteBlocked(message=unavailable_message("roster_changes", league_info.provider),
+                                     data={"reason": "provider_not_supported"})
 
         slots = _roster_slots(team)
-        state = await LineupReadService.read(team.team_id, league_info, fallback_slot_counts=slots)
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
         if not state.can_write:
             raise RosterWriteBlocked(data={"reason": state.write_blocked_reason})
         if state.roster_version != req.roster_version or state.scoring_period_id != req.expected_scoring_period_id:
@@ -141,7 +138,8 @@ class RosterTransactionService:
         parts += [f"Dropped {dropped.name}"] if dropped else []
         return RosterTransactionResp(
             status=ApiStatus.SUCCESS,
-            message=", ".join(parts) + " — sent to ESPN" + ("" if verified else ", not yet confirmed"),
+            message=", ".join(parts) + f" — sent to {provider_name(league_info.provider)}"
+                    + ("" if verified else ", not yet confirmed"),
             data=RosterTransactionData(lineup=fresh, added=added, dropped=dropped, verified=verified,
                                        audit_id=audit_id, scoring_period_id=fresh.scoring_period_id),
         )
@@ -171,13 +169,16 @@ class RosterTransactionService:
         if add is not None:
             if add in on_board:
                 raise _invalid("add_already_on_roster", f"{on_board[add].name} is already on your roster", add)
-            entries = await EspnService.get_player_pool_entries(league_info, [add], scoring_period_id=state.scoring_period_id)
+            label = provider_name(league_info.provider)
+            entries = await get_provider_adapter(league_info.provider).player_pool_entries(
+                league_info, [add], scoring_period_id=state.scoring_period_id
+            )
             pool_entry = entries.get(add)
             if pool_entry is None:
-                raise _invalid("add_not_found", "ESPN does not list that player in this league", add)
+                raise _invalid("add_not_found", f"{label} does not list that player in this league", add)
             if pool_entry.status == "WAIVERS":
                 until = f" until {pool_entry.waivers_until.isoformat()}" if pool_entry.waivers_until else ""
-                raise _invalid("add_on_waivers", f"{pool_entry.name} is on waivers{until} — place the claim on ESPN", add)
+                raise _invalid("add_on_waivers", f"{pool_entry.name} is on waivers{until} — place the claim on {label}", add)
             if pool_entry.status == "ONTEAM" or pool_entry.on_team_id:
                 raise _invalid("add_not_available", f"{pool_entry.name} is on another team's roster", add)
             if pool_entry.roster_locked:
@@ -197,7 +198,7 @@ class RosterTransactionService:
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, "manual",
                                 moves, key, kind="transaction")
         try:
-            result = await fantasy_writer_client.apply_transaction(transaction_payload(league_info, state, add, drop, key))
+            result = await get_roster_writer(league_info.provider).apply_transaction(league_info, state, add, drop, key)
         except FantasyWriterRejected as exc:
             await run_db("roster_txn.audit_update", _audit_update, audit_id, "rejected",
                          provider_status=exc.espn_status, error=exc.message)
@@ -213,7 +214,9 @@ class RosterTransactionService:
             raise RosterWriteUnavailable() from exc
 
         try:
-            fresh = await LineupReadService.read(team_id, league_info, fallback_slot_counts=fallback_slot_counts)
+            fresh = await get_provider_adapter(league_info.provider).read_lineup(
+                team_id, league_info, fallback_slot_counts=fallback_slot_counts
+            )
         except Exception as exc:
             # ESPN took the transaction and only the read-back failed: settle the row as applied,
             # just unverified, and hand back the pre-write board (same as the lineup chain).

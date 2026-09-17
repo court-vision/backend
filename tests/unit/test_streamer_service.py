@@ -13,6 +13,7 @@ from services.player_service import _normalize_name
 from services.player_value_service import ValueResult
 from services.scoring.resolver import ResolvedScoring
 from services.streamer_service import StreamerService
+from services.providers import identity
 
 MATCHUP = {
     "matchup_number": 3,
@@ -67,7 +68,7 @@ def stubbed(monkeypatch):
     monkeypatch.setattr(ss, "has_remaining_b2b", lambda team, d: team == "DEN")
     monkeypatch.setattr(ss, "get_b2b_game_count", lambda team, d: 2 if team == "DEN" else 0)
     monkeypatch.setattr(ss, "get_teams_with_b2b", lambda d: ["DEN"])
-    monkeypatch.setattr(ss.PlayerModel, "select", classmethod(lambda cls, *a, **k: _NoRows()))
+    monkeypatch.setattr(identity.PlayerModel, "select", classmethod(lambda cls, *a, **k: _NoRows()))
     # A points league with its own weights (no DB): the dispatcher must pass them to the value service
     monkeypatch.setattr(ss.PlayerValueService, "scoring_for",
                         staticmethod(lambda li, team_id=None: ResolvedScoring("points", None, True, {"pts": 1.0})))
