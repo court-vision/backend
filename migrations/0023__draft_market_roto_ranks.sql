@@ -1,3 +1,6 @@
+-- Numbered 0023 although 0024 and 0025 were applied first: this was written on a
+-- branch before them, yoyo applies by pending-ness rather than order, and the ALTER
+-- depends on nothing they added.
 -- ESPN publishes two draft rankings in the same kona_player_info payload:
 -- draftRanksByRankType.STANDARD (points leagues) and .ROTO (category leagues).
 -- Only STANDARD was ever read. They disagree substantially — mean |delta| of 28
