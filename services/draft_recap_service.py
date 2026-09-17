@@ -33,7 +33,7 @@ from services.draft_board_service import (
     BoardInputs,
     DraftBoardService,
 )
-from services.draft_recap import Recap, RecapPick, build_recap
+from services.draft_recap import Recap, RecapPick, build_recap, grade_basis_for
 from services.draft_service import DraftService
 from services.player_value_service import PlayerValueService
 from services.scoring.category_value import rankable_categories
@@ -107,6 +107,10 @@ class DraftRecapService:
         }
         pool = {row.id: row for row, *_rest in entries}
 
+        rank_type = DraftBoardService._rank_type(scoring)
+        grade_basis, grade_basis_reason = grade_basis_for(
+            scoring.league, session.espn_league_id, inputs.market, rank_type, session.draft_type
+        )
         recap = build_recap(
             picks,
             ladder,
@@ -117,7 +121,9 @@ class DraftRecapService:
             season_value=season_value,
             draft_type=session.draft_type,
             my_slot=session.my_slot,
-            rank_type=DraftBoardService._rank_type(scoring),
+            rank_type=rank_type,
+            grade_basis=grade_basis,
+            grade_basis_reason=grade_basis_reason,
         )
         return DraftRecapService._respond(scoring, session, inputs, recap, pool, cat_defs)
 
@@ -153,6 +159,10 @@ class DraftRecapService:
                 surplus_cv=entry.surplus_cv,
                 surplus_market=entry.surplus_market,
                 value_over_slot=entry.value_over_slot,
+                market_value=entry.market_value,
+                surplus_espn=entry.surplus_espn,
+                market_value_over_slot=entry.market_value_over_slot,
+                market_value_over_bid=entry.market_value_over_bid,
                 bid=pick.bid,
             ))
 
@@ -162,6 +172,9 @@ class DraftRecapService:
                 picks=seat.picks, unscored=seat.unscored, total_value=seat.total_value,
                 value_over_slot=seat.value_over_slot, grade=seat.grade, position=seat.position,
                 best_pick=seat.best_pick, worst_pick=seat.worst_pick,
+                market_value_over_slot=seat.market_value_over_slot,
+                market_value_over_bid=seat.market_value_over_bid,
+                unpriced=seat.unpriced,
             )
             for seat in recap.seats
         ]
@@ -198,6 +211,9 @@ class DraftRecapService:
                 format=scoring.format,
                 value_kind=PlayerValueService.value_kind_for(scoring),
                 graded_by=recap.graded_by,
+                grade_basis=recap.grade_basis,
+                grade_basis_reason=recap.grade_basis_reason,
+                market_rank_type=DraftBoardService._rank_type(scoring),
                 standings_basis="z_sum" if scoring.is_categories else "season_value",
                 session_id=session.session_id,
                 status=session.status,

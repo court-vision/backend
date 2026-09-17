@@ -138,6 +138,90 @@ def test_a_pick_past_the_end_of_the_ladder_has_no_slot_to_be_priced_against():
     assert recap.picks[0].value_over_slot is None
 
 
+# ------------------------------ ESPN's board ----------------------------- #
+
+
+def test_every_pick_is_also_priced_on_espns_board():
+    """ESPN's auction value over the ESPN-ranked player at the pick, and the
+    rank surplus, ride on every pick whatever grades the seats."""
+    market = {1: {"overall_rank": 1, "auction_value": 60.0},
+              2: {"overall_rank": 2, "auction_value": 50.0},
+              3: {"overall_rank": 3, "auction_value": 40.0}}
+    recap = build_recap([pick(3, 1, 1)], ladder_of(10), market)
+    scored = recap.picks[0]
+
+    assert scored.market_value == 60.0
+    assert scored.market_value_over_slot == 20.0   # ESPN's #1 taken where their #3 ($40) sits
+    assert scored.surplus_espn == -2
+    assert recap.grade_basis == "cv" and recap.graded_by == "value_over_slot"
+
+
+def test_an_espn_room_grades_on_espns_ladder_and_a_zero_price_is_a_price():
+    market = {1: {"overall_rank": 1, "roto_rank": 1, "auction_value": 60.0, "roto_auction_value": 0.0},
+              2: {"overall_rank": 2, "roto_rank": 2, "auction_value": 50.0, "roto_auction_value": 30.0},
+              3: {"overall_rank": 3, "roto_rank": 3, "auction_value": 40.0, "roto_auction_value": 20.0}}
+    picks = [pick(1, 1, 2), pick(2, 2, 1)]   # seat 1 reaches for ESPN's #2; seat 2 gets #1 at pick 2
+    recap = build_recap(picks, ladder_of(10), market, rank_type="roto",
+                        grade_basis="espn", grade_basis_reason="espn_league")
+
+    assert recap.graded_by == "market_value_over_slot" and recap.grade_basis == "espn"
+    # ROTO prices: #1 $0 (a real opinion, not a gap), #2 $30, #3 $20.
+    assert [p.market_value for p in recap.picks] == [30.0, 0.0]
+    assert [p.market_value_over_slot for p in recap.picks] == [30.0, -30.0]
+    assert [s.market_value_over_slot for s in recap.seats] == [30.0, -30.0]
+    assert [s.grade for s in recap.seats] == ["A", "C"]   # two seats stretch the curve
+    assert [s.best_pick for s in recap.seats] == [1, 2]
+    # CV's pricing still reads beside it; it just is not the grade.
+    assert [s.value_over_slot for s in recap.seats] == [-1.0, 1.0]
+
+
+def test_a_pick_espn_cannot_price_is_left_out_of_the_espn_sum_never_charged():
+    market = {1: {"overall_rank": 1, "auction_value": 60.0},
+              2: {"overall_rank": 2, "auction_value": 50.0}}
+    picks = [pick(1, 1, 1), pick(2, 1, 7)]   # player 7 has no market row
+    recap = build_recap(picks, ladder_of(10), market,
+                        grade_basis="espn", grade_basis_reason="espn_league")
+    seat = recap.seats[0]
+
+    assert recap.picks[1].market_value is None and recap.picks[1].market_value_over_slot is None
+    assert seat.unpriced == 1
+    assert seat.market_value_over_slot == 0.0   # pick 1 at par; pick 2 not charged
+
+
+def test_an_espn_room_auction_grades_on_espn_value_over_the_bid():
+    market = {1: {"overall_rank": 1, "auction_value": 60.0},
+              3: {"overall_rank": 3, "auction_value": 40.0}}
+    picks = [pick(1, 1, 3, bid=20.0), pick(2, 2, 1, bid=70.0)]
+    recap = build_recap(picks, ladder_of(8), market, draft_type="auction",
+                        grade_basis="espn", grade_basis_reason="espn_league")
+
+    assert recap.graded_by == "market_value_over_bid"
+    assert [p.market_value_over_bid for p in recap.picks] == [20.0, -10.0]
+    assert all(p.market_value_over_slot is None for p in recap.picks)
+    assert [s.market_value_over_bid for s in recap.seats] == [20.0, -10.0]
+    assert [s.grade for s in recap.seats] == ["A", "C"]
+    assert all(s.market_value_over_slot is None for s in recap.seats)
+
+
+def test_grade_basis_follows_the_room_and_falls_back_when_nothing_is_priced():
+    from types import SimpleNamespace
+
+    from services.draft_recap import grade_basis_for
+
+    espn = SimpleNamespace(provider="espn")
+    yahoo = SimpleNamespace(provider="yahoo")
+    unpriced = {1: {"overall_rank": 1, "auction_value": None}, 2: {"overall_rank": 2, "auction_value": None}}
+    priced = {1: {"overall_rank": 1, "auction_value": 0.0}, 2: {"overall_rank": 2, "auction_value": None}}
+
+    assert grade_basis_for(espn, None, priced, "standard") == ("espn", "espn_league")
+    assert grade_basis_for(espn, None, unpriced, "standard") == ("cv", "no_auction_values")
+    assert grade_basis_for(espn, None, unpriced, "standard", draft_type="auction") == ("cv", "no_auction_values")
+    assert grade_basis_for(espn, None, {}, "standard") == ("cv", "no_market_snapshot")
+    assert grade_basis_for(None, None, priced, "standard") == ("espn", "league_less_room")
+    assert grade_basis_for(yahoo, None, priced, "standard") == ("cv", "provider_not_espn")
+    assert grade_basis_for(yahoo, 42, priced, "standard") == ("espn", "linked_espn_draft")
+
+
 # --------------------------- picks we cannot score ------------------------ #
 
 

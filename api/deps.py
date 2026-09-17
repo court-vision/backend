@@ -71,6 +71,7 @@ class OwnedDraftSessionContext:
     rounds: Optional[int]
     punts: tuple[str, ...] = ()
     scoring_format: Optional[str] = None   # points | categories, only when there is no league
+    espn_league_id: Optional[int] = None   # the ESPN draft the room follows, when it does
 
     @property
     def league_size(self) -> Optional[int]:
@@ -214,6 +215,7 @@ def _owned_session(session_id: int, user_id: int) -> Optional[OwnedDraftSessionC
         rounds=session.rounds,
         punts=tuple(str(k) for k in (session.punts or []) if isinstance(k, str)),
         scoring_format=session.scoring_format,
+        espn_league_id=session.espn_league_id,
     )
 
 

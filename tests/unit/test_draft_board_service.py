@@ -119,10 +119,16 @@ def test_points_league_values_ranks_and_market_join(stub_inputs):
 
     assert resp.status == ApiStatus.SUCCESS
     by_id = {r.player_id: r for r in resp.data}
+    # Rows come back on ESPN's board (this is an ESPN league): market ranks are
+    # 1:1, 3:2, 4:2, 2:6, the tie at #2 broken by CV rank; 6 and 5 have no ESPN
+    # rank and trail everyone who does, best CV value first, with no number.
+    assert [r.player_id for r in resp.data] == [1, 3, 4, 2, 6, 5]
+    assert [r.board_rank for r in resp.data] == [1, 2, 2, 6, None, None]
+    assert resp.meta.rank_basis == "espn" and resp.meta.rank_basis_reason == "espn_league"
     # Value is the league formula over the per-game line ({"pts": 1.0} -> pts),
-    # projection line where one exists, baseline otherwise.
-    assert [r.player_id for r in resp.data] == [1, 3, 2, 4, 6, 5]
-    assert [r.cv_rank for r in resp.data] == [1, 2, 3, 4, 5, 6]
+    # projection line where one exists, baseline otherwise; cv_rank is CV's own
+    # order over the full pool, unchanged by whose board the rows sit on.
+    assert {r.player_id: r.cv_rank for r in resp.data} == {1: 1, 3: 2, 2: 3, 4: 4, 6: 5, 5: 6}
     assert by_id[1].value == 30.0 and by_id[1].value_source == "projection"
     assert by_id[2].value == 22.0 and by_id[2].value_source == "baseline"
     # Market join and the rank-scale delta: positive = market ranks him worse than CV.
@@ -169,9 +175,11 @@ def test_picked_players_leave_the_board_but_ranks_stay_stable(stub_inputs):
     resp = _board(resolve_scoring(_league()), picked=[3], mine=[1])
 
     # `mine` need not be repeated in `picked`; both sets are removed.
-    assert [r.player_id for r in resp.data] == [2, 4, 6, 5]
-    # cv_rank is the full-pool rank, not renumbered after removal.
-    assert [r.cv_rank for r in resp.data] == [3, 4, 5, 6]
+    assert [r.player_id for r in resp.data] == [4, 2, 6, 5]
+    # cv_rank is the full-pool rank, not renumbered after removal — and neither
+    # is board_rank: ESPN's #2 is still #2 with #1 gone.
+    assert [r.cv_rank for r in resp.data] == [4, 3, 5, 6]
+    assert [r.board_rank for r in resp.data] == [2, 6, None, None]
     assert resp.meta.pool_size == 6 and resp.meta.available == 4
     assert stub_inputs == [(frozenset({1}), None)]   # the fetch was told whose roster to look up
 
@@ -184,7 +192,8 @@ def test_category_league_scores_and_maps_to_the_fpts_scale(stub_inputs):
 
     assert resp.meta.format == "categories" and resp.meta.value_kind == "cat_value"
     assert [c.key for c in resp.meta.categories] == [c["key"] for c in NINE_CAT]
-    scores = [r.score for r in resp.data]
+    # Rows sit on ESPN's board; CV's own order is what cv_rank enumerates.
+    scores = [r.score for r in sorted(resp.data, key=lambda r: r.cv_rank)]
     assert scores == sorted(scores, reverse=True)
     for r in resp.data:
         assert set(r.category_z) == {c["key"] for c in NINE_CAT}
@@ -339,8 +348,10 @@ def test_a_ranked_rookie_appears_as_a_market_only_row(monkeypatch):
     assert rookie.cv_rank is None and rookie.fpts_avg is None and rookie.market_delta is None
     assert rookie.market_rank == 25 and rookie.adp == 31.2
     assert rookie.primary_position == "SG"
-    # Market-only rows sit after everything that could be valued.
-    assert [r.player_id for r in resp.data][-1] == 9
+    # ESPN ranks him, so on ESPN's board he sits at his rank — between their
+    # #6 and the players they do not rank — rather than below the whole pool.
+    assert [r.player_id for r in resp.data] == [1, 3, 4, 2, 9, 6, 5]
+    assert rookie.board_rank == 25
     assert resp.meta.market_only_count == 1 and resp.meta.available == 7
     # ...and are never recommended: there is no value to recommend on.
     assert 9 not in [rec.player_id for rec in resp.recommendations]
@@ -1314,10 +1325,29 @@ def test_sample_weeks_reads_the_ordinary_weeks_and_skips_a_missing_one(monkeypat
 
 
 @pytest.mark.unit
-def test_espn_is_the_default_and_orders_recommendations_by_market_rank(stub_inputs):
-    """The default board defers to ESPN: best remaining on their list, in their
-    order, with CV's score still on every card as the dissent."""
+def test_cv_picks_are_the_default_and_name_espns_rank_on_every_card(stub_inputs):
+    """The board is ESPN's; the strip is where CV's opinion lives, so it opens
+    on CV's picks — best composite first — with ESPN's rank on every card as
+    the number it is disagreeing with."""
     resp = _board(resolve_scoring(_league()))
+
+    assert resp.meta.rank_source == "cv" and resp.meta.rank_source_requested == "cv"
+    assert all(r.source == "cv" for r in resp.recommendations)
+    assert [r.score for r in resp.recommendations] == sorted(
+        (r.score for r in resp.recommendations), reverse=True
+    )
+    by_id = {r.player_id: r for r in resp.recommendations}
+    assert by_id[1].market_rank == 1 and by_id[1].cv_rank == 1
+    assert by_id[1].reason.endswith("; ESPN has him #1")
+    assert by_id[6].market_rank is None and by_id[6].reason.endswith("; unranked by ESPN")
+
+
+@pytest.mark.unit
+def test_espn_source_is_opt_in_and_orders_the_same_cards_by_market_rank(stub_inputs):
+    """Asked for, the strip defers to ESPN: best remaining on their list, in
+    their order, with CV's score still on every card as the dissent."""
+    cv = _board(resolve_scoring(_league()))
+    resp = _board(resolve_scoring(_league()), session=BoardSession(rank_source="espn"))
 
     assert resp.meta.rank_source == "espn" and resp.meta.rank_source_requested == "espn"
     # market ranks are 1:1, 3:2, 4:2, 2:6; players 5 and 6 have no ESPN rank,
@@ -1332,38 +1362,67 @@ def test_espn_is_the_default_and_orders_recommendations_by_market_rank(stub_inpu
     assert second.score < fourth.score
     assert "ESPN's #1" in resp.recommendations[0].reason
     assert "unranked by ESPN" in resp.recommendations[4].reason
+    # Same players, same numbers as the CV strip — only the ordering differs.
+    assert {r.player_id for r in cv.recommendations} == {r.player_id for r in resp.recommendations}
+    by_id = {r.player_id: r for r in cv.recommendations}
+    assert all(r.score == by_id[r.player_id].score for r in resp.recommendations)
+    assert [r.player_id for r in cv.recommendations] != [r.player_id for r in resp.recommendations]
 
 
 @pytest.mark.unit
-def test_cv_source_is_opt_in_and_reorders_the_same_cards(stub_inputs):
-    espn = _board(resolve_scoring(_league()))
-    cv = _board(resolve_scoring(_league()), session=BoardSession(rank_source="cv"))
-
-    assert cv.meta.rank_source == "cv"
-    assert [r.player_id for r in cv.recommendations] != [r.player_id for r in espn.recommendations]
-    # Same players, same numbers — only the ordering and the `source` differ.
-    assert {r.player_id for r in cv.recommendations} == {r.player_id for r in espn.recommendations}
-    by_id = {r.player_id: r for r in espn.recommendations}
-    assert all(r.score == by_id[r.player_id].score for r in cv.recommendations)
-    assert [r.score for r in cv.recommendations] == sorted(
-        (r.score for r in cv.recommendations), reverse=True
-    )
-
-
-@pytest.mark.unit
-def test_espn_falls_back_to_cv_without_a_market_snapshot(monkeypatch):
+def test_without_a_market_snapshot_the_board_and_the_strip_fall_back_to_cv(monkeypatch):
     """Before the preseason pipeline has run there is nothing of ESPN's to
     defer to. The board says what it actually ordered by rather than returning
     an arbitrary list under ESPN's name."""
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
                         staticmethod(lambda my_ids, session_id=None: _inputs(market={})))
-    resp = _board(resolve_scoring(_league()))
+    resp = _board(resolve_scoring(_league()), session=BoardSession(rank_source="espn"))
 
     assert resp.meta.rank_source_requested == "espn" and resp.meta.rank_source == "cv"
     assert [r.source for r in resp.recommendations] == ["cv"] * len(resp.recommendations)
     assert [r.score for r in resp.recommendations] == sorted(
         (r.score for r in resp.recommendations), reverse=True
     )
+    assert resp.meta.rank_basis == "cv" and resp.meta.rank_basis_reason == "no_market_snapshot"
+    assert [r.cv_rank for r in resp.data] == [1, 2, 3, 4, 5, 6]
+    assert [r.board_rank for r in resp.data] == [r.cv_rank for r in resp.data]
+
+
+@pytest.mark.unit
+def test_a_yahoo_league_keeps_cvs_board(stub_inputs):
+    """No other provider's rankings reach the platform, so a Yahoo room's board
+    is CV's, with ESPN's rank still a column beside it."""
+    resp = _board(resolve_scoring(_league(provider="yahoo")))
+
+    assert resp.meta.rank_basis == "cv" and resp.meta.rank_basis_reason == "provider_not_espn"
+    assert [r.player_id for r in resp.data] == [1, 3, 2, 4, 6, 5]
+    assert [r.board_rank for r in resp.data] == [1, 2, 3, 4, 5, 6]
+    assert [r.market_rank for r in resp.data] == [1, 2, 6, 2, None, None]
+
+
+@pytest.mark.unit
+def test_a_league_less_room_drafts_off_espns_board_for_its_format(monkeypatch):
+    """A room with no league draws its pool from ESPN anyway, so it takes ESPN's
+    board — the category one when it scores as categories."""
+    market = _espn_market(**{"1": {"roto_rank": 4}, "2": {"roto_rank": 1},
+                             "3": {"roto_rank": 2}, "4": {"roto_rank": 3}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
+    resp = _board(resolve_scoring(None, "categories"))
+
+    assert resp.meta.rank_basis == "espn" and resp.meta.rank_basis_reason == "league_less_room"
+    assert resp.meta.market_rank_type == "roto"
+    assert [r.player_id for r in resp.data][:4] == [2, 3, 4, 1]
+    assert [r.board_rank for r in resp.data] == [1, 2, 3, 4, None, None]
+
+
+@pytest.mark.unit
+def test_a_yahoo_room_that_follows_an_espn_draft_drafts_off_espns_board(stub_inputs):
+    resp = _board(resolve_scoring(_league(provider="yahoo")),
+                  session=BoardSession(espn_league_id=426893737))
+
+    assert resp.meta.rank_basis == "espn" and resp.meta.rank_basis_reason == "linked_espn_draft"
+    assert [r.player_id for r in resp.data] == [1, 3, 4, 2, 6, 5]
 
 
 @pytest.mark.unit

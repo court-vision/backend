@@ -765,3 +765,32 @@ def test_an_unfinished_draft_answers_409(authed_client, monkeypatch):
     res = authed_client.post("/v1/internal/drafts/12/import")
 
     assert res.status_code == 409 and res.json()["error_code"] == "DRAFT_NOT_COMPLETE"
+
+
+@pytest.mark.api
+def test_the_recommendations_knob_defaults_to_cv_and_passes_espn_through(authed_client, service, monkeypatch):
+    """The board's own order is the server's call (`meta.rank_basis`); the only
+    thing the query string chooses is what orders the strip, and that opens on
+    Court Vision's picks."""
+    _own_session(monkeypatch, league=_league(), espn_league_id=426893737)
+
+    assert authed_client.get("/v1/internal/drafts/12/board").status_code == 200
+    assert authed_client.get("/v1/internal/drafts/12/board?rank_source=espn").status_code == 200
+    assert authed_client.get("/v1/internal/drafts/12/board?rank_source=yahoo").status_code == 422
+
+    default, espn = service["calls"]
+    assert default["session"].rank_source == "cv" and espn["session"].rank_source == "espn"
+    # The room's ESPN link rides along: it is what lets a room following an
+    # ESPN draft take ESPN's board whatever league it was opened from.
+    assert default["session"].espn_league_id == 426893737
+
+
+@pytest.mark.api
+def test_the_stateless_board_takes_the_same_knob(authed_client, service, monkeypatch):
+    _own(monkeypatch, league=_league())
+
+    assert authed_client.get("/v1/internal/drafts/board?team_id=7").status_code == 200
+    assert authed_client.get("/v1/internal/drafts/board?team_id=7&rank_source=espn").status_code == 200
+
+    default, espn = service["calls"]
+    assert default["session"].rank_source == "cv" and espn["session"].rank_source == "espn"
