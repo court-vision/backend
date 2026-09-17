@@ -105,6 +105,18 @@ async def test_rejected_credentials_map_without_retry(http, status):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a_refusal_logs_the_providers_own_reason(http):
+    """Yahoo answers "not authorized for this API" and "token expired" with the
+    same 403; only the body tells them apart, so the failure log carries it."""
+    http.queue = [response(403, '<yahoo:error><yahoo:description>Please provide valid credentials. '
+                                 'OAuth oauth_problem="this application is not authorized"</yahoo:description></yahoo:error>')]
+    with capture_logs() as logs, pytest.raises(ProviderAuthError):
+        await provider_http.provider_get("yahoo", URL, headers={"Authorization": "Bearer t"})
+    assert "not authorized" in failures(logs)[0]["body_preview"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 403])
 async def test_rejected_credentials_say_so_when_some_were_sent(http, status):
     """Cookies were sent and refused: the credentials themselves are suspect."""
