@@ -261,8 +261,13 @@ async def test_the_board_and_roster_track_the_record(team, league, board_players
     opening = await DraftBoardService.get_board(scoring, session=room)
     assert len(opening.data) == len(replay["picks"])        # nobody drafted yet
     assert opening.roster == []
-    # Value descends with draft order, so the big board opens in that order.
+    # Value descends with draft order, so the big board opens in that order —
+    # and this is an ESPN league, so the rows sit on ESPN's board, which the
+    # fixture seeds in the same order (overall_rank == draft order).
     assert [r.player_id for r in opening.data[:3]] == [900_001, 900_002, 900_003]
+    assert opening.meta.rank_basis == "espn" and opening.meta.rank_basis_reason == "espn_league"
+    assert [r.board_rank for r in opening.data] == [r.market_rank for r in opening.data]
+    assert [r.board_rank for r in opening.data] == sorted(r.board_rank for r in opening.data)
 
     for pick in replay["picks"][:24]:
         await _record(session.id, pick, board_players, replay)

@@ -432,6 +432,15 @@ class DraftBoardRow(ApiModel):
             "averages. market: no stat line at all — the row exists because ESPN drafts him."
         ),
     )
+    board_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "The row's place on the board `meta.rank_basis` names — ESPN's published rank for "
+            "the league's format in an ESPN room, `cv_rank` otherwise. Rows come back in this "
+            "order. None for a player the basis does not rank; those trail every ranked row, "
+            "ordered by the other opinion, and are never given a number that looks like ESPN's."
+        ),
+    )
     value_season: Optional[str] = Field(
         default=None,
         description=(
@@ -615,12 +624,12 @@ class DraftBoardMeta(ApiModel):
     market_only_count: int = 0                  # rows ESPN ranks that no stat line can value (rookies)
     projections_as_of: Optional[date] = None    # snapshot date of the projections used (None before ESPN publishes)
     market_as_of: Optional[date] = None         # snapshot date of the market ranks used
-    rank_source: Literal["espn", "cv"] = Field(
-        default="espn",
+    rank_source: Literal["cv", "espn"] = Field(
+        default="cv",
         description="What actually ordered `recommendations` on this response",
     )
-    rank_source_requested: Literal["espn", "cv"] = Field(
-        default="espn",
+    rank_source_requested: Literal["cv", "espn"] = Field(
+        default="cv",
         description=(
             "What the caller asked for. Differs from `rank_source` only when `espn` was asked "
             "for and no market snapshot exists yet, which falls back to `cv`."
@@ -633,6 +642,21 @@ class DraftBoardMeta(ApiModel):
             "for points leagues, `roto` for category leagues. They are separate opinions — over "
             "ESPN's own top 150 they disagree by a mean of 28 places."
         ),
+    )
+    rank_basis: Literal["espn", "cv"] = Field(
+        default="cv",
+        description=(
+            "Whose rank orders the rows and fills `board_rank`. `espn` in an ESPN room: a league "
+            "ESPN runs, a room with no league at all, or one following an ESPN draft. `cv` for a "
+            "league elsewhere, or while no market snapshot exists. Not a caller's choice — "
+            "`rank_source` is the recommendations' knob, this is the board's fact."
+        ),
+    )
+    rank_basis_reason: Literal[
+        "espn_league", "league_less_room", "linked_espn_draft", "provider_not_espn", "no_market_snapshot"
+    ] = Field(
+        default="provider_not_espn",
+        description="Why `rank_basis` is what it is, in the words the room shows",
     )
     session_id: Optional[int] = None            # set when the board was read for a draft session
     league_size: Optional[int] = None           # teams in the draft; sets replacement level with roster_slots
@@ -724,14 +748,19 @@ class DraftRecommendation(ApiModel):
     source: Literal["cv", "espn"] = Field(
         default="cv",
         description=(
-            "What ordered the list: `espn` takes the best remaining on ESPN's board for the "
-            "league's format, `cv` the composite `score`. Under `espn` the score is still "
-            "returned, as the visible dissenting opinion rather than the ranking key."
+            "What ordered the list: `cv` (the default) the composite `score`, `espn` the best "
+            "remaining on ESPN's board for the league's format. The other opinion rides along "
+            "either way — `market_rank` on a CV card, `score` on an ESPN one — as the visible "
+            "dissent rather than the ranking key."
         ),
     )
     market_rank: Optional[int] = Field(
         default=None,
         description="ESPN's draft rank for the league's format; None for a player ESPN does not rank",
+    )
+    cv_rank: Optional[int] = Field(
+        default=None,
+        description="Court Vision's rank over the full pool — the board's `cv_rank` for this player",
     )
     components: List[RecommendationComponent] = []
     reason: str = Field(description="One-sentence summary of the dominant terms")
@@ -778,6 +807,25 @@ class RecapPickResp(ApiModel):
         default=None,
         description="value(player) − value(the cv-ranked player at this pick number); null in an auction",
     )
+    market_value: Optional[float] = Field(
+        default=None,
+        description="ESPN's auction value for the league's format; null for a player ESPN does not price",
+    )
+    surplus_espn: Optional[int] = Field(
+        default=None,
+        description="market_rank − overall_pick; positive = taken later than ESPN ranks him",
+    )
+    market_value_over_slot: Optional[float] = Field(
+        default=None,
+        description=(
+            "market_value(player) − market_value(the ESPN-ranked player at this pick number); "
+            "null in an auction, and for a pick ESPN cannot price"
+        ),
+    )
+    market_value_over_bid: Optional[float] = Field(
+        default=None,
+        description="market_value − bid; auctions only, null for a pick ESPN cannot price",
+    )
     bid: Optional[float] = None
 
 
@@ -791,6 +839,13 @@ class RecapSeatResp(ApiModel):
     unscored: int = Field(description="Picks with no value to price — listed in `picks`, left out of the sums")
     total_value: float
     value_over_slot: Optional[float] = Field(default=None, description="Σ over the seat's priced picks; null in an auction")
+    market_value_over_slot: Optional[float] = Field(
+        default=None, description="Σ market_value_over_slot over the seat's ESPN-priced picks; null in an auction"
+    )
+    market_value_over_bid: Optional[float] = Field(
+        default=None, description="Σ market_value_over_bid over the seat's ESPN-priced picks; auctions only"
+    )
+    unpriced: int = Field(default=0, description="Picks ESPN cannot price — listed in `picks`, left out of the ESPN sums")
     grade: Optional[str] = Field(default=None, description="Relative letter A–F; a four-seat league tops out at D")
     position: Optional[float] = Field(default=None, description="Rank among the seats, ties sharing the average position")
     best_pick: Optional[int] = None
@@ -828,8 +883,29 @@ class RecapStandingResp(ApiModel):
 class RecapMeta(ApiModel):
     format: str                                 # points | categories
     value_kind: Literal["fpts", "cat_value"]
-    graded_by: Literal["value_over_slot", "value"] = Field(
-        description="What the seat grades rank on. An auction has no value ladder to price picks against."
+    graded_by: Literal["value_over_slot", "value", "market_value_over_slot", "market_value_over_bid"] = Field(
+        description=(
+            "What the seat grades rank on. Under `grade_basis: espn` a snake grades on ESPN's auction "
+            "value over the ESPN-ranked player at each pick and an auction on ESPN value over the bid; "
+            "under `cv` a snake grades on CV value over slot and an auction, which has no value "
+            "ladder to price picks against, on total value."
+        )
+    )
+    grade_basis: Literal["espn", "cv"] = Field(
+        default="cv",
+        description=(
+            "Whose board the seats are graded against: ESPN's published board in an ESPN room, "
+            "Court Vision's otherwise — the same rule as the board's `rank_basis`, plus a fall-back "
+            "to `cv` when the snapshot carries no auction values to price picks with."
+        ),
+    )
+    grade_basis_reason: Optional[Literal[
+        "espn_league", "league_less_room", "linked_espn_draft", "provider_not_espn",
+        "no_market_snapshot", "no_auction_values",
+    ]] = Field(default=None, description="Why `grade_basis` is what it is")
+    market_rank_type: Literal["standard", "roto"] = Field(
+        default="standard",
+        description="Which of ESPN's two boards `market_rank` and `market_value` come from",
     )
     standings_basis: Literal["z_sum", "season_value"] = Field(
         description="Category standings sum per-player z; they approximate a roto finish, they do not simulate a season."

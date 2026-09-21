@@ -17,6 +17,7 @@ import pytest
 
 from api import deps
 from db.models.leagues import League
+from db.models.nba.draft_market import DraftMarket
 from schemas.draft import DraftPickCreate
 from services.draft_board_service import BoardSession, DraftBoardService
 from services.draft_recap_service import DraftRecapService
@@ -68,7 +69,11 @@ async def test_the_captured_draft_recaps_pick_for_pick(team, board_players, repl
     assert recap.meta.picks_made == len(replay["picks"])
     assert recap.meta.unscored == 0 and recap.meta.unattributed == 0
     assert recap.meta.league_size == 4 and recap.meta.total_picks == 52
+    # An ESPN room grades on ESPN's board — but the fixture's snapshot prices
+    # nobody (auction values all null), so the grades fall back to CV and say so.
     assert recap.meta.graded_by == "value_over_slot"
+    assert recap.meta.grade_basis == "cv" and recap.meta.grade_basis_reason == "no_auction_values"
+    assert recap.meta.market_rank_type == "standard"
 
 
 async def test_the_recap_prices_picks_against_the_same_board_the_room_showed(team, board_players, replay):
@@ -120,6 +125,43 @@ async def test_a_reach_and_a_steal_separate_the_seats(team, board_players, repla
     assert [by_slot[s].grade for s in (1, 2, 3, 4)] == ["D", "B", "B", "A"]
     # The two untouched seats drafted par and are told so.
     assert by_slot[2].value_over_slot == by_slot[3].value_over_slot == 0.0
+
+
+async def test_an_espn_room_grades_on_espns_board_once_the_snapshot_prices_players(team, board_players, replay):
+    """With auction values on the snapshot the seats grade on ESPN's ladder:
+    the capture took ESPN's board in order, so every pick is par there too,
+    and CV's pricing still rides beside it."""
+    DraftMarket.update(auction_value=100 - DraftMarket.overall_rank).execute()
+    session = await _replay_all(team, replay, board_players)
+
+    recap = await _recap(session.id, team.user_id)
+
+    assert recap.meta.grade_basis == "espn" and recap.meta.grade_basis_reason == "espn_league"
+    assert recap.meta.graded_by == "market_value_over_slot"
+    assert all(p.market_value_over_slot == 0.0 for p in recap.data)
+    assert all(p.surplus_espn == 0 for p in recap.data)
+    assert all(p.value_over_slot == 0.0 for p in recap.data)
+    assert {s.market_value_over_slot for s in recap.seats} == {0.0}
+    assert all(s.unpriced == 0 for s in recap.seats)
+    assert len({s.grade for s in recap.seats}) == 1
+
+
+async def test_a_reach_and_a_steal_separate_the_seats_on_espns_board(team, board_players, replay):
+    DraftMarket.update(auction_value=100 - DraftMarket.overall_rank).execute()
+    picks = copy.deepcopy(replay["picks"])
+    first, last = picks[0]["espn_player_id"], picks[-1]["espn_player_id"]
+    picks[0]["espn_player_id"], picks[-1]["espn_player_id"] = last, first
+
+    session = await _replay_all(team, replay, board_players, picks=picks)
+    recap = await _recap(session.id, team.user_id)
+
+    by_slot = {seat.slot: seat for seat in recap.seats}
+    assert by_slot[1].market_value_over_slot < 0 and by_slot[4].market_value_over_slot > 0
+    assert by_slot[1].worst_pick == 1 and by_slot[4].best_pick == 52
+    assert [by_slot[s].grade for s in (1, 2, 3, 4)] == ["D", "B", "B", "A"]
+    assert by_slot[2].market_value_over_slot == by_slot[3].market_value_over_slot == 0.0
+    # The pick that reached: ESPN's #52 taken first, 51 places early.
+    assert recap.data[0].surplus_espn == 51 and recap.data[-1].surplus_espn == -51
 
 
 async def test_an_unresolved_pick_is_graded_around_never_dropped(team, board_players, replay):

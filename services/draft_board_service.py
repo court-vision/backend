@@ -57,11 +57,7 @@ building hundreds of pydantic rows must not hold a DB permit).
 Recommendations rank the available, non-cap-blocked pool by one of two orderings,
 chosen by `rank_source`:
 
-- `espn` (the default): ESPN's own draft rank for the league's format, best rank
-  first. Nothing about the pick is Court Vision's opinion, which is the point —
-  a projection nobody can validate until the season ends should not be the thing
-  quietly driving someone's draft.
-- `cv`: the composite
+- `cv` (the default): Court Vision's room-aware pick, the composite
 
       score = vorp + scarcity + flexibility + category_fit − injury − congestion
 
@@ -71,9 +67,25 @@ chosen by `rank_source`:
   The model is deliberately simple: the visible breakdown matters more than its
   sophistication this season.
 
+- `espn`: ESPN's own draft rank for the league's format, best rank first — the
+  next name off the board the room is already ordered by, for a drafter who
+  wants none of our opinion in the pick at all.
+
 Both orderings compute every term either way, so an ESPN-ordered recommendation
-still carries CV's full score as the visible dissenting opinion. `rank_source`
-falls back to `cv` when no market snapshot has been taken, and the meta says so.
+still carries CV's full score as the visible dissenting opinion, and a CV-ordered
+one names ESPN's rank so the disagreement is on the card. `rank_source` falls
+back to `cv` when no market snapshot has been taken, and the meta says so.
+
+The board's own row order is a separate question from the strip's, and not the
+caller's to choose: `rank_basis` (services.draft_market.rank_basis_for) puts
+ESPN's published rank in the gutter of every ESPN room — a league ESPN runs, a
+room with no league at all, or one following an ESPN draft — with CV's rank
+beside it, and keeps CV's order for a room whose league lives elsewhere or
+while no snapshot exists. Rows come back already in that order, `board_rank`
+naming each row's place. Players the basis does not rank trail every ranked one
+in the other opinion's order with no number of their own, and a rookie ESPN
+ranks that no stat line can value sits at his ESPN rank instead of below the
+whole pool.
 
 Availability answers "will he still be there when I pick again?" as a bucket —
 likely / toss-up / gone — from the gap between ESPN's ADP and the caller's next
@@ -123,7 +135,7 @@ from services.draft_congestion import (
     week_from_calendar,
 )
 from services.draft_fit import FitModel, build_fit_model, draftable_tier_size
-from services.draft_market import market_auction_of, market_rank_of, rank_type_for
+from services.draft_market import market_auction_of, market_rank_of, rank_basis_for, rank_type_for
 from services.draft_service import (
     draft_front,
     next_pick_for_slot,
@@ -214,13 +226,14 @@ class BoardSession:
     league_size: Optional[int] = None
     draft_type: str = "snake"
     punts: tuple[str, ...] = ()
-    rank_source: str = "espn"               # espn | cv — what orders recommendations
+    rank_source: str = "cv"                 # cv | espn — what orders recommendations
+    espn_league_id: Optional[int] = None    # the ESPN draft the room follows, when it does
     draft_front: Optional[int] = None       # one past the last pick made on the clock
     my_next_pick: Optional[int] = None      # my next turn, counted from the front
     my_following_pick: Optional[int] = None  # and the turn after that
 
     @classmethod
-    def of(cls, ctx: "OwnedDraftSessionContext", rank_source: str = "espn") -> "BoardSession":
+    def of(cls, ctx: "OwnedDraftSessionContext", rank_source: str = "cv") -> "BoardSession":
         return cls(
             session_id=ctx.session_id,
             my_slot=ctx.my_slot,
@@ -229,6 +242,7 @@ class BoardSession:
             draft_type=ctx.draft_type,
             punts=tuple(ctx.punts),
             rank_source=rank_source,
+            espn_league_id=ctx.espn_league_id,
         )
 
 
@@ -443,8 +457,6 @@ class DraftBoardService:
             for pid in market_only_ids
             if pid in names
         ]
-        market_only.sort(key=lambda r: (market[r.id]["overall_rank"] is None,
-                                        market[r.id]["overall_rank"] or 0))
 
         return BoardInputs(
             season=season, pool=list(pool.values()), source=source,
@@ -592,6 +604,11 @@ class DraftBoardService:
         league_size = DraftBoardService._league_size(scoring, session)
         horizon = DraftBoardService._availability_horizon(session)
 
+        # Whose board this is — decided before a row exists, because every row's
+        # `board_rank` is that decision applied to one player.
+        has_market = any(market_rank_of(m, rank_type) is not None for m in inputs.market.values())
+        basis, basis_reason = rank_basis_for(scoring.league, session.espn_league_id, has_market)
+
         rows: list[DraftBoardRow] = []
         candidates: list[dict] = []
         for cv_rank, (row, value, cats, z, z_sum) in enumerate(entries, start=1):
@@ -611,6 +628,7 @@ class DraftBoardService:
                     positions=eligible.get(row.id),
                     injury_status=DraftBoardService._injury_of(market),
                     cv_rank=cv_rank,
+                    board_rank=(market_rank if basis == "espn" else cv_rank),
                     value=value,
                     value_source=inputs.source.get(row.id, "baseline"),
                     value_season=inputs.value_season.get(row.id),
@@ -623,7 +641,7 @@ class DraftBoardService:
                     market_delta=(market_rank - cv_rank) if market_rank is not None else None,
                     fit_value=fit_values.get(row.id),
                     fit_rank=fit_ranks.get(row.id),
-                    availability=DraftBoardService._availability_of(market, horizon, league_size),
+                    availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
                     cap_blocked=blocked,
                     categories=cats,
                     category_z=z,
@@ -632,6 +650,7 @@ class DraftBoardService:
             candidates.append({
                 "id": row.id, "name": row.name, "value": value, "team": team,
                 "market_rank": market_rank,
+                "cv_rank": cv_rank,
                 "source": inputs.source.get(row.id, "baseline"),
                 "season_value": round(value * gp, VALUE_DECIMALS),
                 "gp": gp,
@@ -644,18 +663,10 @@ class DraftBoardService:
                 "slots": eligible.get(row.id),
             })
 
-        # Market-only rows sit after everything valued: they have no value to
-        # rank by, only ESPN's opinion that they are worth drafting. `_fetch_inputs`
-        # ordered them by STANDARD without knowing the format; re-order by the
-        # board this league actually drafts off.
-        market_only = sorted(
-            inputs.market_only,
-            key=lambda r: (
-                market_rank_of(inputs.market.get(r.id, {}), rank_type) is None,
-                market_rank_of(inputs.market.get(r.id, {}), rank_type) or 0,
-            ),
-        )
-        for entry in market_only:
+        # Market-only rows: no value to rank by, only ESPN's opinion that they
+        # are worth drafting. Under ESPN's basis that opinion is their place on
+        # the board; under CV's they trail everything valued, in ESPN's order.
+        for entry in inputs.market_only:
             if entry.id in removed:
                 continue
             market = inputs.market.get(entry.id, {})
@@ -670,6 +681,7 @@ class DraftBoardService:
                 positions=eligible.get(entry.id),
                 injury_status=DraftBoardService._injury_of(market),
                 cv_rank=None,
+                board_rank=(market_rank if basis == "espn" else None),
                 value=None,
                 value_source="market",
                 value_season=None,
@@ -682,12 +694,22 @@ class DraftBoardService:
                 market_delta=None,
                 fit_value=None,
                 fit_rank=None,
-                availability=DraftBoardService._availability_of(market, horizon, league_size),
+                availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
                 cap_blocked=cap_check(entry.id),
                 categories=None,
                 category_z=None,
                 score=None,
             ))
+
+        # One ordering for the whole board, valued and market-only rows alike.
+        # Whoever the basis does not rank trails everyone it does, in the other
+        # opinion's order — never lost, never promoted.
+        if basis == "espn":
+            rows.sort(key=lambda r: (r.market_rank is None, r.market_rank or 0,
+                                     r.cv_rank is None, r.cv_rank or 0))
+        else:
+            rows.sort(key=lambda r: (r.cv_rank is None, r.cv_rank or 0,
+                                     r.market_rank is None, r.market_rank or 0))
 
         # What this roster would bench on its real game nights, measured once;
         # every candidate's congestion term is a delta against it.
@@ -697,7 +719,6 @@ class DraftBoardService:
         )
         # `espn` needs ranks to order by; without a snapshot it degrades to the
         # CV composite rather than returning nothing, and the meta says which ran.
-        has_market = any(c.get("market_rank") is not None for c in candidates)
         rank_source = session.rank_source if (session.rank_source == "cv" or has_market) else "cv"
         recommendations = DraftBoardService._recommend(
             candidates, scoring, session, mine, primary, fit, congestion,
@@ -764,6 +785,8 @@ class DraftBoardService:
                 rank_source=rank_source,
                 rank_source_requested=session.rank_source,
                 market_rank_type=rank_type,
+                rank_basis=basis,
+                rank_basis_reason=basis_reason,
                 session_id=session.session_id,
                 league_size=league_size,
                 roster_slots=roster_slots,
@@ -1092,7 +1115,8 @@ class DraftBoardService:
 
     @staticmethod
     def _availability_of(
-        market: Mapping, horizon: Optional[int], league_size: Optional[int]
+        market: Mapping, horizon: Optional[int], league_size: Optional[int],
+        rank_type: str = "standard",
     ) -> Optional[str]:
         """Likely / toss-up / gone, from where the market drafts him vs `horizon`.
 
@@ -1105,7 +1129,7 @@ class DraftBoardService:
             return None
         expected = market.get("adp")
         if expected is None:
-            expected = market.get("overall_rank")
+            expected = market_rank_of(market, rank_type)
         if expected is None:
             return None
 
@@ -1183,7 +1207,7 @@ class DraftBoardService:
         primary: Mapping[int, str],
         fit: Optional[FitModel] = None,
         congestion: Optional[CongestionModel] = None,
-        rank_source: str = "espn",
+        rank_source: str = "cv",
     ) -> list[DraftRecommendation]:
         """The best of what is left, ordered by `rank_source`.
 
@@ -1342,6 +1366,7 @@ class DraftBoardService:
             score=score,
             source=rank_source,
             market_rank=c.get("market_rank"),
+            cv_rank=c.get("cv_rank"),
             components=[
                 RecommendationComponent(
                     key="season_value", label="Season value", value=t.season_value, in_score=False,
@@ -1432,12 +1457,15 @@ class DraftBoardService:
 
         Under `espn` that is ESPN's rank — the reason must name the thing doing
         the ordering, or the room reads a CV rationale for a pick CV did not
-        make. The score is still on the card; this line just stops claiming it.
+        make. Under `cv` it is the terms, and the sentence ends with where ESPN
+        has him: the board is ordered by ESPN, so a CV pick is only readable
+        next to the number it disagrees with.
         """
         where = f" at {position}" if position else ""
+        place = f"ESPN has him #{market_rank}" if market_rank is not None else "unranked by ESPN"
         if rank_source == "espn":
-            place = f"ESPN's #{market_rank}" if market_rank is not None else "unranked by ESPN"
-            return f"{name}: {place} and the best left on their board; CV has him {vorp:+.1f} over replacement{where}"
+            top = f"ESPN's #{market_rank}" if market_rank is not None else "unranked by ESPN"
+            return f"{name}: {top} and the best left on their board; CV has him {vorp:+.1f} over replacement{where}"
         parts = [f"{vorp:+.1f} over replacement{where}"]
         if scarcity:
             parts.append(f"{scarcity:+.1f} for scarcity")
@@ -1449,4 +1477,4 @@ class DraftBoardService:
             parts.append(f"{injury:+.1f} for {injury_status}")
         if congestion:
             parts.append(f"{congestion:+.1f} for lineup congestion")
-        return f"{name}: " + ", ".join(parts)
+        return f"{name}: " + ", ".join(parts) + f"; {place}"

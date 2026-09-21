@@ -74,6 +74,10 @@ router = APIRouter(prefix="/drafts", tags=["Drafts"])
         "caller's own roster, with any `punt` categories weighing zero.\n\n"
         "`market_rank` and `auction_value` come from the ESPN board matching the league's format "
         "— STANDARD for points, ROTO for categories — which `meta.market_rank_type` names.\n\n"
+        "Rows come back in the order `meta.rank_basis` names: ESPN's published rank in an ESPN "
+        "room (a league ESPN runs, or a team with no synced league — its market pool is ESPN's "
+        "anyway), with `board_rank` as each row's place and players ESPN does not rank trailing "
+        "in CV order; Court Vision's rank for a league elsewhere, or while no snapshot exists.\n\n"
         "Stateless: pick state rides in the query params, so there is no slot to count from and "
         "rows carry no availability. Use the session board once a draft room is open."
     ),
@@ -103,13 +107,14 @@ async def get_draft_board(
             "the session instead). No effect on a points league."
         ),
     ),
-    rank_source: Literal["espn", "cv"] = Query(
-        default="espn",
+    rank_source: Literal["cv", "espn"] = Query(
+        default="cv",
         description=(
-            "What orders `recommendations`. `espn` (the default) takes the best remaining on "
-            "ESPN's own board for this league's format; `cv` uses Court Vision's composite score. "
-            "Both are computed either way, so an ESPN-ordered pick still carries CV's full "
-            "breakdown. `espn` falls back to `cv` when no market snapshot exists — "
+            "What orders `recommendations`. `cv` (the default) is Court Vision's room-aware "
+            "pick — VORP with scarcity, fit and congestion applied; `espn` takes the best "
+            "remaining on ESPN's own board for this league's format. Every component is "
+            "computed either way, so switching never changes a card's numbers, only which "
+            "opinion put it on top. `espn` falls back to `cv` when no market snapshot exists; "
             "`meta.rank_source` says which actually ran."
         ),
     ),
@@ -250,10 +255,15 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
         "team in each category.\n\n"
         "Rows with market data carry `availability` (`likely`/`tossup`/`gone`) for the caller's "
         "next pick — the pick after that while the caller is on the clock.\n\n"
-        "`rank_source` chooses what orders the recommendations: ESPN's own board for this "
-        "league's format (the default), or Court Vision's composite score. Every component is "
-        "computed either way, so switching views never changes the numbers on a card — only "
-        "which of the two opinions put it at the top."
+        "Rows come back in the order `meta.rank_basis` names: ESPN's published rank for the "
+        "league's format in an ESPN room (a league ESPN runs, a room with no league, or one "
+        "following an ESPN draft), with `board_rank` as each row's place and players ESPN does "
+        "not rank trailing in CV order; Court Vision's rank for a league elsewhere, or while no "
+        "market snapshot exists. `meta.rank_basis_reason` says which.\n\n"
+        "`rank_source` chooses what orders the recommendations: Court Vision's room-aware pick "
+        "(the default), or the best remaining on ESPN's board. Every component is computed "
+        "either way, so switching views never changes the numbers on a card — only which of "
+        "the two opinions put it at the top."
     ),
     responses={
         200: {"description": "Board retrieved successfully (empty data with a message before any season data exists)"},
@@ -261,13 +271,14 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
     },
 )
 async def get_draft_session_board(
-    rank_source: Literal["espn", "cv"] = Query(
-        default="espn",
+    rank_source: Literal["cv", "espn"] = Query(
+        default="cv",
         description=(
-            "What orders `recommendations`. `espn` (the default) takes the best remaining on "
-            "ESPN's own board for this league's format; `cv` uses Court Vision's composite score. "
-            "Both are computed either way, so an ESPN-ordered pick still carries CV's full "
-            "breakdown. `espn` falls back to `cv` when no market snapshot exists — "
+            "What orders `recommendations`. `cv` (the default) is Court Vision's room-aware "
+            "pick — VORP with scarcity, fit and congestion applied; `espn` takes the best "
+            "remaining on ESPN's own board for this league's format. Every component is "
+            "computed either way, so switching never changes a card's numbers, only which "
+            "opinion put it on top. `espn` falls back to `cv` when no market snapshot exists; "
             "`meta.rank_source` says which actually ran."
         ),
     ),

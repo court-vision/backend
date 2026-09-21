@@ -39,7 +39,7 @@ is never quietly graded down for a gap in our data.
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
-from services.draft_market import market_rank_of
+from services.draft_market import market_auction_of, market_ladder, market_rank_of, rank_basis_for
 from services.scoring.models import CategoryDef
 
 # Relative letters, worst last. A four-seat league therefore tops out at D:
@@ -76,6 +76,12 @@ class ScoredPick:
     surplus_cv: Optional[int] = None
     surplus_market: Optional[float] = None
     value_over_slot: Optional[float] = None
+    # ESPN's pricing of the same pick, computed for every room; it grades the
+    # seats only where ESPN's board is the room's own (`Recap.grade_basis`).
+    market_value: Optional[float] = None
+    surplus_espn: Optional[int] = None
+    market_value_over_slot: Optional[float] = None
+    market_value_over_bid: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,9 @@ class SeatSummary:
     position: Optional[float]
     best_pick: Optional[int]
     worst_pick: Optional[int]
+    market_value_over_slot: Optional[float] = None
+    market_value_over_bid: Optional[float] = None
+    unpriced: int = 0
 
 
 @dataclass(frozen=True)
@@ -130,6 +139,49 @@ class Recap:
     graded_by: str
     unscored: int
     unattributed: int
+    grade_basis: str = "cv"
+    grade_basis_reason: Optional[str] = None
+
+
+GRADE_BASIS_REASONS = (
+    "espn_league", "league_less_room", "linked_espn_draft", "provider_not_espn",
+    "no_market_snapshot", "no_auction_values",
+)
+
+
+def grade_basis_for(
+    league,
+    espn_league_id: Optional[int],
+    market: Mapping[int, Mapping],
+    rank_type: str,
+    draft_type: str = "snake",
+) -> tuple[str, str]:
+    """Whose board grades the seats, and why.
+
+    The board's own rule (`rank_basis_for`) first: an ESPN room grades on ESPN's
+    board. Then one more way to fall back — a snapshot can rank players without
+    pricing them, and a ladder with nothing on its rungs prices every pick at
+    nothing, so a room with no auction values at all grades on CV instead and
+    says so rather than handing every seat the same letter.
+    """
+    has_market = any(market_rank_of(row, rank_type) is not None for row in market.values())
+    basis, reason = rank_basis_for(league, espn_league_id, has_market)
+    if basis != "espn":
+        return basis, reason
+    if draft_type == "auction":
+        priced = any(market_auction_of(row, rank_type) is not None for row in market.values())
+    else:
+        priced = any(value is not None for _pid, value in market_ladder(market, rank_type))
+    if not priced:
+        return "cv", "no_auction_values"
+    return basis, reason
+
+
+def graded_by_for(grade_basis: str, priced_by_slot: bool) -> str:
+    """The quantity a seat's grade ranks on, by name."""
+    if grade_basis == "espn":
+        return "market_value_over_slot" if priced_by_slot else "market_value_over_bid"
+    return "value_over_slot" if priced_by_slot else "value"
 
 
 def positions_of(totals: Mapping[int, float]) -> dict[int, float]:
@@ -176,6 +228,8 @@ def build_recap(
     draft_type: str = "snake",
     my_slot: Optional[int] = None,
     rank_type: str = "standard",
+    grade_basis: str = "cv",
+    grade_basis_reason: Optional[str] = None,
 ) -> Recap:
     """Score every pick, grade every seat, and project the standings.
 
@@ -183,9 +237,14 @@ def build_recap(
     same order `cv_rank` enumerates — so the player ranked at pick *k* is
     `ladder[k - 1]` whether or not anybody drafted him.
 
-    `rank_type` picks which of ESPN's two boards a pick is graded against, and
+    `rank_type` picks which of ESPN's two boards a pick is measured against, and
     must be the one the room drafted off: grading a category draft against
     ESPN's points ranking would call every punt-build pick a reach.
+
+    Every pick is priced both ways — CV's value over the CV-ranked player at that
+    pick, and ESPN's auction value over the ESPN-ranked one — and `grade_basis`
+    says which of the two the seats' letters come from. `grade_basis_for`
+    decides it from the room; callers that leave it grade on CV.
     """
     market = market or {}
     category_z = category_z or {}
@@ -197,6 +256,7 @@ def build_recap(
     # ladder, so pricing one against the k-th best player would be arithmetic
     # about nothing. Those rooms grade on what they drafted instead.
     priced_by_slot = draft_type != "auction"
+    espn_ladder = market_ladder(market, rank_type)
 
     scored: list[ScoredPick] = []
     for pick in sorted(picks, key=lambda p: p.overall_pick):
@@ -206,9 +266,17 @@ def build_recap(
         row = market.get(pid, {}) if pid is not None else {}
         market_rank = market_rank_of(row, rank_type) if row else None
         adp = row.get("adp")
+        # A stored $0 is a real price (ESPN values plenty of points-league
+        # starters at nothing in categories); only a missing row is None.
+        market_value = market_auction_of(row, rank_type) if row else None
         slot_value = (
             ladder[pick.overall_pick - 1][1]
             if priced_by_slot and 0 < pick.overall_pick <= len(ladder)
+            else None
+        )
+        espn_slot_value = (
+            espn_ladder[pick.overall_pick - 1][1]
+            if priced_by_slot and 0 < pick.overall_pick <= len(espn_ladder)
             else None
         )
         scored.append(ScoredPick(
@@ -223,9 +291,19 @@ def build_recap(
                 round(value - slot_value, VALUE_DECIMALS)
                 if value is not None and slot_value is not None else None
             ),
+            market_value=market_value,
+            surplus_espn=(market_rank - pick.overall_pick) if market_rank is not None else None,
+            market_value_over_slot=(
+                round(market_value - espn_slot_value, VALUE_DECIMALS)
+                if market_value is not None and espn_slot_value is not None else None
+            ),
+            market_value_over_bid=(
+                round(market_value - pick.bid, VALUE_DECIMALS)
+                if not priced_by_slot and market_value is not None and pick.bid is not None else None
+            ),
         ))
 
-    seats = _seats(scored, my_slot=my_slot, priced_by_slot=priced_by_slot)
+    seats = _seats(scored, my_slot=my_slot, priced_by_slot=priced_by_slot, grade_basis=grade_basis)
     standings = _standings(
         scored,
         [seat.slot for seat in seats],
@@ -238,17 +316,29 @@ def build_recap(
         picks=scored,
         seats=seats,
         standings=standings,
-        graded_by="value_over_slot" if priced_by_slot else "value",
+        graded_by=graded_by_for(grade_basis, priced_by_slot),
         unscored=sum(1 for s in scored if s.value is None),
         unattributed=sum(1 for s in scored if s.pick.slot is None),
+        grade_basis=grade_basis,
+        grade_basis_reason=grade_basis_reason,
     )
 
 
-def _seats(scored: Sequence[ScoredPick], *, my_slot: Optional[int], priced_by_slot: bool) -> list[SeatSummary]:
+def _seats(
+    scored: Sequence[ScoredPick],
+    *,
+    my_slot: Optional[int],
+    priced_by_slot: bool,
+    grade_basis: str = "cv",
+) -> list[SeatSummary]:
     """One summary per seat that made a pick, graded against the others.
 
     A pick with no seat (a room that never learned its pick order) is still
-    listed among the picks; it just has no roster to join.
+    listed among the picks; it just has no roster to join. The grade ranks one
+    quantity per room — CV's value over slot (total value in an auction), or
+    under `grade_basis: espn` ESPN's value over slot (over the bid in an
+    auction) — and a pick that quantity cannot price is left out of the sum,
+    never charged as a loss: no seat is graded down for a gap in the data.
     """
     by_seat: dict[int, list[ScoredPick]] = {}
     for entry in scored:
@@ -257,11 +347,14 @@ def _seats(scored: Sequence[ScoredPick], *, my_slot: Optional[int], priced_by_sl
     if not by_seat:
         return []
 
+    def graded(entry: ScoredPick) -> Optional[float]:
+        if grade_basis == "espn":
+            return entry.market_value_over_slot if priced_by_slot else entry.market_value_over_bid
+        return entry.value_over_slot if priced_by_slot else entry.value
+
     totals: dict[int, float] = {}
     for slot, entries in by_seat.items():
-        graded = [e.value_over_slot for e in entries if e.value_over_slot is not None]
-        values = [e.value for e in entries if e.value is not None]
-        totals[slot] = _sum(graded, VALUE_DECIMALS) if priced_by_slot else _sum(values, VALUE_DECIMALS)
+        totals[slot] = _sum([g for e in entries if (g := graded(e)) is not None], VALUE_DECIMALS)
 
     places = positions_of(totals)
     count = len(by_seat)
@@ -269,10 +362,13 @@ def _seats(scored: Sequence[ScoredPick], *, my_slot: Optional[int], priced_by_sl
     summaries: list[SeatSummary] = []
     for slot in sorted(by_seat):
         entries = by_seat[slot]
-        graded = [e for e in entries if e.value_over_slot is not None]
         values = [e.value for e in entries if e.value is not None]
-        best = max(graded, key=lambda e: e.value_over_slot, default=None)
-        worst = min(graded, key=lambda e: e.value_over_slot, default=None)
+        cv_over_slot = [e.value_over_slot for e in entries if e.value_over_slot is not None]
+        espn_over_slot = [e.market_value_over_slot for e in entries if e.market_value_over_slot is not None]
+        espn_over_bid = [e.market_value_over_bid for e in entries if e.market_value_over_bid is not None]
+        ranked = [(graded(e), e) for e in entries if graded(e) is not None]
+        best = max(ranked, key=lambda t: t[0], default=None)
+        worst = min(ranked, key=lambda t: t[0], default=None)
         summaries.append(SeatSummary(
             slot=slot,
             espn_team_id=next((e.pick.espn_team_id for e in entries if e.pick.espn_team_id is not None), None),
@@ -280,14 +376,16 @@ def _seats(scored: Sequence[ScoredPick], *, my_slot: Optional[int], priced_by_sl
             picks=len(entries),
             unscored=sum(1 for e in entries if e.value is None),
             total_value=_sum(values, VALUE_DECIMALS),
-            value_over_slot=_sum([e.value_over_slot for e in graded], VALUE_DECIMALS) if priced_by_slot else None,
+            value_over_slot=_sum(cv_over_slot, VALUE_DECIMALS) if priced_by_slot else None,
             grade=grade_for(places[slot], count),
             position=places[slot],
-            best_pick=best.pick.overall_pick if best is not None else None,
-            worst_pick=worst.pick.overall_pick if worst is not None else None,
+            best_pick=best[1].pick.overall_pick if best is not None else None,
+            worst_pick=worst[1].pick.overall_pick if worst is not None else None,
+            market_value_over_slot=_sum(espn_over_slot, VALUE_DECIMALS) if priced_by_slot else None,
+            market_value_over_bid=_sum(espn_over_bid, VALUE_DECIMALS) if not priced_by_slot else None,
+            unpriced=sum(1 for e in entries if e.market_value is None),
         ))
     return summaries
-
 
 def _standings(
     scored: Sequence[ScoredPick],
