@@ -73,6 +73,23 @@ def test_callback_asks_yahoo_for_the_account_when_the_token_response_lacks_it(cl
 
 
 @pytest.mark.api
+def test_callback_names_a_fantasy_refusal_after_a_good_login(client, stored, monkeypatch):
+    """Tokens were issued, so OAuth is fine; the Fantasy API refusing them means
+    the app is not enabled for it. Say that, not "oauth failed"."""
+    from core.errors import ProviderAuthError
+
+    monkeypatch.setattr(YahooService, "exchange_code_for_tokens",
+                        AsyncMock(return_value={**TOKENS, "guid": ""}))
+    monkeypatch.setattr(YahooService, "get_user_guid", AsyncMock(side_effect=ProviderAuthError("yahoo")))
+
+    res = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+
+    assert res.status_code in (302, 307)
+    assert res.headers["location"].endswith("/manage-teams?yahoo_error=fantasy_not_authorized")
+    assert stored == []
+
+
+@pytest.mark.api
 def test_callback_refuses_a_grant_yahoo_will_not_put_a_name_to(client, stored, monkeypatch):
     """Two nameless accounts would share one row (the pre-0025 shape); nothing is stored."""
     monkeypatch.setattr(YahooService, "exchange_code_for_tokens",

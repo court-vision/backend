@@ -24,7 +24,7 @@ from services.yahoo_service import YahooService
 from services import credential_service
 from services.user_sync_service import UserSyncService
 from api.deps import UserContext, get_db_user
-from core.errors import BadRequestError
+from core.errors import BadRequestError, ProviderAuthError
 from db.base import run_db
 
 router = APIRouter(prefix="/yahoo", tags=["Yahoo Fantasy"])
@@ -119,10 +119,23 @@ async def yahoo_callback(
 
     try:
         tokens = await YahooService.exchange_code_for_tokens(code)
-        # Yahoo names the account in the token response; when it does not, ask.
-        guid = tokens.get("guid") or await YahooService.get_user_guid(tokens.get("access_token", ""))
     except Exception as exc:  # mid-redirect: never render an error body, never echo the cause
         log.warning("yahoo_oauth_exchange_failed", error=type(exc).__name__,
+                    error_code=getattr(exc, "error_code", None))
+        return _manage_teams_redirect(yahoo_error="oauth_failed")
+
+    # Yahoo names the account in the token response; when it does not, ask the
+    # Fantasy API. That read is also the first thing the grant is used for, so
+    # a refusal here is the one case worth naming: Yahoo issued the login, but
+    # the app is not enabled for the Fantasy Sports API (its developer-console
+    # permission, granted per app after the access review).
+    try:
+        guid = tokens.get("guid") or await YahooService.get_user_guid(tokens.get("access_token", ""))
+    except ProviderAuthError:
+        log.warning("yahoo_fantasy_not_authorized")
+        return _manage_teams_redirect(yahoo_error="fantasy_not_authorized")
+    except Exception as exc:
+        log.warning("yahoo_oauth_account_lookup_failed", error=type(exc).__name__,
                     error_code=getattr(exc, "error_code", None))
         return _manage_teams_redirect(yahoo_error="oauth_failed")
 

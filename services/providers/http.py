@@ -124,6 +124,16 @@ def _rate_limited(provider: str, exc: RateLimitError) -> ProviderError:
     )
 
 
+class _RefusedRequest(ClientError):
+    """A 4xx with the start of its body, so the failure log can show the
+    provider's own reason -- Yahoo's `<yahoo:description>` says "not authorized
+    for this API" and "token expired" with the same 403."""
+
+    def __init__(self, status_code: int, preview: str):
+        super().__init__("Client error", status_code=status_code)
+        self.preview = preview
+
+
 def _classify_response(response: httpx.Response) -> None:
     status = response.status_code
     if status == 429:
@@ -136,7 +146,7 @@ def _classify_response(response: httpx.Response) -> None:
     if status >= 500:
         raise ServerError("Server error", status_code=status)
     if status >= 400:
-        raise ClientError("Client error", status_code=status)
+        raise _RefusedRequest(status, (response.text or "")[:_BODY_PREVIEW])
 
 
 def _cookie_header(cookies: Optional[dict]) -> Optional[str]:
@@ -257,6 +267,7 @@ async def _call(
         status, error = 429, exc
     except ClientError as exc:
         status = exc.status_code
+        preview = getattr(exc, "preview", None) or None
         if status in auth_statuses:
             messages = (
                 PROVIDER_AUTH_MESSAGES
