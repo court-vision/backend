@@ -19,11 +19,8 @@ from db.models.teams import Team
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.league import CategoryDefResp, LeagueDetail, LeagueSummary
 from services.scoring.models import CategoryDef, LeagueSettings
-from services.scoring.providers.espn_settings import parse_espn_settings
 from services.scoring.vocab import DEFAULT_CATEGORIES
-from services.scoring.providers.yahoo_settings import fetch_yahoo_league_settings, parse_yahoo_settings
-from services.providers.http import provider_get
-from utils.constants import ESPN_FANTASY_ENDPOINT
+from services.providers import get_provider_adapter
 from db.base import DB_RUNTIME_ERRORS, run_db
 
 log = get_logger()
@@ -54,27 +51,9 @@ class LeagueService:
                              espn_payload: Optional[dict] = None) -> Optional[LeagueSettings]:
         provider, _, season = LeagueService.provider_league_key(league_info)
         try:
-            if provider == FantasyProvider.YAHOO.value:
-                from services.yahoo_service import YahooService
-                token = await YahooService._ensure_valid_token(league_info, team_id)
-                league_key = league_info.yahoo_team_key.rsplit(".t.", 1)[0]
-                return parse_yahoo_settings(await fetch_yahoo_league_settings(token, league_key), season=season)
-
-            payload = espn_payload
-            if payload is None:
-                payload = await provider_get(
-                    "espn",
-                    ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
-                    params={"view": "mSettings"},
-                    cookies={"espn_s2": league_info.espn_s2, "SWID": league_info.swid},
-                    expect_key="settings",
-                )
-            parsed = parse_espn_settings(payload)
-            if not parsed.provider_league_id:
-                parsed.provider_league_id = str(league_info.league_id)
-            if not parsed.season:
-                parsed.season = int(league_info.year)
-            return parsed
+            return await get_provider_adapter(provider).fetch_league_settings(
+                league_info, team_id=team_id, payload=espn_payload
+            )
         except DB_RUNTIME_ERRORS:
             raise
         except Exception as exc:  # provider outages (typed AppErrors included) must never break team flows

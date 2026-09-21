@@ -27,7 +27,7 @@ from typing import Mapping, Optional, Sequence
 
 from core.logging import get_logger
 from db.base import run_db
-from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo
 from schemas.daily_actions import (
     DailyAction,
     DailyActionPlayer,
@@ -48,13 +48,12 @@ from services.lineup_editor_service import (
     unfilled_results,
 )
 from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_fill, plan_ir
-from services.lineup_read_service import LineupReadService, _games_on
+from services.lineup_read_service import LineupReadService, _games_on  # noqa: F401  (tests stand in for its read here)
 from services.matchup_days import index_games
+from services.providers import get_provider_adapter, unavailable_message
 from services.streamer_service import StreamerService
 
 log = get_logger("daily_actions")
-
-NOT_ESPN_MESSAGE = "Daily actions are available for ESPN teams"
 # The drop candidate is "streamable" only when the day's pool holds a comparable player.
 STREAMABLE_RATIO = 0.85
 DEFAULT_FA_COUNT = 100
@@ -269,12 +268,14 @@ class DailyActionsService:
     @staticmethod
     async def read(team, league_info: LeagueInfo, *, fa_count: int = DEFAULT_FA_COUNT,
                    ratio: float = STREAMABLE_RATIO) -> DailyActionsResp:
-        if league_info.provider != FantasyProvider.ESPN:
-            return DailyActionsResp(status=ApiStatus.SUCCESS, message=NOT_ESPN_MESSAGE, data=DailyActionsData(
-                can_write=False, write_blocked_reason="provider_not_supported"))
+        adapter = get_provider_adapter(league_info.provider)
+        if not adapter.capabilities(league_info).lineup_read:
+            return DailyActionsResp(status=ApiStatus.SUCCESS,
+                                    message=unavailable_message("daily_actions", league_info.provider),
+                                    data=DailyActionsData(can_write=False, write_blocked_reason="provider_not_supported"))
 
         board, pool = await asyncio.gather(
-            LineupReadService.read(team.team_id, league_info, fallback_slot_counts=_roster_slots(team)),
+            adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team)),
             StreamerService.find_streamers(
                 league_info, fa_count=fa_count, exclude_injured=True, b2b_only=False,
                 mode=StreamerMode.DAILY, target_day=None, avg_days=7, team_id=team.team_id,

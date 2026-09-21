@@ -22,7 +22,7 @@ from peewee import IntegrityError
 from core.errors import BadRequestError, ConflictError
 from db.base import db, db_operation
 from db.models.drafts import DraftPick, DraftSession
-from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
+from schemas.common import ApiStatus, LeagueInfo
 from schemas.draft import DraftImportResp, DraftImportResponse
 from services.draft_service import DraftService, _session_resp, lock_room
 from services.draft_sync_service import (
@@ -36,6 +36,7 @@ from services.draft_sync_service import (
 from services.espn_service import EspnService
 from services.providers.http import provider_get
 from utils.constants import ESPN_FANTASY_ENDPOINT
+from services.providers import get_provider_adapter
 
 
 def made_picks(detail: dict) -> Iterator[IncomingPick]:
@@ -114,10 +115,10 @@ class DraftImportService:
     @staticmethod
     async def import_draft(session_id: int, league_info: LeagueInfo) -> DraftImportResponse:
         """Fetch the completed draft and fold it into the session."""
-        if league_info.provider != FantasyProvider.ESPN:
+        if not get_provider_adapter(league_info.provider).capabilities(league_info).draft_import:
             # Yahoo's draft results are a different endpoint and a different id
             # space (`nba.players` has no `yahoo_id`), so it is its own piece of
-            # work rather than a branch in this one.
+            # work (docs/YAHOO_PARITY_PLAN.md P9) rather than a branch in this one.
             raise BadRequestError(
                 "IMPORT_PROVIDER_UNSUPPORTED",
                 f"Importing a {league_info.provider.value} draft is not supported yet",

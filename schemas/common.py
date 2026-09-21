@@ -276,11 +276,32 @@ class LeagueInfoPublic(ApiModel):
         )
 
 
+class ProviderCapabilitiesResp(ApiModel):
+    """What this team's provider can do for it (services.providers.capabilities).
+
+    The client reads these instead of branching on the provider name: a
+    feature is offered when its capability is true and renders the empty state
+    with `write_blocked_reason` otherwise.
+    """
+    lineup_read: bool
+    lineup_write: bool
+    transactions: bool
+    waiver_claims: bool
+    position_limits: bool
+    live_totals: bool
+    daily_lineups: bool
+    account_teams: bool
+    draft_sync: bool
+    draft_import: bool
+    write_scope: bool
+
+
 class TeamResponse(ApiModel):
     """Team data response model"""
     team_id: int
     league_info: LeagueInfoPublic
     league: Optional[LeagueSummary] = None   # None until league settings have been synced
+    capabilities: ProviderCapabilitiesResp
 
 class LineupResponse(ApiModel):
     """Lineup data response model"""

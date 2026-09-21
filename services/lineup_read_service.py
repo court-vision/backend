@@ -24,6 +24,7 @@ from typing import Any, Literal, Mapping, Optional
 import pytz
 
 from core.errors import BadRequestError
+from services.providers.capabilities import ProviderCapabilityMissing
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
@@ -214,8 +215,10 @@ class LineupReadService:
         fallback_slot_counts: Optional[Mapping[str, int]] = None,
         now: Optional[datetime] = None,
     ) -> LineupState:
+        # This is ESPN's reader; every consumer reaches it through the adapter's
+        # `read_lineup`, which is where another provider's board will come from.
         if league_info.provider != FantasyProvider.ESPN:
-            raise BadRequestError("PROVIDER_NOT_SUPPORTED", "Lineup editing is available for ESPN teams")
+            raise ProviderCapabilityMissing(league_info.provider, "lineup_editing")
 
         payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS)
         parsed = parse_espn_lineup(
