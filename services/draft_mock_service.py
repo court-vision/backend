@@ -67,6 +67,7 @@ from services.draft_service import (
     slot_of,
     total_picks_of,
 )
+from services.draft_market import market_rank_of, rank_type_for
 from services.scoring.category_value import rankable_categories
 from services.scoring.providers.espn_settings import POSITION_ID_MAP
 from services.scoring.resolver import resolve_scoring_for_room
@@ -491,11 +492,11 @@ class DraftMockService:
         season = settings.nba_season
         market = {rec.player_id: rec for rec in DraftMarket.latest_for_season(season)}
         if market:
-            return DraftMockService._market_pool(market, drafted)
+            return DraftMockService._market_pool(market, drafted, rank_type_for(scoring.is_categories))
         return DraftMockService._value_pool(session_id, scoring, drafted)
 
     @staticmethod
-    def _market_pool(market: Mapping[int, object], drafted) -> MockPool:
+    def _market_pool(market: Mapping[int, object], drafted, rank_type: str = "standard") -> MockPool:
         wanted = set(market) | set(drafted)
         players = {
             rec.id: rec
@@ -516,9 +517,15 @@ class DraftMockService:
                 coarse[pid] = player.position
             if pid in drafted:
                 continue
+            # ADP is one crowd number ESPN does not split by format, so it
+            # leads either way; the rank behind it must be the board this room
+            # drafts off, or an unranked-in-ADP player is queued by the wrong one.
+            rank = market_rank_of(
+                {"overall_rank": rec.overall_rank, "roto_rank": rec.roto_rank}, rank_type
+            )
             key = order_key_of(
                 float(rec.adp) if rec.adp is not None else None,
-                int(rec.overall_rank) if rec.overall_rank is not None else None,
+                int(rank) if rank is not None else None,
             )
             if key is None or player is None:
                 continue

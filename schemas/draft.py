@@ -432,15 +432,43 @@ class DraftBoardRow(ApiModel):
             "averages. market: no stat line at all — the row exists because ESPN drafts him."
         ),
     )
+    value_season: Optional[str] = Field(
+        default=None,
+        description=(
+            "Set only when a baseline `value` came from an OLDER season than the board's own "
+            "previous one, e.g. `2024-25` on a 2026-27 board — a player who missed last season "
+            "entirely is valued off the most recent one he played, and that value is a year "
+            "staler than every other row. None for everyone valued from last season, and for "
+            "projection and market-only rows."
+        ),
+    )
     last_season_gp: Optional[int] = Field(default=None, description="Games played last season; None for rookies")
     projected_gp: Optional[int] = Field(default=None, description="Projected games this season, when a projection exists")
     fpts_avg: Optional[float] = Field(
         default=None,
         description="Per-game fantasy points under the platform default formula (familiar scale, tiebreak); None for market-only rows",
     )
-    market_rank: Optional[int] = Field(default=None, description="ESPN editorial overall draft rank (latest snapshot)")
-    adp: Optional[float] = Field(default=None, description="Average draft position across real ESPN drafts")
-    auction_value: Optional[float] = Field(default=None, description="ESPN editorial auction value")
+    market_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "ESPN editorial draft rank from the latest snapshot, taken from the board that "
+            "matches the league's format — see `meta.market_rank_type`. Falls back to the "
+            "points board on snapshots written before the category board was captured."
+        ),
+    )
+    adp: Optional[float] = Field(
+        default=None,
+        description=(
+            "Average draft position across real ESPN drafts. Unlike `market_rank` this is NOT "
+            "format-specific: ESPN publishes one crowd average, sampled from the reference "
+            "league's own format (points). A category room should read it as a rough "
+            "availability signal, not as its own format's ADP."
+        ),
+    )
+    auction_value: Optional[float] = Field(
+        default=None,
+        description="ESPN editorial auction value from the same board as `market_rank`",
+    )
     market_delta: Optional[int] = Field(
         default=None,
         description="market_rank − cv_rank; positive means the market ranks the player worse than CV does (a bargain)",
@@ -587,6 +615,25 @@ class DraftBoardMeta(ApiModel):
     market_only_count: int = 0                  # rows ESPN ranks that no stat line can value (rookies)
     projections_as_of: Optional[date] = None    # snapshot date of the projections used (None before ESPN publishes)
     market_as_of: Optional[date] = None         # snapshot date of the market ranks used
+    rank_source: Literal["espn", "cv"] = Field(
+        default="espn",
+        description="What actually ordered `recommendations` on this response",
+    )
+    rank_source_requested: Literal["espn", "cv"] = Field(
+        default="espn",
+        description=(
+            "What the caller asked for. Differs from `rank_source` only when `espn` was asked "
+            "for and no market snapshot exists yet, which falls back to `cv`."
+        ),
+    )
+    market_rank_type: Literal["standard", "roto"] = Field(
+        default="standard",
+        description=(
+            "Which of ESPN's two boards `market_rank` and `auction_value` come from: `standard` "
+            "for points leagues, `roto` for category leagues. They are separate opinions — over "
+            "ESPN's own top 150 they disagree by a mean of 28 places."
+        ),
+    )
     session_id: Optional[int] = None            # set when the board was read for a draft session
     league_size: Optional[int] = None           # teams in the draft; sets replacement level with roster_slots
     roster_slots: dict[str, int] = {}           # the league's starting slots, as stored
@@ -669,7 +716,22 @@ class DraftRecommendation(ApiModel):
     season_value: float = Field(description="value x projected games")
     vorp: float = Field(description="season_value minus the replacement level at the player's position")
     score: float = Field(
-        description="vorp + scarcity + flexibility + injury + category_fit + congestion — the ranking number"
+        description=(
+            "vorp + scarcity + flexibility + injury + category_fit + congestion. Court Vision's "
+            "own number, always computed — it only *orders* this list when `source` is `cv`."
+        )
+    )
+    source: Literal["cv", "espn"] = Field(
+        default="cv",
+        description=(
+            "What ordered the list: `espn` takes the best remaining on ESPN's board for the "
+            "league's format, `cv` the composite `score`. Under `espn` the score is still "
+            "returned, as the visible dissenting opinion rather than the ranking key."
+        ),
+    )
+    market_rank: Optional[int] = Field(
+        default=None,
+        description="ESPN's draft rank for the league's format; None for a player ESPN does not rank",
     )
     components: List[RecommendationComponent] = []
     reason: str = Field(description="One-sentence summary of the dominant terms")

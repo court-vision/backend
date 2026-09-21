@@ -15,6 +15,8 @@ Route order matters: `/board` is declared before `/{session_id}` so the literal
 path is not parsed as a session id.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import (
@@ -70,6 +72,8 @@ router = APIRouter(prefix="/drafts", tags=["Drafts"])
         "stable and market-comparable throughout a draft.\n\n"
         "Category leagues also carry `fit_value`/`fit_rank`: the same board re-scored for the "
         "caller's own roster, with any `punt` categories weighing zero.\n\n"
+        "`market_rank` and `auction_value` come from the ESPN board matching the league's format "
+        "— STANDARD for points, ROTO for categories — which `meta.market_rank_type` names.\n\n"
         "Stateless: pick state rides in the query params, so there is no slot to count from and "
         "rows carry no availability. Use the session board once a draft room is open."
     ),
@@ -99,6 +103,16 @@ async def get_draft_board(
             "the session instead). No effect on a points league."
         ),
     ),
+    rank_source: Literal["espn", "cv"] = Query(
+        default="espn",
+        description=(
+            "What orders `recommendations`. `espn` (the default) takes the best remaining on "
+            "ESPN's own board for this league's format; `cv` uses Court Vision's composite score. "
+            "Both are computed either way, so an ESPN-ordered pick still carries CV's full "
+            "breakdown. `espn` falls back to `cv` when no market snapshot exists — "
+            "`meta.rank_source` says which actually ran."
+        ),
+    ),
     team: OwnedTeamContext = Depends(get_owned_team),
 ):
     # `get_owned_team` already loaded the league, so resolving its scoring is
@@ -107,7 +121,8 @@ async def get_draft_board(
     # No session, so no picks and no slot: BoardSession carries only the view
     # knobs the query string sets.
     return respond(await DraftBoardService.get_board(
-        scoring, picked_ids=picked, my_ids=mine, session=BoardSession(punts=tuple(punt))
+        scoring, picked_ids=picked, my_ids=mine,
+        session=BoardSession(punts=tuple(punt), rank_source=rank_source),
     ))
 
 
@@ -234,17 +249,35 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
         "recommendation, and `meta.category_need`, which says how far the roster trails an average "
         "team in each category.\n\n"
         "Rows with market data carry `availability` (`likely`/`tossup`/`gone`) for the caller's "
-        "next pick — the pick after that while the caller is on the clock."
+        "next pick — the pick after that while the caller is on the clock.\n\n"
+        "`rank_source` chooses what orders the recommendations: ESPN's own board for this "
+        "league's format (the default), or Court Vision's composite score. Every component is "
+        "computed either way, so switching views never changes the numbers on a card — only "
+        "which of the two opinions put it at the top."
     ),
     responses={
         200: {"description": "Board retrieved successfully (empty data with a message before any season data exists)"},
         404: {"description": "No such session, or it does not belong to the caller"},
     },
 )
-async def get_draft_session_board(session: OwnedDraftSessionContext = Depends(get_owned_session)):
+async def get_draft_session_board(
+    rank_source: Literal["espn", "cv"] = Query(
+        default="espn",
+        description=(
+            "What orders `recommendations`. `espn` (the default) takes the best remaining on "
+            "ESPN's own board for this league's format; `cv` uses Court Vision's composite score. "
+            "Both are computed either way, so an ESPN-ordered pick still carries CV's full "
+            "breakdown. `espn` falls back to `cv` when no market snapshot exists — "
+            "`meta.rank_source` says which actually ran."
+        ),
+    ),
+    session: OwnedDraftSessionContext = Depends(get_owned_session),
+):
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
     scoring = resolve_scoring_for_room(session.league, session.scoring_format)
-    return respond(await DraftBoardService.get_board(scoring, session=BoardSession.of(session)))
+    return respond(await DraftBoardService.get_board(
+        scoring, session=BoardSession.of(session, rank_source=rank_source)
+    ))
 
 
 @router.post(

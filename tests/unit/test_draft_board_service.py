@@ -488,7 +488,7 @@ def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkey
 
 @pytest.mark.unit
 def test_recommendations_decompose_the_score_and_sum_to_it(stub_inputs):
-    resp = _board(resolve_scoring(_league()))
+    resp = _board(resolve_scoring(_league()), session=BoardSession(rank_source="cv"))
 
     assert resp.recommendations, "a valued pool must produce recommendations"
     best = resp.recommendations[0]
@@ -535,7 +535,8 @@ def test_congestion_penalizes_deepening_a_stack_and_the_meta_reports_it(monkeypa
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
                         staticmethod(lambda my_ids, session_id=None: inputs))
 
-    resp = _board(resolve_scoring(_league(roster_slots={"C": 1, "UT": 1, "BE": 3})), mine=[1, 3, 6])
+    resp = _board(resolve_scoring(_league(roster_slots={"C": 1, "UT": 1, "BE": 3})), mine=[1, 3, 6],
+                  session=BoardSession(rank_source="cv"))
 
     meta = resp.meta.congestion
     assert meta.benched_per_week == 10.0 and meta.benched_season == 240.0
@@ -760,8 +761,8 @@ def fake_tables(monkeypatch):
 
     monkeypatch.setattr(module.settings, "nba_season", SEASON, raising=False)
     monkeypatch.setattr(module, "load_baseline_pool",
-                        lambda: [_row(1, fpts=50.0, gp=70, name="Star", espn_id=101),
-                                 _row(2, fpts=30.0, gp=60, name="Guard", espn_id=102)])
+                        lambda walk_back=False: [_row(1, fpts=50.0, gp=70, name="Star", espn_id=101),
+                                                 _row(2, fpts=30.0, gp=60, name="Guard", espn_id=102)])
     monkeypatch.setattr(DraftBoardService, "_latest_projections",
                         staticmethod(lambda season, source="espn": (None, state["projections"])))
     monkeypatch.setattr(module.DraftMarket, "latest_for_season",
@@ -779,8 +780,8 @@ def fake_tables(monkeypatch):
 
 def _market_row(player_id, **overrides):
     base = dict(player_id=player_id, as_of_date=date(2026, 9, 1), overall_rank=None,
-                adp=None, auction_value=None, default_position_id=None,
-                eligible_slot_ids=None, injury_status=None)
+                roto_rank=None, adp=None, auction_value=None, roto_auction_value=None,
+                default_position_id=None, eligible_slot_ids=None, injury_status=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -788,7 +789,9 @@ def _market_row(player_id, **overrides):
 @pytest.mark.unit
 def test_fetch_builds_the_pool_and_reads_the_market_position_columns(fake_tables):
     fake_tables["market"] = [
+        # Both of ESPN's boards: the points #1 is only the category #2.
         _market_row(1, overall_rank=1, adp=1.79, auction_value=65.0,
+                    roto_rank=2, roto_auction_value=61.0,
                     default_position_id=5, eligible_slot_ids=[4, 9, 11, 12, 13],
                     injury_status="DAY_TO_DAY"),
     ]
@@ -801,7 +804,8 @@ def test_fetch_builds_the_pool_and_reads_the_market_position_columns(fake_tables
     assert inputs.last_season_gp == {1: 70, 2: 60}
     assert inputs.market_as_of == date(2026, 9, 1)
     assert inputs.market[1] == {
-        "overall_rank": 1, "adp": 1.79, "auction_value": 65.0,
+        "overall_rank": 1, "roto_rank": 2, "adp": 1.79,
+        "auction_value": 65.0, "roto_auction_value": 61.0,
         "default_position_id": 5, "eligible_slot_ids": [4, 9, 11, 12, 13],
         "injury_status": "DAY_TO_DAY",
     }
@@ -1256,7 +1260,8 @@ def test_the_seats_change_the_recommendation_not_just_the_readout(cat_seat_table
         ))
         resp = asyncio.run(DraftBoardService.get_board(
             resolve_scoring(_cat_league()), my_ids=[3],
-            session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13),
+            session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13,
+                                 rank_source="cv"),
         ))
         return resp.recommendations[0].player_id, resp.meta.pace_source
 
@@ -1303,3 +1308,98 @@ def test_sample_weeks_reads_the_ordinary_weeks_and_skips_a_missing_one(monkeypat
 
     monkeypatch.setattr(module.schedule_service, "get_matchup_by_number", missing)
     assert DraftBoardService._sample_weeks() == ((), 0)
+
+
+# ---- ESPN's two boards, and which one orders the room ----------------------
+
+
+@pytest.mark.unit
+def test_espn_is_the_default_and_orders_recommendations_by_market_rank(stub_inputs):
+    """The default board defers to ESPN: best remaining on their list, in their
+    order, with CV's score still on every card as the dissent."""
+    resp = _board(resolve_scoring(_league()))
+
+    assert resp.meta.rank_source == "espn" and resp.meta.rank_source_requested == "espn"
+    # market ranks are 1:1, 3:2, 4:2, 2:6; players 5 and 6 have no ESPN rank,
+    # and unranked players sort after every ranked one, best CV score first.
+    assert [r.player_id for r in resp.recommendations] == [1, 3, 4, 2, 6]
+    assert [r.market_rank for r in resp.recommendations] == [1, 2, 2, 6, None]
+    assert all(r.source == "espn" for r in resp.recommendations)
+    # CV's composite is computed and returned, it just is not the ranking key:
+    # ESPN's #2 is placed above ESPN's #6 even though CV scores the #6 higher.
+    fourth, second = resp.recommendations[3], resp.recommendations[2]
+    assert (second.player_id, fourth.player_id) == (4, 2)
+    assert second.score < fourth.score
+    assert "ESPN's #1" in resp.recommendations[0].reason
+    assert "unranked by ESPN" in resp.recommendations[4].reason
+
+
+@pytest.mark.unit
+def test_cv_source_is_opt_in_and_reorders_the_same_cards(stub_inputs):
+    espn = _board(resolve_scoring(_league()))
+    cv = _board(resolve_scoring(_league()), session=BoardSession(rank_source="cv"))
+
+    assert cv.meta.rank_source == "cv"
+    assert [r.player_id for r in cv.recommendations] != [r.player_id for r in espn.recommendations]
+    # Same players, same numbers — only the ordering and the `source` differ.
+    assert {r.player_id for r in cv.recommendations} == {r.player_id for r in espn.recommendations}
+    by_id = {r.player_id: r for r in espn.recommendations}
+    assert all(r.score == by_id[r.player_id].score for r in cv.recommendations)
+    assert [r.score for r in cv.recommendations] == sorted(
+        (r.score for r in cv.recommendations), reverse=True
+    )
+
+
+@pytest.mark.unit
+def test_espn_falls_back_to_cv_without_a_market_snapshot(monkeypatch):
+    """Before the preseason pipeline has run there is nothing of ESPN's to
+    defer to. The board says what it actually ordered by rather than returning
+    an arbitrary list under ESPN's name."""
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _inputs(market={})))
+    resp = _board(resolve_scoring(_league()))
+
+    assert resp.meta.rank_source_requested == "espn" and resp.meta.rank_source == "cv"
+    assert [r.source for r in resp.recommendations] == ["cv"] * len(resp.recommendations)
+    assert [r.score for r in resp.recommendations] == sorted(
+        (r.score for r in resp.recommendations), reverse=True
+    )
+
+
+@pytest.mark.unit
+def test_a_points_league_reads_standard_and_a_category_league_reads_roto(monkeypatch):
+    """ESPN's two rankings are separate opinions, and the league's format picks
+    one. Player 2 is the points #6 and the category #1 — a category room must
+    see the category number, or it drafts off the wrong board entirely."""
+    market = _espn_market(
+        **{"1": {"roto_rank": 4, "roto_auction_value": 30.0},
+           "2": {"roto_rank": 1, "roto_auction_value": 55.0}}
+    )
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
+
+    points = _board(resolve_scoring(_league()))
+    assert points.meta.market_rank_type == "standard"
+    by_id = {r.player_id: r for r in points.data}
+    assert (by_id[1].market_rank, by_id[1].auction_value) == (1, 62.0)
+    assert (by_id[2].market_rank, by_id[2].auction_value) == (6, None)
+
+    cats = _board(resolve_scoring(_cat_league()))
+    assert cats.meta.market_rank_type == "roto"
+    by_id = {r.player_id: r for r in cats.data}
+    assert (by_id[1].market_rank, by_id[1].auction_value) == (4, 30.0)
+    assert (by_id[2].market_rank, by_id[2].auction_value) == (1, 55.0)
+    # Player 3 has no ROTO rank on this snapshot: rather than reading as "ESPN
+    # has no opinion", he falls back to his points-board rank and value.
+    assert by_id[3].market_rank == 2 and by_id[3].auction_value == 48.0
+
+
+@pytest.mark.unit
+def test_market_delta_is_measured_against_the_league_s_own_board(monkeypatch):
+    market = _espn_market(**{"2": {"roto_rank": 1}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
+
+    cats = _board(resolve_scoring(_cat_league()))
+    row = next(r for r in cats.data if r.player_id == 2)
+    assert row.market_delta == row.market_rank - row.cv_rank

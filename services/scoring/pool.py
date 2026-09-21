@@ -6,7 +6,10 @@ from the stored stat tables.
                           player's latest row of the current season.
 - load_baseline_pool():   every player's final row of the previous season
                           (gp >= BASELINE_MIN_GP), the fallback while the current
-                          season has no data yet.
+                          season has no data yet. With `walk_back=True` a player
+                          who has no qualifying row in that season falls back to
+                          the most recent season in which he does — see
+                          `baseline_records`.
 
 Rows carry the player's ESPN id and normalized name so callers can key values
 by either without a second lookup.
@@ -35,22 +38,48 @@ def baseline_season(season: Optional[str] = None) -> str:
     return season or previous_season(settings.nba_season)
 
 
-def baseline_records(season: Optional[str] = None, where=None):
-    """Each player's final PlayerSeasonStats row of `season` (gp >= BASELINE_MIN_GP), Player joined."""
-    cond = (PlayerSeasonStats.season == baseline_season(season)) & (PlayerSeasonStats.gp >= BASELINE_MIN_GP)
+def baseline_records(season: Optional[str] = None, where=None, walk_back: bool = False):
+    """Each player's final PlayerSeasonStats row of `season` (gp >= BASELINE_MIN_GP), Player joined.
+
+    With `walk_back`, the row is instead each player's most recent qualifying
+    season at or before `season` — the same query with the season pinned to a
+    ceiling rather than an equality, ordered so DISTINCT ON keeps the newest.
+
+    Why it matters: a player who missed a season has no qualifying row in it and
+    would otherwise vanish from the pool entirely. Going into 2026-27 that was
+    Haliburton, Kyrie Irving, VanVleet and Lillard — four of ESPN's top 70 — plus
+    Walker Kessler, whose 5 games fell under the floor while 57 games at 29.9
+    minutes sat in the season before. Walking back values them off the last
+    season they actually played.
+
+    The GP floor stops being a cliff under this rule. Falling below it now means
+    "look further back", not "you do not exist", and a player who clears it in
+    no season at all is genuinely unknown rather than merely unlucky — which is
+    the honest reason to leave him off a valued board.
+
+    Seasons are 'YYYY-YY' and sort lexicographically in chronological order, so
+    the ceiling and the ordering are both plain string comparisons.
+    """
+    target = baseline_season(season)
+    cond = PlayerSeasonStats.gp >= BASELINE_MIN_GP
+    cond = cond & ((PlayerSeasonStats.season <= target) if walk_back
+                   else (PlayerSeasonStats.season == target))
     if where is not None:
         cond = cond & where
+    order = ([PlayerSeasonStats.player, PlayerSeasonStats.season.desc(), PlayerSeasonStats.as_of_date.desc()]
+             if walk_back else
+             [PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc()])
     return (
         PlayerSeasonStats.select(PlayerSeasonStats, Player)
         .join(Player)
         .where(cond)
         .distinct([PlayerSeasonStats.player])
-        .order_by(PlayerSeasonStats.player, PlayerSeasonStats.as_of_date.desc())
+        .order_by(*order)
     )
 
 
 def _season_row(rec, gp: int) -> PoolRow:
-    """A season-totals row as a per-game PoolRow."""
+    """A season-totals row as a per-game PoolRow, tagged with its own season."""
     line = StatLine.from_row(rec).scaled(1 / gp)
     line.gp = 1.0
     fpts_total = float(rec.fpts or 0)
@@ -58,7 +87,7 @@ def _season_row(rec, gp: int) -> PoolRow:
         id=rec.player_id, name=rec.player.name, team=rec.team_id, gp=gp, line=line,
         fpts_avg=round(fpts_total / gp, 2), fpts_total=fpts_total,
         espn_id=rec.player.espn_id, name_normalized=rec.player.name_normalized,
-        position=rec.player.position,
+        position=rec.player.position, season=rec.season,
     )
 
 
@@ -118,10 +147,16 @@ def load_pool(window: Optional[int], season: Optional[str] = None) -> tuple[Opti
     return as_of, pool
 
 
-def load_baseline_pool(season: Optional[str] = None) -> list[PoolRow]:
-    """Every player's final previous-season row (gp >= BASELINE_MIN_GP) as per-game PoolRows."""
+def load_baseline_pool(season: Optional[str] = None,
+                       walk_back: bool = False) -> list[PoolRow]:
+    """Every player's final previous-season row as per-game PoolRows.
+
+    With `walk_back`, each player's most recent qualifying season instead. The
+    row carries the season it came from, so a caller can say a value is a year
+    older than the rest of the board rather than presenting it as current.
+    """
     pool: list[PoolRow] = []
-    for rec in baseline_records(season):
+    for rec in baseline_records(season, walk_back=walk_back):
         gp = int(rec.gp or 0)
         if gp < 1:
             continue
