@@ -93,6 +93,26 @@ class Settings(BaseSettings):
     fantasy_writer_timeout_seconds: float = 30.0  # > the writer's own 20 s ESPN timeout
     fantasy_writer_max_in_flight: int = 2
 
+    # AI layer (docs/AI_LAYER_PLAN.md). AI_ENABLED is the kill switch: off, every
+    # AI route answers 503 AI_DISABLED before any model call, so shipping the code
+    # spends nothing until both the flag and ANTHROPIC_API_KEY are set. The hard
+    # dollar ceiling is the Anthropic Console workspace spend limit; the values
+    # below are the per-request and per-day bounds that sit under it.
+    ai_enabled: bool = False
+    anthropic_api_key: Optional[SecretStr] = None
+    ai_model: str = "claude-opus-5"
+    ai_effort: str = "medium"
+    # Model calls per request. The last one is made without tools, so a request
+    # always ends in an answer rather than a half-finished tool loop.
+    ai_max_model_calls: int = 4
+    # Tool executions per request across every turn; each result is input tokens.
+    ai_max_tool_calls: int = 8
+    # Fixed 24-hour windows in the shared rate-limit storage (Redis on Railway).
+    ai_user_daily_limit: int = 30
+    ai_global_daily_limit: int = 300
+    # Wall clock for a whole request, retries included (the SDK retries 429/5xx).
+    ai_request_timeout_seconds: float = 90.0
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "console"
@@ -180,6 +200,15 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid_levels}")
         return upper_v
 
+    @field_validator("ai_effort")
+    @classmethod
+    def validate_ai_effort(cls, v: str) -> str:
+        allowed = {"low", "medium", "high", "xhigh", "max"}
+        lower_v = v.lower()
+        if lower_v not in allowed:
+            raise ValueError(f"ai_effort must be one of {sorted(allowed)}")
+        return lower_v
+
     @field_validator("log_format")
     @classmethod
     def validate_log_format(cls, v: str) -> str:
@@ -249,6 +278,24 @@ class Settings(BaseSettings):
             )
         if not self.fantasy_writer_token:
             raise ValueError("FANTASY_WRITER_TOKEN is required when ROSTER_WRITES_ENABLED is on")
+        return self
+
+    @model_validator(mode="after")
+    def require_complete_ai_config(self) -> "Settings":
+        """AI_ENABLED without a key, or with a zero budget, is a misconfiguration, not a mode."""
+        if not self.ai_enabled:
+            return self
+        if not self.anthropic_api_key:
+            raise ValueError("ANTHROPIC_API_KEY is required when AI_ENABLED is on")
+        bounds = {
+            "ai_max_model_calls": self.ai_max_model_calls,
+            "ai_max_tool_calls": self.ai_max_tool_calls,
+            "ai_user_daily_limit": self.ai_user_daily_limit,
+            "ai_global_daily_limit": self.ai_global_daily_limit,
+        }
+        invalid = [name for name, value in bounds.items() if value <= 0]
+        if invalid or self.ai_request_timeout_seconds <= 0:
+            raise ValueError(f"AI bounds must be positive: {', '.join(invalid) or 'ai_request_timeout_seconds'}")
         return self
 
     @model_validator(mode="after")
