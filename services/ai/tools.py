@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
 from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.errors import AppError
-from core.nba_calendar import nba_date_et
 from core.logging import get_logger
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
@@ -90,10 +88,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_player_status",
         "description": (
-            "A player's most recent injury report entry: status, injury, expected "
-            "return, and report_date; injury=null when there has never been a report. "
-            "The most recent report can be months old. report_age_days says how old "
-            "it is: give the report's date rather than presenting an old report as current."
+            "A player's current injury report: status, injury, expected return, "
+            "report_date, and report_age_days (never more than 7). injury=null means "
+            "Court Vision has no current report, which is not proof of health: say "
+            "there is no current injury information rather than calling the player healthy."
         ),
         "input_schema": {
             "type": "object",
@@ -149,23 +147,12 @@ async def _get_player_stats(args: PlayerStatsInput) -> dict[str, Any]:
 
 async def _get_player_status(args: PlayerStatusInput) -> dict[str, Any]:
     resp = await PlayerService.get_player_status(args.player_id)
-    # The service returns the latest report ever filed, however old: in
-    # September that is last April's. The model has no clock, so the age is
-    # computed here rather than left for it to infer.
-    today = nba_date_et()
+    # The service returns only a report from the last seven days, with its
+    # age already on it; an older one comes back as no report at all.
     return {
         "player_id": args.player_id,
         "injury": resp.data.model_dump() if resp.data else None,
-        "report_age_days": _age_days(resp.data.report_date, today) if resp.data else None,
-        "today": today.isoformat(),
     }
-
-
-def _age_days(report_date: str | None, today: date) -> int | None:
-    try:
-        return (today - date.fromisoformat((report_date or "")[:10])).days
-    except ValueError:
-        return None
 
 
 @dataclass(frozen=True)

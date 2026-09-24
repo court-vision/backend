@@ -9,7 +9,6 @@ readable `is_error` results rather than exceptions that would sink the answer.
 
 import asyncio
 import json
-from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -123,43 +122,28 @@ class TestGetPlayerStats:
 
 @pytest.mark.unit
 class TestGetPlayerStatus:
-    @pytest.fixture(autouse=True)
-    def today(self, monkeypatch):
-        monkeypatch.setattr(tools, "nba_date_et", lambda: date(2026, 9, 21))
-
-    @staticmethod
-    def _report(monkeypatch, report_date):
+    def test_no_current_report_is_null_not_healthy(self, monkeypatch):
+        """The service answers None for last April's report in September, as for no report at all."""
         async def fake(player_id):
-            return PlayerStatusResp(status=ApiStatus.SUCCESS, message="ok", data=PlayerStatusData(
-                status="Out", injury_type="Ankle", injury_detail="Sprain",
-                expected_return=None, report_date=report_date))
-        monkeypatch.setattr(PlayerService, "get_player_status", staticmethod(fake))
-
-    def test_no_report_is_null_not_healthy(self, monkeypatch):
-        async def fake(player_id):
-            return PlayerStatusResp(status=ApiStatus.SUCCESS, message="No injury record found", data=None)
+            return PlayerStatusResp(status=ApiStatus.SUCCESS, message="No current injury report", data=None)
         monkeypatch.setattr(PlayerService, "get_player_status", staticmethod(fake))
 
         body = json.loads(_run("get_player_status", {"player_id": 1630578}).content)
 
-        assert body == {"player_id": 1630578, "injury": None, "report_age_days": None, "today": "2026-09-21"}
+        assert body == {"player_id": 1630578, "injury": None}
 
-    def test_an_old_report_says_how_old_it_is(self, monkeypatch):
-        """The real case that prompted this: in September the latest report is April's."""
-        self._report(monkeypatch, "2026-04-12")
+    def test_a_current_report_keeps_its_date_and_age(self, monkeypatch):
+        async def fake(player_id):
+            return PlayerStatusResp(status=ApiStatus.SUCCESS, message="ok", data=PlayerStatusData(
+                status="Out", injury_type="Ankle", injury_detail="Sprain",
+                expected_return=None, report_date="2026-09-19", report_age_days=2))
+        monkeypatch.setattr(PlayerService, "get_player_status", staticmethod(fake))
 
         body = json.loads(_run("get_player_status", {"player_id": 1630578}).content)
 
         assert body["injury"]["status"] == "Out"
-        assert body["report_age_days"] == 162
-        assert body["today"] == "2026-09-21"
-
-    def test_an_unparseable_date_has_no_age(self, monkeypatch):
-        self._report(monkeypatch, None)
-
-        body = json.loads(_run("get_player_status", {"player_id": 1630578}).content)
-
-        assert body["report_age_days"] is None
+        assert body["injury"]["report_date"] == "2026-09-19"
+        assert body["injury"]["report_age_days"] == 2
 
 
 @pytest.mark.unit
