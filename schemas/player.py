@@ -92,6 +92,9 @@ class PlayerStatusData(ApiModel):
     injury_detail: Optional[str]
     expected_return: Optional[str]
     report_date: Optional[str]
+    # Days between report_date and today's NBA date. Never more than
+    # CURRENT_REPORT_MAX_AGE_DAYS: an older report is not returned at all.
+    report_age_days: int
 
 
 class PlayerStatusResp(BaseResponse):

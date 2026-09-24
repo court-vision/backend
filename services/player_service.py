@@ -299,11 +299,13 @@ class PlayerService:
     @staticmethod
     @db_operation("players.status")
     def get_player_status(player_id: int) -> PlayerStatusResp:
-        injury = PlayerInjury.get_current_status(player_id)
+        today = nba_date_et()
+        injury = PlayerInjury.get_current_status(player_id, as_of=today)
         if not injury:
+            # Includes a player whose latest report is too old to be current.
             return PlayerStatusResp(
                 status=ApiStatus.SUCCESS,
-                message="No injury record found",
+                message="No current injury report",
                 data=None,
             )
         return PlayerStatusResp(
@@ -315,6 +317,7 @@ class PlayerService:
                 injury_detail=injury.injury_detail,
                 expected_return=str(injury.expected_return) if injury.expected_return else None,
                 report_date=str(injury.report_date),
+                report_age_days=(today - injury.report_date).days,
             ),
         )
 
