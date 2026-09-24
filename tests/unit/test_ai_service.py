@@ -316,9 +316,9 @@ class TestFailures:
         monkeypatch.setattr(service, "run_tool", slow_run_tool)
         script(msg("tool_use", tool_use("t1", "search_players", {"name": "a"})))
 
-        with pytest.raises(ProviderTimeout):
+        with pytest.raises(ProviderTimeout) as exc:
             ask()
-        assert logged[-1][1]["outcome"] == "AI_TIMEOUT"
+        assert exc.value.error_code == logged[-1][1]["outcome"] == "AI_TIMEOUT"
 
     @pytest.mark.parametrize("status, expected_type, code", [
         (429, ProviderError, "AI_BUSY"),
@@ -340,8 +340,9 @@ class TestFailures:
     def test_connection_errors_and_timeouts(self, script, tool_log, logged):
         request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
         script(anthropic.APITimeoutError(request=request))
-        with pytest.raises(ProviderTimeout):
+        with pytest.raises(ProviderTimeout) as exc:
             ask()
+        assert exc.value.error_code == "AI_TIMEOUT"
 
         script(anthropic.APIConnectionError(request=request))
         with pytest.raises(ProviderError) as exc:
@@ -377,6 +378,39 @@ class TestFallbackBoundaries:
         assert resp.data.answer == "Answered by the fallback."
         assert resp.data.usage.fallback is True
         assert resp.data.usage.model == "claude-opus-4-8"
+
+    @staticmethod
+    def _attempt(kind, input_tokens, output_tokens):
+        return SimpleNamespace(type=kind, input_tokens=input_tokens, output_tokens=output_tokens,
+                               cache_read_input_tokens=0, cache_creation_input_tokens=0)
+
+    def test_an_attempt_declined_mid_output_is_counted(self, script, tool_log, logged):
+        """Top-level usage covers only the serving attempt; the declined one was billed too."""
+        script(msg("end_turn", fallback_marker(), text("ok"), input_tokens=100, output_tokens=20,
+                   iterations=[self._attempt("message", 80, 30), self._attempt("fallback_message", 100, 20)]))
+
+        usage = ask().data.usage
+
+        assert (usage.input_tokens, usage.output_tokens) == (180, 50)
+        assert logged[-1][1]["declined_attempts_billed"] == 1
+
+    def test_an_attempt_declined_before_output_is_not_billed(self, script, tool_log, logged):
+        script(msg("end_turn", fallback_marker(), text("ok"), input_tokens=100, output_tokens=20,
+                   iterations=[self._attempt("message", 80, 0), self._attempt("fallback_message", 100, 20)]))
+
+        usage = ask().data.usage
+
+        assert (usage.input_tokens, usage.output_tokens) == (100, 20)
+        assert logged[-1][1]["declined_attempts_billed"] == 0
+
+    def test_without_a_fallback_the_serving_attempt_is_not_counted_twice(self, script, tool_log, logged):
+        script(msg("end_turn", text("ok"), input_tokens=100, output_tokens=20,
+                   iterations=[self._attempt("message", 100, 20)]))
+
+        usage = ask().data.usage
+
+        assert (usage.input_tokens, usage.output_tokens) == (100, 20)
+        assert usage.fallback is False
 
 
 # ---- the log line ----

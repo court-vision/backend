@@ -23,7 +23,7 @@ router = APIRouter(prefix="/ai", tags=["AI"])
         429: {"description": "The caller's daily allowance is used up (AI_QUOTA_EXCEEDED)"},
         502: {"description": "The model provider failed (AI_UNAVAILABLE, AI_BUSY, AI_INCOMPLETE)"},
         503: {"description": "Turned off (AI_DISABLED) or today's global budget is spent (AI_DAILY_BUDGET_REACHED)"},
-        504: {"description": "The assistant took too long"},
+        504: {"description": "The assistant took too long (AI_TIMEOUT)"},
     },
 )
 async def ask(req: AskReq, user: UserContext = Depends(get_db_user)) -> AskResp:

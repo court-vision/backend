@@ -71,6 +71,25 @@ class TestSearchPlayers:
         assert "espn_id" not in body["players"][0]
         assert calls == [{"name": "Sengun", "limit": 8}]
 
+    def test_the_season_fallback_note_reaches_the_model(self, monkeypatch):
+        """Before opening night the service serves last season's ranks and says so only in
+        its message; without it the model would call a 2025-26 rank this season's."""
+        async def fake(**kwargs):
+            return PlayersListResp(
+                status=ApiStatus.SUCCESS,
+                message="Found 1 players (no 2026-27 data yet; showing 2025-26)",
+                data=PlayersListData(
+                    players=[PlayerListItem(id=1630578, name="Alperen Sengun", team="HOU", position="C",
+                                            games_played=72, avg_fpts=43.8, rank=14)],
+                    total=1, limit=8, offset=0, season="2025-26",
+                ))
+        monkeypatch.setattr(PlayersListService, "list_players", staticmethod(fake))
+
+        body = json.loads(_run("search_players", {"name": "Sengun"}).content)
+
+        assert body["season"] == "2025-26"
+        assert "no 2026-27 data yet; showing 2025-26" in body["note"]
+
     def test_an_empty_list_is_a_result_not_an_error(self, monkeypatch):
         async def fake(**kwargs):
             return PlayersListResp(status=ApiStatus.SUCCESS, message="No player data available", data=None)

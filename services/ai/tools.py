@@ -54,7 +54,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Find NBA players by name, or part of a name. Returns up to 8 matches, "
             "each with the NBA player_id every other tool needs, plus team, "
-            "position, games played, and fantasy rank for the current season."
+            "position, games played, and fantasy rank for the season named in "
+            "`season` -- last season's until the new one has games, which `note` "
+            "says when it happens."
         ),
         "input_schema": {
             "type": "object",
@@ -131,6 +133,8 @@ async def _search_players(args: SearchPlayersInput) -> dict[str, Any]:
         ],
         "total": data.total,
         "season": data.season,
+        # Carries the service's season note ("no 2026-27 data yet; showing ...")
+        "note": resp.message,
     }
 
 

@@ -48,6 +48,7 @@ class _Run:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     fallback: bool = False
+    declined_attempts_billed: int = 0
     model: str = ""
     stop_reason: str | None = None
     request_ids: list[str] = field(default_factory=list)
@@ -56,19 +57,30 @@ class _Run:
     def record(self, response: Any) -> None:
         usage = response.usage
         self.model_calls += 1
-        self.input_tokens += usage.input_tokens or 0
-        self.output_tokens += usage.output_tokens or 0
-        self.cache_read_input_tokens += usage.cache_read_input_tokens or 0
-        self.cache_creation_input_tokens += usage.cache_creation_input_tokens or 0
-        # The served-by signal: a fallback_message iteration means a fallback model ran
-        self.fallback = self.fallback or any(
-            getattr(entry, "type", None) == "fallback_message" for entry in (usage.iterations or [])
-        )
+        self._add(usage)
+        # Top-level usage covers only the attempt that served the message. When a
+        # fallback served it (a fallback_message iteration), the attempts that
+        # declined are `message` iterations: one declined before any output is
+        # not billed, one declined mid-output is -- so count those too, or the
+        # meters come up short on exactly the requests that cost extra.
+        entries = usage.iterations or []
+        if any(getattr(entry, "type", None) == "fallback_message" for entry in entries):
+            self.fallback = True
+            for entry in entries:
+                if getattr(entry, "type", None) == "message" and (getattr(entry, "output_tokens", 0) or 0) > 0:
+                    self._add(entry)
+                    self.declined_attempts_billed += 1
         self.model = response.model
         self.stop_reason = response.stop_reason
         request_id = getattr(response, "_request_id", None)
         if request_id:
             self.request_ids.append(request_id)
+
+    def _add(self, usage: Any) -> None:
+        self.input_tokens += getattr(usage, "input_tokens", 0) or 0
+        self.output_tokens += getattr(usage, "output_tokens", 0) or 0
+        self.cache_read_input_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+        self.cache_creation_input_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
 
     def usage(self) -> AiUsage:
         return AiUsage(
@@ -107,7 +119,7 @@ async def _create(**kwargs: Any) -> Any:
     try:
         return await get_client().beta.messages.create(**kwargs)
     except anthropic.APITimeoutError as exc:
-        raise ProviderTimeout("anthropic", "The assistant timed out; try again") from exc
+        raise ProviderTimeout("anthropic", "The assistant timed out; try again", error_code="AI_TIMEOUT") from exc
     except anthropic.APIConnectionError as exc:
         raise ProviderError("anthropic", "The assistant is unreachable; try again", error_code="AI_UNAVAILABLE") from exc
     except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
@@ -205,7 +217,7 @@ class AiService:
             outcome = "ok"
         except TimeoutError as exc:
             outcome = "AI_TIMEOUT"
-            raise ProviderTimeout("anthropic", "The assistant took too long; try again") from exc
+            raise ProviderTimeout("anthropic", "The assistant took too long; try again", error_code=outcome) from exc
         except AppError as exc:
             outcome = exc.error_code
             raise
@@ -224,6 +236,7 @@ class AiService:
                 cache_read_input_tokens=run.cache_read_input_tokens,
                 cache_creation_input_tokens=run.cache_creation_input_tokens,
                 fallback=run.fallback,
+                declined_attempts_billed=run.declined_attempts_billed,
                 stop_reason=run.stop_reason,
                 duration_ms=round((time.monotonic() - started) * 1000),
                 request_ids=run.request_ids,
