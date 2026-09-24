@@ -7,6 +7,8 @@ Uses slowapi to enforce request limits:
 """
 
 from fastapi import Request, Response
+from limits.storage import storage_from_string
+from limits.strategies import FixedWindowRateLimiter
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -43,6 +45,11 @@ limiter = Limiter(
     in_memory_fallback_enabled=False,
     key_prefix="courtvision",
 )
+
+# Quotas that belong to a caller rather than to a route -- the AI layer's daily
+# allowances (services/ai/guards.py) -- counted in the same shared storage, so
+# every replica sees one number.
+quota_limiter = FixedWindowRateLimiter(storage_from_string(_storage_uri))
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:

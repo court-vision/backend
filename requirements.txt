@@ -52,6 +52,14 @@ slowapi==0.1.9
 redis==5.2.1
 sentry-sdk[fastapi]==2.68.1
 
+# AI (anthropic 1.x runs on httpx2, which installs alongside httpx)
+anthropic==1.7.0
+docstring-parser==0.18.0
+httpcore2==2.13.0
+httpx2==2.13.0
+jiter==0.17.0
+truststore==0.10.4
+
 # Email
 resend==2.19.0
 
@@ -64,7 +72,7 @@ distro==1.9.0
 dnspython==2.8.0
 frozenlist==1.8.0
 h11==0.16.0
-idna==3.11
+idna==3.20
 multidict==6.7.1
 packaging==26.0
 propcache==0.4.1
