@@ -15,6 +15,7 @@ from services.player_games_service import PlayerGamesService
 from services.trends_service import TrendsService
 from services.ownership_service import OwnershipService
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
+from db.models.nba.player_injuries import CURRENT_REPORT_MAX_AGE_DAYS
 from core.responses import respond
 
 router = APIRouter(prefix="/players", tags=["Players"])
@@ -281,7 +282,11 @@ async def get_player_percentiles(
     "/{player_id}/status",
     response_model=PlayerStatusResp,
     summary="Get player injury status",
-    description="Get the most recent injury status for a player.",
+    description=(
+        "Get a player's current injury status. Only reports from the last "
+        f"{CURRENT_REPORT_MAX_AGE_DAYS} days count; a player whose latest report "
+        "is older has no current status and `data` is null."
+    ),
     responses={
         200: {"description": "Player status retrieved successfully"},
         429: {"description": "Rate limit exceeded"},
@@ -292,7 +297,7 @@ async def get_player_status(
     request: Request,
     player_id: int = Path(..., description="NBA player ID"),
 ) -> PlayerStatusResp:
-    """Get the most recent injury status for a player."""
+    """Get a player's current injury status."""
     return respond(await PlayerService.get_player_status(player_id=player_id))
 
 
