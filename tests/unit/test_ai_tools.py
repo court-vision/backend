@@ -81,6 +81,17 @@ class TestSearchPlayers:
         assert not outcome.is_error
         assert json.loads(outcome.content)["players"] == []
 
+    def test_a_failed_search_is_an_error_not_an_empty_result(self, monkeypatch):
+        """Otherwise the model would tell the user the player doesn't exist."""
+        async def fake(**kwargs):
+            return PlayersListResp(status=ApiStatus.ERROR, message="Failed to fetch players", data=None)
+        monkeypatch.setattr(PlayersListService, "list_players", staticmethod(fake))
+
+        outcome = _run("search_players", {"name": "Sengun"})
+
+        assert outcome.is_error
+        assert outcome.content == "Failed to fetch players"
+
 
 @pytest.mark.unit
 class TestGetPlayerStats:

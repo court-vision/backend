@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.errors import AppError
 from core.logging import get_logger
+from schemas.common import ApiStatus
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 
@@ -107,6 +108,11 @@ TOOLS: list[dict[str, Any]] = [
 
 async def _search_players(args: SearchPlayersInput) -> dict[str, Any]:
     resp = await PlayersListService.list_players(name=args.name, limit=8)
+    # The service reports its own failures as an ERROR envelope with no data.
+    # Read as an empty search, that would have the model tell the user no such
+    # player exists; raising makes it a tool error instead.
+    if resp.status != ApiStatus.SUCCESS:
+        raise AppError("PLAYER_SEARCH_FAILED", resp.message or "Player search failed")
     data = resp.data
     if data is None:
         return {"players": [], "total": 0, "note": resp.message}
