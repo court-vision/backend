@@ -191,13 +191,15 @@ class AiService:
 
     @staticmethod
     async def ask(question: str, *, user_id: int) -> AskResp:
-        guards.ensure_enabled()
-        await guards.consume_quota(user_id)
-
         run = _Run()
         started = time.monotonic()
         outcome = "INTERNAL_ERROR"
         try:
+            # Inside the logging scope: a request turned away by the kill switch
+            # or by a quota is still a request, and quota exhaustion is only
+            # visible in telemetry if the rejection is logged too.
+            guards.ensure_enabled()
+            await guards.consume_quota(user_id)
             async with asyncio.timeout(settings.ai_request_timeout_seconds):
                 answer = await _answer(question, run)
             outcome = "ok"

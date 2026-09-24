@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import anthropic
 import httpx2
 import pytest
+from limits import parse
 from pydantic import SecretStr, ValidationError
 
 from core.errors import AppError, ProviderError, ProviderTimeout, ServiceUnavailableError
@@ -147,6 +148,36 @@ class TestGuards:
         with pytest.raises(ServiceUnavailableError) as exc:
             ask(user_id=2)
         assert exc.value.error_code == "AI_DAILY_BUDGET_REACHED"
+
+    def test_a_global_rejection_does_not_spend_the_callers_allowance(self, script, tool_log, logged, monkeypatch):
+        """Otherwise retrying through a spent global budget burns a day of questions
+        no model ever saw, and the two windows reset at different times."""
+        monkeypatch.setattr(settings, "ai_global_daily_limit", 1)
+        monkeypatch.setattr(settings, "ai_user_daily_limit", 5)
+        script(msg("end_turn", text("ok")))
+
+        ask(user_id=1)  # spends the one global request
+        with pytest.raises(ServiceUnavailableError):
+            ask(user_id=2)
+
+        remaining = quota_limiter.get_window_stats(
+            parse("5/day"), "courtvision", "ai", "user:2").remaining
+        assert remaining == 5
+
+    def test_a_caller_past_their_limit_does_not_drain_the_shared_budget(self, script, tool_log, logged, monkeypatch):
+        monkeypatch.setattr(settings, "ai_user_daily_limit", 1)
+        monkeypatch.setattr(settings, "ai_global_daily_limit", 5)
+        script(msg("end_turn", text("ok")))
+
+        ask(user_id=1)
+        with pytest.raises(AppError):
+            ask(user_id=1)
+        with pytest.raises(AppError):
+            ask(user_id=1)
+
+        remaining = quota_limiter.get_window_stats(
+            parse("5/day"), "courtvision", "ai", "global").remaining
+        assert remaining == 4  # only the one answered request
 
     def test_enabled_without_a_key_does_not_boot(self):
         with pytest.raises(ValidationError, match="ANTHROPIC_API_KEY"):
@@ -379,6 +410,30 @@ class TestLogging:
         assert fields["outcome"] == "AI_DECLINED"
         assert fields["model_calls"] == 2
         assert fields["input_tokens"] == 200
+
+    def test_a_request_turned_away_by_the_kill_switch_is_still_logged(self, script, tool_log, logged, monkeypatch):
+        """While AI_ENABLED is off these are the only ai_request lines there are."""
+        monkeypatch.setattr(settings, "ai_enabled", False)
+
+        with pytest.raises(ServiceUnavailableError):
+            ask(user_id=7)
+
+        event, fields = logged[-1]
+        assert event == "ai_request"
+        assert fields["outcome"] == "AI_DISABLED"
+        assert (fields["model_calls"], fields["input_tokens"], fields["output_tokens"]) == (0, 0, 0)
+        assert fields["user_id"] == 7
+
+    def test_a_quota_rejection_is_logged(self, script, tool_log, logged, monkeypatch):
+        monkeypatch.setattr(settings, "ai_user_daily_limit", 1)
+        script(msg("end_turn", text("ok")))
+
+        ask(user_id=7)
+        with pytest.raises(AppError):
+            ask(user_id=7)
+
+        assert logged[-1][1]["outcome"] == "AI_QUOTA_EXCEEDED"
+        assert logged[-1][1]["model_calls"] == 0
 
     def test_the_question_is_not_logged(self, script, tool_log, logged):
         script(msg("end_turn", text("ok")))
