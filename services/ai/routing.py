@@ -15,7 +15,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Optional, get_args
+from typing import Any, Iterable, Optional, get_args
 
 from pydantic import Field, ValidationError, field_validator
 
@@ -26,6 +26,7 @@ from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
 from db.models.teams import Team
 from schemas.ai import (
+    AiContext,
     AiTarget,
     AnswerKind,
     GapKind,
@@ -146,14 +147,55 @@ def statmuse_url(query: str) -> Optional[str]:
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 
-def ungrounded_numbers(text: str, question: str, target: Optional[AiTarget]) -> int:
+def ungrounded_numbers(
+    text: str,
+    question: str,
+    target: Optional[AiTarget],
+    names: Iterable[str] = (),
+) -> int:
     """Numbers in the answer line that appear neither in the question nor in the
     target (a window, an ID). The router states no statistics, so anything else
-    is a number it made up. Logged, not blocked; the eval is where it fails."""
+    is a number it made up. Names the lookups returned are removed first -- a
+    team called "Lvl. 3 Goblins" is not a statistic. Logged, not blocked; the
+    eval is where it fails."""
+    for name in sorted({n for n in names if n}, key=len, reverse=True):
+        text = re.sub(re.escape(name), " ", text, flags=re.IGNORECASE)
     allowed = set(_NUMBER.findall(question))
     if target is not None:
         allowed |= set(_NUMBER.findall(target.model_dump_json()))
     return sum(1 for number in _NUMBER.findall(text) if number not in allowed)
+
+
+@db_operation("ai.route_view_names")
+def _view_names(player_ids: list[int], nba_team: Optional[str]) -> tuple[dict[int, str], Optional[str]]:
+    players = (
+        {row.id: row.name for row in Player.select(Player.id, Player.name).where(Player.id.in_(player_ids))}
+        if player_ids else {}
+    )
+    team = NBATeam.get_or_none(NBATeam.id == nba_team) if nba_team else None
+    return players, team.name if team else None
+
+
+async def describe_view(context: AiContext) -> dict[str, Any]:
+    """The caller's view for the model: its IDs, with player and NBA team names
+    added from our own tables. Without a name the model has only an ID, and
+    tries to find out whose it is by searching players at random.
+
+    Names come from nba.players / nba.teams only -- never from league data --
+    so they add no prompt-injection surface. A fantasy team stays an ID; the
+    model can ask get_my_teams for its name.
+    """
+    ids = [i for i in [context.player_id, *context.compare_ids] if i is not None]
+    names, nba_team_name = await _view_names(ids, context.nba_team) if (ids or context.nba_team) else ({}, None)
+    view: dict[str, Any] = {"page": context.page, "mode": context.mode, "team_id": context.team_id,
+                            "window": context.window}
+    if context.player_id is not None:
+        view["player"] = {"id": context.player_id, "name": names.get(context.player_id)}
+    if context.compare_ids:
+        view["compare"] = [{"id": i, "name": names.get(i)} for i in context.compare_ids]
+    if context.nba_team:
+        view["nba_team"] = {"abbrev": context.nba_team, "name": nba_team_name}
+    return {key: value for key, value in view.items() if value is not None}
 
 
 @dataclass(frozen=True)

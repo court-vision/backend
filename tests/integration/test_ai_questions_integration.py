@@ -108,3 +108,12 @@ class TestTargetLookup:
         assert found.players == {1630578}
         assert found.owned_teams == {mine.team_id}
         assert found.nba_teams == {"HOU"}
+
+    def test_view_names_come_from_our_own_tables(self, integration_db):
+        Player.create(id=1627734, espn_id=3155942, name="Domantas Sabonis", name_normalized="domantas sabonis")
+        NBATeam.insert(id="SAC", name="Sacramento Kings", conference="West", division="Pacific").on_conflict_ignore().execute()
+
+        names, team = asyncio.run(routing._view_names([1627734, 999999], "SAC"))
+
+        assert names == {1627734: "Domantas Sabonis"}
+        assert team == "Sacramento Kings"

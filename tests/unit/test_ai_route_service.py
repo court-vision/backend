@@ -97,6 +97,16 @@ def env(monkeypatch):
         return state.found
     monkeypatch.setattr(routing, "_lookup", fake_lookup)
 
+    names = {SENGUN: "Alperen Sengun", SABONIS: "Domantas Sabonis"}
+
+    async def fake_view_names(player_ids, nba_team):
+        return {i: names[i] for i in player_ids if i in names}, ("Houston Rockets" if nba_team == "HOU" else None)
+    monkeypatch.setattr(routing, "_view_names", fake_view_names)
+
+    async def fake_season_line():
+        return "NBA season: 2026-27 starts 2026-10-20; the latest season with games is 2025-26."
+    monkeypatch.setattr(service, "_season_line", fake_season_line)
+
     async def fake_record(**row):
         state.recorded.append(row)
         return 17
@@ -124,13 +134,32 @@ class TestRequest:
         route("sengun last 15", AiContext(page="terminal", mode="player", player_id=SABONIS, window="l10"))
 
         for call in fake.calls:
-            assert call["system"] == ROUTER_PROMPT
+            # the fixed prefix carries its own breakpoint so requests can share it
+            assert call["system"] == [{"type": "text", "text": ROUTER_PROMPT, "cache_control": {"type": "ephemeral"}}]
             assert call["tools"] == ROUTER_TOOLS
             # the answer format rides on every call, or the cached prefix would change
             assert call["output_config"] == {"effort": settings.ai_effort, "format": routing.ANSWER_FORMAT}
-        turn = fake.calls[0]["messages"][0]["content"]
-        assert turn.startswith('Current view: {"mode": "player", "page": "terminal", "player_id": 1627734, "window": "l10"}')
-        assert turn.endswith("Question: sengun last 15")
+        season, view, _, question = fake.calls[0]["messages"][0]["content"].split("\n")
+        assert season.startswith("NBA season: 2026-27")
+        assert json.loads(view.removeprefix("Current view: ")) == {
+            "mode": "player", "page": "terminal", "window": "l10",
+            "player": {"id": SABONIS, "name": "Domantas Sabonis"},
+        }
+        assert question == "Question: sengun last 15"
+
+    def test_the_focused_player_arrives_by_name(self, env):
+        """Given only an ID, the model searched seven random players to find out whose it was."""
+        fake = env.install(msg("end_turn", answer(kind="statmuse", text_="Sending that to StatMuse",
+                                                  statmuse_query="Alperen Sengun three point percentage by season",
+                                                  gap="no_view", missing="career shooting splits")))
+
+        route("how's his three point shooting compared to his career?",
+              AiContext(mode="player", player_id=SENGUN, compare_ids=[SABONIS], nba_team="HOU"))
+
+        view = json.loads(fake.calls[0]["messages"][0]["content"].split("\n")[1].removeprefix("Current view: "))
+        assert view["player"] == {"id": SENGUN, "name": "Alperen Sengun"}
+        assert view["compare"] == [{"id": SABONIS, "name": "Domantas Sabonis"}]
+        assert view["nba_team"] == {"abbrev": "HOU", "name": "Houston Rockets"}
 
     def test_tools_run_as_the_caller_within_the_router_toolset(self, env):
         env.install(msg("tool_use", tool_use("t1", "get_my_teams", {})),
@@ -197,6 +226,19 @@ class TestRecording:
         assert row["tool_calls"] == [{"name": "search_players", "input": {"name": "Sengun"}, "is_error": False}]
         assert row["ungrounded_numbers"] == 0
 
+    def test_a_number_inside_a_looked_up_name_is_not_made_up(self, env, monkeypatch):
+        async def teams_tool(name, raw, *, ctx=None, allowed=None):
+            return ToolOutcome('{"teams": [{"team_id": 7, "team_name": "Lvl. 3 Goblins", "league_name": "Dorm 2"}]}',
+                               is_error=False)
+        monkeypatch.setattr(service, "run_tool", teams_tool)
+        env.install(msg("tool_use", tool_use("t1", "get_my_teams", {})),
+                    msg("end_turn", answer(text_="Opening the matchup for Lvl. 3 Goblins",
+                                           target={"type": "page", "page": "matchup", "team_id": 7, "rankings": None})))
+
+        route("am I winning")
+
+        assert env.recorded[-1]["ungrounded_numbers"] == 0
+
     def test_a_made_up_number_is_counted(self, env):
         env.install(msg("end_turn", answer(text_="Sengun is averaging 21.4 points lately", target=PLAYER_TARGET)))
 
@@ -251,3 +293,31 @@ def test_recording_never_raises(monkeypatch):
     monkeypatch.setattr(questions, "_insert", boom)
 
     assert asyncio.run(questions.record(user_id=1, outcome="ok")) is None
+
+
+@pytest.mark.unit
+class TestSeasonLine:
+    """What "this season" means today. StatMuse took "this season" in the preseason
+    to be 2024-25; naming the season in the user turn lets the model write "2025-26"."""
+
+    @pytest.fixture
+    def bounds(self, monkeypatch):
+        from datetime import date
+        monkeypatch.setattr(settings, "nba_season", "2026-27")
+        monkeypatch.setattr(service, "get_season_bounds", lambda: SimpleNamespace(opening_night=date(2026, 10, 20)))
+        return date
+
+    def test_before_opening_night_it_points_at_last_season(self, bounds, monkeypatch):
+        monkeypatch.setattr(service, "nba_date_et", lambda: bounds(2026, 9, 30))
+        assert service._season_line_sync() == (
+            "NBA season: 2026-27 starts 2026-10-20; the latest season with games is 2025-26.")
+
+    def test_after_opening_night_it_is_this_season(self, bounds, monkeypatch):
+        monkeypatch.setattr(service, "nba_date_et", lambda: bounds(2026, 11, 2))
+        assert service._season_line_sync() == "NBA season: 2026-27, in progress."
+
+    def test_without_a_calendar_it_still_names_the_season(self, monkeypatch):
+        def boom():
+            raise ValueError("no calendar")
+        monkeypatch.setattr(service, "get_season_bounds", boom)
+        assert service._season_line_sync().startswith("NBA season: ")

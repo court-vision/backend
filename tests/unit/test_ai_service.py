@@ -221,6 +221,8 @@ class TestLoop:
         assert call["fallbacks"] == "default"
         assert call["betas"] == ["server-side-fallback-2026-07-01"]
         assert call["cache_control"] == {"type": "ephemeral"}
+        # the fixed prefix has its own breakpoint, so separate requests can share it
+        assert call["system"] == [{"type": "text", "text": service.SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
         assert "tool_choice" not in call
 
     def test_the_last_allowed_call_cannot_use_tools(self, script, tool_log, logged, monkeypatch):

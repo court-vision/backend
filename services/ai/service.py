@@ -26,6 +26,8 @@ import anthropic
 
 from core.errors import AppError, ProviderError, ProviderTimeout, ServiceUnavailableError
 from core.logging import get_logger
+from core.nba_calendar import nba_date_et
+from core.season import previous_season
 from core.settings import settings
 from schemas.ai import AiContext, AiToolCall, AiUsage, AskData, AskResp, RouteData, RouteResp
 from schemas.common import ApiStatus
@@ -33,6 +35,7 @@ from services.ai import guards, questions, routing
 from services.ai.client import get_client
 from services.ai.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
 from services.ai.tools import ASK_TOOL_NAMES, ROUTER_TOOL_NAMES, ROUTER_TOOLS, TOOLS, ToolContext, run_tool
+from services.schedule_service import get_season_bounds
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16_000  # a backstop the model never sees; answer length is set by the prompt
@@ -54,6 +57,8 @@ class _Run:
     stop_reason: str | None = None
     request_ids: list[str] = field(default_factory=list)
     tool_calls: list[AiToolCall] = field(default_factory=list)
+    # Player, team and league names the lookups returned (for the number check)
+    names: set[str] = field(default_factory=set)
 
     def record(self, response: Any) -> None:
         usage = response.usage
@@ -154,6 +159,8 @@ async def _run_tools(
 
     results: list[dict[str, Any]] = []
     for block, outcome in zip(runnable, outcomes):
+        if not outcome.is_error:
+            run.names |= _names_in(outcome.content)
         run.tool_calls.append(AiToolCall(name=block.name, input=_as_dict(block.input), is_error=outcome.is_error))
         results.append({"type": "tool_result", "tool_use_id": block.id, "content": outcome.content,
                         "is_error": outcome.is_error})
@@ -165,6 +172,31 @@ async def _run_tools(
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+_NAME_KEYS = ("name", "team_name", "league_name")
+
+
+def _names_in(content: str) -> set[str]:
+    """Every name-like string value in a tool result's JSON, at any depth."""
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return set()
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _NAME_KEYS and isinstance(value, str):
+                    found.add(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+    walk(data)
+    return found
 
 
 async def _loop(
@@ -192,7 +224,10 @@ async def _loop(
         response = await _create(
             model=settings.ai_model,
             max_tokens=MAX_TOKENS,
-            system=system,
+            # An explicit breakpoint on the fixed prefix (tools + system) lets
+            # requests share it. The top-level breakpoint below sits after each
+            # request's own question, so on its own no two requests ever match.
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=tools,
             messages=messages,
             thinking={"type": "adaptive"},
@@ -233,11 +268,29 @@ async def _answer(question: str, run: _Run) -> str:
     return _final_text(response)
 
 
-def _router_turn(question: str, context: AiContext) -> str:
-    """The user turn: the current view as ID-only JSON, then the question. Kept out of
-    the system prompt so the cached prefix is the same for everyone."""
-    view = context.model_dump(exclude_none=True, exclude_defaults=True)
-    return f"Current view: {json.dumps(view, sort_keys=True)}\n\nQuestion: {question}"
+def _router_turn(question: str, view: dict[str, Any], season: str) -> str:
+    """The user turn: the season, the current view, then the question. Kept out of the
+    system prompt so the cached prefix is the same for everyone."""
+    return f"{season}\nCurrent view: {json.dumps(view, sort_keys=True)}\n\nQuestion: {question}"
+
+
+def _season_line_sync() -> str:
+    """Which season "this season" means today. Before opening night it's last
+    season's games that exist -- StatMuse and our own views both answer with those."""
+    current = settings.nba_season
+    try:
+        opening = get_season_bounds().opening_night
+    except Exception:
+        return f"NBA season: {current}."
+    if nba_date_et() < opening:
+        return (f"NBA season: {current} starts {opening.isoformat()}; "
+                f"the latest season with games is {previous_season(current)}.")
+    return f"NBA season: {current}, in progress."
+
+
+async def _season_line() -> str:
+    # The calendar is a cached file read, but the first one still touches disk
+    return await asyncio.to_thread(_season_line_sync)
 
 
 def _log_request(endpoint: str, user_id: int, outcome: str, run: _Run, started: float, **extra: Any) -> None:
@@ -310,8 +363,10 @@ class AiService:
             await guards.consume_quota(user_id)
             reached_model = True
             async with asyncio.timeout(settings.ai_request_timeout_seconds):
+                view = await routing.describe_view(context)
+                run.names |= {p["name"] for p in [view.get("player"), *view.get("compare", [])] if p and p.get("name")}
                 response = await _loop(
-                    _router_turn(question, context),
+                    _router_turn(question, view, await _season_line()),
                     run,
                     system=ROUTER_PROMPT,
                     tools=ROUTER_TOOLS,
@@ -320,7 +375,7 @@ class AiService:
                     output_format=routing.ANSWER_FORMAT,
                 )
                 answer = await routing.validate(routing.parse_answer(_final_text(response)), user_id=user_id)
-            ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target)
+            ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target, run.names)
             outcome = "ok"
         except TimeoutError as exc:
             outcome = "AI_TIMEOUT"

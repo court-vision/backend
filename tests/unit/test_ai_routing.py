@@ -110,6 +110,49 @@ class TestUngroundedNumbers:
     def test_a_statistic_the_router_made_up_is_counted(self):
         assert routing.ungrounded_numbers("He's averaging 21.4 points", "how's sengun", player()) == 1
 
+    def test_numbers_inside_names_are_not_statistics(self):
+        text = "Opening the matchup for your Lvl. 3 Goblins team in Dorm League 2"
+        assert routing.ungrounded_numbers(text, "am I winning", None) == 2
+        assert routing.ungrounded_numbers(text, "am I winning", None, ["lvl. 3 goblins", "Dorm League 2"]) == 0
+
+    def test_removing_names_does_not_hide_a_made_up_stat(self):
+        text = "Lvl. 3 Goblins lead by 12.5"
+        assert routing.ungrounded_numbers(text, "am I winning", None, ["Lvl. 3 Goblins"]) == 1
+
+
+@pytest.mark.unit
+def test_describe_view_names_players_and_nba_teams_but_not_fantasy_teams(monkeypatch):
+    from schemas.ai import AiContext
+    seen = []
+
+    async def fake(player_ids, nba_team):
+        seen.append((player_ids, nba_team))
+        return {SENGUN: "Alperen Sengun"}, "Houston Rockets"
+    monkeypatch.setattr(routing, "_view_names", fake)
+
+    view = asyncio.run(routing.describe_view(AiContext(
+        page="terminal", mode="player", player_id=SENGUN, compare_ids=[UNKNOWN], team_id=7, nba_team="HOU",
+        window="l15")))
+
+    assert seen == [([SENGUN, UNKNOWN], "HOU")]
+    assert view == {
+        "page": "terminal", "mode": "player", "team_id": 7, "window": "l15",
+        "player": {"id": SENGUN, "name": "Alperen Sengun"},
+        "compare": [{"id": UNKNOWN, "name": None}],
+        "nba_team": {"abbrev": "HOU", "name": "Houston Rockets"},
+    }
+
+
+@pytest.mark.unit
+def test_an_empty_view_needs_no_lookup(monkeypatch):
+    from schemas.ai import AiContext
+
+    async def fail(*args):
+        raise AssertionError("no lookup for an empty view")
+    monkeypatch.setattr(routing, "_view_names", fail)
+
+    assert asyncio.run(routing.describe_view(AiContext(page="rankings"))) == {"page": "rankings"}
+
 
 @pytest.mark.unit
 class TestParse:
