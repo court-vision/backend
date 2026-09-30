@@ -76,11 +76,13 @@ still carries CV's full score as the visible dissenting opinion, and a CV-ordere
 one names ESPN's rank so the disagreement is on the card. `rank_source` falls
 back to `cv` when no market snapshot has been taken, and the meta says so.
 
-The board's own row order is a separate question from the strip's, and not the
-caller's to choose: `rank_basis` (services.draft_market.rank_basis_for) puts
-ESPN's published rank in the gutter of every ESPN room — a league ESPN runs, a
-room with no league at all, or one following an ESPN draft — with CV's rank
-beside it, and keeps CV's order for a room whose league lives elsewhere or
+The board's own row order is a separate question from the strip's. `board`
+chooses it — `espn` by default, `cv` as the opt-in for a drafter who would
+rather draft off Court Vision's rankings outright — and `rank_basis`
+(services.draft_market.rank_basis_for) says what actually ran: ESPN's
+published rank in the gutter of every ESPN room — a league ESPN runs, a room
+with no league at all, or one following an ESPN draft — with CV's rank beside
+it; CV's order when asked for, for a room whose league lives elsewhere, or
 while no snapshot exists. Rows come back already in that order, `board_rank`
 naming each row's place. Players the basis does not rank trail every ranked one
 in the other opinion's order with no number of their own, and a rookie ESPN
@@ -227,13 +229,16 @@ class BoardSession:
     draft_type: str = "snake"
     punts: tuple[str, ...] = ()
     rank_source: str = "cv"                 # cv | espn — what orders recommendations
+    board_source: str = "espn"              # espn | cv — whose rankings the caller asked to order the rows
     espn_league_id: Optional[int] = None    # the ESPN draft the room follows, when it does
     draft_front: Optional[int] = None       # one past the last pick made on the clock
     my_next_pick: Optional[int] = None      # my next turn, counted from the front
     my_following_pick: Optional[int] = None  # and the turn after that
 
     @classmethod
-    def of(cls, ctx: "OwnedDraftSessionContext", rank_source: str = "cv") -> "BoardSession":
+    def of(
+        cls, ctx: "OwnedDraftSessionContext", rank_source: str = "cv", board_source: str = "espn"
+    ) -> "BoardSession":
         return cls(
             session_id=ctx.session_id,
             my_slot=ctx.my_slot,
@@ -242,6 +247,7 @@ class BoardSession:
             draft_type=ctx.draft_type,
             punts=tuple(ctx.punts),
             rank_source=rank_source,
+            board_source=board_source,
             espn_league_id=ctx.espn_league_id,
         )
 
@@ -607,7 +613,9 @@ class DraftBoardService:
         # Whose board this is — decided before a row exists, because every row's
         # `board_rank` is that decision applied to one player.
         has_market = any(market_rank_of(m, rank_type) is not None for m in inputs.market.values())
-        basis, basis_reason = rank_basis_for(scoring.league, session.espn_league_id, has_market)
+        basis, basis_reason = rank_basis_for(
+            scoring.league, session.espn_league_id, has_market, requested=session.board_source
+        )
 
         rows: list[DraftBoardRow] = []
         candidates: list[dict] = []
@@ -787,6 +795,7 @@ class DraftBoardService:
                 market_rank_type=rank_type,
                 rank_basis=basis,
                 rank_basis_reason=basis_reason,
+                rank_basis_requested=session.board_source,
                 session_id=session.session_id,
                 league_size=league_size,
                 roster_slots=roster_slots,

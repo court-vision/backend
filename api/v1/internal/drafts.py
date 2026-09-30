@@ -74,7 +74,7 @@ router = APIRouter(prefix="/drafts", tags=["Drafts"])
         "caller's own roster, with any `punt` categories weighing zero.\n\n"
         "`market_rank` and `auction_value` come from the ESPN board matching the league's format "
         "— STANDARD for points, ROTO for categories — which `meta.market_rank_type` names.\n\n"
-        "Rows come back in the order `meta.rank_basis` names: ESPN's published rank in an ESPN "
+        "Rows come back in the order `meta.rank_basis` names — `board` asks for one, the meta says what ran: ESPN's published rank in an ESPN "
         "room (a league ESPN runs, or a team with no synced league — its market pool is ESPN's "
         "anyway), with `board_rank` as each row's place and players ESPN does not rank trailing "
         "in CV order; Court Vision's rank for a league elsewhere, or while no snapshot exists.\n\n"
@@ -107,6 +107,15 @@ async def get_draft_board(
             "the session instead). No effect on a points league."
         ),
     ),
+    board: Literal["espn", "cv"] = Query(
+        default="espn",
+        description=(
+            "Whose rankings order the rows. `espn` (the default) is ESPN's published draft rank "
+            "for this league's format — the order an ESPN draft room shows — wherever the room can "
+            "have it; `cv` is Court Vision's ranking, the opt-in. `meta.rank_basis` says which "
+            "actually ran and `meta.rank_basis_reason` why."
+        ),
+    ),
     rank_source: Literal["cv", "espn"] = Query(
         default="cv",
         description=(
@@ -127,7 +136,7 @@ async def get_draft_board(
     # knobs the query string sets.
     return respond(await DraftBoardService.get_board(
         scoring, picked_ids=picked, my_ids=mine,
-        session=BoardSession(punts=tuple(punt), rank_source=rank_source),
+        session=BoardSession(punts=tuple(punt), rank_source=rank_source, board_source=board),
     ))
 
 
@@ -271,6 +280,15 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
     },
 )
 async def get_draft_session_board(
+    board: Literal["espn", "cv"] = Query(
+        default="espn",
+        description=(
+            "Whose rankings order the rows. `espn` (the default) is ESPN's published draft rank "
+            "for this league's format — the order an ESPN draft room shows — wherever the room can "
+            "have it; `cv` is Court Vision's ranking, the opt-in. `meta.rank_basis` says which "
+            "actually ran and `meta.rank_basis_reason` why."
+        ),
+    ),
     rank_source: Literal["cv", "espn"] = Query(
         default="cv",
         description=(
@@ -287,7 +305,7 @@ async def get_draft_session_board(
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
     scoring = resolve_scoring_for_room(session.league, session.scoring_format)
     return respond(await DraftBoardService.get_board(
-        scoring, session=BoardSession.of(session, rank_source=rank_source)
+        scoring, session=BoardSession.of(session, rank_source=rank_source, board_source=board)
     ))
 
 

@@ -647,16 +647,24 @@ class DraftBoardMeta(ApiModel):
         default="cv",
         description=(
             "Whose rank orders the rows and fills `board_rank`. `espn` in an ESPN room: a league "
-            "ESPN runs, a room with no league at all, or one following an ESPN draft. `cv` for a "
-            "league elsewhere, or while no market snapshot exists. Not a caller's choice — "
-            "`rank_source` is the recommendations' knob, this is the board's fact."
+            "ESPN runs, a room with no league at all, or one following an ESPN draft. `cv` when the "
+            "caller asked for Court Vision's rankings (`board=cv`), for a league elsewhere, or while "
+            "no market snapshot exists. `board` asks; this is what ran."
         ),
     )
     rank_basis_reason: Literal[
-        "espn_league", "league_less_room", "linked_espn_draft", "provider_not_espn", "no_market_snapshot"
+        "espn_league", "league_less_room", "linked_espn_draft", "caller_chose_cv",
+        "provider_not_espn", "no_market_snapshot",
     ] = Field(
         default="provider_not_espn",
         description="Why `rank_basis` is what it is, in the words the room shows",
+    )
+    rank_basis_requested: Literal["espn", "cv"] = Field(
+        default="espn",
+        description=(
+            "What the caller asked `board` for. Differs from `rank_basis` only when `espn` was asked "
+            "for and the room cannot have it: a league elsewhere, or no market snapshot yet."
+        ),
     )
     session_id: Optional[int] = None            # set when the board was read for a draft session
     league_size: Optional[int] = None           # teams in the draft; sets replacement level with roster_slots
