@@ -76,19 +76,28 @@ def test_every_internal_route_carries_an_auth_dependency(unauthed_app):
     """A route under /v1/internal that forgets its auth dependency is reachable by
     anyone. This was true of POST /yahoo/validate_league until it was removed:
     the ESPN router declared auth at router level and the Yahoo router did not."""
-    from fastapi.routing import APIRoute
+    from fastapi.routing import APIRoute, iter_route_contexts
 
     from api.deps import get_db_user
     from core.clerk_auth import get_current_user, verify_clerk_token
     from core.pipeline_auth import verify_pipeline_token
 
     guards = {get_db_user, get_current_user, verify_clerk_token, verify_pipeline_token}
+    # Since FastAPI 0.137, app.routes holds included routers as tree nodes, so a
+    # flat walk finds no /v1/internal route at all and this passes vacuously.
+    # The route contexts carry the prefixed path and a dependant that includes
+    # router-level dependencies.
+    internal = [
+        route
+        for route in iter_route_contexts(unauthed_app.routes)
+        if isinstance(route.original_route, APIRoute)
+        and route.path.startswith("/v1/internal")
+    ]
+    assert internal, "no /v1/internal routes found: the route walk is broken"
     unguarded = sorted(
         f"{sorted(route.methods)} {route.path}"
-        for route in unauthed_app.routes
-        if isinstance(route, APIRoute)
-        and route.path.startswith("/v1/internal")
-        and route.path not in UNAUTHENTICATED_INTERNAL_ROUTES
+        for route in internal
+        if route.path not in UNAUTHENTICATED_INTERNAL_ROUTES
         and not (guards & _dependency_calls(route.dependant))
     )
     assert unguarded == []
