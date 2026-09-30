@@ -57,6 +57,7 @@ def clean_tables(integration_db):
             nba.player_season_stats,
             nba.player_game_stats,
             nba.games,
+            nba.player_history,
             nba.players
         RESTART IDENTITY CASCADE
     """)
