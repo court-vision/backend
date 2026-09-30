@@ -54,10 +54,17 @@ class ResolvedScoring:
 
 
 def _league_categories(league: Optional["League"]) -> Optional[CategoryScoring]:
-    """The league's own categories when it is a synced category league, else None."""
-    if league is not None and league.scoring_type == "categories" and league.categories:
+    """The league's own categories when it is a synced category league, else None.
+
+    Roto is a category league too — the same categories, scored as season-long
+    standings instead of weekly matchups — so it resolves to categories with
+    `win_mode == "roto"` rather than falling through to points, which scored an
+    ESPN ROTO league by fantasy points it never counts.
+    """
+    if league is not None and league.scoring_type in ("categories", "roto") and league.categories:
         cats = [CategoryDef.from_json(_as_json(c)) for c in league.categories]
-        return CategoryScoring(cats, league.category_win_mode or "each_category")
+        mode = "roto" if league.scoring_type == "roto" else (league.category_win_mode or "each_category")
+        return CategoryScoring(cats, mode)
     return None
 
 

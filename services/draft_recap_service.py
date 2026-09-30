@@ -28,9 +28,8 @@ from schemas.draft import (
     RecapStandingResp,
 )
 from services.draft_board_service import (
-    DEFAULT_PROJECTED_GP,
-    VALUE_DECIMALS,
     BoardInputs,
+    BoardSession,
     DraftBoardService,
 )
 from services.draft_recap import Recap, RecapPick, build_recap, grade_basis_for
@@ -97,15 +96,12 @@ class DraftRecapService:
         picks: list[RecapPick],
     ) -> DraftRecapResp:
         cat_defs = rankable_categories(scoring) if scoring.is_categories else []
-        entries = DraftBoardService.rank_pool(scoring, inputs.pool, cat_defs)
+        entries = DraftBoardService.rank_pool(scoring, inputs, cat_defs, BoardSession.of(session))
 
-        ladder = [(row.id, value) for row, value, _cats, _z, _sum in entries]
-        category_z = {row.id: z for row, _v, _c, z, _s in entries if z}
-        season_value = {
-            row.id: round(value * (inputs.projected_gp.get(row.id) or DEFAULT_PROJECTED_GP), VALUE_DECIMALS)
-            for row, value, _c, _z, _s in entries
-        }
-        pool = {row.id: row for row, *_rest in entries}
+        ladder = [(entry.row.id, entry.value) for entry in entries]
+        category_z = {entry.row.id: entry.z for entry in entries if entry.z}
+        season_value = {entry.row.id: entry.season_value for entry in entries}
+        pool = {entry.row.id: entry.row for entry in entries}
 
         rank_type = DraftBoardService._rank_type(scoring)
         grade_basis, grade_basis_reason = grade_basis_for(

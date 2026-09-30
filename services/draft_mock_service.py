@@ -552,16 +552,16 @@ class DraftMockService:
         """CV value as the draft order, when there is no market to draft by."""
         inputs = DraftBoardService._fetch_inputs(frozenset(), session_id)
         cat_defs = rankable_categories(scoring) if scoring.is_categories else []
-        entries = DraftBoardService.rank_pool(scoring, inputs.pool, cat_defs)
+        entries = DraftBoardService.rank_pool(scoring, inputs, cat_defs)
         candidates = [
             MockCandidate(
-                player_id=row.id,
-                espn_id=row.espn_id,
-                name=row.name,
+                player_id=entry.row.id,
+                espn_id=entry.row.espn_id,
+                name=entry.row.name,
                 order_key=float(cv_rank),
             )
-            for cv_rank, (row, *_rest) in enumerate(entries, start=1)
-            if row.id not in drafted
+            for cv_rank, entry in enumerate(entries, start=1)
+            if entry.row.id not in drafted
         ]
         return MockPool(
             candidates=candidates,       # already in cv_rank order; keys are unique

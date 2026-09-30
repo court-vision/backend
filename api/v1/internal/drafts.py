@@ -15,7 +15,7 @@ Route order matters: `/board` is declared before `/{session_id}` so the literal
 path is not parsed as a session id.
 """
 
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -47,6 +47,7 @@ from schemas.draft import (
     MockAdvanceResponse,
 )
 from services.draft_board_service import BoardSession, DraftBoardService
+from services.valuation.engine import playoff_weight_of
 from services.draft_import_service import DraftImportService
 from services.draft_mock_service import DraftMockService
 from services.draft_recap_service import DraftRecapService
@@ -55,6 +56,14 @@ from services.draft_sync_service import DraftSyncService
 from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
+
+
+_PLAYOFF_WEIGHT_DOC = (
+    "How many regular-season games one game in the league's fantasy-playoff weeks counts as "
+    "in Court Vision's value: 1 (playoffs weigh nothing extra) to 4, snapped to 1, 1.5, 2, 3 "
+    "or 4. Default 2. Moves `cv_rank`, `season_games` and the recommendations; ESPN's order "
+    "never moves with it. `meta.playoffs` names the weeks and echoes the weight used."
+)
 
 
 @router.get(
@@ -127,6 +136,12 @@ async def get_draft_board(
             "`meta.rank_source` says which actually ran."
         ),
     ),
+    playoff_weight: Optional[float] = Query(
+        default=None,
+        ge=1.0,
+        le=4.0,
+        description=_PLAYOFF_WEIGHT_DOC,
+    ),
     team: OwnedTeamContext = Depends(get_owned_team),
 ):
     # `get_owned_team` already loaded the league, so resolving its scoring is
@@ -136,7 +151,8 @@ async def get_draft_board(
     # knobs the query string sets.
     return respond(await DraftBoardService.get_board(
         scoring, picked_ids=picked, my_ids=mine,
-        session=BoardSession(punts=tuple(punt), rank_source=rank_source, board_source=board),
+        session=BoardSession(punts=tuple(punt), rank_source=rank_source, board_source=board,
+                             playoff_weight=playoff_weight_of(playoff_weight)),
     ))
 
 
@@ -300,12 +316,21 @@ async def get_draft_session_board(
             "`meta.rank_source` says which actually ran."
         ),
     ),
+    playoff_weight: Optional[float] = Query(
+        default=None,
+        ge=1.0,
+        le=4.0,
+        description=_PLAYOFF_WEIGHT_DOC,
+    ),
     session: OwnedDraftSessionContext = Depends(get_owned_session),
 ):
     # `get_owned_session` already loaded the league, so scoring resolution is pure.
     scoring = resolve_scoring_for_room(session.league, session.scoring_format)
     return respond(await DraftBoardService.get_board(
-        scoring, session=BoardSession.of(session, rank_source=rank_source, board_source=board)
+        scoring, session=BoardSession.of(
+            session, rank_source=rank_source, board_source=board,
+            playoff_weight=playoff_weight_of(playoff_weight),
+        )
     ))
 
 
