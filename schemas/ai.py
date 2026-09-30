@@ -7,7 +7,7 @@ block makes each request's token spend visible to the caller as well as to
 the `ai_request` log line.
 """
 
-from typing import Any, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import Field
 
@@ -55,3 +55,107 @@ class AskResp(BaseResponse):
     """Response for POST /v1/internal/ai/ask."""
 
     data: Optional[AskData] = None
+
+
+# ------------------------------------------------------------ Router (Phase 1)
+#
+# POST /v1/internal/ai/route takes a question to the place that answers it:
+# a Court Vision view (`show`), StatMuse (`statmuse`), or an honest `cannot`
+# (docs/AI_PHASE1_PLAN.md). The model picks the destination; the server
+# validates it before anything reaches the client.
+
+# `season`, or the last N games for N in 1..82 -- the terminal's `:window` range
+WINDOW_PATTERN = r"^(season|l([1-9]|[1-7][0-9]|8[0-2]))$"
+
+TerminalMode = Literal["overview", "player", "team", "nba_team"]
+RoutablePage = Literal["rankings", "streamers", "matchup", "lineup-generation", "your-teams", "draft", "playoffs"]
+AnswerKind = Literal["show", "statmuse", "cannot"]
+GapKind = Literal["no_view", "no_data", "out_of_scope", "invalid_target"]
+
+
+class AiContext(ApiModel):
+    """Where the user is when they ask. IDs only -- never names from league data,
+    so the context adds no prompt-injection surface."""
+
+    page: Optional[str] = Field(None, max_length=40, description="Current route, e.g. 'terminal'")
+    mode: Optional[TerminalMode] = Field(None, description="Terminal mode, when on the terminal")
+    player_id: Optional[int] = Field(None, gt=0, description="Focused NBA player ID")
+    compare_ids: list[int] = Field(default_factory=list, max_length=4, description="NBA player IDs")
+    team_id: Optional[int] = Field(None, gt=0, description="Selected fantasy team ID")
+    nba_team: Optional[str] = Field(None, pattern=r"^[A-Z]{2,3}$", description="Focused NBA team abbreviation")
+    window: Optional[str] = Field(None, pattern=WINDOW_PATTERN, description="Terminal stat window")
+
+
+class RouteReq(ApiModel):
+    """Body for POST /v1/internal/ai/route."""
+
+    question: str = Field(..., min_length=1, max_length=500, description="The question, in plain language")
+    context: AiContext = Field(default_factory=AiContext)
+
+
+class TerminalTarget(ApiModel):
+    """Open the terminal in a mode, focused on a subject."""
+
+    type: Literal["terminal"] = "terminal"
+    mode: TerminalMode
+    player_id: Optional[int] = Field(None, description="NBA player ID; required for player mode")
+    compare_ids: list[int] = Field(default_factory=list, description="NBA player IDs, at most 4; player mode only")
+    team_id: Optional[int] = Field(None, description="The caller's fantasy team; required for team mode")
+    nba_team: Optional[str] = Field(None, description="NBA team abbreviation; required for nba_team mode")
+    window: Optional[str] = Field(None, pattern=WINDOW_PATTERN, description="`season` or `lN`")
+
+
+class RankingsParams(ApiModel):
+    """URL parameters for /rankings (frontend lib/rankings-params.ts)."""
+
+    scope: Optional[Literal["global", "league"]] = None
+    format: Optional[Literal["points", "categories"]] = None
+    window: Optional[Literal[7, 14, 30]] = Field(None, description="Days; null means season")
+    cats: list[str] = Field(default_factory=list, description="Category keys, e.g. ['blk', 'stl']")
+    min_games: Optional[int] = Field(None, ge=1, le=82)
+
+
+class PageTarget(ApiModel):
+    """Navigate to a page, optionally selecting one of the caller's teams first."""
+
+    type: Literal["page"] = "page"
+    page: RoutablePage
+    team_id: Optional[int] = Field(None, description="Set as the selected team before navigating")
+    rankings: Optional[RankingsParams] = Field(None, description="Only when page is rankings")
+
+
+AiTarget = Annotated[Union[TerminalTarget, PageTarget], Field(discriminator="type")]
+
+
+class RouteData(ApiModel):
+    kind: AnswerKind = Field(..., description="show: open `target` · statmuse: link out · cannot: say so")
+    text: str = Field(..., description="One line for the user")
+    target: Optional[AiTarget] = Field(None, description="Where to go, when kind is show")
+    statmuse_query: Optional[str] = Field(None, description="The question restated in full, when kind is statmuse")
+    statmuse_url: Optional[str] = Field(None, description="Built by the server from statmuse_query")
+    suggestions: list[str] = Field(default_factory=list, description="Questions it can answer, when kind is cannot")
+    gap: Optional[GapKind] = Field(None, description="Why a question could not be answered in Court Vision")
+    question_id: Optional[int] = Field(None, description="For feedback; null if the question could not be logged")
+    sources: list[AiToolCall] = Field(default_factory=list, description="Lookups the router made")
+    usage: AiUsage
+
+
+class RouteResp(BaseResponse):
+    """Response for POST /v1/internal/ai/route."""
+
+    data: Optional[RouteData] = None
+
+
+class AiFeedbackReq(ApiModel):
+    feedback: Optional[Literal["up", "down"]] = Field(..., description="null clears earlier feedback")
+
+
+class AiFeedbackData(ApiModel):
+    question_id: int
+    feedback: Optional[Literal["up", "down"]] = None
+
+
+class AiFeedbackResp(BaseResponse):
+    """Response for POST /v1/internal/ai/questions/{question_id}/feedback."""
+
+    data: Optional[AiFeedbackData] = None

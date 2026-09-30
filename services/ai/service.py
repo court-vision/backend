@@ -1,5 +1,5 @@
 """
-The bounded tool loop behind POST /v1/internal/ai/ask.
+The bounded tool loop behind POST /v1/internal/ai/ask and /ai/route.
 
 A hand-written loop rather than the SDK's beta tool runner, because the
 bounds are the point: at most `ai_max_model_calls` model calls, the last one
@@ -17,6 +17,7 @@ still comes back means the whole chain declined.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,12 +27,12 @@ import anthropic
 from core.errors import AppError, ProviderError, ProviderTimeout, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
-from schemas.ai import AiToolCall, AiUsage, AskData, AskResp
+from schemas.ai import AiContext, AiToolCall, AiUsage, AskData, AskResp, RouteData, RouteResp
 from schemas.common import ApiStatus
-from services.ai import guards
+from services.ai import guards, questions, routing
 from services.ai.client import get_client
-from services.ai.prompts import SYSTEM_PROMPT
-from services.ai.tools import TOOLS, run_tool
+from services.ai.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
+from services.ai.tools import ASK_TOOL_NAMES, ROUTER_TOOL_NAMES, ROUTER_TOOLS, TOOLS, ToolContext, run_tool
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16_000  # a backstop the model never sees; answer length is set by the prompt
@@ -133,18 +134,26 @@ async def _create(**kwargs: Any) -> Any:
         raise AppError("AI_REQUEST_REJECTED", "The assistant couldn't process that question", status_code=500) from exc
 
 
-async def _run_tools(tool_uses: list[Any], run: _Run) -> list[dict[str, Any]]:
+async def _run_tools(
+    tool_uses: list[Any],
+    run: _Run,
+    *,
+    ctx: ToolContext | None,
+    allowed: frozenset[str],
+) -> list[dict[str, Any]]:
     """Execute this turn's tool calls within the request's remaining budget.
 
     Every tool_use gets a tool_result -- over-budget calls get a refusal the
     model can read -- and all results go back in one user message.
     """
     budget = max(settings.ai_max_tool_calls - len(run.tool_calls), 0)
-    allowed, over_budget = tool_uses[:budget], tool_uses[budget:]
-    outcomes = await asyncio.gather(*(run_tool(block.name, block.input) for block in allowed))
+    runnable, over_budget = tool_uses[:budget], tool_uses[budget:]
+    outcomes = await asyncio.gather(*(
+        run_tool(block.name, block.input, ctx=ctx, allowed=allowed) for block in runnable
+    ))
 
     results: list[dict[str, Any]] = []
-    for block, outcome in zip(allowed, outcomes):
+    for block, outcome in zip(runnable, outcomes):
         run.tool_calls.append(AiToolCall(name=block.name, input=_as_dict(block.input), is_error=outcome.is_error))
         results.append({"type": "tool_result", "tool_use_id": block.id, "content": outcome.content,
                         "is_error": outcome.is_error})
@@ -158,19 +167,36 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-async def _answer(question: str, run: _Run) -> str:
-    messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+async def _loop(
+    user_turn: str,
+    run: _Run,
+    *,
+    system: str,
+    tools: list[dict[str, Any]],
+    allowed: frozenset[str],
+    ctx: ToolContext | None = None,
+    output_format: dict[str, Any] | None = None,
+) -> Any:
+    """Run the bounded loop and return the final response.
+
+    `output_format` goes on every call, not just the last: it is part of the
+    request, so changing it between calls would change the cached prefix.
+    """
+    output_config: dict[str, Any] = {"effort": settings.ai_effort}
+    if output_format is not None:
+        output_config["format"] = output_format
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user_turn}]
     response: Any = None
     for call in range(1, settings.ai_max_model_calls + 1):
         final = call == settings.ai_max_model_calls or len(run.tool_calls) >= settings.ai_max_tool_calls
         response = await _create(
             model=settings.ai_model,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
+            system=system,
+            tools=tools,
             messages=messages,
             thinking={"type": "adaptive"},
-            output_config={"effort": settings.ai_effort},
+            output_config=output_config,
             # Calls within one request are seconds apart, so each re-reads the last one's prefix
             cache_control={"type": "ephemeral"},
             betas=[FALLBACK_BETA],
@@ -191,12 +217,51 @@ async def _answer(question: str, run: _Run) -> str:
         if final or response.stop_reason != "tool_use" or not tool_uses:
             break
         messages.append({"role": "assistant", "content": content})
-        messages.append({"role": "user", "content": await _run_tools(tool_uses, run)})
+        messages.append({"role": "user", "content": await _run_tools(tool_uses, run, ctx=ctx, allowed=allowed)})
+    return response
 
-    answer = "".join(block.text for block in _served_content(response.content) if block.type == "text").strip()
-    if not answer:
+
+def _final_text(response: Any) -> str:
+    text = "".join(block.text for block in _served_content(response.content) if block.type == "text").strip()
+    if not text:
         raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
-    return answer
+    return text
+
+
+async def _answer(question: str, run: _Run) -> str:
+    response = await _loop(question, run, system=SYSTEM_PROMPT, tools=TOOLS, allowed=ASK_TOOL_NAMES)
+    return _final_text(response)
+
+
+def _router_turn(question: str, context: AiContext) -> str:
+    """The user turn: the current view as ID-only JSON, then the question. Kept out of
+    the system prompt so the cached prefix is the same for everyone."""
+    view = context.model_dump(exclude_none=True, exclude_defaults=True)
+    return f"Current view: {json.dumps(view, sort_keys=True)}\n\nQuestion: {question}"
+
+
+def _log_request(endpoint: str, user_id: int, outcome: str, run: _Run, started: float, **extra: Any) -> None:
+    get_logger().info(
+        "ai_request",
+        endpoint=endpoint,
+        user_id=user_id,
+        outcome=outcome,
+        model=run.model or settings.ai_model,
+        effort=settings.ai_effort,
+        model_calls=run.model_calls,
+        tool_calls=[call.name for call in run.tool_calls],
+        tool_errors=sum(call.is_error for call in run.tool_calls),
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
+        cache_read_input_tokens=run.cache_read_input_tokens,
+        cache_creation_input_tokens=run.cache_creation_input_tokens,
+        fallback=run.fallback,
+        declined_attempts_billed=run.declined_attempts_billed,
+        stop_reason=run.stop_reason,
+        duration_ms=round((time.monotonic() - started) * 1000),
+        request_ids=run.request_ids,
+        **extra,
+    )
 
 
 class AiService:
@@ -222,28 +287,91 @@ class AiService:
             outcome = exc.error_code
             raise
         finally:
-            get_logger().info(
-                "ai_request",
-                user_id=user_id,
-                outcome=outcome,
-                model=run.model or settings.ai_model,
-                effort=settings.ai_effort,
-                model_calls=run.model_calls,
-                tool_calls=[call.name for call in run.tool_calls],
-                tool_errors=sum(call.is_error for call in run.tool_calls),
-                input_tokens=run.input_tokens,
-                output_tokens=run.output_tokens,
-                cache_read_input_tokens=run.cache_read_input_tokens,
-                cache_creation_input_tokens=run.cache_creation_input_tokens,
-                fallback=run.fallback,
-                declined_attempts_billed=run.declined_attempts_billed,
-                stop_reason=run.stop_reason,
-                duration_ms=round((time.monotonic() - started) * 1000),
-                request_ids=run.request_ids,
-            )
+            _log_request("ask", user_id, outcome, run, started)
 
         return AskResp(
             status=ApiStatus.SUCCESS,
             message="Answered",
             data=AskData(answer=answer, tool_calls=run.tool_calls, usage=run.usage()),
+        )
+
+    @staticmethod
+    async def route(question: str, context: AiContext, *, user_id: int) -> RouteResp:
+        """Take a question to the place that answers it (docs/AI_PHASE1_PLAN.md)."""
+        run = _Run()
+        started = time.monotonic()
+        outcome = "INTERNAL_ERROR"
+        reached_model = False
+        answer: routing.RouterAnswer | None = None
+        ungrounded: int | None = None
+        question_id: int | None = None
+        try:
+            guards.ensure_enabled()
+            await guards.consume_quota(user_id)
+            reached_model = True
+            async with asyncio.timeout(settings.ai_request_timeout_seconds):
+                response = await _loop(
+                    _router_turn(question, context),
+                    run,
+                    system=ROUTER_PROMPT,
+                    tools=ROUTER_TOOLS,
+                    allowed=ROUTER_TOOL_NAMES,
+                    ctx=ToolContext(user_id=user_id),
+                    output_format=routing.ANSWER_FORMAT,
+                )
+                answer = await routing.validate(routing.parse_answer(_final_text(response)), user_id=user_id)
+            ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target)
+            outcome = "ok"
+        except TimeoutError as exc:
+            outcome = "AI_TIMEOUT"
+            raise ProviderTimeout("anthropic", "The assistant took too long; try again", error_code=outcome) from exc
+        except AppError as exc:
+            outcome = exc.error_code
+            raise
+        finally:
+            # Every question that reached the model is logged -- a failed one too,
+            # since a question the router chokes on is exactly what the review wants.
+            if reached_model:
+                question_id = await questions.record(
+                    user_id=user_id,
+                    question=question,
+                    context=context.model_dump(exclude_none=True, exclude_defaults=True),
+                    kind=answer.kind if answer else None,
+                    target=answer.target.model_dump() if answer and answer.target else None,
+                    statmuse_query=answer.statmuse_query if answer else None,
+                    gap=answer.gap if answer else None,
+                    missing=answer.missing if answer else None,
+                    tool_calls=[call.model_dump() for call in run.tool_calls],
+                    outcome=outcome,
+                    model_calls=run.model_calls,
+                    input_tokens=run.input_tokens,
+                    output_tokens=run.output_tokens,
+                    cache_read_input_tokens=run.cache_read_input_tokens,
+                    cache_creation_input_tokens=run.cache_creation_input_tokens,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    ungrounded_numbers=ungrounded,
+                )
+            _log_request(
+                "route", user_id, outcome, run, started,
+                kind=answer.kind if answer else None,
+                gap=answer.gap if answer else None,
+                ungrounded_numbers=ungrounded,
+                question_id=question_id,
+            )
+
+        return RouteResp(
+            status=ApiStatus.SUCCESS,
+            message="Routed",
+            data=RouteData(
+                kind=answer.kind,
+                text=answer.text,
+                target=answer.target,
+                statmuse_query=answer.statmuse_query,
+                statmuse_url=routing.statmuse_url(answer.statmuse_query) if answer.statmuse_query else None,
+                suggestions=answer.suggestions,
+                gap=answer.gap,
+                question_id=question_id,
+                sources=run.tool_calls,
+                usage=run.usage(),
+            ),
         )

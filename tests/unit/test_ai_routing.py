@@ -1,0 +1,228 @@
+"""
+The router's answer contract (services/ai/routing.py): the schema the model
+fills, the StatMuse link the server builds, and the checks that decide whether
+a destination reaches the client.
+
+No database: `_check` is pure over what `_lookup` found, and `validate` is
+tested with `_lookup` stubbed. The migration and real lookups are covered in
+tests/integration/test_ai_questions_integration.py.
+"""
+
+import asyncio
+import json
+
+import pytest
+
+from core.errors import ProviderError
+from schemas.ai import PageTarget, RankingsParams, TerminalTarget
+from services.ai import routing
+from services.ai.routing import RouterAnswer, _Found
+from services.scoring.category_rank import RANKABLE_KEYS
+
+SENGUN, SABONIS, JOKIC, UNKNOWN = 1630578, 1627734, 203999, 999
+MY_TEAM, NOT_MY_TEAM = 7, 8
+FOUND = _Found(players=frozenset({SENGUN, SABONIS, JOKIC}), owned_teams=frozenset({MY_TEAM}),
+               nba_teams=frozenset({"HOU", "SAC"}))
+
+
+def show(target, text="Opening it"):
+    return RouterAnswer(kind="show", text=text, target=target)
+
+
+def player(pid=SENGUN, compare=(), window=None):
+    return TerminalTarget(mode="player", player_id=pid, compare_ids=list(compare), window=window)
+
+
+def walk(schema):
+    """Every dict node in a JSON schema."""
+    if isinstance(schema, dict):
+        yield schema
+        for value in schema.values():
+            yield from walk(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            yield from walk(item)
+
+
+@pytest.mark.unit
+class TestSchema:
+    def test_every_object_is_closed_and_fully_required(self):
+        for node in walk(routing.ANSWER_SCHEMA):
+            if node.get("type") == "object":
+                assert node["additionalProperties"] is False
+                assert set(node["required"]) == set(node["properties"])
+
+    def test_uses_no_constraint_structured_outputs_rejects(self):
+        unsupported = {"minLength", "maxLength", "minimum", "maximum", "multipleOf", "minItems", "maxItems"}
+        for node in walk(routing.ANSWER_SCHEMA):
+            assert not unsupported & set(node), node
+
+    def test_the_model_cannot_claim_the_servers_gap(self):
+        gap_enum = routing.ANSWER_SCHEMA["properties"]["gap"]["anyOf"][0]["enum"]
+        assert "invalid_target" not in gap_enum
+        assert set(gap_enum) == {"no_view", "no_data", "out_of_scope"}
+
+    def test_category_keys_follow_the_rankings_service(self):
+        cats = routing.ANSWER_SCHEMA["$defs"]["rankings"]["properties"]["cats"]["items"]["enum"]
+        assert cats == list(RANKABLE_KEYS)
+
+    def test_the_format_is_byte_stable(self):
+        """It rides on every call; a changing byte would change the cached prefix."""
+        assert json.dumps(routing.ANSWER_FORMAT) == json.dumps(routing.ANSWER_FORMAT)
+        assert routing.ANSWER_FORMAT["type"] == "json_schema"
+
+
+@pytest.mark.unit
+class TestStatmuseUrl:
+    def test_the_shape_statmuse_answers(self):
+        """Verified 2026-09-30: this exact slug answers "9.2 rebounds per game"."""
+        assert routing.statmuse_url("Alperen Şengün rebounds per game, last 15 games") == (
+            "https://www.statmuse.com/nba/ask/alperen-sengun-rebounds-per-game-last-15-games")
+
+    @pytest.mark.parametrize("query", [
+        "https://evil.example/phish?x=1",
+        "../../../admin",
+        "javascript:alert(1)",
+        "Jokic\ncareer triple doubles\r\n<script>",
+    ])
+    def test_whatever_the_model_writes_the_link_stays_a_statmuse_search(self, query):
+        url = routing.statmuse_url(query)
+        assert url.startswith("https://www.statmuse.com/nba/ask/")
+        slug = url.removeprefix("https://www.statmuse.com/nba/ask/")
+        assert slug and all(c.isalnum() or c == "-" for c in slug)
+
+    def test_nothing_searchable_is_no_link(self):
+        assert routing.statmuse_url("?!… ✓") is None
+
+    def test_long_questions_are_capped(self):
+        slug = routing.statmuse_url("rebounds " * 100).removeprefix(routing.STATMUSE_ASK)
+        assert len(slug) <= routing.MAX_QUERY and not slug.endswith("-")
+
+
+@pytest.mark.unit
+class TestUngroundedNumbers:
+    def test_numbers_from_the_question_are_fine(self):
+        assert routing.ungrounded_numbers("Opening Sengun's last 15 games", "sengun last 15", None) == 0
+
+    def test_numbers_from_the_target_are_fine(self):
+        assert routing.ungrounded_numbers("Showing the last 20", "how's he been", player(window="l20")) == 0
+
+    def test_a_statistic_the_router_made_up_is_counted(self):
+        assert routing.ungrounded_numbers("He's averaging 21.4 points", "how's sengun", player()) == 1
+
+
+@pytest.mark.unit
+class TestParse:
+    def test_reads_the_final_json(self):
+        answer = routing.parse_answer(json.dumps({
+            "kind": "show", "text": " Opening Sengun ", "statmuse_query": None, "gap": None, "missing": None,
+            "suggestions": [],
+            "target": {"type": "terminal", "mode": "player", "player_id": SENGUN, "compare_ids": [],
+                       "team_id": None, "nba_team": None, "window": "l15"},
+        }))
+        assert isinstance(answer.target, TerminalTarget)
+        assert (answer.text, answer.target.window) == ("Opening Sengun", "l15")
+
+    def test_keeps_at_most_two_suggestions(self):
+        answer = routing.parse_answer(json.dumps({
+            "kind": "cannot", "text": "No news here", "target": None, "statmuse_query": None, "gap": "no_data",
+            "missing": "news feed", "suggestions": ["a", " ", "b", "c"],
+        }))
+        assert answer.suggestions == ["a", "b"]
+
+    @pytest.mark.parametrize("raw", ["", "not json", '{"kind": "maybe", "text": "x"}',
+                                     '{"kind": "show", "text": "x", "target": {"type": "terminal", "mode": "player", "window": "l99"}}'])
+    def test_an_unreadable_answer_is_the_models_failure(self, raw):
+        with pytest.raises(ProviderError) as exc:
+            routing.parse_answer(raw)
+        assert exc.value.error_code == "AI_INCOMPLETE"
+
+
+@pytest.mark.unit
+class TestCheckTerminal:
+    def test_a_valid_player_target_passes(self):
+        checked = routing._check(show(player(window="l15")), FOUND)
+        assert checked.kind == "show" and checked.target.player_id == SENGUN and checked.target.window == "l15"
+
+    def test_an_unknown_player_is_a_bug_not_an_answer(self):
+        checked = routing._check(show(player(UNKNOWN)), FOUND)
+        assert (checked.kind, checked.gap, checked.target) == ("cannot", "invalid_target", None)
+
+    def test_the_comparison_drops_duplicates_and_the_focused_player(self):
+        checked = routing._check(show(player(compare=[SABONIS, SENGUN, SABONIS, JOKIC])), FOUND)
+        assert checked.target.compare_ids == [SABONIS, JOKIC]
+
+    def test_an_unknown_player_in_the_comparison_is_invalid(self):
+        assert routing._check(show(player(compare=[SABONIS, UNKNOWN])), FOUND).gap == "invalid_target"
+
+    def test_more_than_four_to_compare_is_invalid(self):
+        found = _Found(players=frozenset(range(1, 10)), owned_teams=frozenset(), nba_teams=frozenset())
+        assert routing._check(show(player(1, compare=[2, 3, 4, 5, 6])), found).gap == "invalid_target"
+
+    def test_team_mode_needs_one_of_the_callers_teams(self):
+        mine = routing._check(show(TerminalTarget(mode="team", team_id=MY_TEAM)), FOUND)
+        theirs = routing._check(show(TerminalTarget(mode="team", team_id=NOT_MY_TEAM)), FOUND)
+        assert mine.target.team_id == MY_TEAM
+        assert (theirs.kind, theirs.gap) == ("cannot", "invalid_target")
+
+    def test_nba_team_is_normalized_and_checked(self):
+        assert routing._check(show(TerminalTarget(mode="nba_team", nba_team="hou")), FOUND).target.nba_team == "HOU"
+        assert routing._check(show(TerminalTarget(mode="nba_team", nba_team="XYZ")), FOUND).gap == "invalid_target"
+
+    def test_fields_other_modes_cannot_use_are_cleared(self):
+        """The client sets all three focus fields from the target; stray ones would win."""
+        target = TerminalTarget(mode="team", team_id=MY_TEAM, player_id=SENGUN, compare_ids=[SABONIS], nba_team="HOU")
+        checked = routing._check(show(target), FOUND).target
+        assert (checked.player_id, checked.compare_ids, checked.nba_team) == (None, [], None)
+        overview = routing._check(show(TerminalTarget(mode="overview", player_id=SENGUN)), FOUND).target
+        assert overview.player_id is None
+
+
+@pytest.mark.unit
+class TestCheckPageAndOthers:
+    def test_rankings_keep_their_params(self):
+        target = PageTarget(page="rankings", rankings=RankingsParams(window=14, cats=["blk"], format="categories"))
+        checked = routing._check(show(target), FOUND).target
+        assert checked.rankings.window == 14 and checked.rankings.cats == ["blk"]
+
+    def test_rankings_params_on_another_page_are_dropped(self):
+        target = PageTarget(page="streamers", team_id=MY_TEAM, rankings=RankingsParams(window=7))
+        assert routing._check(show(target), FOUND).target.rankings is None
+
+    def test_a_page_for_someone_elses_team_is_invalid(self):
+        assert routing._check(show(PageTarget(page="matchup", team_id=NOT_MY_TEAM)), FOUND).gap == "invalid_target"
+
+    def test_show_needs_a_target(self):
+        assert routing._check(show(None), FOUND).gap == "invalid_target"
+
+    def test_statmuse_needs_a_question_and_carries_no_target(self):
+        good = routing._check(RouterAnswer(kind="statmuse", text="t", statmuse_query=" Jokic career triple doubles ",
+                                           target=player()), FOUND)
+        bad = routing._check(RouterAnswer(kind="statmuse", text="t", statmuse_query="  "), FOUND)
+        assert (good.kind, good.target, good.statmuse_query) == ("statmuse", None, "Jokic career triple doubles")
+        assert (bad.kind, bad.gap) == ("cannot", "invalid_target")
+
+    def test_cannot_carries_no_destination(self):
+        checked = routing._check(RouterAnswer(kind="cannot", text="No news", target=player(),
+                                              statmuse_query="x", gap="no_data"), FOUND)
+        assert (checked.target, checked.statmuse_query, checked.gap) == (None, None, "no_data")
+
+
+@pytest.mark.unit
+def test_validate_checks_every_id_in_one_lookup_scoped_to_the_caller(monkeypatch):
+    seen = []
+
+    async def fake_lookup(player_ids, team_ids, nba_teams, user_id):
+        seen.append((sorted(player_ids), team_ids, nba_teams, user_id))
+        return FOUND
+    monkeypatch.setattr(routing, "_lookup", fake_lookup)
+
+    asyncio.run(routing.validate(show(player(compare=[SABONIS])), user_id=42))
+    asyncio.run(routing.validate(show(PageTarget(page="matchup", team_id=MY_TEAM)), user_id=42))
+    asyncio.run(routing.validate(RouterAnswer(kind="cannot", text="x", target=player()), user_id=42))
+
+    assert seen == [
+        ([SABONIS, SENGUN], [], [], 42),
+        ([], [MY_TEAM], [], 42),
+        ([], [], [], 42),  # a cannot's stray target is never looked up
+    ]
