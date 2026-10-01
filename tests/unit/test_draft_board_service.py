@@ -769,14 +769,19 @@ def fake_tables(monkeypatch):
         2: SimpleNamespace(id=2, name="Guard", position="G", espn_id=102, name_normalized="guard"),
         9: SimpleNamespace(id=9, name="Rookie", position="F", espn_id=109, name_normalized="rookie"),
     }
-    state = {"players": players, "picks": [], "projections": [], "market": [], "profiles": []}
+    state = {"players": players, "picks": [], "projections": [], "cv_projections": [],
+             "market": [], "profiles": []}
 
     monkeypatch.setattr(module.settings, "nba_season", SEASON, raising=False)
     monkeypatch.setattr(module, "load_baseline_pool",
                         lambda walk_back=False: [_row(1, fpts=50.0, gp=70, name="Star", espn_id=101),
                                                  _row(2, fpts=30.0, gp=60, name="Guard", espn_id=102)])
-    monkeypatch.setattr(DraftBoardService, "_latest_projections",
-                        staticmethod(lambda season, source="espn": (None, state["projections"])))
+    # `projections` is ESPN's snapshot, `cv_projections` Court Vision's own.
+    monkeypatch.setattr(
+        DraftBoardService, "_latest_projections",
+        staticmethod(lambda season, source="espn": (
+            None, state["cv_projections"] if source == "cv" else state["projections"])),
+    )
     monkeypatch.setattr(module.DraftMarket, "latest_for_season",
                         classmethod(lambda cls, season, source="espn": state["market"]))
     monkeypatch.setattr(module.Player, "select",
@@ -850,6 +855,56 @@ def test_fetch_projections_win_over_the_baseline_and_carry_projected_games(fake_
     assert projected.line.pts == 30.0 and projected.gp == 78
     # The baseline row still supplies the NBA team a projection does not carry.
     assert projected.team == "DEN"
+    assert inputs.projection_source == "espn"
+
+
+def _cv_projection(fake_tables, player_id, **overrides):
+    base = dict(player_id=player_id, projected_gp=66, player=fake_tables["players"][player_id],
+                pts=24.0, reb=9.0, ast=7.0, stl=1.0, blk=0.7, tov=3.0,
+                fgm=9.0, fga=17.0, fg3m=1.0, fg3a=3.0, ftm=5.0, fta=6.0, min=33.0,
+                raw={"dd_rate": 0.4, "td_rate": 0.05})
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.unit
+def test_fetch_prefers_court_visions_projection_and_reads_its_game_rates(fake_tables):
+    fake_tables["projections"] = [_cv_projection(fake_tables, 1, pts=30.0, projected_gp=78, raw=None)]
+    fake_tables["cv_projections"] = [_cv_projection(fake_tables, 1), _cv_projection(fake_tables, 2, pts=12.0)]
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    assert inputs.projection_source == "cv"
+    assert next(r for r in inputs.pool if r.id == 1).line.pts == 24.0     # CV's line, not ESPN's
+    assert inputs.projected_gp == {1: 66, 2: 66}
+    assert inputs.game_rates == {1: (0.4, 0.05), 2: (0.4, 0.05)}
+
+
+@pytest.mark.unit
+def test_fetch_drops_baseline_players_court_vision_did_not_project(fake_tables):
+    """CV projects every rostered player with a stat line; a baseline row it
+    skipped is a retired or unsigned player. He leaves the valued pool, and
+    stays on the board only as ESPN's opinion, when ESPN still has one."""
+    fake_tables["cv_projections"] = [_cv_projection(fake_tables, 1)]
+    fake_tables["market"] = [_market_row(2, overall_rank=409)]
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    assert {r.id for r in inputs.pool} == {1}
+    assert 2 not in inputs.source and 2 not in inputs.last_season_gp
+    assert [m.id for m in inputs.market_only] == [2]
+
+
+@pytest.mark.unit
+def test_fetch_keeps_every_baseline_row_while_only_espn_projects(fake_tables):
+    """ESPN projects a few hundred players; the baseline is still the only
+    stat line the rest of the league has."""
+    fake_tables["projections"] = [_cv_projection(fake_tables, 1, raw=None)]
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    assert {r.id for r in inputs.pool} == {1, 2}
+    assert inputs.game_rates == {}
 
 
 @pytest.mark.unit

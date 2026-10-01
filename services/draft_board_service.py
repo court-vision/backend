@@ -452,6 +452,20 @@ class DraftBoardService:
             if raw.get("dd_rate") is not None or raw.get("td_rate") is not None:
                 game_rates[rec.player_id] = (float(raw.get("dd_rate") or 0.0), float(raw.get("td_rate") or 0.0))
 
+        if projection_source == "cv" and projections:
+            # Court Vision's projection covers every player on a roster who has
+            # a stat line, so a baseline row it did not project belongs to a
+            # player who is no longer on one — retired, overseas, unsigned.
+            # Valuing him off last season's line put Russell Westbrook at #80
+            # two months after he retired. He leaves the valued pool; if ESPN
+            # still ranks him he stays on the board as a market-only row.
+            projected = {rec.player_id for rec in projections}
+            for pid in [pid for pid in pool if pid not in projected]:
+                del pool[pid]
+                source.pop(pid, None)
+                value_season.pop(pid, None)
+                last_season_gp.pop(pid, None)
+
         market: dict[int, dict] = {}
         market_as_of: Optional[date] = None
         for rec in DraftMarket.latest_for_season(season):
