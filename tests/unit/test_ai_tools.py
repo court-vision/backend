@@ -37,15 +37,19 @@ def _stats_resp(message="Player stats fetched successfully"):
 
 @pytest.mark.unit
 class TestDefinitions:
-    def test_every_definition_has_a_handler_in_the_same_order(self):
-        assert [t["name"] for t in tools.TOOLS] == list(tools._REGISTRY)
+    def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
+        defined = {t["name"] for t in tools.TOOLS} | {t["name"] for t in tools.ROUTER_TOOLS}
+        assert defined == set(tools._REGISTRY)
+
+    def test_the_router_resolves_names_and_never_loads_stats(self):
+        assert [t["name"] for t in tools.ROUTER_TOOLS] == ["search_players", "get_my_teams"]
 
     def test_schemas_forbid_extra_properties(self):
-        for tool in tools.TOOLS:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
             assert tool["input_schema"]["additionalProperties"] is False, tool["name"]
 
     def test_no_tool_takes_an_espn_id(self):
-        for tool in tools.TOOLS:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
             assert not any("espn" in prop for prop in tool["input_schema"]["properties"]), tool["name"]
 
 
@@ -202,3 +206,57 @@ class TestDispatch:
 
         assert outcome.is_error
         assert outcome.content == "The lookup failed"
+
+
+def _team(team_id, name, league=None, league_name="Dorm League", scoring_preview="points"):
+    from schemas.common import FantasyProvider
+    return SimpleNamespace(
+        team_id=team_id,
+        league_info=SimpleNamespace(team_name=name, league_name=league_name, provider=FantasyProvider.ESPN,
+                                    year=2027, scoring_preview=scoring_preview),
+        league=league,
+    )
+
+
+@pytest.mark.unit
+class TestGetMyTeams:
+    def test_needs_a_caller(self):
+        outcome = _run("get_my_teams", {})
+        assert outcome.is_error
+
+    def test_lists_the_callers_teams_and_only_the_fields_routing_needs(self, monkeypatch):
+        from services.team_service import TeamService
+        seen = []
+
+        async def fake(user_id):
+            seen.append(user_id)
+            return SimpleNamespace(data=[
+                _team(7, "Sengun Szn", league=SimpleNamespace(name="Dorm League 26-27", scoring_type="categories")),
+                _team(9, "Punt FT%", league=None, league_name="Work League", scoring_preview="points"),
+            ])
+        monkeypatch.setattr(TeamService, "get_teams", staticmethod(fake))
+
+        outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42)))
+
+        assert seen == [42]
+        teams = json.loads(outcome.content)["teams"]
+        assert teams[0] == {"team_id": 7, "team_name": "Sengun Szn", "league_name": "Dorm League 26-27",
+                            "provider": "espn", "season": 2027, "scoring": "categories"}
+        assert (teams[1]["league_name"], teams[1]["scoring"]) == ("Work League", "points")
+
+    def test_takes_no_arguments(self):
+        outcome = asyncio.run(tools.run_tool("get_my_teams", {"user_id": 1}, ctx=tools.ToolContext(user_id=42)))
+        assert outcome.is_error and outcome.content.startswith("Invalid input")
+
+
+@pytest.mark.unit
+class TestToolsets:
+    def test_a_tool_outside_the_callers_toolset_is_unknown(self):
+        """The router's model never sees the stats tools; if it named one anyway, it would not run."""
+        outcome = asyncio.run(tools.run_tool("get_player_stats", {"player_id": 1}, allowed=tools.ROUTER_TOOL_NAMES))
+        assert outcome.is_error and "Unknown tool" in outcome.content
+
+    def test_ask_cannot_reach_the_team_lookup(self):
+        outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42),
+                                             allowed=tools.ASK_TOOL_NAMES))
+        assert outcome.is_error and "Unknown tool" in outcome.content

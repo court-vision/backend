@@ -11,9 +11,11 @@ Two rules shape every result:
   endpoint returns: it is the bulk of that payload, and every byte of a tool
   result is billed as input on each later model call.
 
-Tool definitions are a module-level constant in a fixed order. They render
+Tool definitions are module-level constants in a fixed order. They render
 ahead of the system prompt, so reordering them would change every request's
-prefix.
+prefix. Each endpoint gets its own toolset: `/ai/ask` answers from stats
+(`TOOLS`), the router only resolves names (`ROUTER_TOOLS`), and `run_tool`
+refuses anything outside the set the caller passes as `allowed`.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from core.errors import AppError
 from core.logging import get_logger
 from schemas.common import ApiStatus
 from services.player_service import PlayerService
+from services.team_service import TeamService
 from services.players_list_service import PlayersListService
 
 
@@ -46,6 +49,17 @@ class PlayerStatsInput(_Input):
 
 class PlayerStatusInput(_Input):
     player_id: int = Field(..., gt=0)
+
+
+class MyTeamsInput(_Input):
+    pass
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """Who is asking. Team-scoped tools answer for this user and no one else."""
+
+    user_id: int
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -108,7 +122,7 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
-async def _search_players(args: SearchPlayersInput) -> dict[str, Any]:
+async def _search_players(args: SearchPlayersInput, ctx: ToolContext | None) -> dict[str, Any]:
     resp = await PlayersListService.list_players(name=args.name, limit=8)
     # The service reports its own failures as an ERROR envelope with no data.
     # Read as an empty search, that would have the model tell the user no such
@@ -138,7 +152,7 @@ async def _search_players(args: SearchPlayersInput) -> dict[str, Any]:
     }
 
 
-async def _get_player_stats(args: PlayerStatsInput) -> dict[str, Any]:
+async def _get_player_stats(args: PlayerStatsInput, ctx: ToolContext | None) -> dict[str, Any]:
     resp = await PlayerService.get_player_stats(player_id=args.player_id, window=args.window)
     stats = resp.data
     return {
@@ -155,7 +169,7 @@ async def _get_player_stats(args: PlayerStatsInput) -> dict[str, Any]:
     }
 
 
-async def _get_player_status(args: PlayerStatusInput) -> dict[str, Any]:
+async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -> dict[str, Any]:
     resp = await PlayerService.get_player_status(args.player_id)
     # The service returns only a report from the last seven days, with its
     # age already on it; an older one comes back as no report at all.
@@ -165,18 +179,56 @@ async def _get_player_status(args: PlayerStatusInput) -> dict[str, Any]:
     }
 
 
+async def _get_my_teams(args: MyTeamsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    resp = await TeamService.get_teams(ctx.user_id)
+    return {
+        "teams": [
+            {
+                "team_id": team.team_id,
+                "team_name": team.league_info.team_name,
+                "league_name": (team.league.name if team.league and team.league.name
+                                else team.league_info.league_name),
+                "provider": getattr(team.league_info.provider, "value", team.league_info.provider),
+                "season": team.league_info.year,
+                "scoring": (team.league.scoring_type if team.league
+                            else team.league_info.scoring_preview),
+            }
+            for team in (resp.data or [])
+        ],
+    }
+
+
+GET_MY_TEAMS: dict[str, Any] = {
+    "name": "get_my_teams",
+    "description": (
+        "The asking user's own fantasy teams: team_id, team name, league name, provider, "
+        "season and scoring format. Use it to resolve 'my team', 'my matchup', or a league "
+        "the user names. A team_id you put in an answer must come from this list."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+}
+
+# The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
+ROUTER_TOOLS: list[dict[str, Any]] = [TOOLS[0], GET_MY_TEAMS]
+ASK_TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
+ROUTER_TOOL_NAMES = frozenset(t["name"] for t in ROUTER_TOOLS)
+
+
 @dataclass(frozen=True)
 class _Tool:
     input_model: type[_Input]
-    handler: Callable[[Any], Awaitable[dict[str, Any]]]
+    handler: Callable[[Any, ToolContext | None], Awaitable[dict[str, Any]]]
 
 
 _REGISTRY: dict[str, _Tool] = {
     "search_players": _Tool(SearchPlayersInput, _search_players),
     "get_player_stats": _Tool(PlayerStatsInput, _get_player_stats),
     "get_player_status": _Tool(PlayerStatusInput, _get_player_status),
+    "get_my_teams": _Tool(MyTeamsInput, _get_my_teams),
 }
-assert list(_REGISTRY) == [t["name"] for t in TOOLS], "TOOLS and _REGISTRY must list the same tools in order"
+assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
 
 
 @dataclass(frozen=True)
@@ -185,10 +237,19 @@ class ToolOutcome:
     is_error: bool
 
 
-async def run_tool(name: str, raw_input: Any) -> ToolOutcome:
+async def run_tool(
+    name: str,
+    raw_input: Any,
+    *,
+    ctx: ToolContext | None = None,
+    allowed: frozenset[str] | None = None,
+) -> ToolOutcome:
     """Validate and run one tool call. Failures come back as `is_error` results for
-    the model to read, never as exceptions: one bad lookup should not sink the answer."""
-    tool = _REGISTRY.get(name)
+    the model to read, never as exceptions: one bad lookup should not sink the answer.
+
+    `allowed` is the calling endpoint's toolset; a name outside it is unknown even
+    if another endpoint defines it."""
+    tool = _REGISTRY.get(name) if allowed is None or name in allowed else None
     if tool is None:
         return ToolOutcome(f"Unknown tool: {name}", is_error=True)
     try:
@@ -197,7 +258,7 @@ async def run_tool(name: str, raw_input: Any) -> ToolOutcome:
         problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'input'}: {e['msg']}" for e in exc.errors())
         return ToolOutcome(f"Invalid input: {problems}", is_error=True)
     try:
-        result = await tool.handler(args)
+        result = await tool.handler(args, ctx)
     except AppError as exc:
         # Service-named failures (PLAYER_NOT_FOUND, ...) are meant to be read
         return ToolOutcome(exc.message, is_error=True)
