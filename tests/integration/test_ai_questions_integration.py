@@ -2,7 +2,8 @@
 Integration: the AI router against the real schema (migration 0026).
 
 The question log -- recording, the 90-day text retention that runs with each
-insert and at startup, owner-scoped feedback, the cascade from a deleted user --
+insert, at startup and daily after it, owner-scoped feedback, the cascade from a
+deleted user --
 and the one lookup that validates a routed destination: players that exist, NBA
 teams that exist, and fantasy teams that belong to the caller and nobody else.
 """
@@ -10,6 +11,7 @@ teams that exist, and fantasy teams that belong to the caller and nobody else.
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from peewee import IntegrityError
@@ -89,6 +91,29 @@ class TestQuestionLog:
         assert (old_row.question, old_row.context, old_row.kind) == (None, None, "show")
         assert (recent_row.question, recent_row.context) == ("sengun last 15", {"mode": "player"})
         assert AiQuestion.select().count() == 2
+
+    def test_text_that_turns_ninety_days_old_while_the_application_is_up_is_redacted(self, integration_db, monkeypatch):
+        """With one sweep at startup, it kept its text until the next deploy or the next question."""
+        user = _user(12)
+        swept = []
+        log = SimpleNamespace(info=lambda event, **kw: swept.append((kw["trigger"], kw["rows"])))
+        monkeypatch.setattr(questions, "get_logger", lambda: log)
+        monkeypatch.setattr(questions, "SWEEP_EVERY", timedelta(milliseconds=50))
+        expiring = datetime.now(timezone.utc) - questions.RETENTION + timedelta(seconds=1)
+        row = AiQuestion.insert(**_row(user, created_at=expiring)).execute()
+
+        async def run():
+            sweeping = asyncio.create_task(questions.keep_redacting())
+            try:
+                while ("daily", 1) not in swept:
+                    await asyncio.sleep(0.05)
+            finally:
+                sweeping.cancel()
+        asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+        assert swept[0] == ("startup", 0)  # not yet ninety days old when the application started
+        stored = AiQuestion.get_by_id(row)
+        assert (stored.question, stored.context, stored.kind) == (None, None, "show")
 
     def test_a_failing_sweep_does_not_cost_the_insert_it_rides_on(self, integration_db, monkeypatch):
         user = _user(10)

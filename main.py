@@ -71,10 +71,11 @@ async def lifespan(app: FastAPI):
         watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
 
         # AI question text is redacted after 90 days. The sweep otherwise runs only
-        # when a question is recorded, so run it here too or the policy lapses when
-        # AI traffic stops. In the background: it logs its own failure, and a slow
-        # or failing sweep must never delay or fail a startup.
-        retention = asyncio.create_task(ai_questions.redact_expired())
+        # when a question is recorded, so run it here too -- now, and daily while
+        # the process is up -- or the policy lapses when AI traffic stops. In the
+        # background: it logs its own failure, and a slow or failing sweep must
+        # never delay or fail a startup.
+        retention = asyncio.create_task(ai_questions.keep_redacting())
         yield
     finally:
         if retention is not None:

@@ -5,14 +5,16 @@ Recording never fails a request: a question that can't be logged is still
 answered, and the failure is logged instead.
 
 Retention needs no scheduler: text and context older than 90 days are nulled
-after each insert, in the same round trip, and once more when the application
-starts -- so the policy holds even when nobody asks anything. A sweep that
+after each insert, in the same round trip, and by the application itself -- once
+when it starts and then once a day for as long as it runs -- so the policy
+holds even when nobody asks anything and nothing is deployed. A sweep that
 fails is logged and retried by the next one; it never costs the insert it rode
 on, or a startup.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -21,6 +23,7 @@ from db.base import db_operation
 from db.models.ai_questions import AiQuestion
 
 RETENTION = timedelta(days=90)
+SWEEP_EVERY = timedelta(days=1)
 
 
 def _redact_expired() -> int:
@@ -70,12 +73,24 @@ def _sweep() -> int:
     return _redact_expired()
 
 
-async def redact_expired() -> None:
-    """The retention sweep on its own, for application startup. Never raises."""
+async def redact_expired(trigger: str = "startup") -> None:
+    """The retention sweep on its own, away from any insert. Never raises."""
     try:
-        get_logger().info("ai_questions_redacted", rows=await _sweep(), trigger="startup")
+        get_logger().info("ai_questions_redacted", rows=await _sweep(), trigger=trigger)
     except Exception:
-        get_logger().exception("ai_question_retention_failed", trigger="startup")
+        get_logger().exception("ai_question_retention_failed", trigger=trigger)
+
+
+async def keep_redacting() -> None:
+    """The retention sweep for as long as the application runs: at startup, then
+    once a day. Startup alone left the policy waiting on the next deploy -- a
+    process that stays up with no questions asked would keep text past 90 days.
+    Runs until cancelled; a sweep that fails is tried again the next day."""
+    trigger = "startup"
+    while True:
+        await redact_expired(trigger)
+        await asyncio.sleep(SWEEP_EVERY.total_seconds())
+        trigger = "daily"
 
 
 @db_operation("ai.question_feedback")
