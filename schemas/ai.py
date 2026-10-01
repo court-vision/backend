@@ -75,6 +75,7 @@ class AskResp(BaseResponse):
 
 # `season`, or the last N games for N in 1..82 -- the terminal's `:window` range
 WINDOW_PATTERN = r"^(season|l([1-9]|[1-7][0-9]|8[0-2]))$"
+SEASON_GAMES = 82  # the same ceiling, for a games-played minimum
 
 TerminalMode = Literal["overview", "player", "team", "nba_team"]
 RoutablePage = Literal["rankings", "streamers", "matchup", "lineup-generation", "your-teams", "draft", "playoffs"]
@@ -123,7 +124,7 @@ class RankingsParams(ApiModel):
     format: Optional[Literal["points", "categories"]] = None
     window: Optional[Literal[7, 14, 30]] = Field(None, description="Days; null means season")
     cats: list[str] = Field(default_factory=list, description="Category keys, e.g. ['blk', 'stl']")
-    min_games: Optional[int] = Field(None, ge=1, le=82)
+    min_games: Optional[int] = Field(None, ge=1, le=SEASON_GAMES)
 
 
 class PageTarget(ApiModel):

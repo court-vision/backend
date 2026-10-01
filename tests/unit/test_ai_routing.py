@@ -10,6 +10,7 @@ tests/integration/test_ai_questions_integration.py.
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +32,22 @@ def show(target, text="Opening it"):
 
 def player(pid=SENGUN, compare=(), window=None):
     return TerminalTarget(mode="player", player_id=pid, compare_ids=list(compare), window=window)
+
+
+def terminal_answer(kind="show", text="Opening Sengun", window=None, statmuse_query=None):
+    """The model's JSON for a player target, every field said as ANSWER_SCHEMA requires."""
+    return {"kind": kind, "text": text, "statmuse_query": statmuse_query, "gap": None, "missing": None,
+            "suggestions": [],
+            "target": {"type": "terminal", "mode": "player", "player_id": SENGUN, "compare_ids": [],
+                       "team_id": None, "nba_team": None, "window": window}}
+
+
+def rankings_answer(page, min_games):
+    return {"kind": "show", "text": "Opening it", "statmuse_query": None, "gap": None, "missing": None,
+            "suggestions": [],
+            "target": {"type": "page", "page": page, "team_id": None,
+                       "rankings": {"scope": None, "format": None, "window": 14, "cats": ["blk"],
+                                    "min_games": min_games}}}
 
 
 def walk(schema):
@@ -173,12 +190,60 @@ class TestParse:
         }))
         assert answer.suggestions == ["a", "b"]
 
-    @pytest.mark.parametrize("raw", ["", "not json", '{"kind": "maybe", "text": "x"}',
-                                     '{"kind": "show", "text": "x", "target": {"type": "terminal", "mode": "player", "window": "l99"}}'])
+    @pytest.mark.parametrize("raw", ["", "not json", "[]", '{"kind": "maybe", "text": "x"}',
+                                     '{"kind": "show", "text": "x", "target": "the terminal"}',
+                                     '{"kind": "maybe", "text": "x", "target": {"type": "terminal", "mode": "player", "window": "l99"}}'])
     def test_an_unreadable_answer_is_the_models_failure(self, raw):
         with pytest.raises(ProviderError) as exc:
             routing.parse_answer(raw)
         assert exc.value.error_code == "AI_INCOMPLETE"
+
+    def test_an_unreadable_answer_logs_the_fields_that_failed(self, monkeypatch):
+        logged = []
+        monkeypatch.setattr(routing, "get_logger", lambda: SimpleNamespace(
+            warning=lambda event, **kw: logged.append((event, kw))))
+
+        for raw in ("not json", json.dumps({**terminal_answer(window="l99"), "text": None, "gap": "invalid_target?"})):
+            with pytest.raises(ProviderError):
+                routing.parse_answer(raw)
+
+        assert logged == [
+            ("ai_route_unparseable", {"error": "JSONDecodeError", "fields": []}),
+            ("ai_route_unparseable", {"error": "ValidationError",
+                                      "fields": ["text", "target.terminal.window", "gap"]}),
+        ]
+
+    @pytest.mark.parametrize("written, window", [("L15", "l15"), (" l15 ", "l15"), ("Season", "season"), ("", None)])
+    def test_a_window_the_schema_could_not_constrain_is_tidied(self, written, window):
+        assert routing.parse_answer(json.dumps(terminal_answer(window=written))).target.window == window
+
+    @pytest.mark.parametrize("window", ["l99", "l100", "l0", "15", "last 15"])
+    def test_a_window_out_of_range_is_an_invalid_target_not_an_unreadable_answer(self, window):
+        """It was a 502 "try again" that spent the quota and left the log row empty."""
+        answer = routing.parse_answer(json.dumps(terminal_answer(window=window)))
+
+        assert (answer.kind, answer.gap, answer.target) == ("cannot", "invalid_target", None)
+        assert answer.text == routing.INVALID_TARGET_TEXT
+        assert answer.missing == "rejected: target.terminal.window"
+        assert answer.rejected_target["window"] == window
+
+    @pytest.mark.parametrize("min_games, kept", [(0, None), (-1, None), (83, None), (100, None), (1, 1), (82, 82)])
+    def test_a_games_minimum_out_of_range_is_no_minimum(self, min_games, kept):
+        answer = routing.parse_answer(json.dumps(rankings_answer("rankings", min_games)))
+        assert answer.kind == "show" and answer.target.rankings.min_games == kept
+
+    def test_rankings_params_on_another_page_cannot_sink_the_answer(self):
+        answer = routing.parse_answer(json.dumps(rankings_answer("streamers", 0)))
+        assert answer.kind == "show" and answer.target.page == "streamers"
+
+    def test_only_a_show_has_a_target_to_fail(self):
+        raw = terminal_answer(kind="statmuse", window="l100", statmuse_query="Nikola Jokic career triple doubles")
+        answer = routing.parse_answer(json.dumps(raw))
+        assert (answer.kind, answer.target, answer.gap) == ("statmuse", None, None)
+
+    def test_the_model_cannot_write_the_rejected_target(self):
+        raw = {**terminal_answer(), "rejected_target": {"x": 1}, "_rejected_target": {"x": 1}}
+        assert routing.parse_answer(json.dumps(raw)).rejected_target is None
 
 
 @pytest.mark.unit
@@ -190,6 +255,20 @@ class TestCheckTerminal:
     def test_an_unknown_player_is_a_bug_not_an_answer(self):
         checked = routing._check(show(player(UNKNOWN)), FOUND)
         assert (checked.kind, checked.gap, checked.target) == ("cannot", "invalid_target", None)
+
+    def test_a_refused_target_is_kept_for_the_log_with_the_reason(self):
+        """The row said only `invalid_target`: not which ID the model proposed, nor why it failed."""
+        checked = routing._check(show(player(UNKNOWN, window="l15")), FOUND)
+        assert checked.missing == "rejected: player_id"
+        assert checked.rejected_target == player(UNKNOWN, window="l15").model_dump()
+        assert "rejected_target" not in checked.model_dump() and "_rejected_target" not in checked.model_dump()
+
+        theirs = routing._check(show(PageTarget(page="matchup", team_id=NOT_MY_TEAM)), FOUND)
+        assert (theirs.missing, theirs.rejected_target["team_id"]) == ("rejected: team_id", NOT_MY_TEAM)
+
+    def test_an_answer_that_passes_carries_no_rejected_target(self):
+        checked = routing._check(show(player()), FOUND)
+        assert (checked.missing, checked.rejected_target) == (None, None)
 
     def test_the_comparison_drops_duplicates_and_the_focused_player(self):
         checked = routing._check(show(player(compare=[SABONIS, SENGUN, SABONIS, JOKIC])), FOUND)

@@ -6,7 +6,8 @@ The model picks a destination; it is never trusted with one. Every ID in a
 target is checked against the database, a fantasy team must belong to the
 caller, and a StatMuse link is built here from the model's question -- the
 model never supplies a URL. A target that fails any check turns the answer
-into `cannot` with `gap="invalid_target"`, which is logged as a bug signal.
+into `cannot` with `gap="invalid_target"`, which is logged as a bug signal:
+the question log keeps the target that was refused and why.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, get_args
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, PrivateAttr, ValidationError, field_validator
 
 from core.errors import ProviderError
 from core.logging import get_logger
@@ -26,6 +27,7 @@ from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
 from db.models.teams import Team
 from schemas.ai import (
+    SEASON_GAMES,
     AiContext,
     AiTarget,
     AnswerKind,
@@ -112,6 +114,13 @@ class RouterAnswer(ApiModel):
     suggestions: list[str] = Field(default_factory=list)
     gap: Optional[GapKind] = None
     missing: Optional[str] = None
+    # For the question log only: the target an invalid_target answer was refused
+    # for. Private, so the model cannot write it and no response can carry it.
+    _rejected_target: Optional[dict[str, Any]] = PrivateAttr(default=None)
+
+    @property
+    def rejected_target(self) -> Optional[dict[str, Any]]:
+        return self._rejected_target
 
     @field_validator("text", "missing")
     @classmethod
@@ -124,15 +133,47 @@ class RouterAnswer(ApiModel):
         return [s.strip()[:MAX_TEXT] for s in value if s.strip()][:MAX_SUGGESTIONS]
 
 
+def _tidy(target: dict[str, Any]) -> None:
+    """The two fields ANSWER_SCHEMA cannot bound, where the model's slip is harmless:
+    "L15" is `l15`, and a games minimum outside 1..82 is no minimum."""
+    window = target.get("window")
+    if target.get("type") == "terminal" and isinstance(window, str):
+        target["window"] = window.strip().lower() or None
+    rankings = target.get("rankings")
+    if isinstance(rankings, dict):
+        games = rankings.get("min_games")
+        if isinstance(games, int) and not 1 <= games <= SEASON_GAMES:
+            rankings["min_games"] = None
+
+
+def _unreadable(exc: Exception, fields: Iterable[str] = ()) -> ProviderError:
+    get_logger().warning("ai_route_unparseable", error=type(exc).__name__, fields=list(fields))
+    return ProviderError("anthropic", "The assistant returned an answer we couldn't read; try again",
+                         error_code="AI_INCOMPLETE")
+
+
 def parse_answer(text: str) -> RouterAnswer:
     """The final message's JSON as a RouterAnswer. Structured outputs guarantee the
-    shape unless the turn was cut short, so a failure here is the model's, not ours."""
+    shape unless the turn was cut short, so an answer that can't be read is the
+    model's failure, not ours. What they cannot guarantee is a value's range: a
+    `show` whose target is out of range (window "l100") is an invalid target like
+    any other, not an unreadable answer."""
     try:
-        return RouterAnswer.model_validate(json.loads(text))
-    except (json.JSONDecodeError, ValidationError) as exc:
-        get_logger().warning("ai_route_unparseable", error=type(exc).__name__)
-        raise ProviderError("anthropic", "The assistant returned an answer we couldn't read; try again",
-                            error_code="AI_INCOMPLETE") from exc
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _unreadable(exc) from exc
+    target = raw.get("target") if isinstance(raw, dict) else None
+    if isinstance(target, dict) and raw.get("kind") != "show":
+        raw["target"] = target = None  # only a `show` has a destination; see _check
+    if isinstance(target, dict):
+        _tidy(target)
+    try:
+        return RouterAnswer.model_validate(raw)
+    except ValidationError as exc:
+        fields = [".".join(str(part) for part in error["loc"]) for error in exc.errors()]
+        if isinstance(target, dict) and all(field.split(".")[0] == "target" for field in fields):
+            return _invalid(", ".join(fields), target)
+        raise _unreadable(exc, fields) from exc
 
 
 def statmuse_url(query: str) -> Optional[str]:
@@ -216,9 +257,14 @@ def _lookup(player_ids: list[int], team_ids: list[int], nba_teams: list[str], us
     return _Found(frozenset(players), frozenset(owned), frozenset(nba))
 
 
-def _invalid(reason: str) -> RouterAnswer:
+def _invalid(reason: str, target: AiTarget | dict[str, Any] | None = None) -> RouterAnswer:
+    """The `cannot` a refused destination becomes. What was refused, and why, ride
+    along for the question log -- the eval reads them there; the user never does."""
     get_logger().warning("ai_route_invalid_target", reason=reason)
-    return RouterAnswer(kind="cannot", text=INVALID_TARGET_TEXT, gap="invalid_target")
+    answer = RouterAnswer(kind="cannot", text=INVALID_TARGET_TEXT, gap="invalid_target",
+                          missing=f"rejected: {reason}")
+    answer._rejected_target = target.model_dump() if isinstance(target, ApiModel) else target
+    return answer
 
 
 def _check(answer: RouterAnswer, found: _Found) -> RouterAnswer:
@@ -240,25 +286,25 @@ def _check(answer: RouterAnswer, found: _Found) -> RouterAnswer:
         update: dict[str, Any] = {"player_id": None, "compare_ids": [], "team_id": None, "nba_team": None}
         if target.mode == "player":
             if target.player_id not in found.players:
-                return _invalid("player_id")
+                return _invalid("player_id", target)
             compare = list(dict.fromkeys(i for i in target.compare_ids if i != target.player_id))
             if any(i not in found.players for i in compare) or len(compare) > MAX_COMPARE:
-                return _invalid("compare_ids")
+                return _invalid("compare_ids", target)
             update.update(player_id=target.player_id, compare_ids=compare)
         elif target.mode == "team":
             if target.team_id not in found.owned_teams:
-                return _invalid("team_id")
+                return _invalid("team_id", target)
             update["team_id"] = target.team_id
         elif target.mode == "nba_team":
             abbrev = (target.nba_team or "").upper()
             if abbrev not in found.nba_teams:
-                return _invalid("nba_team")
+                return _invalid("nba_team", target)
             update["nba_team"] = abbrev
         clean = target.model_copy(update=update)
     else:
         assert isinstance(target, PageTarget)
         if target.team_id is not None and target.team_id not in found.owned_teams:
-            return _invalid("team_id")
+            return _invalid("team_id", target)
         clean = target.model_copy(update={"rankings": target.rankings if target.page == "rankings" else None})
 
     return answer.model_copy(update={"target": clean, "statmuse_query": None})

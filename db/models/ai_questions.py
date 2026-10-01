@@ -3,8 +3,10 @@ usr.ai_questions — one row per question the AI router sent to the model
 (migration 0026, docs/AI_PHASE1_PLAN.md § 5).
 
 It is the roadmap as much as an audit trail: `statmuse` rows are stat questions
-no Court Vision view covers, `cannot` rows are questions nothing covers. The
-question text and context are nulled after 90 days; the counts stay.
+no Court Vision view covers, `cannot` rows are questions nothing covers. A row
+with gap `invalid_target` is a routing bug: its `target` is the destination the
+server refused and `missing` says why ("rejected: player_id"). The question
+text and context are nulled after 90 days; the counts stay.
 Backend-only; data-platform never reads or writes it.
 """
 

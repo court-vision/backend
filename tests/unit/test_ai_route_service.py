@@ -200,6 +200,30 @@ class TestAnswers:
         assert (data.kind, data.gap, data.target) == ("cannot", "invalid_target", None)
         assert env.recorded[-1]["gap"] == "invalid_target"
 
+    def test_a_refused_target_is_recorded_with_the_reason_but_never_returned(self, env):
+        """The row is what the review debugs from; it used to hold neither."""
+        env.install(msg("end_turn", answer(target={**PLAYER_TARGET, "player_id": 999})))
+
+        resp = route()
+
+        row = env.recorded[-1]
+        assert (row["kind"], row["gap"], row["missing"]) == ("cannot", "invalid_target", "rejected: player_id")
+        assert row["target"] == {**PLAYER_TARGET, "player_id": 999}
+        assert resp.data.target is None
+        assert not {"missing", "rejected_target"} & set(resp.data.model_dump())
+
+    def test_a_window_out_of_range_is_an_invalid_target_not_a_502(self, env):
+        fake = env.install(msg("end_turn", answer(text_="Opening Alperen Sengun's last 100 games",
+                                                  target={**PLAYER_TARGET, "window": "l100"})))
+
+        data = route("sengun last 100").data
+
+        assert (data.kind, data.gap, data.target) == ("cannot", "invalid_target", None)
+        row = env.recorded[-1]
+        assert (row["outcome"], row["kind"], row["gap"]) == ("ok", "cannot", "invalid_target")
+        assert (row["missing"], row["target"]["window"]) == ("rejected: target.terminal.window", "l100")
+        assert len(fake.calls) == 1  # answered from the one call; nothing is retried
+
     def test_missing_is_recorded_but_never_returned(self, env):
         env.install(msg("end_turn", answer(kind="cannot", text_="Court Vision doesn't track trade rumors",
                                            suggestions=["Is Sengun injured?"], gap="no_data", missing="news feed")))

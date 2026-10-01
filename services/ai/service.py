@@ -392,7 +392,8 @@ class AiService:
                     question=question,
                     context=context.model_dump(exclude_none=True, exclude_defaults=True),
                     kind=answer.kind if answer else None,
-                    target=answer.target.model_dump() if answer and answer.target else None,
+                    # A refused target is kept for the review; the client never sees the row
+                    target=(answer.target.model_dump() if answer.target else answer.rejected_target) if answer else None,
                     statmuse_query=answer.statmuse_query if answer else None,
                     gap=answer.gap if answer else None,
                     missing=answer.missing if answer else None,
