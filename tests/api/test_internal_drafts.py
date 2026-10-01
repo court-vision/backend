@@ -794,3 +794,21 @@ def test_the_stateless_board_takes_the_same_knob(authed_client, service, monkeyp
 
     default, espn = service["calls"]
     assert default["session"].rank_source == "cv" and espn["session"].rank_source == "espn"
+
+
+@pytest.mark.api
+def test_the_board_knob_defaults_to_espn_and_passes_cv_through(authed_client, service, monkeypatch):
+    """`board` is the drafter's choice of whose rankings order the rows; ESPN by
+    default, Court Vision on request, on both the session and stateless boards."""
+    _own_session(monkeypatch, league=_league())
+
+    assert authed_client.get("/v1/internal/drafts/12/board").status_code == 200
+    assert authed_client.get("/v1/internal/drafts/12/board?board=cv").status_code == 200
+    assert authed_client.get("/v1/internal/drafts/12/board?board=yahoo").status_code == 422
+
+    default, cv = service["calls"]
+    assert default["session"].board_source == "espn" and cv["session"].board_source == "cv"
+
+    _own(monkeypatch, league=_league())
+    assert authed_client.get("/v1/internal/drafts/board?team_id=7&board=cv").status_code == 200
+    assert service["calls"][-1]["session"].board_source == "cv"
