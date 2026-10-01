@@ -125,6 +125,7 @@ def test_points_league_values_ranks_and_market_join(stub_inputs):
     assert [r.player_id for r in resp.data] == [1, 3, 4, 2, 6, 5]
     assert [r.board_rank for r in resp.data] == [1, 2, 2, 6, None, None]
     assert resp.meta.rank_basis == "espn" and resp.meta.rank_basis_reason == "espn_league"
+    assert resp.meta.rank_basis_requested == "espn"
     # Value is the league formula over the per-game line ({"pts": 1.0} -> pts),
     # projection line where one exists, baseline otherwise; cv_rank is CV's own
     # order over the full pool, unchanged by whose board the rows sit on.
@@ -1386,6 +1387,26 @@ def test_without_a_market_snapshot_the_board_and_the_strip_fall_back_to_cv(monke
     assert resp.meta.rank_basis == "cv" and resp.meta.rank_basis_reason == "no_market_snapshot"
     assert [r.cv_rank for r in resp.data] == [1, 2, 3, 4, 5, 6]
     assert [r.board_rank for r in resp.data] == [r.cv_rank for r in resp.data]
+
+
+@pytest.mark.unit
+def test_a_drafter_can_ask_for_court_visions_board_outright(stub_inputs):
+    """ESPN's board is the default, never the only option: `board=cv` puts CV's
+    rank in the gutter with ESPN's beside it, and the strip is unchanged."""
+    from services.draft_market import rank_basis_for
+
+    resp = _board(resolve_scoring(_league()), session=BoardSession(board_source="cv"))
+
+    assert resp.meta.rank_basis == "cv" and resp.meta.rank_basis_reason == "caller_chose_cv"
+    assert resp.meta.rank_basis_requested == "cv"
+    assert [r.player_id for r in resp.data] == [1, 3, 2, 4, 6, 5]
+    assert [r.board_rank for r in resp.data] == [1, 2, 3, 4, 5, 6]
+    assert [r.market_rank for r in resp.data] == [1, 2, 6, 2, None, None]
+    # The strip is not the board's business: still CV's picks, ESPN's rank on the card.
+    assert resp.meta.rank_source == "cv" and resp.recommendations[0].market_rank == 1
+    # The choice is honoured whatever the room would otherwise get.
+    assert rank_basis_for(None, None, True, requested="cv") == ("cv", "caller_chose_cv")
+    assert rank_basis_for(_league(provider="yahoo"), None, False, requested="cv") == ("cv", "caller_chose_cv")
 
 
 @pytest.mark.unit

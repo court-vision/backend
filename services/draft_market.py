@@ -72,14 +72,23 @@ def market_auction_of(market: Mapping, rank_type: str) -> Optional[float]:
     return value if value is not None else market.get("auction_value")
 
 
-def rank_basis_for(league, espn_league_id: Optional[int], has_market: bool) -> tuple[str, str]:
+def rank_basis_for(
+    league, espn_league_id: Optional[int], has_market: bool, requested: str = "espn"
+) -> tuple[str, str]:
     """Whose board a room drafts off, and why: `("espn" | "cv", reason)`.
 
     `league` is anything carrying `provider` (a `League` row or the
     `LeagueDetail` a request has already loaded), or None for a room without
     one. The reasons are the wire vocabulary the room shows, so a drafter can
     see *why* a board is ordered the way it is rather than infer it.
+
+    `requested` is the drafter's own choice. `espn` (the default) takes ESPN's
+    board wherever the room can have it; `cv` takes Court Vision's rankings
+    outright — the opt-in for someone who would rather draft off our opinion
+    than ESPN's, which is theirs to make and never made for them.
     """
+    if requested == "cv":
+        return "cv", "caller_chose_cv"
     if league is None:
         basis, reason = "espn", "league_less_room"
     else:
