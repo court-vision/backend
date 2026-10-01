@@ -428,17 +428,36 @@ class DraftBoardRow(ApiModel):
     )
     value_source: Literal["projection", "baseline", "market"] = Field(
         description=(
-            "projection: ESPN's published per-game projection. baseline: last season's per-game "
-            "averages. market: no stat line at all — the row exists because ESPN drafts him."
+            "projection: a per-game projection for the coming season (`meta.projection_source` "
+            "says whose). baseline: last season's per-game averages. market: no stat line at all "
+            "— the row exists because ESPN drafts him."
         ),
     )
     board_rank: Optional[int] = Field(
         default=None,
         description=(
             "The row's place on the board `meta.rank_basis` names — ESPN's published rank for "
-            "the league's format in an ESPN room, `cv_rank` otherwise. Rows come back in this "
-            "order. None for a player the basis does not rank; those trail every ranked row, "
-            "ordered by the other opinion, and are never given a number that looks like ESPN's."
+            "the league's format in an ESPN room, `cv_rank` on Court Vision's board, `room_rank` "
+            "on `my_team`. Rows come back in this order. None for a player the basis does not "
+            "rank; those trail every ranked row, ordered by the other opinion, and are never "
+            "given a number that looks like ESPN's."
+        ),
+    )
+    room_score: Optional[float] = Field(
+        default=None,
+        description=(
+            "Court Vision's value for *this roster*, in season-value points: value over the "
+            "league's replacement level, plus what the room's punts add, minus the starts this "
+            "roster could not use (lineup congestion). The number the recommendation cards "
+            "decompose, on every row it was computed for. None for drafted, cap-blocked and "
+            "market-only rows."
+        ),
+    )
+    room_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "Rank by `room_score` among the players the caller can still draft — the `my_team` "
+            "board's order. Like `fit_rank` and unlike `cv_rank`, it moves with every pick."
         ),
     )
     value_season: Optional[str] = Field(
@@ -614,16 +633,21 @@ class DraftStackResp(ApiModel):
 
 class DraftCongestionResp(ApiModel):
     """Lineup congestion on the caller's roster: starter value that would sit on
-    nights more rostered players play than the league can start, measured on a
-    sample of the season's calendar. A friction estimate, not a projection."""
+    nights more rostered players play than the league can start, measured on
+    every week of the calendar the league scores."""
 
     benched_per_week: float = Field(description="Starter value the roster benches per sampled fantasy week")
     benched_season: float = Field(description="`benched_per_week` scaled to `season_weeks`")
     sample_weeks: List[int] = Field(
-        default=[], description="Fantasy week numbers sampled; empty when no calendar could be read"
+        default=[],
+        description=(
+            "Fantasy week numbers measured — every week the league scores, so the weeks after "
+            "its playoffs are left out; empty when no calendar could be read"
+        ),
     )
     season_weeks: int = Field(
-        default=0, description="Weeks the sample is scaled to; 0 when no calendar could be read"
+        default=0,
+        description="Weeks `benched_season` covers (the measured weeks); 0 when no calendar could be read",
     )
     slots: int = Field(
         default=0,
@@ -641,8 +665,8 @@ class DraftCongestionResp(ApiModel):
     evaluated: int = Field(
         default=0,
         description=(
-            "Candidates the congestion term was measured for (the top 25 by pre-congestion "
-            "score); the rest carry 0"
+            "Candidates the congestion term was measured for: everyone the caller can still "
+            "draft, or 0 when there is no lineup or calendar to measure against"
         ),
     )
 
@@ -706,23 +730,25 @@ class DraftBoardMeta(ApiModel):
             "ESPN's own top 150 they disagree by a mean of 28 places."
         ),
     )
-    rank_basis: Literal["espn", "cv"] = Field(
+    rank_basis: Literal["espn", "cv", "my_team"] = Field(
         default="cv",
         description=(
             "Whose rank orders the rows and fills `board_rank`. `espn` in an ESPN room: a league "
             "ESPN runs, a room with no league at all, or one following an ESPN draft. `cv` when the "
             "caller asked for Court Vision's rankings (`board=cv`), for a league elsewhere, or while "
-            "no market snapshot exists. `board` asks; this is what ran."
+            "no market snapshot exists. `my_team` when the caller asked for those rankings re-ordered "
+            "for their own roster (`board=my_team`): rows in `room_rank` order. `board` asks; this "
+            "is what ran."
         ),
     )
     rank_basis_reason: Literal[
         "espn_league", "league_less_room", "linked_espn_draft", "caller_chose_cv",
-        "provider_not_espn", "no_market_snapshot",
+        "caller_chose_my_team", "provider_not_espn", "no_market_snapshot",
     ] = Field(
         default="provider_not_espn",
         description="Why `rank_basis` is what it is, in the words the room shows",
     )
-    rank_basis_requested: Literal["espn", "cv"] = Field(
+    rank_basis_requested: Literal["espn", "cv", "my_team"] = Field(
         default="espn",
         description=(
             "What the caller asked `board` for. Differs from `rank_basis` only when `espn` was asked "
@@ -795,14 +821,16 @@ class DraftBoardMeta(ApiModel):
 class RecommendationComponent(ApiModel):
     """One visible term of a recommendation score, in season-value points."""
 
-    key: Literal["season_value", "vorp", "scarcity", "flexibility", "injury",
-                 "category_fit", "congestion"]
+    key: Literal["season_value", "vorp", "punts", "injury", "congestion", "category_fit"]
     label: str
     value: float
     in_score: bool = Field(
         description=(
             "Whether this term is summed into `score`. `season_value` is the base the other terms "
-            "are computed from and is shown for context, not added on top of `vorp`."
+            "are computed from and is shown for context, not added on top of `vorp`. `category_fit` "
+            "(category leagues) is what weighting categories by this roster's needs would add: "
+            "information for the drafter, deliberately not part of the score. `punts` (category "
+            "leagues) is how the room's conceded categories move his value over replacement."
         ),
     )
     detail: Optional[str] = Field(default=None, description="One line of why, for the room to render verbatim")
@@ -816,11 +844,17 @@ class DraftRecommendation(ApiModel):
     primary_position: Optional[str] = None
     value: float = Field(description="Per-game league-scored value (the board row's `value`)")
     season_value: float = Field(description="value x projected games")
-    vorp: float = Field(description="season_value minus the replacement level at the player's position")
+    vorp: float = Field(
+        description=(
+            "season_value minus the replacement level: the league's last starter still to be "
+            "filled, or the lower level at a position whose own lineup seats the league cannot fill"
+        )
+    )
     score: float = Field(
         description=(
-            "vorp + scarcity + flexibility + injury + category_fit + congestion. Court Vision's "
-            "own number, always computed — it only *orders* this list when `source` is `cv`."
+            "vorp + punts + injury + congestion, every term in season-value points — "
+            "the board row's `room_score`. Court Vision's own number, always computed — it only "
+            "*orders* this list when `source` is `cv`."
         )
     )
     source: Literal["cv", "espn"] = Field(

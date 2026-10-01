@@ -116,20 +116,23 @@ async def get_draft_board(
             "the session instead). No effect on a points league."
         ),
     ),
-    board: Literal["espn", "cv"] = Query(
+    board: Literal["espn", "cv", "my_team"] = Query(
         default="espn",
         description=(
             "Whose rankings order the rows. `espn` (the default) is ESPN's published draft rank "
             "for this league's format — the order an ESPN draft room shows — wherever the room can "
-            "have it; `cv` is Court Vision's ranking, the opt-in. `meta.rank_basis` says which "
-            "actually ran and `meta.rank_basis_reason` why."
+            "have it; `cv` is Court Vision's ranking, the opt-in; `my_team` is that ranking "
+            "re-ordered for the caller's roster (`room_rank`: value over replacement under the "
+            "room's punts, less the starts the roster could not use), which moves with every "
+            "pick. `meta.rank_basis` says which actually ran and "
+            "`meta.rank_basis_reason` why."
         ),
     ),
     rank_source: Literal["cv", "espn"] = Query(
         default="cv",
         description=(
             "What orders `recommendations`. `cv` (the default) is Court Vision's room-aware "
-            "pick — VORP with scarcity, fit and congestion applied; `espn` takes the best "
+            "pick — value over replacement with the room's punts and lineup congestion applied; `espn` takes the best "
             "remaining on ESPN's own board for this league's format. Every component is "
             "computed either way, so switching never changes a card's numbers, only which "
             "opinion put it on top. `espn` falls back to `cv` when no market snapshot exists; "
@@ -268,23 +271,27 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
     description=(
         "The room's board: the same valuation as `/drafts/board`, with pick state taken from the "
         "session rather than the query string, and with recommendations for the caller's next "
-        "pick — every component of the score visible (`season_value`, `vorp`, `scarcity`, "
-        "`flexibility`, `injury`, `category_fit`).\n\n"
+        "pick — every component of the score visible (`season_value`, `vorp`, `punts`, "
+        "`injury`, `congestion`), all in season-value points. Every row the caller "
+        "can still draft carries the same number as `room_score`, and its place by it as "
+        "`room_rank`; `board=my_team` returns the rows in that order.\n\n"
         "Players the league's hard position caps have made undraftable for the caller are flagged "
         "`cap_blocked` (shown greyed, never hidden) and are excluded from the recommendations.\n\n"
         "`roster` lists the caller's drafted players with primary position, eligible slots and NBA "
         "team — what the roster zone needs to fill lineup slots, count caps and flag stacking.\n\n"
         "Category leagues additionally carry `fit_value`/`fit_rank` — the board re-scored for this "
-        "roster, with the session's `punts` at zero weight — a `category_fit` component on every "
-        "recommendation, and `meta.category_need`, which says how far the roster trails an average "
-        "team in each category.\n\n"
+        "roster's needs, with the session's `punts` at zero weight — and `meta.category_need`, "
+        "which says how far the roster trails an average team in each category. The punts are "
+        "part of the score (`punts`); the needs are shown on every recommendation as "
+        "`category_fit` and deliberately left out of it.\n\n"
         "Rows with market data carry `availability` (`likely`/`tossup`/`gone`) for the caller's "
         "next pick — the pick after that while the caller is on the clock.\n\n"
         "Rows come back in the order `meta.rank_basis` names: ESPN's published rank for the "
         "league's format in an ESPN room (a league ESPN runs, a room with no league, or one "
         "following an ESPN draft), with `board_rank` as each row's place and players ESPN does "
         "not rank trailing in CV order; Court Vision's rank for a league elsewhere, or while no "
-        "market snapshot exists. `meta.rank_basis_reason` says which.\n\n"
+        "market snapshot exists; `room_rank` when `board=my_team` asked for it. "
+        "`meta.rank_basis_reason` says which.\n\n"
         "`rank_source` chooses what orders the recommendations: Court Vision's room-aware pick "
         "(the default), or the best remaining on ESPN's board. Every component is computed "
         "either way, so switching views never changes the numbers on a card — only which of "
@@ -296,20 +303,23 @@ async def delete_draft_session(session: OwnedDraftSessionContext = Depends(get_o
     },
 )
 async def get_draft_session_board(
-    board: Literal["espn", "cv"] = Query(
+    board: Literal["espn", "cv", "my_team"] = Query(
         default="espn",
         description=(
             "Whose rankings order the rows. `espn` (the default) is ESPN's published draft rank "
             "for this league's format — the order an ESPN draft room shows — wherever the room can "
-            "have it; `cv` is Court Vision's ranking, the opt-in. `meta.rank_basis` says which "
-            "actually ran and `meta.rank_basis_reason` why."
+            "have it; `cv` is Court Vision's ranking, the opt-in; `my_team` is that ranking "
+            "re-ordered for the caller's roster (`room_rank`: value over replacement under the "
+            "room's punts, less the starts the roster could not use), which moves with every "
+            "pick. `meta.rank_basis` says which actually ran and "
+            "`meta.rank_basis_reason` why."
         ),
     ),
     rank_source: Literal["cv", "espn"] = Query(
         default="cv",
         description=(
             "What orders `recommendations`. `cv` (the default) is Court Vision's room-aware "
-            "pick — VORP with scarcity, fit and congestion applied; `espn` takes the best "
+            "pick — value over replacement with the room's punts and lineup congestion applied; `espn` takes the best "
             "remaining on ESPN's own board for this league's format. Every component is "
             "computed either way, so switching never changes a card's numbers, only which "
             "opinion put it on top. `espn` falls back to `cv` when no market snapshot exists; "

@@ -31,10 +31,10 @@ FULL = {"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE
 GUARD = ("PG", "G", "UT")
 
 
-def _p(id, value, team="DEN", slots=GUARD, position=None):
+def _p(id, value, team="DEN", slots=GUARD, position=None, share=1.0):
     return CongestionPlayer(
         id=id, value=value, team=team,
-        slots=frozenset(slots) if slots is not None else None, position=position,
+        slots=frozenset(slots) if slots is not None else None, position=position, share=share,
     )
 
 
@@ -180,6 +180,83 @@ def test_the_penalty_is_never_positive():
         assert 0.0 >= pen.value >= -(candidate.value * pen.games * model.scale)
     # Adding to an empty lineup benches nothing, reported as a clean zero.
     assert str(_model([], roster_slots=seats).penalty(_p(1, 10)).value) == "0.0"
+
+
+def test_a_benched_game_is_charged_at_the_games_both_players_are_expected_to_play():
+    """One seat, two point guards. He only sits on a night he plays and the
+    player ahead of him plays too: 20 x 0.5 x 0.8, where "everyone plays every
+    game" would charge the full 20. Who starts is still decided by value."""
+    starter = _p(1, 30, slots=("PG",), share=0.8)
+    model = _model([starter], roster_slots={"PG": 1})
+
+    often_hurt = model.penalty(_p(2, 20, slots=("PG",), share=0.5))
+    assert often_hurt.value == -8.0
+    # Healthy, the same candidate costs the starter's availability alone.
+    assert model.penalty(_p(2, 20, slots=("PG",))).value == -16.0
+    # The better player takes the seat whatever his share, and what he benches
+    # is the other man's value at the games the two share.
+    assert model.penalty(_p(3, 40, slots=("PG",), share=0.5)).value == -round(30 * 0.8 * 0.5, 1)
+
+
+def test_a_share_never_turns_the_penalty_into_a_bonus():
+    """A often-absent candidate thins what the roster already benches by lowering
+    the lineup's average availability. That is not something he adds."""
+    roster = [_p(1, 30, slots=("PG",)), _p(2, 20, slots=("PG",))]      # 2 already sits
+    model = _model(roster, roster_slots={"PG": 1, "C": 1})
+    assert model.benched_sample == 20.0
+
+    centre = model.penalty(_p(3, 25, slots=("C",), share=0.1))          # seats freely at C
+    assert centre.value == 0.0 and centre.per_week == 0.0
+
+
+def test_a_penalty_reads_only_the_nights_his_team_plays():
+    """Denver is off on the night the roster is crowded, so a Nugget adds
+    nothing there; a Laker who plays that night does."""
+    roster = [_p(1, 30, team="LAL", slots=("PG",)), _p(2, 20, team="LAL", slots=("PG",))]
+    weeks = (_week(3, {"LAL"}, {"DEN"}),)
+    model = _model(roster, roster_slots={"PG": 1}, weeks=weeks)
+
+    nugget = model.penalty(_p(3, 10, team="DEN", slots=("PG",)))
+    assert nugget.value == 0.0 and nugget.games == 1
+    laker = model.penalty(_p(4, 10, team="LAL", slots=("PG",)))
+    assert laker.value == -10.0 and laker.games == 1
+
+
+def test_the_exchange_agrees_with_re_running_the_lineup():
+    """The penalty reads one re-seating chain per night instead of matching the
+    roster twice. On a few hundred arbitrary rosters, calendars and candidates
+    it must say exactly what the two matchings say: with every share at 1, the
+    value benched with him minus the value benched without."""
+    import random
+
+    rng = random.Random(20261001)
+    teams = ["DEN", "BOS", "LAL", "NYK", "MIA"]
+    eligibilities = [("PG", "G", "UT"), ("SG", "G", "UT"), ("SF", "F", "UT"), ("PF", "F", "UT"),
+                     ("C", "UT"), ("PG", "SG", "G", "UT"), ("SF", "PF", "F", "UT"), ("PF", "C", "F", "UT"),
+                     ("C",), ()]
+    leagues = [FULL, {"PG": 1, "SG": 1, "C": 1, "UT": 1}, {"C": 2, "G": 1}, {"UT": 2}]
+    checked = benched_someone = 0
+    for _ in range(300):
+        roster_slots = rng.choice(leagues)
+        roster = [
+            _p(i, rng.choice([8, 12, 12, 20, 25, 31, 40]), team=rng.choice(teams),
+               slots=rng.choice(eligibilities))
+            for i in range(1, rng.randint(1, 14))
+        ]
+        weeks = tuple(
+            _week(n, *[set(rng.sample(teams, rng.randint(0, 5))) for _ in range(7)])
+            for n in range(1, rng.randint(2, 4))
+        )
+        model = build_congestion_model(roster, roster_slots, weeks, len(weeks))
+        slots = active_slots(roster_slots)
+        for cid in (100, 101, 102):
+            candidate = _p(cid, rng.choice([5, 12, 20, 25, 33, 45]), team=rng.choice(teams),
+                           slots=rng.choice(eligibilities))
+            expected = benched_value(roster + [candidate], slots, weeks) - benched_value(roster, slots, weeks)
+            assert model.penalty(candidate).value == (-round(expected, 1) or 0.0)
+            checked += 1
+            benched_someone += expected > 0
+    assert checked == 900 and benched_someone > 200       # the sample really exercises collisions
 
 
 def test_the_sample_scales_to_the_season():

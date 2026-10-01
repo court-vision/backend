@@ -812,3 +812,15 @@ def test_the_board_knob_defaults_to_espn_and_passes_cv_through(authed_client, se
     _own(monkeypatch, league=_league())
     assert authed_client.get("/v1/internal/drafts/board?team_id=7&board=cv").status_code == 200
     assert service["calls"][-1]["session"].board_source == "cv"
+
+
+@pytest.mark.api
+def test_the_board_knob_takes_my_team_on_both_boards(authed_client, service, monkeypatch):
+    """The third option: Court Vision's rankings re-ordered for the caller's roster."""
+    _own_session(monkeypatch, league=_league())
+    assert authed_client.get("/v1/internal/drafts/12/board?board=my_team").status_code == 200
+    assert service["calls"][-1]["session"].board_source == "my_team"
+
+    _own(monkeypatch, league=_league())
+    assert authed_client.get("/v1/internal/drafts/board?team_id=7&board=my_team").status_code == 200
+    assert service["calls"][-1]["session"].board_source == "my_team"

@@ -11,10 +11,11 @@ ones that would not.
 
 The model, in four steps:
 
-1. **The sample.** A few ordinary fantasy weeks from the season's calendar —
-   not the short opening week, not the merged All-Star fortnight — each day a
-   set of the NBA teams playing. The board passes them in; this module reads
-   no calendar itself.
+1. **The calendar.** Fantasy weeks of the season, each day a set of the NBA
+   teams playing. The board passes in every week the league scores, so the
+   term is measured on the season itself rather than extrapolated from a
+   sample; a caller may pass fewer and a `season_weeks` to scale them to. This
+   module reads no calendar itself.
 2. **The lineup, per day.** The roster players whose team plays that day are
    matched against the league's active lineup slots (`roster_slots` minus
    bench and IR, UT open to everyone), eligibility from ESPN's own lineup slots.
@@ -22,23 +23,33 @@ The model, in four steps:
    first, and admit each one whenever an augmenting path can still seat him.
    With the weights on one side of the graph the seatable sets form a
    transversal matroid, where that greedy is exact, and at fifteen players by
-   thirteen slots it costs nothing. Unmatched player-games × per-game value is
-   the day's benched value.
-3. **The term.** For a candidate, `congestion = −(benched(roster + him) −
-   benched(roster))`, the sample scaled to the season by
-   `season_weeks / len(weeks)`. His own games are already in `season_value`, so
+   thirteen slots it costs nothing. Whoever is left unmatched rides the bench.
+3. **The term.** A candidate changes a night's lineup in one of three ways,
+   and the matroid says which without re-running the matching. Follow the
+   re-seatings his arrival could set off — his seats, the players in them,
+   their other seats, and so on. If the chain reaches an empty seat he starts
+   and nobody sits. Otherwise the players along it are exactly those whose
+   absence would seat him, and the worst of them and him — the one the greedy
+   would reach last — is who sits: him, or the roster player he displaces.
+   `congestion = −(what that newly benched player-game is worth)`, summed over
+   the nights his team plays. His own games are already in `season_value`, so
    this only ever charges for what his arrival benches — his or someone else's.
-4. **Never positive.** Per day, the roster's optimal lineup is still a lineup
-   once he is added, so the matched value cannot fall; and his lineup minus his
-   own seat is a lineup for the roster alone, so the matched value cannot rise
-   by more than his value. The benched value therefore moves by
-   `v − (gain)` with `0 ≤ gain ≤ v`: between 0 and his value, never below 0.
-   Summed over days and weeks, the term lives in `[−v × games × scale, 0]`.
+4. **Never positive.** A night costs nothing or one benched player-game, so the
+   term lives in `[−max(v) × games × scale, 0]`.
 
-Two assumptions, stated rather than hidden: today's per-game values hold all
-season, and every calendar game is played (no games-played discount — the
-term is a friction estimate, not a projection). Stacking needs no model of its
-own: same team, same nights, and the matching sees the collision directly.
+**Availability.** `season_value` counts a player's value over the games he is
+expected to play, so a benched game is charged the same way: at `share`, the
+fraction of his team's games he is expected to play, times the average share of
+the players whose absence would seat him — he only sits on a night he plays
+and the players ahead of him play too. For two players and one seat that is
+exact; for a fuller lineup it sits between "everyone plays every game" and
+independent absences, which is where a roster that replaces its injured
+starters lives. With every share at 1 — the default, and what the matching
+itself always uses to decide who starts — the charge is the plain benched value.
+
+One assumption, stated rather than hidden: today's per-game values hold all
+season. Stacking needs no model of its own: same team, same nights, and the
+matching sees the collision directly.
 
 Missing data never penalizes on its own account. A player with no team on file
 plays no sampled game and is left out of the matching; a candidate with no
@@ -50,7 +61,7 @@ no ORM, no I/O.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 # ---- lineup vocabulary --------------------------------------------------------
@@ -101,6 +112,7 @@ class CongestionPlayer:
     team: Optional[str]                     # NBA tricode; None plays no sampled game
     slots: Optional[frozenset[str]] = None  # ESPN lineup slots he can start in; None = unknown
     position: Optional[str] = None          # ESPN primary, the fallback when slots are unknown
+    share: float = 1.0                      # fraction of his team's games he is expected to play
 
 
 @dataclass(frozen=True)
@@ -134,8 +146,19 @@ class Penalty:
 
 
 @dataclass(frozen=True)
+class Night:
+    """One calendar day as the roster plays it: who has a game, who starts where."""
+
+    teams: frozenset[str]
+    players: tuple[CongestionPlayer, ...]       # roster players whose team plays tonight
+    seats: tuple[tuple[int, ...], ...]          # per player, the seat indices he can fill
+    owner: tuple[Optional[int], ...]            # per seat, the index of the player starting in it
+    benched: float                              # what the roster alone leaves on the bench tonight
+
+
+@dataclass(frozen=True)
 class CongestionModel:
-    """One roster's lineup pressure over the sampled weeks."""
+    """One roster's lineup pressure over the calendar it was measured on."""
 
     slots: tuple[str, ...]                  # active slot instances, e.g. (... "UT", "UT", "UT")
     roster: tuple[CongestionPlayer, ...]    # the roster players in the matching (a team on file)
@@ -144,6 +167,11 @@ class CongestionModel:
     season_weeks: int
     benched_sample: float                   # the roster's benched value over the sample, unscaled
     stacks: tuple[Stack, ...]
+    nights: tuple[Night, ...] = ()          # every sampled day, with the roster's lineup on it
+    # (night, eligibility) -> the exchange a candidate with that eligibility
+    # sets off there. Candidates share a handful of eligibilities, so the
+    # re-seating chain is walked once per night for each rather than per player.
+    _exchanges: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def active(self) -> bool:
@@ -185,10 +213,22 @@ class CongestionModel:
         if not candidate.team:
             return Penalty(0.0, 0.0, 0, 0, None, weeks, NO_TEAM)
 
-        games = sum(1 for week in self.weeks for day in week.days if candidate.team in day)
-        with_him = benched_value(self.roster + (candidate,), self.slots, self.weeks)
-        # >= 0 by the argument in the module docstring; max() absorbs float noise only.
-        delta = max(0.0, with_him - self.benched_sample)
+        # Only the nights his team plays can change: on every other one the
+        # lineup is the roster's own, already measured.
+        eligibility = (candidate.slots, candidate.position if candidate.slots is None else None)
+        seats: Optional[tuple[int, ...]] = None
+        games = 0
+        delta = 0.0
+        for index, night in enumerate(self.nights):
+            if candidate.team not in night.teams:
+                continue
+            games += 1
+            exchange = self._exchanges.get((index, eligibility))
+            if exchange is None:
+                if seats is None:
+                    seats = seat_indices(candidate, self.slots)
+                exchange = self._exchanges[(index, eligibility)] = _exchange(night, seats)
+            delta += exchange.cost(candidate)
         # `or 0.0`: -round(0.0) is -0.0, and the room should never render that.
         value = -round(delta * self.scale, VALUE_DECIMALS) or 0.0
         return Penalty(
@@ -199,6 +239,67 @@ class CongestionModel:
             team=candidate.team,
             weeks=weeks,
         )
+
+
+@dataclass(frozen=True)
+class _Exchange:
+    """What a candidate with one eligibility sets off on one night.
+
+    `blockers` are the starters his arrival could unseat — everyone along the
+    re-seating chains from his seats — and `open` says a chain reaches an empty
+    seat, in which case nobody sits.
+    """
+
+    open: bool
+    blockers: tuple[CongestionPlayer, ...] = ()
+
+    def cost(self, candidate: CongestionPlayer) -> float:
+        """The value of the player-game his arrival benches, thinned by availability."""
+        if self.open:
+            return 0.0
+        if not self.blockers:
+            # He can start nowhere in this league: every game of his sits.
+            return candidate.value * candidate.share
+        # The one the greedy reaches last sits: lowest value, then highest id.
+        worst = max(self.blockers, key=_greedy_order)
+        shares = sum(p.share for p in self.blockers)
+        if _greedy_order(candidate) > _greedy_order(worst):
+            return candidate.value * candidate.share * (shares / len(self.blockers))
+        # He takes the seat and `worst` sits behind the rest of the chain, him included.
+        ahead = (shares - worst.share + candidate.share) / len(self.blockers)
+        return worst.value * worst.share * ahead
+
+
+def _greedy_order(player: CongestionPlayer) -> tuple[float, int]:
+    """The order the matching seats players in: best first, ties on id."""
+    return (-player.value, player.id)
+
+
+def _blockers(night: Night, seats: Sequence[int]) -> Optional[list[int]]:
+    """Indices of the starters reachable by re-seating from `seats`, or None
+    when a chain ends at an empty seat."""
+    seen: set[int] = set()
+    found: list[int] = []
+    queue = list(seats)
+    while queue:
+        seat = queue.pop()
+        if seat in seen:
+            continue
+        seen.add(seat)
+        holder = night.owner[seat]
+        if holder is None:
+            return None
+        if holder not in found:
+            found.append(holder)
+            queue.extend(night.seats[holder])
+    return found
+
+
+def _exchange(night: Night, seats: Sequence[int]) -> _Exchange:
+    reached = _blockers(night, seats)
+    if reached is None:
+        return _Exchange(open=True)
+    return _Exchange(open=False, blockers=tuple(night.players[i] for i in reached))
 
 
 def active_slots(roster_slots: Optional[Mapping[str, object]]) -> tuple[str, ...]:
@@ -252,10 +353,18 @@ def week_from_calendar(number: int, game_span: int, games: Mapping[str, Mapping]
     return SampleWeek(number=int(number), days=tuple(days))
 
 
-def max_weight_assignment(
+def seat_indices(player: CongestionPlayer, slots: Sequence[str]) -> tuple[int, ...]:
+    """The seats (indices into `slots`) a player can fill, in a stable order."""
+    by_name: dict[str, list[int]] = {}
+    for index, name in enumerate(slots):
+        by_name.setdefault(name, []).append(index)
+    return tuple(j for name in sorted(eligible_slots(player, slots)) for j in by_name.get(name, ()))
+
+
+def lineup(
     players: Sequence[CongestionPlayer], slots: Sequence[str]
-) -> frozenset[int]:
-    """The ids that start when the lineup is chosen to maximize started value.
+) -> tuple[tuple[tuple[int, ...], ...], tuple[Optional[int], ...]]:
+    """The value-maximizing lineup: each player's seats, and who holds each seat.
 
     Greedy by value with augmenting paths: each player, best first, is seated
     if some chain of re-seatings makes room for him. A successful chain never
@@ -263,16 +372,7 @@ def max_weight_assignment(
     heaviest element that keeps the set independent", optimal on a matroid.
     Ties break on id, so the answer is deterministic.
     """
-    if not players or not slots:
-        return frozenset()
-
-    by_name: dict[str, list[int]] = {}
-    for index, name in enumerate(slots):
-        by_name.setdefault(name, []).append(index)
-    seats: list[list[int]] = [
-        [j for name in sorted(eligible_slots(p, slots)) for j in by_name.get(name, ())]
-        for p in players
-    ]
+    seats = tuple(seat_indices(p, slots) for p in players)
     owner: list[Optional[int]] = [None] * len(slots)
 
     def seat(i: int, seen: set[int]) -> bool:
@@ -286,27 +386,52 @@ def max_weight_assignment(
                 return True
         return False
 
-    started: set[int] = set()
-    order = sorted(range(len(players)), key=lambda i: (-players[i].value, players[i].id))
-    for i in order:
-        if seats[i] and seat(i, set()):
-            started.add(players[i].id)
-    return frozenset(started)
+    for i in sorted(range(len(players)), key=lambda i: _greedy_order(players[i])):
+        if seats[i]:
+            seat(i, set())
+    return seats, tuple(owner)
+
+
+def max_weight_assignment(
+    players: Sequence[CongestionPlayer], slots: Sequence[str]
+) -> frozenset[int]:
+    """The ids that start when the lineup is chosen to maximize started value."""
+    if not players or not slots:
+        return frozenset()
+    _seats, owner = lineup(players, slots)
+    return frozenset(players[i].id for i in owner if i is not None)
+
+
+def night_of(
+    teams: frozenset[str], roster: Sequence[CongestionPlayer], slots: Sequence[str]
+) -> Night:
+    """One day's lineup for a roster, and what it leaves on the bench.
+
+    A benched game is charged at his own share of games times the mean share
+    of the starters whose absence would seat him (see the module docstring).
+    """
+    players = tuple(p for p in roster if p.team is not None and p.team in teams)
+    seats, owner = lineup(players, slots)
+    night = Night(teams=teams, players=players, seats=seats, owner=owner, benched=0.0)
+    started = {i for i in owner if i is not None}
+    benched = 0.0
+    for i, player in enumerate(players):
+        if i in started:
+            continue
+        ahead = [players[j] for j in (_blockers(night, seats[i]) or ())]
+        thinning = sum(p.share for p in ahead) / len(ahead) if ahead else 1.0
+        benched += player.value * player.share * thinning
+    return Night(teams=teams, players=players, seats=seats, owner=owner, benched=benched)
 
 
 def benched_value(
     players: Sequence[CongestionPlayer], slots: Sequence[str], weeks: Sequence[SampleWeek]
 ) -> float:
     """Value that rides the bench over the sampled weeks, day by day."""
-    total = 0.0
-    for week in weeks:
-        for teams_today in week.days:
-            today = [p for p in players if p.team is not None and p.team in teams_today]
-            if not today:
-                continue
-            started = max_weight_assignment(today, slots)
-            total += sum(p.value for p in today if p.id not in started)
-    return total
+    return sum(
+        night_of(teams_today, players, slots).benched
+        for week in weeks for teams_today in week.days
+    )
 
 
 def build_congestion_model(
@@ -320,7 +445,11 @@ def build_congestion_model(
     sampled = tuple(weeks)
     with_team = tuple(p for p in roster if p.team)
     no_team = tuple(p.id for p in roster if not p.team)
-    benched = benched_value(with_team, slots, sampled) if slots and sampled else 0.0
+    nights = tuple(
+        night_of(teams_today, with_team, slots)
+        for week in sampled for teams_today in week.days
+    ) if slots else ()
+    benched = sum(night.benched for night in nights)
 
     counts = Counter(p.team for p in with_team)
     stacks = tuple(
@@ -348,4 +477,5 @@ def build_congestion_model(
         season_weeks=length if length > 0 else DEFAULT_SEASON_WEEKS,
         benched_sample=benched,
         stacks=stacks,
+        nights=nights,
     )

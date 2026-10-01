@@ -18,6 +18,7 @@ from services.valuation.engine import (
     ProjectedPlayer,
     TeamWeeks,
     effective_games,
+    games_share,
     playoff_weight_of,
     points_per_game,
     value_pool,
@@ -168,6 +169,23 @@ class TestPlayoffs:
         m = LeagueModel(format="points", point_weights=DEFAULT_POINT_WEIGHTS)
         assert effective_games(_p(1, games=61.0), m) == 61.0
         assert effective_games(ProjectedPlayer(row=_row(2)), m) == 65.0
+
+    def test_the_share_is_his_games_over_his_teams_and_rides_on_the_valued_row(self):
+        m = LeagueModel(format="points", point_weights=DEFAULT_POINT_WEIGHTS,
+                        team_weeks={"X": TeamWeeks(regular=64, playoff=14, after=4)})
+        assert games_share(_p(1, games=41.0, team="X"), m) == pytest.approx(0.5)
+        assert games_share(_p(2, games=90.0, team="X"), m) == 1.0         # never more than every game
+        # A team the calendar does not carry is the league-average one; no
+        # calendar at all is an 82-game season; nobody projecting him is 65 games.
+        assert games_share(_p(3, games=41.0, team="??"), m) == pytest.approx(0.5)
+        bare = LeagueModel(format="points", point_weights=DEFAULT_POINT_WEIGHTS)
+        assert games_share(_p(4, games=41.0), bare) == pytest.approx(0.5)
+        assert games_share(ProjectedPlayer(row=_row(5)), bare) == pytest.approx(65 / 82)
+
+        valued = _by_id(value_pool([_p(1, games=41.0, team="X"), _p(2, games=82.0, team="X")], m))
+        assert valued[1].share == pytest.approx(0.5) and valued[2].share == 1.0
+        cats = _by_id(value_pool([_p(1, games=41.0), _p(2, games=82.0)] + _filler(10, 20), _cats()))
+        assert cats[1].share == pytest.approx(0.5) and cats[2].share == 1.0
 
 
 class TestPoints:
