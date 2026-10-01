@@ -95,7 +95,7 @@ def tool_log(monkeypatch):
     """Stub the tools: record calls, answer with a tiny JSON body."""
     calls = []
 
-    async def fake_run_tool(name, raw):
+    async def fake_run_tool(name, raw, *, ctx=None, allowed=None):
         calls.append((name, raw))
         return ToolOutcome('{"ok": true}', is_error=False)
     monkeypatch.setattr(service, "run_tool", fake_run_tool)
@@ -221,6 +221,8 @@ class TestLoop:
         assert call["fallbacks"] == "default"
         assert call["betas"] == ["server-side-fallback-2026-07-01"]
         assert call["cache_control"] == {"type": "ephemeral"}
+        # the fixed prefix has its own breakpoint, so separate requests can share it
+        assert call["system"] == [{"type": "text", "text": service.SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
         assert "tool_choice" not in call
 
     def test_the_last_allowed_call_cannot_use_tools(self, script, tool_log, logged, monkeypatch):
@@ -311,7 +313,7 @@ class TestFailures:
     def test_the_request_deadline(self, script, tool_log, logged, monkeypatch):
         monkeypatch.setattr(settings, "ai_request_timeout_seconds", 0.05)
 
-        async def slow_run_tool(name, raw):
+        async def slow_run_tool(name, raw, **_):
             await asyncio.sleep(1)
         monkeypatch.setattr(service, "run_tool", slow_run_tool)
         script(msg("tool_use", tool_use("t1", "search_players", {"name": "a"})))
