@@ -6,10 +6,27 @@ identity: the caller names the user and team, and ownership is re-checked here.
 
 from fastapi import APIRouter, Security
 
+from core.compute import run_cpu
 from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
+from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp
+from schemas.valuation import (
+    StandardRankResp,
+    StandardValuationData,
+    StandardValuationReq,
+    StandardValuationResp,
+)
 from services.lineup_editor_service import LineupEditorService
+from services.valuation.engine import playoff_weight_of
+from services.valuation.standard import (
+    STANDARD_LEAGUE_SIZE,
+    STANDARD_ROUNDS,
+    ProjectedLine,
+    season_calendar,
+    standard_playoff_weeks,
+    standard_ranks,
+)
 
 router = APIRouter(prefix="/jobs", tags=["internal jobs"], dependencies=[Security(verify_pipeline_token)])
 
@@ -22,3 +39,37 @@ async def evaluate_lineup(req: LineupEvaluateReq):
     Business outcomes are reported in `data.outcome`, never raised.
     """
     return respond(await LineupEditorService.evaluate(req))
+
+
+@router.post("/valuation/standard", response_model=StandardValuationResp)
+async def value_standard_league(req: StandardValuationReq):
+    """Rank a set of projections in the standard league, in points and in 9-cat.
+
+    Called by data-platform's projections editor, which holds the projections
+    (and the edit being previewed) and has no valuation of its own. The ranks
+    are the `cv_rank` a room with no league would show for the same
+    projections: ESPN's default points weights or the standard nine categories,
+    twelve teams, thirteen rounds, the default fantasy-playoff weeks. Nothing
+    is read from or written to the database.
+    """
+    weight = playoff_weight_of(req.playoff_weight)
+    calendar = season_calendar()
+    lines = [
+        ProjectedLine(
+            player_id=p.player_id, line=p.line, games=p.games, team=p.team,
+            dd_rate=p.dd_rate, td_rate=p.td_rate,
+        )
+        for p in req.players
+    ]
+    ranks = await run_cpu("valuation.standard", standard_ranks, lines, calendar, weight)
+    return respond(StandardValuationResp(
+        status=ApiStatus.SUCCESS,
+        message=f"Valued {len(ranks)} players in the standard league",
+        data=StandardValuationData(
+            league_size=STANDARD_LEAGUE_SIZE,
+            rounds=STANDARD_ROUNDS,
+            playoff_weight=weight,
+            playoff_weeks=list(standard_playoff_weeks(calendar)),
+            players=[StandardRankResp(**vars(rank)) for rank in ranks],
+        ),
+    ))
