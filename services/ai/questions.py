@@ -2,9 +2,13 @@
 The router's question log, usr.ai_questions (migration 0026).
 
 Recording never fails a request: a question that can't be logged is still
-answered, and the failure is logged instead. Retention runs with each insert --
-text and context older than 90 days are nulled in the same round trip -- so the
-policy needs no scheduler.
+answered, and the failure is logged instead.
+
+Retention needs no scheduler: text and context older than 90 days are nulled
+after each insert, in the same round trip, and once more when the application
+starts -- so the policy holds even when nobody asks anything. A sweep that
+fails is logged and retried by the next one; it never costs the insert it rode
+on, or a startup.
 """
 
 from __future__ import annotations
@@ -19,14 +23,24 @@ from db.models.ai_questions import AiQuestion
 RETENTION = timedelta(days=90)
 
 
+def _redact_expired() -> int:
+    cutoff = datetime.now(timezone.utc) - RETENTION
+    return (AiQuestion
+            .update(question=None, context=None)
+            .where(AiQuestion.created_at < cutoff, AiQuestion.question.is_null(False))
+            .execute())
+
+
 @db_operation("ai.record_question")
 def _insert(row: dict[str, Any]) -> int:
-    cutoff = datetime.now(timezone.utc) - RETENTION
-    (AiQuestion
-     .update(question=None, context=None)
-     .where(AiQuestion.created_at < cutoff, AiQuestion.question.is_null(False))
-     .execute())
-    return AiQuestion.insert(**row).execute()
+    # The insert first, and on its own: statements here autocommit, so nothing
+    # the sweep does afterwards can take the row back.
+    question_id = AiQuestion.insert(**row).execute()
+    try:
+        _redact_expired()
+    except Exception:
+        get_logger().exception("ai_question_retention_failed", trigger="insert")
+    return question_id
 
 
 def _storable(value: Any) -> Any:
@@ -49,6 +63,19 @@ async def record(**row: Any) -> Optional[int]:
     except Exception:
         get_logger().exception("ai_question_record_failed", outcome=row.get("outcome"))
         return None
+
+
+@db_operation("ai.redact_expired_questions")
+def _sweep() -> int:
+    return _redact_expired()
+
+
+async def redact_expired() -> None:
+    """The retention sweep on its own, for application startup. Never raises."""
+    try:
+        get_logger().info("ai_questions_redacted", rows=await _sweep(), trigger="startup")
+    except Exception:
+        get_logger().exception("ai_question_retention_failed", trigger="startup")
 
 
 @db_operation("ai.question_feedback")

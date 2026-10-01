@@ -2,9 +2,9 @@
 Integration: the AI router against the real schema (migration 0026).
 
 The question log -- recording, the 90-day text retention that runs with each
-insert, owner-scoped feedback, the cascade from a deleted user -- and the one
-lookup that validates a routed destination: players that exist, NBA teams that
-exist, and fantasy teams that belong to the caller and nobody else.
+insert and at startup, owner-scoped feedback, the cascade from a deleted user --
+and the one lookup that validates a routed destination: players that exist, NBA
+teams that exist, and fantasy teams that belong to the caller and nobody else.
 """
 
 import asyncio
@@ -75,6 +75,33 @@ class TestQuestionLog:
         assert (old_row.question, old_row.context) == (None, None)
         assert (old_row.kind, old_row.input_tokens) == ("show", 900)  # the counts stay
         assert recent_row.question == "sengun last 15"
+
+    def test_the_startup_sweep_redacts_without_a_new_question(self, integration_db):
+        """Riding on inserts alone, the policy lapsed whenever AI traffic stopped."""
+        user = _user(9)
+        now = datetime.now(timezone.utc)
+        old = AiQuestion.insert(**_row(user, created_at=now - timedelta(days=91))).execute()
+        recent = AiQuestion.insert(**_row(user, created_at=now - timedelta(days=89))).execute()
+
+        asyncio.run(questions.redact_expired())
+
+        old_row, recent_row = AiQuestion.get_by_id(old), AiQuestion.get_by_id(recent)
+        assert (old_row.question, old_row.context, old_row.kind) == (None, None, "show")
+        assert (recent_row.question, recent_row.context) == ("sengun last 15", {"mode": "player"})
+        assert AiQuestion.select().count() == 2
+
+    def test_a_failing_sweep_does_not_cost_the_insert_it_rides_on(self, integration_db, monkeypatch):
+        user = _user(10)
+
+        def failing_sweep():
+            db.execute_sql("SELECT 1 / 0")
+        monkeypatch.setattr(questions, "_redact_expired", failing_sweep)
+
+        first = record(**_row(user))
+        second = record(**_row(user, question="who leads in blocks"))  # and the connection is still good
+
+        assert first is not None and second is not None
+        assert [q.question for q in AiQuestion.select().order_by(AiQuestion.id)] == ["sengun last 15", "who leads in blocks"]
 
     def test_a_nul_character_cannot_keep_a_question_out_of_the_log(self, integration_db):
         """Postgres text and jsonb refuse NUL; the insert failed and the question went unrecorded."""

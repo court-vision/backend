@@ -17,6 +17,7 @@ from core.telemetry import init_sentry
 from core.watchdog import start_loop_watchdog
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
+from services.ai import questions as ai_questions
 from services.features_client import start_features_runtime, stop_features_runtime
 from services.sqlmate_client import start_sqlmate_runtime, stop_sqlmate_runtime
 from services.fantasy_writer_client import start_fantasy_writer_runtime, stop_fantasy_writer_runtime
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
              environment=settings.environment)
 
     watchdog = None
+    retention = None
     try:
         # Startup migrations are deliberately synchronous before the server
         # accepts traffic; init_db closes their connection when complete.
@@ -67,8 +69,16 @@ async def lifespan(app: FastAPI):
 
         # A blocked event loop hangs every request with nothing logged; exit so Railway restarts us.
         watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
+
+        # AI question text is redacted after 90 days. The sweep otherwise runs only
+        # when a question is recorded, so run it here too or the policy lapses when
+        # AI traffic stops. In the background: it logs its own failure, and a slow
+        # or failing sweep must never delay or fail a startup.
+        retention = asyncio.create_task(ai_questions.redact_expired())
         yield
     finally:
+        if retention is not None:
+            retention.cancel()
         if watchdog is not None:
             watchdog.stop()
         # All lifecycle functions are idempotent, including partial-startup cleanup.
