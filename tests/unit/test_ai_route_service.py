@@ -296,6 +296,30 @@ def test_recording_never_raises(monkeypatch):
 
 
 @pytest.mark.unit
+def test_recording_drops_the_nul_postgres_cannot_store(monkeypatch):
+    """One NUL -- in the question, or in a tool input the model wrote -- kept the whole row out of the log."""
+    from services.ai import questions
+    seen = []
+
+    async def insert(row):
+        seen.append(row)
+        return 5
+    monkeypatch.setattr(questions, "_insert", insert)
+
+    question_id = asyncio.run(questions.record(
+        user_id=1, question="sengun\x00 last 15", context={"page": "ter\x00minal", "player_id": SENGUN},
+        target={"type": "terminal", "window": "l15\x00", "compare_ids": [SABONIS]}, missing=None, outcome="ok",
+        tool_calls=[{"name": "search_players", "input": {"na\x00me": "Sen\x00gun", "also": ["\x00a"]}, "is_error": False}]))
+
+    assert question_id == 5
+    assert seen == [{
+        "user_id": 1, "question": "sengun last 15", "context": {"page": "terminal", "player_id": SENGUN},
+        "target": {"type": "terminal", "window": "l15", "compare_ids": [SABONIS]}, "missing": None, "outcome": "ok",
+        "tool_calls": [{"name": "search_players", "input": {"name": "Sengun", "also": ["a"]}, "is_error": False}],
+    }]
+
+
+@pytest.mark.unit
 class TestSeasonLine:
     """What "this season" means today. StatMuse took "this season" in the preseason
     to be 2024-25; naming the season in the user turn lets the model write "2025-26"."""

@@ -13,6 +13,14 @@ from pydantic import Field
 
 from schemas.common import ApiModel, BaseResponse
 
+# Postgres text and jsonb cannot hold a NUL, so a string carrying one could
+# never be logged; it is refused before any quota or model call is spent on it
+NO_NUL = r"^[^\x00]*$"
+
+# Every ID the caller sends is an int4 in our tables. Unbounded, a JSON integer
+# can run to thousands of digits, each of them copied into the prompt.
+INT4_MAX = 2_147_483_647
+
 
 class AskReq(ApiModel):
     """Body for POST /v1/internal/ai/ask."""
@@ -21,6 +29,7 @@ class AskReq(ApiModel):
         ...,
         min_length=1,
         max_length=500,
+        pattern=NO_NUL,
         description="A question about NBA players, in plain language",
     )
 
@@ -77,11 +86,12 @@ class AiContext(ApiModel):
     """Where the user is when they ask. IDs only -- never names from league data,
     so the context adds no prompt-injection surface."""
 
-    page: Optional[str] = Field(None, max_length=40, description="Current route, e.g. 'terminal'")
+    page: Optional[str] = Field(None, max_length=40, pattern=NO_NUL, description="Current route, e.g. 'terminal'")
     mode: Optional[TerminalMode] = Field(None, description="Terminal mode, when on the terminal")
-    player_id: Optional[int] = Field(None, gt=0, description="Focused NBA player ID")
-    compare_ids: list[int] = Field(default_factory=list, max_length=4, description="NBA player IDs")
-    team_id: Optional[int] = Field(None, gt=0, description="Selected fantasy team ID")
+    player_id: Optional[int] = Field(None, gt=0, le=INT4_MAX, description="Focused NBA player ID")
+    compare_ids: list[Annotated[int, Field(gt=0, le=INT4_MAX)]] = Field(
+        default_factory=list, max_length=4, description="NBA player IDs")
+    team_id: Optional[int] = Field(None, gt=0, le=INT4_MAX, description="Selected fantasy team ID")
     nba_team: Optional[str] = Field(None, pattern=r"^[A-Z]{2,3}$", description="Focused NBA team abbreviation")
     window: Optional[str] = Field(None, pattern=WINDOW_PATTERN, description="Terminal stat window")
 
@@ -89,7 +99,8 @@ class AiContext(ApiModel):
 class RouteReq(ApiModel):
     """Body for POST /v1/internal/ai/route."""
 
-    question: str = Field(..., min_length=1, max_length=500, description="The question, in plain language")
+    question: str = Field(..., min_length=1, max_length=500, pattern=NO_NUL,
+                          description="The question, in plain language")
     context: AiContext = Field(default_factory=AiContext)
 
 

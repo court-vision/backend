@@ -71,7 +71,8 @@ def test_answer_envelope(authed_client, user, monkeypatch):
 
 
 @pytest.mark.api
-@pytest.mark.parametrize("payload", [{}, {"question": ""}, {"question": "x" * 501}])
+@pytest.mark.parametrize("payload", [{}, {"question": ""}, {"question": "x" * 501},
+                                     {"question": "who leads\x00 in blocks"}])
 def test_question_is_validated_before_the_service(authed_client, user, monkeypatch, payload):
     calls = _stub(monkeypatch, OK)
 
@@ -157,6 +158,15 @@ def test_route_envelope(authed_client, user, monkeypatch):
     {"question": "q", "context": {"window": "l83"}},
     {"question": "q", "context": {"compare_ids": [1, 2, 3, 4, 5]}},
     {"question": "q", "context": {"nba_team": "houston"}},
+    # Postgres cannot store a NUL, so it would be a question no log row could hold
+    {"question": "sengun\x00 last 15"},
+    {"question": "q", "context": {"page": "ter\x00minal"}},
+    # IDs are int4; anything longer only inflates the prompt and the stored row
+    {"question": "q", "context": {"player_id": 2**31}},
+    {"question": "q", "context": {"team_id": 2**31}},
+    {"question": "q", "context": {"compare_ids": [1630578, int("9" * 4300)]}},
+    {"question": "q", "context": {"compare_ids": [0]}},
+    {"question": "q", "context": {"compare_ids": [1630578, -5]}},
 ])
 def test_route_validates_before_the_service(authed_client, user, monkeypatch, payload):
     calls = _stub_route(monkeypatch, ROUTED)
@@ -165,6 +175,17 @@ def test_route_validates_before_the_service(authed_client, user, monkeypatch, pa
 
     assert r.status_code == 422
     assert calls == []
+
+
+@pytest.mark.api
+def test_route_takes_the_largest_id_a_table_can_hold(authed_client, user, monkeypatch):
+    calls = _stub_route(monkeypatch, ROUTED)
+    context = {"player_id": 2**31 - 1, "compare_ids": [2**31 - 1], "team_id": 2**31 - 1}
+
+    r = authed_client.post(ROUTE_URL, json={"question": "line one\nline two", "context": context})
+
+    assert r.status_code == 200
+    assert calls == [("line one\nline two", context, 42)]
 
 
 @pytest.mark.api

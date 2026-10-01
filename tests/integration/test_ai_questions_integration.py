@@ -76,6 +76,20 @@ class TestQuestionLog:
         assert (old_row.kind, old_row.input_tokens) == ("show", 900)  # the counts stay
         assert recent_row.question == "sengun last 15"
 
+    def test_a_nul_character_cannot_keep_a_question_out_of_the_log(self, integration_db):
+        """Postgres text and jsonb refuse NUL; the insert failed and the question went unrecorded."""
+        user = _user(11)
+
+        question_id = record(**_row(
+            user, question="sengun\x00 last 15", context={"page": "ter\x00minal"}, missing="career\x00 splits",
+            target={"type": "terminal", "mode": "player", "window": "l15\x00"},
+            tool_calls=[{"name": "search_players", "input": {"name": "Sen\x00gun"}, "is_error": False}]))
+
+        stored = AiQuestion.get_by_id(question_id)
+        assert (stored.question, stored.context, stored.missing) == ("sengun last 15", {"page": "terminal"}, "career splits")
+        assert stored.target["window"] == "l15"
+        assert stored.tool_calls[0]["input"] == {"name": "Sengun"}
+
     def test_feedback_is_the_askers_alone(self, integration_db):
         asker, other = _user(4), _user(5)
         question_id = record(**_row(asker))

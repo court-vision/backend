@@ -29,10 +29,23 @@ def _insert(row: dict[str, Any]) -> int:
     return AiQuestion.insert(**row).execute()
 
 
+def _storable(value: Any) -> Any:
+    """`value` with NUL removed from every string in it, at any depth. Postgres text
+    and jsonb cannot hold one, and the model can write one into a tool input or
+    its answer -- which would otherwise keep the whole row out of the log."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_storable(key): _storable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_storable(item) for item in value]
+    return value
+
+
 async def record(**row: Any) -> Optional[int]:
     """Insert one question; returns its id, or None if it could not be stored."""
     try:
-        return await _insert(row)
+        return await _insert(_storable(row))
     except Exception:
         get_logger().exception("ai_question_record_failed", outcome=row.get("outcome"))
         return None
