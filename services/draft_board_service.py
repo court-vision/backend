@@ -1398,7 +1398,10 @@ class DraftBoardService:
         the players worth starting in them: its last dedicated starter then
         sits below the league's, and that lower level is the bar for anyone
         who can take such a seat. That is positional scarcity in value units,
-        and in an ordinary league it is simply absent.
+        and in an ordinary league it is simply absent. It also ends when the
+        seats are filled: once every dedicated starter at a position has been
+        drafted there is no seat left for the next one to take, and he is
+        measured against the league like everybody else.
 
         Both levels are the *marginal* starter still to be filled: the tier is
         fixed against the full pool, drafted or not, and the count of it still
@@ -1430,7 +1433,10 @@ class DraftBoardService:
             )
             if not values:
                 continue
-            bar = values[min(DraftBoardService._tier_left(eligible, dedicated, key), len(values) - 1)]
+            still_to_fill = DraftBoardService._tier_left(eligible, dedicated, key)
+            if still_to_fill <= 0:
+                continue
+            bar = values[min(still_to_fill, len(values) - 1)]
             if bar < overall:
                 short[position] = bar
         return overall, short

@@ -776,6 +776,52 @@ def test_a_position_the_league_cannot_fill_is_measured_against_its_own_last_star
 
 
 @pytest.mark.unit
+def test_a_position_stops_being_short_once_its_seats_are_filled():
+    """The premium is for a seat somebody still has to fill. When every team
+    has its centres, the next one takes nobody's centre seat: he is measured
+    against the league's last starter again, not handed the best remaining
+    centre's value as a bar of his own."""
+    def pool(drafted_centres: int) -> list[dict]:
+        centres = [
+            {"id": 100 + i, "name": f"C{i}", "value": 45 - i, "season_value": (45 - i) * 65.0, "position": "C",
+             "available": i >= drafted_centres, "blocked": False, "injury": None, "slots": ["C", "UT"],
+             "cv_rank": i + 1}
+            for i in range(8)
+        ]
+        scrubs = [
+            {"id": 300 + i, "name": f"Scrub{i}", "value": 5.0, "season_value": 325.0, "position": "C",
+             "available": True, "blocked": False, "injury": None, "slots": ["C", "UT"], "cv_rank": 90 + i}
+            for i in range(10)
+        ]
+        guards = [
+            {"id": 200 + i, "name": f"G{i}", "value": 44 - i * 0.2, "season_value": round((44 - i * 0.2) * 65, 1),
+             "position": "SG", "available": True, "blocked": False, "injury": None,
+             "slots": ["SG", "G", "UT"], "cv_rank": 20 + i}
+            for i in range(60)
+        ]
+        return centres + scrubs + guards
+
+    league = _league(roster_slots={"PG": 1, "SG": 1, "C": 2, "UT": 1, "BE": 3},
+                     draft_settings={"pick_order": [1, 2, 3, 4, 5]})    # 5 teams: 10 centre seats
+
+    # Six real centres gone: four centre seats are still to be filled, by two
+    # real centres and two scrubs, so the position is short.
+    open_seats = {t.c["id"]: t for t in _scored(pool(6), league, league_size=5)}
+    assert open_seats[106].bar_position == "C" and open_seats[106].bar == 325.0
+
+    # Every one of the ten seats filled (the eight centres and two scrubs are
+    # the tier; all drafted): the next centre is just another player.
+    filled = pool(8)
+    for c in filled:
+        if c["id"] in (300, 301):
+            c["available"] = False
+    terms = {t.c["id"]: t for t in _scored(filled, league, league_size=5)}
+    assert terms[302].bar_position is None and terms[200].bar_position is None
+    assert terms[302].bar == terms[200].bar
+    assert terms[302].vorp < 0 < terms[200].vorp
+
+
+@pytest.mark.unit
 def test_the_replacement_bar_does_not_fall_as_the_draft_goes_on():
     """Indexing the *original* starter need into a shrinking available list
     would slide the bar deeper into the distribution and hand the survivors of
