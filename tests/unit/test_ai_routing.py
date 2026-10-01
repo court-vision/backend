@@ -136,6 +136,12 @@ class TestUngroundedNumbers:
         text = "Lvl. 3 Goblins lead by 12.5"
         assert routing.ungrounded_numbers(text, "am I winning", None, ["Lvl. 3 Goblins"]) == 1
 
+    def test_a_name_that_is_a_digit_is_not_cut_out_of_a_longer_number(self):
+        """A league called "1" turned the question's own 15 into a made-up 5."""
+        assert routing.ungrounded_numbers("Opening last 15 games", "last 15 games", None, ["1"]) == 0
+        assert routing.ungrounded_numbers("Opening 1, last 15 games", "last 15 games", None, ["1"]) == 0
+        assert routing.ungrounded_numbers("Up 21 in 1", "am I winning", None, ["1"]) == 1
+
 
 @pytest.mark.unit
 def test_describe_view_names_players_and_nba_teams_but_not_fantasy_teams(monkeypatch):
@@ -348,3 +354,17 @@ def test_validate_checks_every_id_in_one_lookup_scoped_to_the_caller(monkeypatch
         ([], [MY_TEAM], [], 42),
         ([], [], [], 42),  # a cannot's stray target is never looked up
     ]
+
+
+@pytest.mark.unit
+def test_validate_names_the_nba_team_it_found(monkeypatch):
+    """No tool returns NBA team names, so the lookup is the only place "76ers" can come from."""
+    async def fake_lookup(player_ids, team_ids, nba_teams, user_id):
+        return _Found(frozenset(), frozenset(), frozenset({"PHI"}), frozenset({"Philadelphia 76ers"}))
+    monkeypatch.setattr(routing, "_lookup", fake_lookup)
+    names = {"Alperen Sengun"}
+
+    answer = asyncio.run(routing.validate(show(TerminalTarget(mode="nba_team", nba_team="phi")), user_id=42, names=names))
+
+    assert answer.target.nba_team == "PHI"
+    assert names == {"Alperen Sengun", "Philadelphia 76ers"}

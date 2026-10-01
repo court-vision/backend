@@ -263,6 +263,28 @@ class TestRecording:
 
         assert env.recorded[-1]["ungrounded_numbers"] == 0
 
+    def test_the_viewed_nba_teams_name_is_not_a_made_up_number(self, env, monkeypatch):
+        async def view_names(player_ids, nba_team):
+            return {}, "Philadelphia 76ers"
+        monkeypatch.setattr(routing, "_view_names", view_names)
+        env.install(msg("end_turn", answer(kind="cannot", text_="Court Vision has no trade news on the Philadelphia 76ers",
+                                           gap="no_data", missing="news feed")))
+
+        route("any trade rumors on this team", AiContext(mode="nba_team", nba_team="PHI"))
+
+        assert env.recorded[-1]["ungrounded_numbers"] == 0
+
+    def test_a_routed_nba_teams_name_is_not_a_made_up_number(self, env):
+        """No tool returns NBA team names, so the 76 counted unless the user had typed it."""
+        env.found = _Found(frozenset(), frozenset(), frozenset({"PHI"}), frozenset({"Philadelphia 76ers"}))
+        env.install(msg("end_turn", answer(text_="Opening the Philadelphia 76ers", target={
+            "type": "terminal", "mode": "nba_team", "player_id": None, "compare_ids": [], "team_id": None,
+            "nba_team": "PHI", "window": None})))
+
+        route("how are the sixers doing")
+
+        assert env.recorded[-1]["ungrounded_numbers"] == 0
+
     def test_a_made_up_number_is_counted(self, env):
         env.install(msg("end_turn", answer(text_="Sengun is averaging 21.4 points lately", target=PLAYER_TARGET)))
 

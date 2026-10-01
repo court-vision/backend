@@ -197,10 +197,11 @@ def ungrounded_numbers(
     """Numbers in the answer line that appear neither in the question nor in the
     target (a window, an ID). The router states no statistics, so anything else
     is a number it made up. Names the lookups returned are removed first -- a
-    team called "Lvl. 3 Goblins" is not a statistic. Logged, not blocked; the
+    team called "Lvl. 3 Goblins" is not a statistic -- but only where they stand
+    alone: a league called "1" is not the 1 in "15". Logged, not blocked; the
     eval is where it fails."""
     for name in sorted({n for n in names if n}, key=len, reverse=True):
-        text = re.sub(re.escape(name), " ", text, flags=re.IGNORECASE)
+        text = re.sub(rf"(?<!\d){re.escape(name)}(?!\d)", " ", text, flags=re.IGNORECASE)
     allowed = set(_NUMBER.findall(question))
     if target is not None:
         allowed |= set(_NUMBER.findall(target.model_dump_json()))
@@ -244,6 +245,8 @@ class _Found:
     players: frozenset[int]
     owned_teams: frozenset[int]
     nba_teams: frozenset[str]
+    # The found NBA teams' names, for the number check: no tool returns them
+    nba_team_names: frozenset[str] = frozenset()
 
 
 @db_operation("ai.route_ids")
@@ -253,8 +256,11 @@ def _lookup(player_ids: list[int], team_ids: list[int], nba_teams: list[str], us
         {row.team_id for row in Team.select(Team.team_id).where(Team.team_id.in_(team_ids), Team.user_id == user_id)}
         if team_ids else set()
     )
-    nba = {row.id for row in NBATeam.select(NBATeam.id).where(NBATeam.id.in_(nba_teams))} if nba_teams else set()
-    return _Found(frozenset(players), frozenset(owned), frozenset(nba))
+    nba = (
+        {row.id: row.name for row in NBATeam.select(NBATeam.id, NBATeam.name).where(NBATeam.id.in_(nba_teams))}
+        if nba_teams else {}
+    )
+    return _Found(frozenset(players), frozenset(owned), frozenset(nba), frozenset(nba.values()))
 
 
 def _invalid(reason: str, target: AiTarget | dict[str, Any] | None = None) -> RouterAnswer:
@@ -310,8 +316,12 @@ def _check(answer: RouterAnswer, found: _Found) -> RouterAnswer:
     return answer.model_copy(update={"target": clean, "statmuse_query": None})
 
 
-async def validate(answer: RouterAnswer, *, user_id: int) -> RouterAnswer:
-    """Check every ID the answer names in one round trip, then normalize it."""
+async def validate(answer: RouterAnswer, *, user_id: int, names: Optional[set[str]] = None) -> RouterAnswer:
+    """Check every ID the answer names in one round trip, then normalize it.
+
+    `names` collects the name of an NBA team the target points at. The model can
+    pick one that no lookup named, and the 76 in "76ers" is not a statistic.
+    """
     target = answer.target if answer.kind == "show" else None
     player_ids: list[int] = []
     team_ids: list[int] = []
@@ -323,4 +333,6 @@ async def validate(answer: RouterAnswer, *, user_id: int) -> RouterAnswer:
     elif isinstance(target, PageTarget) and target.team_id is not None:
         team_ids = [target.team_id]
     found = await _lookup(player_ids, team_ids, nba_teams, user_id)
+    if names is not None:
+        names |= found.nba_team_names
     return _check(answer, found)

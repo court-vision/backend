@@ -57,7 +57,7 @@ class _Run:
     stop_reason: str | None = None
     request_ids: list[str] = field(default_factory=list)
     tool_calls: list[AiToolCall] = field(default_factory=list)
-    # Player, team and league names the lookups returned (for the number check)
+    # Player, team and league names the lookups and the view supplied (for the number check)
     names: set[str] = field(default_factory=set)
 
     def record(self, response: Any) -> None:
@@ -364,7 +364,8 @@ class AiService:
             reached_model = True
             async with asyncio.timeout(settings.ai_request_timeout_seconds):
                 view = await routing.describe_view(context)
-                run.names |= {p["name"] for p in [view.get("player"), *view.get("compare", [])] if p and p.get("name")}
+                named = [view.get("player"), *view.get("compare", []), view.get("nba_team")]
+                run.names |= {n["name"] for n in named if n and n.get("name")}
                 response = await _loop(
                     _router_turn(question, view, await _season_line()),
                     run,
@@ -374,7 +375,8 @@ class AiService:
                     ctx=ToolContext(user_id=user_id),
                     output_format=routing.ANSWER_FORMAT,
                 )
-                answer = await routing.validate(routing.parse_answer(_final_text(response)), user_id=user_id)
+                answer = await routing.validate(
+                    routing.parse_answer(_final_text(response)), user_id=user_id, names=run.names)
             ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target, run.names)
             outcome = "ok"
         except TimeoutError as exc:

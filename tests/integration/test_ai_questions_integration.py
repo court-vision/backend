@@ -149,6 +149,7 @@ class TestTargetLookup:
         assert found.players == {1630578}
         assert found.owned_teams == {mine.team_id}
         assert found.nba_teams == {"HOU"}
+        assert found.nba_team_names == {"Houston Rockets"}
 
     def test_view_names_come_from_our_own_tables(self, integration_db):
         Player.create(id=1627734, espn_id=3155942, name="Domantas Sabonis", name_normalized="domantas sabonis")
