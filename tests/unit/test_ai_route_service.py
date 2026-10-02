@@ -50,7 +50,8 @@ def answer(kind="show", text_="Opening Alperen Sengun's last 15 games", target=N
                             "suggestions": list(suggestions), "gap": gap, "missing": missing}))
 
 
-PLAYER_TARGET = {"type": "terminal", "mode": "player", "player_id": SENGUN, "compare_ids": [],
+# The model's target: players by name. The server finds the IDs.
+PLAYER_TARGET = {"type": "terminal", "mode": "player", "player": "Alperen Sengun", "compare": [],
                  "team_id": None, "nba_team": None, "window": "l15"}
 
 
@@ -98,6 +99,13 @@ def env(monkeypatch):
     monkeypatch.setattr(routing, "_lookup", fake_lookup)
 
     names = {SENGUN: "Alperen Sengun", SABONIS: "Domantas Sabonis"}
+    state.searched = []
+
+    async def fake_find_players(wanted):
+        state.searched.append(list(wanted))
+        by_name = {name: pid for pid, name in names.items()}
+        return {name: [(by_name[name], name)] if name in by_name else [] for name in wanted}
+    monkeypatch.setattr(routing, "_find_players", fake_find_players)
 
     async def fake_view_names(player_ids, nba_team):
         return {i: names[i] for i in player_ids if i in names}, ("Houston Rockets" if nba_team == "HOU" else None)
@@ -142,13 +150,13 @@ class TestRequest:
         season, view, _, question = fake.calls[0]["messages"][0]["content"].split("\n")
         assert season.startswith("NBA season: 2026-27")
         assert json.loads(view.removeprefix("Current view: ")) == {
-            "mode": "player", "page": "terminal", "window": "l10",
-            "player": {"id": SABONIS, "name": "Domantas Sabonis"},
+            "mode": "player", "page": "terminal", "window": "l10", "player": "Domantas Sabonis",
         }
         assert question == "Question: sengun last 15"
 
     def test_the_focused_player_arrives_by_name(self, env):
-        """Given only an ID, the model searched seven random players to find out whose it was."""
+        """Given only an ID, the model searched seven random players to find out whose it was.
+        Now it gets the name and no ID at all: it names players back and the server finds them."""
         fake = env.install(msg("end_turn", answer(kind="statmuse", text_="Sending that to StatMuse",
                                                   statmuse_query="Alperen Sengun three point percentage by season",
                                                   gap="no_view", missing="career shooting splits")))
@@ -157,9 +165,31 @@ class TestRequest:
               AiContext(mode="player", player_id=SENGUN, compare_ids=[SABONIS], nba_team="HOU"))
 
         view = json.loads(fake.calls[0]["messages"][0]["content"].split("\n")[1].removeprefix("Current view: "))
-        assert view["player"] == {"id": SENGUN, "name": "Alperen Sengun"}
-        assert view["compare"] == [{"id": SABONIS, "name": "Domantas Sabonis"}]
+        assert (view["player"], view["compare"]) == ("Alperen Sengun", ["Domantas Sabonis"])
+        assert str(SENGUN) not in fake.calls[0]["messages"][0]["content"]
         assert view["nba_team"] == {"abbrev": "HOU", "name": "Houston Rockets"}
+
+    def test_the_router_gets_one_round_of_lookups_then_must_answer(self, env):
+        """Sonnet 5.5 asked for the same lookup three times running; each was a trip the user waited through."""
+        fake = env.install(msg("tool_use", tool_use("t1", "get_my_teams", {})),
+                           msg("end_turn", answer(target={"type": "page", "page": "matchup", "team_id": 7,
+                                                          "rankings": None})),
+                           msg("end_turn", answer(target=PLAYER_TARGET)))   # never reached
+
+        data = route("my 9-cat matchup").data
+
+        assert (data.kind, data.target.team_id, data.usage.model_calls) == ("show", 7, 2)
+        assert "tool_choice" not in fake.calls[0]
+        assert fake.calls[1]["tool_choice"] == {"type": "none"}
+        assert service.ROUTER_MAX_MODEL_CALLS == 2 and len(fake.calls) == 2
+
+    def test_a_tighter_app_wide_bound_still_wins(self, env, monkeypatch):
+        monkeypatch.setattr(settings, "ai_max_model_calls", 1)
+        fake = env.install(msg("end_turn", answer(target=PLAYER_TARGET)))
+
+        route()
+
+        assert fake.calls[0]["tool_choice"] == {"type": "none"}
 
     def test_tools_run_as_the_caller_within_the_router_toolset(self, env):
         env.install(msg("tool_use", tool_use("t1", "get_my_teams", {})),
@@ -180,6 +210,27 @@ class TestAnswers:
 
         assert data.kind == "show" and data.target.player_id == SENGUN and data.target.window == "l15"
         assert (data.statmuse_url, data.question_id) == (None, 17)
+        assert env.searched == [["Alperen Sengun"]]
+        assert not {"player", "compare"} & set(data.target.model_dump())   # names stay on the server
+
+    def test_a_player_on_screen_is_routed_without_a_lookup(self, env):
+        env.install(msg("end_turn", answer(text_="Opening Domantas Sabonis's last 30 games", target={
+            **PLAYER_TARGET, "player": "Domantas Sabonis", "compare": ["Alperen Sengun"], "window": "l30"})))
+
+        data = route("switch to the last 30", AiContext(mode="player", player_id=SABONIS, compare_ids=[SENGUN])).data
+
+        assert (data.target.player_id, data.target.compare_ids, data.target.window) == (SABONIS, [SENGUN], "l30")
+        assert env.searched == []
+
+    def test_a_name_no_player_has_is_said_plainly(self, env):
+        env.install(msg("end_turn", answer(text_="Opening Jon Smithh", target={**PLAYER_TARGET, "player": "Jon Smithh"})))
+
+        data = route("show me jon smithh").data
+
+        assert (data.kind, data.gap, data.target) == ("cannot", "no_data", None)
+        assert data.text == "I couldn't find a player called Jon Smithh."
+        row = env.recorded[-1]
+        assert (row["missing"], row["target"]["player"]) == ("player not found: Jon Smithh", "Jon Smithh")
 
     def test_statmuse_link_is_built_by_the_server(self, env):
         env.install(msg("end_turn", answer(kind="statmuse", text_="StatMuse has this one",
@@ -193,7 +244,7 @@ class TestAnswers:
             "https://www.statmuse.com/nba/ask/alperen-sengun-vs-domantas-sabonis-rebounds-per-game-this-season")
 
     def test_a_target_that_fails_validation_becomes_cannot(self, env):
-        env.install(msg("end_turn", answer(target={**PLAYER_TARGET, "player_id": 999})))
+        env.install(msg("end_turn", answer(target={**PLAYER_TARGET, "player": None})))
 
         data = route().data
 
@@ -202,13 +253,13 @@ class TestAnswers:
 
     def test_a_refused_target_is_recorded_with_the_reason_but_never_returned(self, env):
         """The row is what the review debugs from; it used to hold neither."""
-        env.install(msg("end_turn", answer(target={**PLAYER_TARGET, "player_id": 999})))
+        env.install(msg("end_turn", answer(target={**PLAYER_TARGET, "player": None, "compare": ["Domantas Sabonis"]})))
 
         resp = route()
 
         row = env.recorded[-1]
-        assert (row["kind"], row["gap"], row["missing"]) == ("cannot", "invalid_target", "rejected: player_id")
-        assert row["target"] == {**PLAYER_TARGET, "player_id": 999}
+        assert (row["kind"], row["gap"], row["missing"]) == ("cannot", "invalid_target", "rejected: player")
+        assert (row["target"]["compare"], row["target"]["window"]) == (["Domantas Sabonis"], "l15")
         assert resp.data.target is None
         assert not {"missing", "rejected_target"} & set(resp.data.model_dump())
 
@@ -282,6 +333,16 @@ class TestRecording:
             "nba_team": "PHI", "window": None})))
 
         route("how are the sixers doing")
+
+        assert env.recorded[-1]["ungrounded_numbers"] == 0
+
+    def test_the_season_in_a_statmuse_answer_is_not_a_made_up_number(self, env):
+        """The season comes from the season line, not the question, and counted as two numbers."""
+        env.install(msg("end_turn", answer(
+            kind="statmuse", text_="Checking Alperen Sengun and Domantas Sabonis's rebounds for 2025-26 on StatMuse",
+            statmuse_query="Alperen Sengun and Domantas Sabonis rebounds per game 2025-26", gap="no_view")))
+
+        route("who rebounds more this season", AiContext(mode="player", player_id=SENGUN, compare_ids=[SABONIS]))
 
         assert env.recorded[-1]["ungrounded_numbers"] == 0
 

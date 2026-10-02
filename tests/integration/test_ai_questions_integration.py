@@ -184,3 +184,35 @@ class TestTargetLookup:
 
         assert names == {1627734: "Domantas Sabonis"}
         assert team == "Sacramento Kings"
+
+
+class TestFindPlayers:
+    """The router names players; this is where a name becomes an ID (migration-backed: needs `unaccent`)."""
+
+    @pytest.fixture
+    def roster(self, integration_db):
+        rows = [(203999, "Nikola Jokić"), (1628368, "De'Aaron Fox"), (1629023, "P.J. Washington"),
+                (202710, "Jimmy Butler III"), (1628983, "Shai Gilgeous-Alexander"), (1631114, "Jalen Williams"),
+                (1631119, "Jaylin Williams"), (1629627, "Zion Williamson"), (201939, "Stephen Curry"),
+                (203552, "Seth Curry")]
+        for player_id, name in rows:
+            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+
+    def find(self, *names):
+        return asyncio.run(routing._find_players(list(names)))
+
+    def test_a_name_written_any_reasonable_way_is_the_player(self, roster):
+        found = self.find("Nikola Jokic", "DeAaron Fox", "PJ Washington", "Jimmy Butler", "shai gilgeous alexander",
+                          "Steph Curry")
+        assert {name: [i for i, _ in hits] for name, hits in found.items()} == {
+            "Nikola Jokic": [203999], "DeAaron Fox": [1628368], "PJ Washington": [1629023], "Jimmy Butler": [202710],
+            "shai gilgeous alexander": [1628983], "Steph Curry": [201939],
+        }
+
+    def test_a_full_name_is_one_player_and_a_surname_is_everyone_with_it(self, roster):
+        found = self.find("Jalen Williams", "Williams", "Curry", "Michael Jordan", "%", "")
+        assert found["Jalen Williams"] == [(1631114, "Jalen Williams")]
+        assert sorted(i for i, _ in found["Williams"]) == [1631114, 1631119]      # not Williamson
+        assert sorted(i for i, _ in found["Curry"]) == [201939, 203552]
+        assert (found["Michael Jordan"], found["%"], found[""]) == ([], [], [])
+

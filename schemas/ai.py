@@ -80,7 +80,8 @@ SEASON_GAMES = 82  # the same ceiling, for a games-played minimum
 TerminalMode = Literal["overview", "player", "team", "nba_team"]
 RoutablePage = Literal["rankings", "streamers", "matchup", "lineup-generation", "your-teams", "draft", "playoffs"]
 AnswerKind = Literal["show", "statmuse", "cannot"]
-GapKind = Literal["no_view", "no_data", "out_of_scope", "invalid_target"]
+# The last two are the server's alone: a destination it refused, and a player name that fits several players
+GapKind = Literal["no_view", "no_data", "out_of_scope", "invalid_target", "ambiguous"]
 
 
 class AiContext(ApiModel):

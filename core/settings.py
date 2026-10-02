@@ -100,8 +100,11 @@ class Settings(BaseSettings):
     # below are the per-request and per-day bounds that sit under it.
     ai_enabled: bool = False
     anthropic_api_key: Optional[SecretStr] = None
-    ai_model: str = "claude-opus-5"
-    ai_effort: str = "medium"
+    # Chosen on the routing eval (evals/ai_route, 2026-10-02): Opus 5.5 at low effort
+    # routed 90 of 92 with no wasted lookups, at half the cost per question of
+    # Opus 5 at medium. Re-run the eval before changing either.
+    ai_model: str = "claude-opus-5-5"
+    ai_effort: str = "low"
     # Model calls per request. The last one is made without tools, so a request
     # always ends in an answer rather than a half-finished tool loop.
     ai_max_model_calls: int = 4

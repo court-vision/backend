@@ -204,8 +204,9 @@ GET_MY_TEAMS: dict[str, Any] = {
     "name": "get_my_teams",
     "description": (
         "The asking user's own fantasy teams: team_id, team name, league name, provider, "
-        "season and scoring format. Use it to resolve 'my team', 'my matchup', or a league "
-        "the user names. A team_id you put in an answer must come from this list."
+        "season and scoring format. Use it when the user names or describes one of their "
+        "teams or leagues, or asks for a team other than the one selected in the view. A "
+        "team_id you put in an answer must come from this list or from the view."
     ),
     "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
