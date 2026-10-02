@@ -53,7 +53,7 @@ from services.draft_mock_service import DraftMockService
 from services.draft_recap_service import DraftRecapService
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
-from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
+from services.scoring.resolver import resolve_scoring_for_room
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
 
@@ -145,8 +145,9 @@ async def get_draft_board(
     team: OwnedTeamContext = Depends(get_owned_team),
 ):
     # `get_owned_team` already loaded the league, so resolving its scoring is
-    # pure — no second trip to the database (the rankings pattern).
-    scoring = resolve_scoring(team.league)
+    # pure — no second trip to the database (the rankings pattern). Resolved as
+    # a room resolves it: a roto league's board is a roto board.
+    scoring = resolve_scoring_for_room(team.league)
     # No session, so no picks and no slot: BoardSession carries only the view
     # knobs the query string sets.
     return respond(await DraftBoardService.get_board(
