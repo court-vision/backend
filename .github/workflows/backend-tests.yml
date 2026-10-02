@@ -82,3 +82,62 @@ jobs:
         with:
           name: backend-coverage
           path: coverage.xml
+
+  # The production image. Railway builds this Dockerfile on merge and has no
+  # health check that would hold back a container that does not answer, so it is
+  # started here first: the same image and command, against this job's Postgres,
+  # asked for /health over IPv4 (how Railway's public proxy reaches it) and IPv6
+  # (the only protocol its private network carries, where data-platform calls
+  # the jobs routes).
+  image:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: cv_test
+          POSTGRES_USER: cv
+          POSTGRES_PASSWORD: cv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U cv -d cv_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The container starts and answers on IPv4 and IPv6
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL=postgresql://cv:cv@127.0.0.1:5432/cv_test \
+            -e PIPELINE_API_TOKEN=ci-test-token \
+            -e CLERK_JWKS_URL=https://fake.clerk.dev/.well-known/jwks.json \
+            -e CLERK_SECRET_KEY=sk_test_fake \
+            backend:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/health; then break; fi
+            if [ -z "$(docker ps -q --filter name=api)" ]; then break; fi
+            sleep 2
+          done
+          docker logs api
+          echo "--- IPv4"; curl -fsS http://127.0.0.1:8080/health
+          echo; echo "--- IPv6"; curl -fsS -g "http://[::1]:8080/health"
+          echo; docker exec api sh -c 'echo "running as $(id -un)"'
