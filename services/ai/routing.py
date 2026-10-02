@@ -309,11 +309,19 @@ async def describe_view(
         view["compare"] = compared
     if context.nba_team:
         view["nba_team"] = {"abbrev": context.nba_team, "name": nba_team_name}
+    teams = list(teams)
+    kept, cut = teams[:MAX_VIEW_TEAMS], teams[MAX_VIEW_TEAMS:]
+    # The selected team is the one "my team" means, so it is never the one cut.
+    selected = [team for team in cut if team.get("team_id") == context.team_id]
+    kept = selected + kept[:MAX_VIEW_TEAMS - len(selected)]
     listed = [{**{fact: team.get(fact) for fact in _TEAM_FACTS},
                **({"selected": True} if team.get("team_id") == context.team_id else {})}
-              for team in list(teams)[:MAX_VIEW_TEAMS]]
+              for team in kept]
     if listed:
         view["teams"] = listed
+    if cut:
+        # Say the list is not all of them, rather than let it read as every team.
+        view["more_teams"] = len(cut)
     return {key: value for key, value in view.items() if value is not None}, names
 
 

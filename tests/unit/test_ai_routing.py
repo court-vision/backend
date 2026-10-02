@@ -238,6 +238,25 @@ def test_describe_view_lists_teams_by_what_the_server_knows_not_what_users_wrote
 
 
 @pytest.mark.unit
+def test_a_list_too_long_to_show_keeps_the_selected_team_and_says_it_was_cut():
+    from schemas.ai import AiContext
+    teams = [{"team_id": i, "provider": "espn", "season": 2027, "scoring": "points"} for i in range(1, 20)]
+
+    view, _ = asyncio.run(routing.describe_view(AiContext(page="home", team_id=15), teams))
+
+    assert len(view["teams"]) == routing.MAX_VIEW_TEAMS
+    assert view["teams"][0] == {"team_id": 15, "scoring": "points", "provider": "espn", "season": 2027,
+                                "selected": True}
+    assert [team["team_id"] for team in view["teams"][1:]] == list(range(1, 12))
+    assert view["more_teams"] == 7
+
+    # A list that fits is left in the order it came, and says nothing about more.
+    whole, _ = asyncio.run(routing.describe_view(AiContext(page="home", team_id=3), teams[:12]))
+    assert [team["team_id"] for team in whole["teams"]] == list(range(1, 13))
+    assert "more_teams" not in whole
+
+
+@pytest.mark.unit
 def test_an_empty_view_needs_no_lookup(monkeypatch):
     from schemas.ai import AiContext
 
