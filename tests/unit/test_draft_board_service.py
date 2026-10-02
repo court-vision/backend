@@ -23,7 +23,7 @@ from services.draft_congestion import SampleWeek
 from services.scoring.category_value import category_value
 from services.scoring.models import StatLine
 from services.scoring.category_rank import PoolRow
-from services.scoring.resolver import resolve_scoring
+from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
 
 SEASON = "2026-27"
 
@@ -1563,7 +1563,7 @@ def test_congestion_is_measured_on_the_weeks_the_league_scores(monkeypatch):
     slots = {"C": 1, "BE": 3}
 
     h2h = _board(resolve_scoring(_league(roster_slots=slots)), mine=[1, 3])
-    roto = _board(resolve_scoring(_league(roster_slots=slots, scoring_type="roto", categories=NINE_CAT,
+    roto = _board(resolve_scoring_for_room(_league(roster_slots=slots, scoring_type="roto", categories=NINE_CAT,
                                           category_win_mode="roto")), mine=[1, 3])
 
     assert h2h.meta.playoffs.weeks == [2, 3, 4, 5]
