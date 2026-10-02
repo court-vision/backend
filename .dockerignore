@@ -1,0 +1,3 @@
+# Railway and CI build the image from a checkout. Its history, and any
+# credentials git keeps in .git/config, do not belong in the image.
+.git
