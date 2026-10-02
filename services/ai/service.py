@@ -34,7 +34,15 @@ from schemas.common import ApiStatus
 from services.ai import guards, questions, routing
 from services.ai.client import get_client
 from services.ai.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
-from services.ai.tools import ASK_TOOL_NAMES, ROUTER_TOOL_NAMES, ROUTER_TOOLS, TOOLS, ToolContext, run_tool
+from services.ai.tools import (
+    ASK_TOOL_NAMES,
+    ROUTER_TOOL_NAMES,
+    ROUTER_TOOLS,
+    TOOLS,
+    ToolContext,
+    list_my_teams,
+    run_tool,
+)
 from services.schedule_service import get_season_bounds
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -298,6 +306,16 @@ def _season_line_sync() -> str:
     return f"NBA season: {current}, in progress."
 
 
+async def _view_teams(user_id: int) -> list[dict[str, Any]]:
+    """The caller's teams for the view. Without them the router still works -- it
+    looks a team up when it needs one -- so a failure here costs speed, not the answer."""
+    try:
+        return await list_my_teams(user_id)
+    except Exception:
+        get_logger().warning("ai_route_view_teams_failed", user_id=user_id)
+        return []
+
+
 async def _season_line() -> str:
     # The calendar is a cached file read, but the first one still touches disk
     return await asyncio.to_thread(_season_line_sync)
@@ -373,7 +391,7 @@ class AiService:
             await guards.consume_quota(user_id)
             reached_model = True
             async with asyncio.timeout(settings.ai_request_timeout_seconds):
-                view, view_players = await routing.describe_view(context)
+                view, view_players = await routing.describe_view(context, await _view_teams(user_id))
                 run.names |= {name for name in [*view_players.values(), view.get("nba_team", {}).get("name")] if name}
                 season = await _season_line()
                 response = await _loop(

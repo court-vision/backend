@@ -269,8 +269,22 @@ def _view_names(player_ids: list[int], nba_team: Optional[str]) -> tuple[dict[in
     return players, team.name if team else None
 
 
-async def describe_view(context: AiContext) -> tuple[dict[str, Any], dict[int, str]]:
+MAX_VIEW_TEAMS = 12
+# What the view says about each of the caller's teams. No names: they are
+# league data the user (or a league-mate) wrote, and the view is prompt text.
+_TEAM_FACTS = ("team_id", "scoring", "provider", "season")
+
+
+async def describe_view(
+    context: AiContext,
+    teams: Iterable[dict[str, Any]] = (),
+) -> tuple[dict[str, Any], dict[int, str]]:
     """The caller's view for the model, and the players in it by ID.
+
+    `teams` are the caller's fantasy teams (`tools.list_my_teams`). The view
+    lists each one's ID, scoring format, provider and season, so "my categories
+    league" or "my other team" is answered from the view: no lookup to make,
+    and none to skip.
 
     The model sees players by name only: it names players back and the server
     finds them, so an ID in the view would be nothing but something to copy
@@ -290,6 +304,11 @@ async def describe_view(context: AiContext) -> tuple[dict[str, Any], dict[int, s
         view["compare"] = compared
     if context.nba_team:
         view["nba_team"] = {"abbrev": context.nba_team, "name": nba_team_name}
+    listed = [{**{fact: team.get(fact) for fact in _TEAM_FACTS},
+               **({"selected": True} if team.get("team_id") == context.team_id else {})}
+              for team in list(teams)[:MAX_VIEW_TEAMS]]
+    if listed:
+        view["teams"] = listed
     return {key: value for key, value in view.items() if value is not None}, names
 
 

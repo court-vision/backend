@@ -179,34 +179,39 @@ async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -
     }
 
 
+async def list_my_teams(user_id: int) -> list[dict[str, Any]]:
+    """One user's fantasy teams, as the router knows them. The tool returns all of
+    it; the router's view carries everything but the names (`routing.describe_view`)."""
+    resp = await TeamService.get_teams(user_id)
+    return [
+        {
+            "team_id": team.team_id,
+            "team_name": team.league_info.team_name,
+            "league_name": (team.league.name if team.league and team.league.name
+                            else team.league_info.league_name),
+            "provider": getattr(team.league_info.provider, "value", team.league_info.provider),
+            "season": team.league_info.year,
+            "scoring": (team.league.scoring_type if team.league
+                        else team.league_info.scoring_preview),
+        }
+        for team in (resp.data or [])
+    ]
+
+
 async def _get_my_teams(args: MyTeamsInput, ctx: ToolContext | None) -> dict[str, Any]:
     if ctx is None:
         raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
-    resp = await TeamService.get_teams(ctx.user_id)
-    return {
-        "teams": [
-            {
-                "team_id": team.team_id,
-                "team_name": team.league_info.team_name,
-                "league_name": (team.league.name if team.league and team.league.name
-                                else team.league_info.league_name),
-                "provider": getattr(team.league_info.provider, "value", team.league_info.provider),
-                "season": team.league_info.year,
-                "scoring": (team.league.scoring_type if team.league
-                            else team.league_info.scoring_preview),
-            }
-            for team in (resp.data or [])
-        ],
-    }
+    return {"teams": await list_my_teams(ctx.user_id)}
 
 
 GET_MY_TEAMS: dict[str, Any] = {
     "name": "get_my_teams",
     "description": (
         "The asking user's own fantasy teams: team_id, team name, league name, provider, "
-        "season and scoring format. Use it when the user names or describes one of their "
-        "teams or leagues, or asks for a team other than the one selected in the view. A "
-        "team_id you put in an answer must come from this list or from the view."
+        "season and scoring format. The view already lists each team's ID, scoring format "
+        "and provider, so use this only when the user calls a team or league by its name, "
+        "or the view lists no teams. A team_id you put in an answer must come from this "
+        "list or from the view."
     ),
     "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }

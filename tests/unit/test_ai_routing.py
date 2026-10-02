@@ -221,6 +221,23 @@ def test_describe_view_names_players_and_nba_teams_but_not_fantasy_teams(monkeyp
 
 
 @pytest.mark.unit
+def test_describe_view_lists_teams_by_what_the_server_knows_not_what_users_wrote():
+    from schemas.ai import AiContext
+    teams = [{"team_id": i, "team_name": f"Team {i}", "league_name": "L", "provider": "espn", "season": 2027,
+              "scoring": "categories" if i % 2 else "points"} for i in range(1, 20)]
+
+    view, _ = asyncio.run(routing.describe_view(AiContext(page="home", team_id=2), teams))
+
+    assert len(view["teams"]) == routing.MAX_VIEW_TEAMS
+    assert view["teams"][:2] == [
+        {"team_id": 1, "scoring": "categories", "provider": "espn", "season": 2027},
+        {"team_id": 2, "scoring": "points", "provider": "espn", "season": 2027, "selected": True},
+    ]
+    assert "team_name" not in json.dumps(view) and "league_name" not in json.dumps(view)
+    assert "teams" not in asyncio.run(routing.describe_view(AiContext(page="home")))[0]
+
+
+@pytest.mark.unit
 def test_an_empty_view_needs_no_lookup(monkeypatch):
     from schemas.ai import AiContext
 

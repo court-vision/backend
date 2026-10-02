@@ -300,23 +300,36 @@ def attempt(case_id):
 
 class TestRunner:
     def test_an_answer_becomes_a_complete_graded_row(self, scripted):
+        team_101 = {"type": "terminal", "mode": "team", "player": None, "compare": [], "team_id": 101,
+                    "nba_team": None, "window": None}
         calls = scripted(
             msg("tool_use", tool_use("t1", "get_my_teams", {})),
-            msg("end_turn", answer("show", "Opening your Dorm 9-Cat matchup", MATCHUP_102)),
+            msg("end_turn", answer("show", "Opening Area 51 Ballers", team_101)),
         )
 
-        kind, row, trace = attempt("matchup-cats-league")
+        kind, row, trace = attempt("my-team-by-name")
 
         assert kind == "row"
         assert row["grade"] == {"route_ok": 1.0, "kind_ok": 1.0, "clean_text": 1.0, "lean_lookups": 1.0}
         assert (row["model"], row["model_calls"], row["tool_calls"], row["status"]) == ("claude-opus-5", 2, 1, "ok")
         assert row["usage"] == {"input_tokens": 200, "output_tokens": 40, "cache_read_input_tokens": 6000,
                                 "cache_creation_input_tokens": 0}
-        assert row["output"]["target"]["team_id"] == 102          # ownership came from the fixture
-        assert row["output"]["ungrounded_numbers"] == 0            # the 9 is in the league's name
+        assert row["output"]["target"]["team_id"] == 101          # ownership came from the fixture
+        assert row["output"]["ungrounded_numbers"] == 0            # the 51 is in the team's name
         assert [turn["role"] for turn in trace] == ["system", "user", "tool_call", "tool_result", "assistant"]
         assert "Splash Cousins" in trace[3]["content"]             # the fixture's teams reached the model
-        assert calls[0]["messages"][0]["content"].startswith(fixtures.SEASON_LINES["preseason"])
+        turn = calls[0]["messages"][0]["content"]
+        assert turn.startswith(fixtures.SEASON_LINES["preseason"])
+        # ... and the view lists them by format, without their names
+        assert '"scoring": "categories"' in turn and "Splash Cousins" not in turn
+
+    def test_a_described_league_is_answered_from_the_view_in_one_trip(self, scripted):
+        scripted(msg("end_turn", answer("show", "Opening your categories league matchup", MATCHUP_102)))
+
+        kind, row, _ = attempt("matchup-cats-league")
+
+        assert (kind, row["model_calls"], row["tool_calls"]) == ("row", 1, 0)
+        assert row["grade"] == {"route_ok": 1.0, "kind_ok": 1.0, "clean_text": 1.0, "lean_lookups": 1.0}
 
     def test_a_case_can_put_the_season_under_way(self, scripted):
         calls = scripted(msg("end_turn", answer(
