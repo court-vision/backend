@@ -453,6 +453,33 @@ class DraftBoardRow(ApiModel):
     )
     last_season_gp: Optional[int] = Field(default=None, description="Games played last season; None for rookies")
     projected_gp: Optional[int] = Field(default=None, description="Projected games this season, when a projection exists")
+    season_games: Optional[float] = Field(
+        default=None,
+        description=(
+            "The games Court Vision's value is built on: projected games (65 when nothing projects "
+            "him) spread over his team's schedule, with games in the league's fantasy-playoff weeks "
+            "counted `meta.playoffs.weight` times and games after the fantasy season not at all, "
+            "renormalized so the league-average player keeps his games. Roto counts every game once."
+        ),
+    )
+    playoff_games: Optional[int] = Field(
+        default=None,
+        description=(
+            "Games his current NBA team plays in the league's fantasy-playoff weeks "
+            "(`meta.playoffs.weeks`). None when his team or the season calendar is unknown, and "
+            "in roto leagues, which have no playoffs."
+        ),
+    )
+    playoff_light_games: Optional[int] = Field(
+        default=None,
+        description=(
+            "Of `playoff_games`, those on light nights — 7 or fewer NBA games — when a "
+            "daily-lineup manager can nearly always start him."
+        ),
+    )
+    playoff_games_by_week: Optional[List[int]] = Field(
+        default=None, description="`playoff_games` split by playoff week, in `meta.playoffs.weeks` order"
+    )
     fpts_avg: Optional[float] = Field(
         default=None,
         description="Per-game fantasy points under the platform default formula (familiar scale, tiebreak); None for market-only rows",
@@ -522,9 +549,16 @@ class DraftBoardRow(ApiModel):
     )
     category_z: Optional[dict[str, float]] = Field(
         default=None,
-        description="Signed z-score per category over the full pool (positive is always good; TOV is inverted)",
+        description=(
+            "Signed contribution per category (positive is always good; TOV is inverted): the "
+            "player's expected weekly total, games included, against the league's draftable "
+            "cohort, with each category's week-to-week noise in the denominator (G-score). Roto "
+            "uses season totals and no noise term."
+        ),
     )
-    score: Optional[float] = Field(default=None, description="Sum of category z-scores; what `value` is mapped from")
+    score: Optional[float] = Field(
+        default=None, description="Sum of `category_z`; what `value` is mapped from and `cv_rank` is ordered by"
+    )
 
 
 class DraftRosterEntry(ApiModel):
@@ -613,6 +647,27 @@ class DraftCongestionResp(ApiModel):
     )
 
 
+class DraftPlayoffsResp(ApiModel):
+    """The league's fantasy-playoff weeks and how much the CV value weighs them."""
+
+    weeks: List[int] = Field(description="Calendar week numbers of the playoffs, in order")
+    rounds: List[List[int]] = Field(default_factory=list, description="The weeks of each playoff round")
+    label: str = Field(description="Human label, e.g. `weeks 20-23`")
+    source: Literal["league", "espn_default", "yahoo_weeks_assumed"] = Field(
+        description=(
+            "league: read from the league's synced schedule settings. espn_default: the league "
+            "has none (league-less room, unsynced league), so ESPN's default shape — two "
+            "two-week rounds ending the week before the NBA's last. yahoo_weeks_assumed: Yahoo's "
+            "playoff start week, read as this calendar's week number."
+        ),
+    )
+    weight: float = Field(description="λ: how many regular-season games one playoff-week game counts as")
+    weights: List[float] = Field(description="The weights the caller may ask for (`playoff_weight`)")
+    games_min: int = Field(description="Fewest playoff-week games any NBA team plays")
+    games_max: int = Field(description="Most playoff-week games any NBA team plays")
+    games_mean: float = Field(description="Average playoff-week games across the 30 teams")
+
+
 class DraftBoardMeta(ApiModel):
     season: str                                 # season the board is for, e.g. "2026-27"
     format: str                                 # points | categories
@@ -623,6 +678,14 @@ class DraftBoardMeta(ApiModel):
     baseline_count: int                         # pool rows valued from last season's baseline
     market_only_count: int = 0                  # rows ESPN ranks that no stat line can value (rookies)
     projections_as_of: Optional[date] = None    # snapshot date of the projections used (None before ESPN publishes)
+    projection_source: Optional[Literal["cv", "espn"]] = Field(
+        default=None,
+        description=(
+            "Whose projection the `projection` rows were valued from: `cv` (Court Vision's own — "
+            "three seasons of history, ESPN's line and curated adjustments) once the cv-projection "
+            "pipeline has published, `espn` until then. None when no projection exists yet."
+        ),
+    )
     market_as_of: Optional[date] = None         # snapshot date of the market ranks used
     rank_source: Literal["cv", "espn"] = Field(
         default="cv",
@@ -718,6 +781,13 @@ class DraftBoardMeta(ApiModel):
         description=(
             "Lineup congestion for the roster zone: what the roster benches on its real game "
             "nights and which NBA teams it stacks. Set on every board."
+        ),
+    )
+    playoffs: Optional[DraftPlayoffsResp] = Field(
+        default=None,
+        description=(
+            "The fantasy-playoff weeks behind every row's `playoff_games`, and the weight the CV "
+            "value gives them. None in roto leagues and when the season calendar is unavailable."
         ),
     )
 

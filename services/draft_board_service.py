@@ -100,7 +100,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import TYPE_CHECKING, Iterable, Mapping, Optional
+from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Sequence
 
 from core.compute import run_cpu
 from core.settings import settings
@@ -117,6 +117,7 @@ from schemas.draft import (
     DraftBoardResp,
     DraftBoardRow,
     DraftCongestionResp,
+    DraftPlayoffsResp,
     DraftRecommendation,
     DraftRosterEntry,
     DraftStackResp,
@@ -156,6 +157,18 @@ from services.scoring.models import StatLine
 from services.scoring.points import DEFAULT_POINTS
 from services.scoring.pool import baseline_season, load_baseline_pool
 from services.scoring.providers.espn_settings import POSITION_ID_MAP
+from services.valuation.engine import (
+    DEFAULT_PLAYOFF_WEIGHT,
+    PLAYOFF_WEIGHTS,
+    DEFAULT_LEAGUE_SIZE,
+    DEFAULT_ROSTER_SIZE,
+    LeagueModel,
+    ProjectedPlayer,
+    TeamWeeks,
+    Valued,
+    value_pool,
+)
+from services.valuation.playoffs import PlayoffSchedule, playoff_schedule, playoff_window
 from utils.espn_helpers import POSITION_MAP
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -230,6 +243,9 @@ class BoardSession:
     punts: tuple[str, ...] = ()
     rank_source: str = "cv"                 # cv | espn — what orders recommendations
     board_source: str = "espn"              # espn | cv — whose rankings the caller asked to order the rows
+    # How much a game in the league's fantasy-playoff weeks counts against one in
+    # the regular season: the drafter's λ, 1 (off) to 4. ESPN's order never moves with it.
+    playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT
     espn_league_id: Optional[int] = None    # the ESPN draft the room follows, when it does
     draft_front: Optional[int] = None       # one past the last pick made on the clock
     my_next_pick: Optional[int] = None      # my next turn, counted from the front
@@ -237,7 +253,8 @@ class BoardSession:
 
     @classmethod
     def of(
-        cls, ctx: "OwnedDraftSessionContext", rank_source: str = "cv", board_source: str = "espn"
+        cls, ctx: "OwnedDraftSessionContext", rank_source: str = "cv", board_source: str = "espn",
+        playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT,
     ) -> "BoardSession":
         return cls(
             session_id=ctx.session_id,
@@ -248,6 +265,7 @@ class BoardSession:
             punts=tuple(ctx.punts),
             rank_source=rank_source,
             board_source=board_source,
+            playoff_weight=playoff_weight,
             espn_league_id=ctx.espn_league_id,
         )
 
@@ -275,6 +293,10 @@ class BoardInputs:
     last_season_gp: dict[int, int] = field(default_factory=dict)    # players with a baseline row
     projected_gp: dict[int, Optional[int]] = field(default_factory=dict)
     projections_as_of: Optional[date] = None
+    projection_source: Optional[str] = None             # cv | espn — whose projection `source == "projection"` rows use
+    # Per-game double- and triple-double rates, from the CV projection: what
+    # lets a points league's dd/td weights score instead of reading 0.
+    game_rates: dict[int, tuple[float, float]] = field(default_factory=dict)
     market: dict[int, dict] = field(default_factory=dict)           # player id -> market + position fields
     market_as_of: Optional[date] = None
     market_only: list[MarketOnlyRow] = field(default_factory=list)  # ranked, unvaluable players
@@ -294,6 +316,10 @@ class BoardInputs:
     # season has; empty / 0 when the calendar could not be read.
     schedule_weeks: tuple[SampleWeek, ...] = ()
     season_weeks: int = 0
+    # Every fantasy week of the season as per-day team sets: where the league's
+    # playoff weeks fall and how each team's games split around them. Empty when
+    # the calendar could not be read — the valuation then counts plain games.
+    calendar: tuple[SampleWeek, ...] = ()
 
 
 @dataclass
@@ -400,8 +426,15 @@ class DraftBoardService:
         value_season = {pid: row.season for pid, row in baseline.items()
                         if row.season and row.season != expected}
 
-        projections_as_of, projections = DraftBoardService._latest_projections(season)
+        # Court Vision's own projection when the cv-projection pipeline has
+        # published one; ESPN's until then. Never a mix: one snapshot, one source.
+        projection_source = "cv"
+        projections_as_of, projections = DraftBoardService._latest_projections(season, "cv")
+        if not projections:
+            projection_source = "espn"
+            projections_as_of, projections = DraftBoardService._latest_projections(season, "espn")
         projected_gp: dict[int, Optional[int]] = {}
+        game_rates: dict[int, tuple[float, float]] = {}
         for rec in projections:
             line = StatLine.from_row(rec)
             gp = int(rec.projected_gp) if rec.projected_gp is not None else 0
@@ -415,6 +448,23 @@ class DraftBoardService:
             source[rec.player_id] = "projection"
             value_season.pop(rec.player_id, None)   # a projection is for the coming season
             projected_gp[rec.player_id] = int(rec.projected_gp) if rec.projected_gp is not None else None
+            raw = getattr(rec, "raw", None) or {}
+            if raw.get("dd_rate") is not None or raw.get("td_rate") is not None:
+                game_rates[rec.player_id] = (float(raw.get("dd_rate") or 0.0), float(raw.get("td_rate") or 0.0))
+
+        if projection_source == "cv" and projections:
+            # Court Vision's projection covers every player on a roster who has
+            # a stat line, so a baseline row it did not project belongs to a
+            # player who is no longer on one — retired, overseas, unsigned.
+            # Valuing him off last season's line put Russell Westbrook at #80
+            # two months after he retired. He leaves the valued pool; if ESPN
+            # still ranks him he stays on the board as a market-only row.
+            projected = {rec.player_id for rec in projections}
+            for pid in [pid for pid in pool if pid not in projected]:
+                del pool[pid]
+                source.pop(pid, None)
+                value_season.pop(pid, None)
+                last_season_gp.pop(pid, None)
 
         market: dict[int, dict] = {}
         market_as_of: Optional[date] = None
@@ -457,6 +507,7 @@ class DraftBoardService:
             ):
                 current_team[rec.player_id] = rec.team_id
         schedule_weeks, season_weeks = DraftBoardService._sample_weeks()
+        calendar = DraftBoardService._calendar_weeks()
 
         market_only = [
             MarketOnlyRow(id=pid, name=names[pid][0], espn_id=names[pid][1], position=positions.get(pid))
@@ -469,6 +520,8 @@ class DraftBoardService:
             value_season=value_season,
             last_season_gp=last_season_gp, projected_gp=projected_gp,
             projections_as_of=projections_as_of,
+            projection_source=projection_source if projections else None,
+            game_rates=game_rates,
             market=market, market_as_of=market_as_of, market_only=market_only,
             positions=positions, names=names,
             session_picked=frozenset(session_picked), session_mine=frozenset(session_mine),
@@ -476,6 +529,7 @@ class DraftBoardService:
             seat_players={seat: frozenset(ids) for seat, ids in seat_players.items()},
             current_team=current_team,
             schedule_weeks=schedule_weeks, season_weeks=season_weeks,
+            calendar=calendar,
         )
 
     @staticmethod
@@ -496,6 +550,17 @@ class DraftBoardService:
         except FileNotFoundError:
             return (), 0
         return tuple(weeks), season_weeks
+
+    @staticmethod
+    def _calendar_weeks() -> tuple[SampleWeek, ...]:
+        """The whole season's fantasy weeks, for the playoff split. Same cached file."""
+        try:
+            return tuple(
+                week_from_calendar(w["matchup_number"], w["game_span"], w["games"])
+                for w in schedule_service.iter_weeks()
+            )
+        except FileNotFoundError:
+            return ()
 
     @staticmethod
     def _latest_projections(season: str, source: str = "espn") -> tuple[Optional[date], list]:
@@ -559,23 +624,108 @@ class DraftBoardService:
     # ---- pure assembly ---------------------------------------------------------
 
     @staticmethod
-    def rank_pool(scoring: "ResolvedScoring", pool: list[PoolRow], cat_defs: list) -> list[tuple]:
-        """The pool in big-board order: (row, value, per-category values, per-category
-        z, z-sum), best first — the order `cv_rank` enumerates.
+    def rank_pool(
+        scoring: "ResolvedScoring",
+        inputs: BoardInputs,
+        cat_defs: list,
+        session: Optional[BoardSession] = None,
+    ) -> list[Valued]:
+        """The pool in big-board order, best first — the order `cv_rank` enumerates.
 
-        Public because the mock autopicker needs the same ordering when there is
-        no market snapshot to draft from. One ranking rule, two callers: an
-        autopicker drafting by a second-hand approximation of CV value would
-        make the mock's own board disagree with the room's.
+        Valued the way this league scores (`services.valuation.engine`): its
+        format, its categories or weights, its size, the games each player is
+        expected to play, when his team plays them against the league's playoff
+        weeks, and the drafter's playoff weight.
+
+        Public because the mock autopicker and the recap need the same ladder.
+        One ranking rule, three callers: an autopicker drafting by a second-hand
+        approximation of CV value would make the mock's own board disagree with
+        the room's, and a recap graded on another would grade a different draft.
         """
-        if scoring.is_categories:
-            scored = compute_category_scores(pool, cat_defs)
-            return [(s.row, category_value(s.score), s.values, s.z, s.score) for s in scored]
-        points = scoring.points
-        entries = [(row, round(points.score(row.line), VALUE_DECIMALS), None, None, None)
-                   for row in pool]
-        entries.sort(key=lambda e: (-e[1], -e[0].fpts_avg))
-        return entries
+        model, _schedule = DraftBoardService.league_model(scoring, inputs, session or BoardSession(), cat_defs)
+        players = [
+            ProjectedPlayer(
+                row=row,
+                # 0 is "ESPN projects nobody", not "he will not play" — the
+                # historical `gp or DEFAULT_PROJECTED_GP` rule.
+                games=inputs.projected_gp.get(row.id) or None,
+                team=inputs.current_team.get(row.id) or row.team,
+                dd_rate=inputs.game_rates.get(row.id, (None, None))[0],
+                td_rate=inputs.game_rates.get(row.id, (None, None))[1],
+            )
+            for row in inputs.pool
+        ]
+        return value_pool(players, model)
+
+    @staticmethod
+    def league_model(
+        scoring: "ResolvedScoring",
+        inputs: BoardInputs,
+        session: BoardSession,
+        cat_defs: list,
+    ) -> tuple[LeagueModel, Optional[PlayoffSchedule]]:
+        """The valuation's view of this league, and its playoff schedule.
+
+        Roto is a category league with `win_mode == "roto"`: season totals, no
+        weeks, no playoffs. A league-less room, or one whose settings never
+        synced, gets ESPN's default playoff weeks — the window always exists, so
+        the playoff column always has something true to say.
+        """
+        cats = scoring.categories
+        roto = scoring.is_categories and cats is not None and cats.win_mode == "roto"
+        fmt = "roto" if roto else ("categories" if scoring.is_categories else "points")
+        league = scoring.league
+        calendar = inputs.calendar
+        window = playoff_window(
+            getattr(league, "matchup_periods", None) if league is not None else None,
+            getattr(league, "provider", None) if league is not None else None,
+            len(calendar),
+        )
+        schedule = playoff_schedule(window, calendar) if (calendar and window.weeks) else None
+        team_weeks, counted_weeks = DraftBoardService._team_weeks(calendar, window.weeks, roto)
+        roster_size = session.rounds or rounds_from_roster_slots(DraftBoardService._roster_slots(scoring))
+        model = LeagueModel(
+            format=fmt,
+            categories=tuple(cat_defs) if scoring.is_categories else (),
+            point_weights=dict(scoring.points.weights),
+            league_size=DraftBoardService._league_size(scoring, session) or DEFAULT_LEAGUE_SIZE,
+            roster_size=roster_size or DEFAULT_ROSTER_SIZE,
+            counted_weeks=counted_weeks,
+            team_weeks=team_weeks,
+            playoff_weight=session.playoff_weight,
+        )
+        return model, (None if roto else schedule)
+
+    @staticmethod
+    def _team_weeks(
+        calendar: Sequence[SampleWeek], playoff_weeks: Sequence[int], roto: bool
+    ) -> tuple[dict[str, TeamWeeks], float]:
+        """Each team's games before, inside and after the playoff weeks, and the
+        length in 7-day weeks of the season that is actually scored.
+
+        Roto scores the whole calendar and has no playoffs; so does a league
+        whose playoff weeks could not be placed.
+        """
+        if not calendar:
+            return {}, 0.0
+        first = min(playoff_weeks) if (playoff_weeks and not roto) else None
+        last = max(playoff_weeks) if (playoff_weeks and not roto) else None
+        counts: dict[str, list[int]] = {}
+        scored_days = 0
+        for week in calendar:
+            if first is None or week.number < first:
+                bucket = 0
+            elif week.number <= last:
+                bucket = 1
+            else:
+                bucket = 2
+            if bucket < 2:
+                scored_days += len(week.days)
+            for day in week.days:
+                for team in day:
+                    counts.setdefault(team, [0, 0, 0])[bucket] += 1
+        team_weeks = {team: TeamWeeks(regular=c[0], playoff=c[1], after=c[2]) for team, c in counts.items()}
+        return team_weeks, scored_days / 7.0
 
     @staticmethod
     def _build_board(
@@ -593,7 +743,8 @@ class DraftBoardService:
         mine = my_ids | inputs.session_mine
         removed = picked | mine
 
-        entries = DraftBoardService.rank_pool(scoring, inputs.pool, cat_defs)
+        entries = DraftBoardService.rank_pool(scoring, inputs, cat_defs, session)
+        _model, playoffs = DraftBoardService.league_model(scoring, inputs, session, cat_defs)
 
         primary = DraftBoardService._primary_positions(inputs)
         eligible = DraftBoardService._eligible_slots(inputs)
@@ -619,12 +770,16 @@ class DraftBoardService:
 
         rows: list[DraftBoardRow] = []
         candidates: list[dict] = []
-        for cv_rank, (row, value, cats, z, z_sum) in enumerate(entries, start=1):
+        for cv_rank, entry in enumerate(entries, start=1):
+            row, value = entry.row, entry.value
             market = inputs.market.get(row.id, {})
             market_rank = market_rank_of(market, rank_type)
-            gp = inputs.projected_gp.get(row.id) or DEFAULT_PROJECTED_GP
+            # What turns a per-game difference into a season one: effective
+            # games for points, the fixed season the category index is priced at.
+            gp = entry.season_value / value if value else entry.games
             blocked = cap_check(row.id)
             team = inputs.current_team.get(row.id) or row.team
+            po = playoffs.teams.get(team) if (playoffs is not None and team) else None
             if row.id not in removed:
                 rows.append(DraftBoardRow(
                     player_id=row.id,
@@ -642,6 +797,10 @@ class DraftBoardService:
                     value_season=inputs.value_season.get(row.id),
                     last_season_gp=inputs.last_season_gp.get(row.id),
                     projected_gp=inputs.projected_gp.get(row.id),
+                    season_games=entry.games,
+                    playoff_games=po.games if po else None,
+                    playoff_light_games=po.light if po else None,
+                    playoff_games_by_week=list(po.per_week) if po else None,
                     fpts_avg=row.fpts_avg,
                     market_rank=market_rank,
                     adp=market.get("adp"),
@@ -651,18 +810,18 @@ class DraftBoardService:
                     fit_rank=fit_ranks.get(row.id),
                     availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
                     cap_blocked=blocked,
-                    categories=cats,
-                    category_z=z,
-                    score=z_sum,
+                    categories=entry.cats,
+                    category_z=entry.z,
+                    score=entry.z_sum,
                 ))
             candidates.append({
                 "id": row.id, "name": row.name, "value": value, "team": team,
                 "market_rank": market_rank,
                 "cv_rank": cv_rank,
                 "source": inputs.source.get(row.id, "baseline"),
-                "season_value": round(value * gp, VALUE_DECIMALS),
+                "season_value": entry.season_value,
                 "gp": gp,
-                "z": z,
+                "z": entry.z,
                 "fit_value": fit_values.get(row.id),
                 "position": primary.get(row.id),
                 "available": row.id not in removed,
@@ -679,11 +838,13 @@ class DraftBoardService:
                 continue
             market = inputs.market.get(entry.id, {})
             market_rank = market_rank_of(market, rank_type)
+            team = inputs.current_team.get(entry.id)
+            po = playoffs.teams.get(team) if (playoffs is not None and team) else None
             rows.append(DraftBoardRow(
                 player_id=entry.id,
                 espn_id=entry.espn_id,
                 name=entry.name,
-                team=inputs.current_team.get(entry.id),
+                team=team,
                 position=entry.position,
                 primary_position=primary.get(entry.id),
                 positions=eligible.get(entry.id),
@@ -695,6 +856,9 @@ class DraftBoardService:
                 value_season=None,
                 last_season_gp=None,
                 projected_gp=None,
+                playoff_games=po.games if po else None,
+                playoff_light_games=po.light if po else None,
+                playoff_games_by_week=list(po.per_week) if po else None,
                 fpts_avg=None,
                 market_rank=market_rank,
                 adp=market.get("adp"),
@@ -810,12 +974,14 @@ class DraftBoardService:
                 pace_source=(fit.pace_source if fit is not None else None),
                 seats_drafted=(fit.seats_drafted if fit is not None else 0),
                 congestion=DraftBoardService._congestion_meta(congestion, candidates),
+                playoffs=DraftBoardService._playoffs_meta(playoffs, session.playoff_weight),
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
                 # dd/td weights score 0 against aggregate lines; name them rather
                 # than imply the league's weights were fully applied (the
                 # RankingsService._league_scoring rule).
                 unsupported=([k for k in GAME_ONLY_KEYS if k in scoring.points.weights]
-                             if not scoring.is_categories else []),
+                             if not scoring.is_categories and not inputs.game_rates else []),
+                projection_source=inputs.projection_source,
             ),
         )
 
@@ -1016,6 +1182,27 @@ class DraftBoardService:
             evaluated=min(pool, CONGESTION_CANDIDATES) if model.active else 0,
         )
 
+    # ---- playoffs --------------------------------------------------------------
+
+    @staticmethod
+    def _playoffs_meta(
+        playoffs: Optional[PlayoffSchedule], weight: float
+    ) -> Optional[DraftPlayoffsResp]:
+        if playoffs is None or not playoffs.teams:
+            return None
+        low, high = playoffs.span
+        return DraftPlayoffsResp(
+            weeks=list(playoffs.window.weeks),
+            rounds=[list(r) for r in playoffs.window.round_weeks],
+            label=playoffs.window.label,
+            source=playoffs.window.source,
+            weight=weight,
+            weights=list(PLAYOFF_WEIGHTS),
+            games_min=low,
+            games_max=high,
+            games_mean=round(playoffs.mean_games, 1),
+        )
+
     # ---- category fit ----------------------------------------------------------
 
     @staticmethod
@@ -1040,7 +1227,7 @@ class DraftBoardService:
         tier_size = draftable_tier_size(
             DraftBoardService._league_size(scoring, session), roster_size
         )
-        ranked = [(row.id, z) for row, _value, _cats, z, _z_sum in entries]
+        ranked = [(entry.row.id, entry.z) for entry in entries]
         return build_fit_model(
             ranked, my_ids, cat_defs, tier_size, session.punts,
             opponent_rosters=DraftBoardService._opponent_rosters(inputs, session),
@@ -1070,8 +1257,8 @@ class DraftBoardService:
         if fit is None:
             return {}
         return {
-            row.id: category_value(fit.fit_z(z_sum, z))
-            for row, _value, _cats, z, z_sum in entries
+            entry.row.id: category_value(fit.fit_z(entry.z_sum, entry.z))
+            for entry in entries
         }
 
     @staticmethod

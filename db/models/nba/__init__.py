@@ -12,6 +12,8 @@ from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_projections import PlayerProjection
+from db.models.nba.player_history import PlayerHistory
+from db.models.nba.projection_adjustments import ProjectionAdjustment
 from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.games import Game
@@ -35,6 +37,9 @@ __all__ = [
     # Draft Lab
     "PlayerProjection",
     "DraftMarket",
+    # Court Vision projection inputs
+    "PlayerHistory",
+    "ProjectionAdjustment",
     # Team stats
     "TeamStats",
     # Extended data tables

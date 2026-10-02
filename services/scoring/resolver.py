@@ -53,11 +53,23 @@ class ResolvedScoring:
         return ("points", tuple(sorted(self.points.weights.items())))
 
 
-def _league_categories(league: Optional["League"]) -> Optional[CategoryScoring]:
-    """The league's own categories when it is a synced category league, else None."""
-    if league is not None and league.scoring_type == "categories" and league.categories:
+def _league_categories(league: Optional["League"], roto: bool = False) -> Optional[CategoryScoring]:
+    """The league's own categories when it is a synced category league, else None.
+
+    Roto is a category league too — the same categories, scored as season-long
+    standings instead of weekly matchups. With `roto=True` it resolves to
+    categories with `win_mode == "roto"`; without, it falls through to points
+    as it always has. The flag is the caller saying it can show a roto league
+    as one: today only the draft room can. Rankings, matchups, streamers and
+    the lineup tools still present a roto league as points (the frontend's
+    `toScoringFormat` does too), and handing them category numbers under
+    points labels would be worse than the points they show now.
+    """
+    accepted = ("categories", "roto") if roto else ("categories",)
+    if league is not None and league.scoring_type in accepted and league.categories:
         cats = [CategoryDef.from_json(_as_json(c)) for c in league.categories]
-        return CategoryScoring(cats, league.category_win_mode or "each_category")
+        mode = "roto" if league.scoring_type == "roto" else (league.category_win_mode or "each_category")
+        return CategoryScoring(cats, mode)
     return None
 
 
@@ -78,7 +90,9 @@ def _league_weights(league: Optional["League"]) -> dict[str, float]:
     return dict(DEFAULT_POINT_WEIGHTS)
 
 
-def resolve_scoring(league: Optional["League"], preview: Optional[str] = None) -> ResolvedScoring:
+def resolve_scoring(
+    league: Optional["League"], preview: Optional[str] = None, roto: bool = False
+) -> ResolvedScoring:
     """Resolve the league's scoring, or the team's `scoring_preview` override.
 
     `league` is anything carrying the league's scoring fields: a `League` row, or
@@ -91,11 +105,14 @@ def resolve_scoring(league: Optional["League"], preview: Optional[str] = None) -
     league actually uses: `categories` on a points league uses the standard
     9-cat (ESPN/Yahoo payloads carry per-stat totals either way), `points` on
     a category league uses the league's weights or the defaults.
+
+    `roto` resolves a roto league as the category league it is (see
+    `_league_categories`); only the draft room passes it.
     """
     synced = league is not None and league.settings_synced_at is not None
 
     if preview == "categories":
-        cats = _league_categories(league) or CategoryScoring(
+        cats = _league_categories(league, roto) or CategoryScoring(
             [CategoryDef.for_key(k) for k in DEFAULT_CATEGORIES], "each_category"
         )
         return ResolvedScoring("categories", league, True, _league_weights(league), cats)
@@ -105,7 +122,7 @@ def resolve_scoring(league: Optional["League"], preview: Optional[str] = None) -
     if league is None:
         return ResolvedScoring("points", None, False, dict(DEFAULT_POINT_WEIGHTS))
 
-    cats = _league_categories(league)
+    cats = _league_categories(league, roto)
     if cats is not None:
         return ResolvedScoring("categories", league, synced, dict(DEFAULT_POINT_WEIGHTS), cats)
     return ResolvedScoring("points", league, synced, _league_weights(league))
@@ -129,13 +146,16 @@ def resolve_scoring_for_room(
     nothing to inherit, so it uses the format it was created with: `points`
     unless it asked for the standard 9-cat. The two are exclusive by database
     constraint, which is what keeps a room from having two answers.
+
+    A roto league's room drafts it as roto: the board values season totals
+    against the league's own categories, with no weeks and no playoffs.
     """
     if league is not None:
-        return resolve_scoring(league)
+        return resolve_scoring(league, roto=True)
     return resolve_scoring(None, room_format)
 
 
-def resolve_scoring_for_team(team_id: int | None) -> ResolvedScoring:
+def resolve_scoring_for_team(team_id: int | None, roto: bool = False) -> ResolvedScoring:
     if team_id is None:
         return resolve_scoring(None)
     from db.models.teams import Team
@@ -143,7 +163,7 @@ def resolve_scoring_for_team(team_id: int | None) -> ResolvedScoring:
     team = Team.get_or_none(Team.team_id == team_id)
     league = team.league if (team is not None and team.league_id is not None) else None
     preview = _preview_of(team.league_info) if team is not None else None
-    return resolve_scoring(league, preview)
+    return resolve_scoring(league, preview, roto)
 
 
 def resolve_scoring_for_league_info(league_info: "LeagueInfo") -> ResolvedScoring:
