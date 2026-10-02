@@ -349,7 +349,7 @@ def punt_options(session: DraftSession) -> list[str]:
     them is meaningful. Empty for a points-scored room, which has nothing to punt.
     """
     scoring = (
-        resolve_scoring_for_team(session.team_id) if session.team_id is not None
+        resolve_scoring_for_team(session.team_id, roto=True) if session.team_id is not None
         else resolve_scoring_for_room(
             session.league if session.league_id is not None else None, session.scoring_format
         )

@@ -18,7 +18,7 @@ from services.draft_board_service import BoardInputs, BoardSession, DraftBoardSe
 from services.draft_congestion import SampleWeek
 from services.scoring.category_rank import PoolRow
 from services.scoring.models import StatLine
-from services.scoring.resolver import resolve_scoring
+from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
 
 pytestmark = pytest.mark.unit
 
@@ -175,10 +175,38 @@ def test_a_projection_past_the_schedule_plays_every_game(monkeypatch):
 def test_roto_scores_categories_without_playoffs(monkeypatch):
     pool = [_row(1, "HVY", ast=9.0), _row(2, "LGT", reb=12.0)]
     league = _league(scoring_type="roto", category_win_mode=None, categories=NINE_CAT)
-    scoring = resolve_scoring(league)
+    scoring = resolve_scoring_for_room(league)
     assert scoring.is_categories and scoring.categories.win_mode == "roto"
     resp = _board(scoring, _inputs(pool), monkeypatch=monkeypatch)
     assert resp.meta.playoffs is None
     assert all(r.playoff_games is None for r in resp.data)
     assert all(r.category_z for r in resp.data)
     assert resp.meta.market_rank_type == "roto"
+
+
+def test_a_roto_league_is_a_category_league_in_the_draft_room_and_nowhere_else():
+    """The draft room can show a roto league as one. Rankings, matchups,
+    streamers and the lineup tools still present it as points — and so does
+    the frontend — so everywhere but the room it keeps resolving to points,
+    rather than sending category numbers to views labelled for points."""
+    league = _league(scoring_type="roto", category_win_mode=None, categories=NINE_CAT,
+                     point_weights={"pts": 1.0, "reb": 1.5})
+
+    elsewhere = resolve_scoring(league)
+    assert elsewhere.format == "points" and elsewhere.categories is None
+    assert elsewhere.point_weights == {"pts": 1.0, "reb": 1.5}
+    assert elsewhere.fingerprint[0] == "points"
+
+    room = resolve_scoring_for_room(league)
+    assert room.format == "categories" and room.categories.win_mode == "roto"
+    assert room.categories.keys == [c["key"] for c in NINE_CAT]
+    assert room.fingerprint == ("categories", tuple(c["key"] for c in NINE_CAT), "roto")
+    assert resolve_scoring(league, roto=True).fingerprint == room.fingerprint
+
+    # An ordinary category league is one everywhere, with its own win mode.
+    h2h = _league(scoring_type="categories", category_win_mode="most_categories", categories=NINE_CAT)
+    assert resolve_scoring(h2h).categories.win_mode == "most_categories"
+    assert resolve_scoring_for_room(h2h).categories.win_mode == "most_categories"
+    # A league-less room still takes the format it was created with.
+    assert resolve_scoring_for_room(None, "categories").is_categories
+    assert not resolve_scoring_for_room(None, None).is_categories
