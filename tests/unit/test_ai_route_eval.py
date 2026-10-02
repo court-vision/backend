@@ -8,10 +8,17 @@ answers fail; the grader's idea of "the same place" matches the frontend's;
 and the runner, driven through the real `AiService.route` by a scripted
 client, writes a complete row for an answer, keeps a serving failure out of
 the scores, and never lets a different model's answer be scored as this one's.
+
+The gates between a run and the money are pinned too, with the model out of
+reach: no approval, no key, no price, no named variant or no room under the cap
+means no question is asked, a finished question is never asked twice, and a
+variant only ever holds one router's answers.
 """
 
+import argparse
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +36,7 @@ pytestmark = [pytest.mark.unit]
 
 CASES = run.load_cases()
 BY_ID = {case["id"]: case for case in CASES}
+STATE = run.load_state()
 SENGUN, SABONIS, JOKIC, GIANNIS = 1630578, 1627734, 203999, 203507
 
 
@@ -102,6 +110,7 @@ class TestSamePlace:
         assert ok("matchup", page("matchup"))
         assert ok("matchup", page("matchup", team_id=101))
         assert not ok("matchup", page("matchup", team_id=102))
+        assert not ok("matchup", page("streamers"))                     # the right team on the wrong page
 
     def test_a_named_league_needs_that_team(self):
         assert ok("matchup-cats-league", page("matchup", team_id=102))
@@ -131,6 +140,7 @@ class TestSamePlace:
         assert not ok("nba-schedule", terminal(mode="nba_team", nba_team="SAS"))
         assert not ok("nba-schedule", terminal(mode="overview"))
         assert not ok("my-other-team", terminal(mode="team", team_id=101))
+        assert not ok("player-plain", terminal(player_id=SENGUN))       # a player, but not the one asked for
 
     def test_rankings_follow_the_page(self):
         blocks = dict(format="categories", window=14, cats=["blk"])
@@ -159,13 +169,18 @@ class TestSamePlace:
                     ""):
             assert not ok("sm-compare-rebounds", out("statmuse", statmuse_query=bad)), bad
         assert ok("sm-head-to-head", out("statmuse", statmuse_query="Kevin Durant vs LeBron James record"))
+        # One of several wordings is enough, and none of them is not
+        assert ok("sm-by-season", out("statmuse", statmuse_query="LeBron James ppg by season"))
+        assert not ok("sm-by-season", out("statmuse", statmuse_query="LeBron James by season"))
         assert not ok("sm-compare-rebounds", terminal(player_id=SENGUN, compare_ids=[SABONIS]))
 
     def test_cannot_is_the_model_declining_not_the_server_refusing(self):
         assert ok("no-odds", out("cannot", gap="no_data"))
         assert not ok("no-odds", out("cannot", gap="invalid_target"))
         assert not ok("no-weather", out("cannot", gap="no_data"))       # must be out_of_scope
-        assert grade.grade(BY_ID["player-plain"], out("cannot", gap="invalid_target"))["kind_ok"] == 0
+        # Even where `cannot` is the expected kind, a refused destination is not that kind
+        assert grade.grade(BY_ID["no-odds"], out("cannot", gap="no_data"))["kind_ok"] == 1
+        assert grade.grade(BY_ID["no-odds"], out("cannot", gap="invalid_target"))["kind_ok"] == 0
 
     def test_a_made_up_number_or_a_second_line_fails_clean_text(self):
         case = BY_ID["matchup"]
@@ -204,29 +219,60 @@ class TestSamePlace:
         assert not ok("rank-blocks-2-weeks", page("rankings", format="categories", window=14, cats=["blk"], scope="league"))
 
 
-class TestSummary:
-    def test_numbers_are_recomputed_per_case_and_exclude_truncated_rows(self):
-        cases = [BY_ID["matchup"], BY_ID["sm-by-season"], BY_ID["no-odds"]]
+def stored(case_id, answer, rep=0, status="ok", model_calls=1):
+    """A results row as `summarize` reads it."""
+    return {"prompt_id": case_id, "rep": rep, "status": status, "output": answer, "model_calls": model_calls,
+            "grade": grade.grade(BY_ID[case_id], answer)}
 
-        def row(case_id, answer, rep=0, status="ok"):
-            return {"prompt_id": case_id, "rep": rep, "status": status, "output": answer,
-                    "grade": grade.grade(BY_ID[case_id], answer)}
+
+NO_ANSWER = {"kind": None, "failure": "unreadable", "lookups": []}
+
+
+class TestSummary:
+    def test_numbers_are_recomputed_per_case_and_a_truncated_row_is_a_failure(self):
+        """An answer cut off at the cap is an error to the asker. Left out of the rates, it made
+        its case pass on the other rep, or vanish from the score as "not yet run"."""
+        cases = [BY_ID["matchup"], BY_ID["sm-by-season"], BY_ID["no-odds"]]
         rows = [
-            row("matchup", page("matchup")),
-            row("matchup", out("statmuse", statmuse_query="my matchup"), rep=1),   # a leak on one of two reps
-            row("sm-by-season", out("cannot", gap="no_data")),
-            row("no-odds", out("cannot", gap="no_data")),
-            row("no-odds", out("cannot", gap="no_data"), rep=1, status="truncated"),
+            stored("matchup", page("matchup")),
+            stored("matchup", out("statmuse", statmuse_query="my matchup"), rep=1),   # a leak on one of two reps
+            stored("sm-by-season", out("cannot", gap="no_data")),
+            stored("no-odds", out("cannot", gap="no_data")),
+            stored("no-odds", NO_ANSWER, rep=1, status="truncated"),
         ]
         s = grade.summarize(rows, cases)
 
-        assert (s["cases"], s["rows"], s["truncated"]) == (3, 4, 1)
-        assert s["metrics"]["route_ok"]["rate"] == pytest.approx((0.5 + 0 + 1) / 3)
+        assert (s["cases"], s["rows"], s["truncated"], s["missing"]) == (3, 5, 1, [])
+        assert s["metrics"]["route_ok"]["rate"] == pytest.approx((0.5 + 0 + 0.5) / 3)
         assert s["confusion"]["statmuse"] == {"precision": 0.0, "recall": 0.0, "said": 1, "wanted": 1}
-        assert s["confusion"]["cannot"]["precision"] == 0.5
+        assert s["confusion"]["cannot"] == {"precision": 0.5, "recall": 0.5, "said": 2, "wanted": 2}
         assert s["stay_home"] == {"n": 2, "leaks": ["matchup"]}
-        assert s["failed"] == ["matchup", "sm-by-season"]
+        assert s["failed"] == ["matchup", "no-odds", "sm-by-season"]
         assert s["unquoted"]["n"] == 3   # none of these three is quoted in the prompt
+
+    def test_a_case_whose_only_answer_was_cut_off_is_failed_not_missing(self):
+        s = grade.summarize([stored("matchup", page("matchup")), stored("no-odds", NO_ANSWER, status="truncated")],
+                            [BY_ID["matchup"], BY_ID["no-odds"]])
+
+        assert (s["cases"], s["truncated"], s["missing"], s["failed"]) == (2, 1, [], ["no-odds"])
+        assert (s["metrics"]["route_ok"]["rate"], s["metrics"]["route_ok"]["n"]) == (0.5, 2)
+        bars = {"route_ok_min": 0.9, "leaks_max": 0, "made_up_max": 0, "refused_max": 0,
+                "latency_p50_s": 3.0, "latency_p90_s": 6.0}
+        assert dict((name, passed) for name, passed, _ in run.check_bars(bars, s, [1.0, 2.0]))["right place"] is False
+
+    def test_refused_destinations_refusals_and_single_trips_are_reported(self):
+        cases = [BY_ID["matchup"], BY_ID["streamers"], BY_ID["player-plain"], BY_ID["no-odds"], BY_ID["playoffs"]]
+        rows = [stored("matchup", out("cannot", gap="invalid_target")),
+                stored("streamers", page("matchup")),                       # the right kind, the wrong place
+                stored("player-plain", {"kind": None, "failure": "refusal", "lookups": []}),
+                stored("no-odds", out("cannot", gap="no_data"), model_calls=2)]
+        s = grade.summarize(rows, cases)
+
+        assert (s["invalid_targets"], s["refusals"], s["missing"]) == (["matchup"], ["player-plain"], ["playoffs"])
+        assert s["one_call"] == pytest.approx(3 / 4)
+        assert s["metrics"]["kind_ok"]["rate"] == pytest.approx(2 / 4)
+        # By destination it is the right place that is counted, not the right kind
+        assert {group: m["rate"] for group, m in s["by_group"].items()} == {"cannot": 1.0, "page": 0.0, "terminal": 0.0}
 
     def test_wilson_interval_is_sane_at_the_edges(self):
         low, high = grade.wilson(92, 92)
@@ -312,6 +358,9 @@ class TestRunner:
         assert kind == "row"
         assert row["grade"] == {"route_ok": 1.0, "kind_ok": 1.0, "clean_text": 1.0, "lean_lookups": 1.0}
         assert (row["model"], row["model_calls"], row["tool_calls"], row["status"]) == ("claude-opus-5", 2, 1, "ok")
+        # Whose answer it is: the model and effort asked for, and the router's code
+        assert {key: row[key] for key in ("requested_model", "effort", "router")} == run.asked_of("claude-opus-5")
+        assert row["effort"] == settings.ai_effort and len(row["router"]) == 12
         assert row["usage"] == {"input_tokens": 200, "output_tokens": 40, "cache_read_input_tokens": 6000,
                                 "cache_creation_input_tokens": 0}
         assert row["output"]["target"]["team_id"] == 101          # ownership came from the fixture
@@ -367,6 +416,24 @@ class TestRunner:
 
         assert kind == "row"
         assert row["output"] == {"kind": None, "failure": "refusal", "lookups": [], "model_calls": 1}
+        assert set(row["grade"].values()) == {0.0}
+
+    def test_an_answer_cut_off_at_the_cap_is_a_graded_zero_marked_truncated(self, scripted):
+        """The cap is production's own (`MAX_TOKENS`), so this is what a user would get: an error."""
+        scripted(msg("max_tokens", text('{"kind": "show", "text": "Opening your mat')))
+
+        kind, row, _ = attempt("matchup")
+
+        assert (kind, row["status"], row["stop_reason"]) == ("row", "truncated", "max_tokens")
+        assert row["output"] == {"kind": None, "failure": "unreadable", "lookups": [], "model_calls": 1}
+        assert set(row["grade"].values()) == {0.0}
+
+    def test_an_answer_that_cannot_be_read_is_a_graded_zero(self, scripted):
+        scripted(msg("end_turn", text("Opening your matchup")))   # not the JSON it was asked for
+
+        kind, row, _ = attempt("matchup")
+
+        assert (kind, row["status"], row["output"]["failure"]) == ("row", "ok", "unreadable")
         assert set(row["grade"].values()) == {0.0}
 
     def test_an_answer_from_another_model_is_not_scored(self, scripted):
@@ -432,3 +499,186 @@ class TestRunner:
         before = run.harness_sha({"harness_paths": ["a.py"]})
         (tmp_path / "a.py").write_text("two")
         assert run.harness_sha({"harness_paths": ["a.py"]}) != before
+
+
+# ------------------------------------------- the gates before the money
+
+
+def usage(input_tokens=1000):
+    return {"input_tokens": input_tokens, "output_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}
+
+
+@pytest.fixture
+def paid(tmp_path, monkeypatch):
+    """`run.main` and `run.run` as a paid run starts them, with nothing to pay for: the flow
+    directory is a temporary one, the key is a fake, and `run.attempt` -- the only way to the
+    model -- is a stand-in that records each attempt it is asked to make. An attempt answers
+    with the next step of `script`: an error code, or (by default) a passing row."""
+    (tmp_path / "_state.json").write_text((run.FLOW / "_state.json").read_text())
+    monkeypatch.setattr(run, "FLOW", tmp_path)
+    monkeypatch.setattr(settings, "ai_enabled", True)
+    monkeypatch.setattr(settings, "anthropic_api_key", SecretStr("sk-ant-test"))
+    monkeypatch.setattr(fixtures, "install", lambda: None)   # the runner patches the seams for good
+
+    a_turn = asyncio.sleep
+
+    async def no_wait(seconds):
+        return None
+    monkeypatch.setattr(run.asyncio, "sleep", no_wait)        # the pause before a retry
+    seen = SimpleNamespace(flow=tmp_path, started=[], script=[], error_usage=usage())
+
+    async def attempt(case, rep, *, model, timeout_s, attempt_no):
+        seen.started.append((case["id"], rep, attempt_no))
+        await a_turn(0)                                       # cases started together are in flight together
+        base = {"prompt_id": case["id"], "rep": rep, "attempt": attempt_no, "model": model, **run.asked_of(model),
+                "latency_s": 1.0}
+        step = seen.script.pop(0) if seen.script else "row"
+        if step != "row":
+            return "error", {**base, "usage": seen.error_usage, "class": "serving_error", "code": step}, []
+        answer = grade.oracle(case)
+        return "row", {**base, "usage": usage(), "prompt": run.prompt_text(case), "tags": case["tags"], "status": "ok",
+                       "model_calls": 1, "grade": grade.grade(case, answer), "output": answer,
+                       "meta": {"fallback": False}}, []
+    monkeypatch.setattr(run, "attempt", attempt)
+
+    def main(*argv):
+        monkeypatch.setattr(settings, "ai_model", "claude-opus-5")   # a run leaves its --model and --effort behind
+        monkeypatch.setattr(settings, "ai_effort", "low")
+        monkeypatch.setattr(sys, "argv", ["run.py", *argv])
+        run.main()
+    seen.main = main
+
+    def go(cases, **overrides):
+        monkeypatch.setattr(settings, "ai_model", "claude-opus-5")
+        monkeypatch.setattr(settings, "ai_effort", "low")
+        args = argparse.Namespace(**{"variant": "v9", "model": None, "effort": None, "reps": 1, "timeout_s": 5.0,
+                                     "concurrency": 4, "max_usd": 2.0, **overrides})
+        asyncio.run(run.run(args, STATE, cases))
+    seen.run = go
+    return seen
+
+
+class TestMoneyGates:
+    def test_a_paid_run_waits_for_the_harness_to_be_approved_as_it_stands(self, paid):
+        with pytest.raises(SystemExit) as never_approved:
+            paid.main("--variant", "v9", "--ids", "matchup")
+        (paid.flow / "harness.lock").write_text(json.dumps({"sha": "0" * 64}))   # approved, and changed since
+        with pytest.raises(SystemExit) as changed_since:
+            paid.main("--variant", "v9", "--ids", "matchup")
+
+        assert (never_approved.value.code, changed_since.value.code, paid.started) == (2, 2, [])
+
+        paid.main("--approve-harness")
+        paid.main("--variant", "v9", "--ids", "matchup")
+        assert paid.started == [("matchup", 0, 1)]
+
+    def test_a_paid_run_must_name_its_variant(self, paid, capsys):
+        """The bare command used to resume `baseline`: once new cases were added, it asked them of
+        today's router and appended the answers to the committed baseline."""
+        paid.main("--approve-harness")
+
+        with pytest.raises(SystemExit) as bare:
+            paid.main()
+        with pytest.raises(SystemExit) as empty:
+            paid.main("--variant", "")
+
+        assert "--variant" in str(bare.value) and "--variant" in str(empty.value)
+        assert paid.started == [] and not (paid.flow / "baseline").exists()
+        paid.main("--summary")                                   # the free reports still read baseline
+        assert "baseline: no results yet" in capsys.readouterr().out
+
+    def test_a_variant_only_ever_holds_one_routers_answers(self, paid, monkeypatch):
+        paid.run([BY_ID["matchup"]])
+        paid.run([BY_ID["matchup"], BY_ID["playoffs"]])          # the same router: the run resumes
+        assert paid.started == [("matchup", 0, 1), ("playoffs", 0, 1)]
+
+        for change in ({"effort": "medium"}, {"model": "claude-opus-5-5"}):
+            with pytest.raises(SystemExit, match="different router"):
+                paid.run([BY_ID["streamers"]], **change)
+        monkeypatch.setattr(run, "ROUTER_PATHS", run.ROUTER_PATHS[:1])   # the router's code is not what it was
+        with pytest.raises(SystemExit, match="different router"):
+            paid.run([BY_ID["streamers"]])
+        assert len(paid.started) == 2
+
+    def test_the_committed_runs_are_never_added_to(self, paid):
+        """Their rows say nothing of effort or code, so they are no router this run could be."""
+        (paid.flow / "baseline").mkdir()
+        (paid.flow / "baseline" / "results.jsonl").write_text(json.dumps(
+            {"prompt_id": "matchup", "rep": 0, "model": "claude-opus-5", "requested_model": "claude-opus-5",
+             "usage": usage()}) + "\n")
+
+        with pytest.raises(SystemExit, match="baseline holds 1 rows from a different router"):
+            paid.run([BY_ID["matchup"], BY_ID["playoffs"]], variant="baseline")
+
+        assert paid.started == []
+        assert len(run.read_jsonl(paid.flow / "baseline" / "results.jsonl")) == 1
+
+    def test_a_case_that_could_pass_the_cap_is_not_started(self, paid, capsys):
+        paid.run(CASES[:3], max_usd=run.WORST_CASE_USD - 0.01)
+
+        assert paid.started == []
+        assert "STOPPED BY THE CAP: 3 not run" in capsys.readouterr().out
+
+    def test_the_cap_keeps_room_for_every_case_still_in_flight(self, paid, capsys):
+        """Cases asked together could each spend the worst case before any of them is counted."""
+        paid.run(CASES[:4], max_usd=2 * run.WORST_CASE_USD + 0.02)   # the first alone, then three at once
+
+        assert len(paid.started) == 3                            # room for two of the three
+        assert "STOPPED BY THE CAP: 1 not run" in capsys.readouterr().out
+
+    def test_a_retry_is_not_started_once_the_cap_is_reached(self, paid, capsys):
+        """A failed attempt can be billed -- its first model call answered, its second did not --
+        so the cap is looked at again before each one, not once per case."""
+        paid.script = ["AI_UNAVAILABLE", "AI_UNAVAILABLE"]
+        paid.error_usage = usage(input_tokens=10_000)            # $0.05 on Opus 5
+
+        paid.run([BY_ID["matchup"]], max_usd=0.10)               # room for one attempt; $0.05 + $0.08 is not
+
+        assert paid.started == [("matchup", 0, 1)]
+        assert "STOPPED BY THE CAP: 1 not run" in capsys.readouterr().out
+
+    def test_a_finished_case_is_never_asked_twice(self, paid, capsys):
+        paid.run(CASES[:3])
+        paid.run(CASES[:3])
+
+        assert len(paid.started) == 3
+        assert "nothing to run" in capsys.readouterr().out
+        assert len(run.read_jsonl(paid.flow / "v9" / "results.jsonl")) == 3
+
+    def test_only_a_busy_or_unavailable_model_is_asked_again_and_only_twice(self, paid):
+        paid.script = ["AI_BUSY", "AI_UNAVAILABLE", "AI_BUSY",   # gives up after the third
+                       "EVAL_MODEL",                             # the wrong model served: asking again won't help
+                       "AI_BUSY", "row"]
+        for case_id in ("matchup", "playoffs", "streamers"):
+            paid.run([BY_ID[case_id]])
+
+        assert paid.started == [("matchup", 0, 1), ("matchup", 0, 2), ("matchup", 0, 3),
+                                ("playoffs", 0, 1), ("streamers", 0, 1), ("streamers", 0, 2)]
+        assert [row["prompt_id"] for row in run.read_jsonl(paid.flow / "v9" / "results.jsonl")] == ["streamers"]
+        assert len(run.read_jsonl(paid.flow / "v9" / "errors.jsonl")) == 5   # kept, never scored
+
+    def test_no_switch_no_key_or_no_price_means_no_run(self, paid, monkeypatch):
+        with pytest.raises(SystemExit, match="no price for claude-haiku-9"):
+            paid.run(CASES[:1], model="claude-haiku-9")          # the cap could not be enforced
+        monkeypatch.setattr(settings, "anthropic_api_key", None)
+        with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY"):
+            paid.run(CASES[:1])
+        monkeypatch.setattr(settings, "anthropic_api_key", SecretStr("sk-ant-test"))
+        monkeypatch.setattr(settings, "ai_enabled", False)
+        with pytest.raises(SystemExit, match="AI_ENABLED"):
+            paid.run(CASES[:1])
+
+        assert paid.started == []
+
+    def test_a_variant_whose_every_answer_was_cut_off_still_prints_its_numbers(self, paid, capsys):
+        (paid.flow / "v9").mkdir()
+        row = {**stored("matchup", NO_ANSWER, status="truncated"), "model": "claude-opus-5",
+               "requested_model": "claude-opus-5", "usage": usage(), "latency_s": 41.0}
+        (paid.flow / "v9" / "results.jsonl").write_text(json.dumps(row) + "\n")
+
+        run.print_summary("v9", STATE, CASES)
+
+        printed = capsys.readouterr().out
+        assert "1 truncated" in printed and "not passing (1): matchup" in printed
+        assert "FAIL  right place: 0.0%" in printed and "slowest 41.0s" in printed

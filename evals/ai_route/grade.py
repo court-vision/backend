@@ -288,13 +288,13 @@ def _mean(values: Iterable[float]) -> Optional[float]:
 
 def summarize(rows: list[dict[str, Any]], cases: list[dict[str, Any]]) -> dict[str, Any]:
     """Everything the headline needs, recomputed from the raw rows: per case the
-    mean over its reps, then over cases. Truncated rows are counted, not averaged."""
+    mean over its reps, then over cases. A truncated row is counted apart and
+    scored as well, with the zeros it carries: the cap it hit is production's
+    own, so the asker got an error -- a failure, not a question never asked."""
     by_case: dict[str, list[dict[str, Any]]] = {}
     truncated = 0
     for row in rows:
-        if row.get("status", "ok") != "ok":
-            truncated += 1
-            continue
+        truncated += row.get("status", "ok") != "ok"
         by_case.setdefault(row["prompt_id"], []).append(row)
     known = {case["id"]: case for case in cases}
     scored = [cid for cid in by_case if cid in known]

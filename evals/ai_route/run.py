@@ -18,7 +18,10 @@ Output goes to .claude/hillclimb/ai-route/<variant>/:
                   served) -- never scored, and re-run on the next invocation
   traces/         the full exchange for each row
 
-A run resumes where it stopped: rows already in results.jsonl are skipped.
+A run resumes where it stopped: rows already in results.jsonl are skipped. A
+variant is one router, so a paid run names its `--variant` and refuses to add to
+rows that another model, effort or version of services/ai produced: a new
+measurement goes in a new `v<N>`.
 
 The first paid run refuses to start until the harness is approved. The approval
 records a hash of this file, the grader, the fixtures and the cases, so a score
@@ -28,10 +31,10 @@ can't quietly come from a grader that changed underneath it:
 
 Usage:
     .venv/bin/python -m evals.ai_route.run --selfcheck          # free: grader on known answers
-    .venv/bin/python -m evals.ai_route.run                      # the full set, variant `baseline`
-    .venv/bin/python -m evals.ai_route.run --ids matchup,player-last-15
-    .venv/bin/python -m evals.ai_route.run --variant v1 --model claude-opus-5-5
-    .venv/bin/python -m evals.ai_route.run --summary            # reprint the numbers from disk
+    .venv/bin/python -m evals.ai_route.run --variant v6         # paid: the full set, into a new variant
+    .venv/bin/python -m evals.ai_route.run --variant v6 --ids matchup,player-last-15
+    .venv/bin/python -m evals.ai_route.run --variant v7 --model claude-sonnet-5-5
+    .venv/bin/python -m evals.ai_route.run --summary --variant v5   # free: reprint the numbers from disk
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -62,6 +65,8 @@ CASES = HERE / "cases.jsonl"
 WORST_CASE_USD = 0.08
 RETRYABLE = {"AI_BUSY", "AI_UNAVAILABLE"}
 MAX_ATTEMPTS = 3
+# The router itself: its prompt, tools, loop and checks. A row records their hash.
+ROUTER_PATHS = ("services/ai/prompts.py", "services/ai/routing.py", "services/ai/service.py", "services/ai/tools.py")
 
 
 def load_cases() -> list[dict[str, Any]]:
@@ -76,11 +81,24 @@ def load_state() -> dict[str, Any]:
     return json.loads((FLOW / "_state.json").read_text())
 
 
-def harness_sha(state: dict[str, Any]) -> str:
+def files_sha(paths: Iterable[str]) -> str:
     digest = hashlib.sha256()
-    for rel in sorted(state["harness_paths"]):
+    for rel in sorted(paths):
         digest.update(rel.encode() + b"\0" + hashlib.sha256((ROOT / rel).read_bytes()).digest())
     return digest.hexdigest()
+
+
+def harness_sha(state: dict[str, Any]) -> str:
+    return files_sha(state["harness_paths"])
+
+
+def asked_of(model: str) -> dict[str, str]:
+    """Which router a row measured: the model and effort asked for, and the
+    router's code. A variant's score is one router's, so every row says whose it
+    is and a run adds only to rows of its own."""
+    from core.settings import settings
+
+    return {"requested_model": model, "effort": settings.ai_effort, "router": files_sha(ROUTER_PATHS)[:12]}
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -195,7 +213,7 @@ async def attempt(case: dict[str, Any], rep: int, *, model: str, timeout_s: floa
     served = data.usage.model if data is not None else (answered[-1]["response"].model if answered else None)
     usage = _usage(data, recorder)
     trace = _trace(recorder)
-    base = {"prompt_id": case["id"], "rep": rep, "attempt": attempt_no, "model": served, "requested_model": model,
+    base = {"prompt_id": case["id"], "rep": rep, "attempt": attempt_no, "model": served, **asked_of(model),
             "usage": usage, "latency_s": latency}
 
     if error is None and data is not None and not served_as_asked(model, served) and not data.usage.fallback:
@@ -269,6 +287,11 @@ async def run(args: argparse.Namespace, state: dict[str, Any], cases: list[dict[
     if not pending:
         print("nothing to run: every (case, rep) is already in results.jsonl")
         return
+    asked = asked_of(model)
+    others = [row for row in read_jsonl(results) if any(row.get(key) != value for key, value in asked.items())]
+    if others:
+        raise SystemExit(f"{args.variant} holds {len(others)} rows from a different router (another model, effort or "
+                         "version of services/ai), and a variant's score is one router's. Start a new --variant.")
 
     prices = state["prices"]
     spent = sum(cost_usd(r, prices) for r in [*read_jsonl(results), *read_jsonl(errors)])
@@ -282,12 +305,14 @@ async def run(args: argparse.Namespace, state: dict[str, Any], cases: list[dict[
     async def one(case: dict[str, Any], rep: int) -> None:
         nonlocal spent, in_flight
         async with gate:
-            if spent + (in_flight + 1) * WORST_CASE_USD > args.max_usd:
-                skipped.append(case["id"])
-                return
             in_flight += 1
             try:
                 for attempt_no in range(1, MAX_ATTEMPTS + 1):
+                    # Before every attempt, not once per case: a failed attempt can be billed too.
+                    # Each case in flight, this one included, may yet spend its worst case.
+                    if spent + in_flight * WORST_CASE_USD > args.max_usd:
+                        skipped.append(case["id"])
+                        return
                     kind, record, trace = await attempt(case, rep, model=model, timeout_s=args.timeout_s,
                                                         attempt_no=attempt_no)
                     spent += cost_usd(record, prices)
@@ -353,9 +378,9 @@ def print_summary(variant: str, state: dict[str, Any], cases: list[dict[str, Any
     print(f"  refused destinations (invalid_target): {len(s['invalid_targets'])} {s['invalid_targets'] or ''}")
     if s["refusals"]:
         print(f"  refusals: {s['refusals']}")
-    ok = [r for r in rows if r.get("status", "ok") == "ok"]
-    costs = sorted(cost_usd(r, prices) for r in ok)
-    lat = sorted(r["latency_s"] for r in ok)
+    # Every row, a truncated one too: it was paid for and waited through like any other
+    costs = sorted(cost_usd(r, prices) for r in rows)
+    lat = sorted(r["latency_s"] for r in rows)
     total = sum(cost_usd(r, prices) for r in [*rows, *errors])
     print(f"  cost: ${total:.3f} total, per question median ${statistics.median(costs):.4f} "
           f"(min ${costs[0]:.4f}, max ${costs[-1]:.4f})")
@@ -449,7 +474,8 @@ def selfcheck(cases: list[dict[str, Any]]) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--variant", default="baseline", help="output directory: `baseline` or `v<N>`")
+    parser.add_argument("--variant", help="output directory: `baseline` or `v<N>`. A paid run must name one; "
+                                          "the free reports read `baseline` when none is named")
     parser.add_argument("--model", help="override AI_MODEL for this run")
     parser.add_argument("--effort", help="override AI_EFFORT for this run")
     parser.add_argument("--reps", type=int, default=1)
@@ -462,6 +488,8 @@ def main() -> None:
     parser.add_argument("--regrade", action="store_true", help="free: grade the stored answers again after a case or grader change")
     parser.add_argument("--approve-harness", action="store_true", help="record the current harness hash and exit")
     args = parser.parse_args()
+    named = bool(args.variant)
+    args.variant = args.variant or "baseline"
     if not re.fullmatch(r"baseline|v\d+", args.variant):
         raise SystemExit("--variant must be `baseline` or `v<N>`; the report ignores anything else")
 
@@ -481,6 +509,9 @@ def main() -> None:
         lock.write_text(json.dumps({"sha": sha, "approved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
         print(f"harness approved: {sha[:12]}")
         return
+    if not named:
+        # Never a default: the bare command once resumed the committed baseline with today's router
+        raise SystemExit("a paid run needs --variant: a new `v<N>` for a new measurement, or the one to resume")
     approved = json.loads(lock.read_text())["sha"] if lock.exists() else None
     if approved != sha:
         print("The harness (runner, grader, fixtures or cases) has changed since it was last approved, "

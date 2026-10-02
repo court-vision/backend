@@ -19,12 +19,17 @@ answer. Nothing is judged by a model: a destination is right or it isn't.
 .venv/bin/python -m evals.ai_route.run --selfcheck        # free
 .venv/bin/python -m evals.ai_route.review                 # free: inputs.html
 .venv/bin/python -m evals.ai_route.run --approve-harness  # yours to run, after reviewing
-.venv/bin/python -m evals.ai_route.run                    # paid, capped by --max-usd
-.venv/bin/python -m evals.ai_route.review --variant baseline
+.venv/bin/python -m evals.ai_route.run --variant v6       # paid, capped by --max-usd
+.venv/bin/python -m evals.ai_route.review --variant v6
 ```
 
 Output lands in `.claude/hillclimb/ai-route/<variant>/`. Player lookups read the
 database in `.env`; nothing is written to it.
+
+A variant is one router. A paid run has to name its `--variant` (there is no
+default to spend on), and it resumes a variant only when the rows already there
+came from the same model, effort and `services/ai` code. Anything else is a new
+measurement and goes in a new `v<N>`; the committed runs are never added to.
 
 ## Scores
 
@@ -36,6 +41,9 @@ database in `.env`; nothing is written to it.
 
 A fantasy question sent to StatMuse (a "leak") and a destination the server
 refused (`invalid_target`) are counted separately; both should be zero.
+
+An answer cut off at the output cap is a failure in every score, like a refusal:
+the cap is production's, so the asker got an error. It is also counted on its own.
 
 `_state.json` holds the agreed pass/fail lines (`bars`): routing and time are judged separately.
 Time is measured per question, from the request arriving to the destination being ready.

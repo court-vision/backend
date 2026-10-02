@@ -171,24 +171,23 @@ def build_graded(variant: str, cases: list[dict[str, Any]], names: dict[int, str
         f"<p>Fantasy questions sent to StatMuse: <b>{len(summary['stay_home']['leaks'])}</b> of {summary['stay_home']['n']}. "
         f"Destinations the server refused: <b>{len(summary['invalid_targets'])}</b>.</p>",
     ]
-    ok = [r for r in rows if r.get("status", "ok") == "ok"]
-    bars = check_bars(state.get("bars", {}), summary, sorted(r["latency_s"] for r in ok))
+    bars = check_bars(state.get("bars", {}), summary, sorted(r["latency_s"] for r in rows))
     if bars:
         body.append("<h2>Bars</h2><table>" + "".join(
             f"<tr><td><span class={'pass' if passed else 'fail'}>{'PASS' if passed else 'FAIL'}</span></td>"
             f"<th>{esc(name)}</th><td>{esc(detail)}</td></tr>" for name, passed, detail in bars) + "</table>")
-    if ok:
+    if rows:
         def spread(sample: list[dict[str, Any]]) -> str:
             times = sorted(r["latency_s"] for r in sample)
             at = lambda q: times[min(len(times) - 1, round(q * (len(times) - 1)))]  # noqa: E731
             return f"half under {at(0.5):.1f}s, 9 in 10 under {at(0.9):.1f}s, slowest {times[-1]:.1f}s"
         body.append("<h2>Time to answer</h2><p class=dim>From the question arriving to the destination being ready, "
                     "measured in this run. Each lookup adds a second trip to the model.</p><table>"
-                    + f"<tr><th>All {len(ok)}</th><td>{esc(spread(ok))}</td></tr>"
+                    + f"<tr><th>All {len(rows)}</th><td>{esc(spread(rows))}</td></tr>"
                     + "".join(f"<tr><th>{n} model call{'s' if n > 1 else ''} ({len(g)})</th><td>{esc(spread(g))}</td></tr>"
-                              for n in sorted({r['model_calls'] for r in ok})
-                              if (g := [r for r in ok if r['model_calls'] == n]))
-                    + "".join(f"<tr><th>Within {cut}s</th><td>{sum(r['latency_s'] <= cut for r in ok)} of {len(ok)}</td></tr>"
+                              for n in sorted({r['model_calls'] for r in rows})
+                              if (g := [r for r in rows if r['model_calls'] == n]))
+                    + "".join(f"<tr><th>Within {cut}s</th><td>{sum(r['latency_s'] <= cut for r in rows)} of {len(rows)}</td></tr>"
                               for cut in (3, 5, 8))
                     + "</table>")
     system = next((json.loads(p.read_text())[0]["content"] for p in sorted((FLOW / variant / "traces").glob("*.json"))
