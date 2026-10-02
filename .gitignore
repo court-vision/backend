@@ -4,3 +4,12 @@
 not_secrets.txt
 **/__pycache__/*
 secrets.env
+
+# Routing eval (evals/ai_route): transcripts, rendered pages and local approval stay out;
+# the cases, the grader, each run's graded answers and what changed between runs go in.
+.claude/hillclimb/**/traces/
+.claude/hillclimb/**/trajectory/
+.claude/hillclimb/**/*.html
+.claude/hillclimb/**/*.py
+.claude/hillclimb/**/errors.jsonl
+.claude/hillclimb/**/harness.lock
