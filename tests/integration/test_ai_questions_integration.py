@@ -216,3 +216,40 @@ class TestFindPlayers:
         assert sorted(i for i, _ in found["Curry"]) == [201939, 203552]
         assert (found["Michael Jordan"], found["%"], found[""]) == ([], [], [])
 
+    def test_a_player_listed_under_a_shorter_name_is_found_by_the_longer_one(self, integration_db):
+        """The model writes names in full; NBA.com lists some players short. The longest word of
+        "Alexandre Sarr" is not in "Alex Sarr" at all, so the surname has to bring the row in."""
+        rows = [(1642259, "Alex Sarr"), (1629651, "Nic Claxton"), (1629004, "Svi Mykhailiuk"),
+                (1642365, "Nikola Đurišić"), (1628420, "Monte Morris"), (1629652, "Luguentz Dort")]
+        for player_id, name in rows:
+            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+
+        found = self.find("Alexandre Sarr", "Nicolas Claxton", "Sviatoslav Mykhailiuk", "Nikola Durisic",
+                          "Marcus Morris", "Lu Dort")
+
+        assert {name: [i for i, _ in hits] for name, hits in found.items()} == {
+            "Alexandre Sarr": [1642259], "Nicolas Claxton": [1629651], "Sviatoslav Mykhailiuk": [1629004],
+            "Nikola Durisic": [1642365],
+            "Marcus Morris": [], "Lu Dort": [],   # a surname and an initial, or two letters, is not a name
+        }
+
+    def test_a_common_surname_never_pushes_the_whole_name_past_the_limit(self, integration_db, monkeypatch):
+        """ "len" is in every Jalen. Read in table order, they would fill the limit before Alex Len."""
+        monkeypatch.setattr(routing, "_CANDIDATES", 3)
+        names = ["Jalen Green", "Jalen Suggs", "Jalen Duren", "Jalen Brunson", "Alex Len"]
+        for player_id, name in enumerate(names, start=1):
+            Player.create(id=player_id, name=name, name_normalized=name.lower())
+
+        assert self.find("Alex Len") == {"Alex Len": [(5, "Alex Len")]}
+        assert len(self.find("Jalen")["Jalen"]) == 3   # the limit itself still holds: three of the four are read
+
+    def test_a_shorter_listing_is_not_taken_from_a_list_the_limit_cut(self, integration_db, monkeypatch):
+        """The only Cam among some of the Thomases is not known to be the only one."""
+        for player_id, name in enumerate(["Cam Thomas", "Tim Thomas", "Isaiah Thomas"], start=1):
+            Player.create(id=player_id, name=name, name_normalized=name.lower())
+        assert self.find("Cameron Thomas") == {"Cameron Thomas": [(1, "Cam Thomas")]}
+
+        monkeypatch.setattr(routing, "_CANDIDATES", 3)   # as many as were read: there may be more
+
+        assert self.find("Cameron Thomas") == {"Cameron Thomas": []}
+        assert self.find("Cam Thomas") == {"Cam Thomas": [(1, "Cam Thomas")]}   # his whole name is read first

@@ -357,6 +357,8 @@ class TestFold:
         ("Nikola Jokić", "nikola jokic"), ("De'Aaron Fox", "DeAaron Fox"), ("P.J. Washington", "PJ Washington"),
         ("Jimmy Butler III", "Jimmy Butler"), ("Jaren Jackson Jr.", "jaren jackson jr"),
         ("Shai Gilgeous-Alexander", "Shai Gilgeous Alexander"), ("  LeBron   James ", "lebron james"),
+        # No accent to strip, so NFKD leaves the letter whole: folded the way Postgres `unaccent` folds it
+        ("Nikola Đurišić", "Nikola Durisic"), ("Jørgen Łukasz Groß", "jorgen lukasz gross"),
     ])
     def test_the_same_name_written_two_ways_is_one_name(self, a, b):
         assert routing._fold(a) == routing._fold(b)
@@ -370,7 +372,9 @@ class TestFold:
 @pytest.mark.unit
 class TestPick:
     ROSTER = [(1, "Jalen Williams"), (2, "Jaylin Williams"), (3, "Mark Williams"), (4, "Zion Williamson"),
-              (5, "Stephen Curry"), (6, "Seth Curry"), (7, "Jimmy Butler III"), (8, "Tacko Fall"), (9, "Tacko Fall")]
+              (5, "Stephen Curry"), (6, "Seth Curry"), (7, "Jimmy Butler III"), (8, "Tacko Fall"), (9, "Tacko Fall"),
+              (10, "Alex Sarr"), (11, "Nic Claxton"), (12, "Monte Morris"), (13, "Luguentz Dort"),
+              (14, "Moritz Wagner"), (15, "Tre Jones"), (16, "Trey Jones")]
 
     def pick(self, name):
         return routing._pick(routing._fold(name), self.ROSTER)
@@ -387,6 +391,22 @@ class TestPick:
         assert self.pick("Steph Curry") == ([(5, "Stephen Curry")], False)
         assert self.pick("S Curry") == ([], False)                         # too short to mean anyone
         assert self.pick("Curry")[0] == [(5, "Stephen Curry"), (6, "Seth Curry")]
+
+    def test_a_player_listed_under_a_shorter_first_name_is_found_by_the_longer_one(self):
+        """NBA.com lists Alexandre Sarr as Alex; the prompt tells the model to write names in full."""
+        assert self.pick("Alexandre Sarr") == ([(10, "Alex Sarr")], False)
+        assert self.pick("Nicolas Claxton") == ([(11, "Nic Claxton")], False)
+
+    def test_the_loosest_reading_needs_the_surname_whole_and_exactly_one_player(self):
+        assert self.pick("Treyvon Jones") == ([], False)       # Tre or Trey: never a "which one?"
+        assert self.pick("Alexandre Sarro") == ([], False)     # the surname is not his
+        assert self.pick("Marcus Morris") == ([], False)       # an initial and a surname is not Monte Morris
+        assert self.pick("Lu Dort") == ([], False)             # too short to mean anyone
+        assert self.pick("Moe Wagner") == ([], False)          # a nickname, not the start of Moritz
+        assert self.pick("Sarr")[0] == [(10, "Alex Sarr")]     # a surname alone is still everyone with it
+        # The only one among some of the Sarrs: the rest were past the limit, so nobody is picked
+        assert routing._pick(routing._fold("Alexandre Sarr"), self.ROSTER, complete=False) == ([], False)
+        assert routing._pick(routing._fold("Alex Sarr"), self.ROSTER, complete=False)[0] == [(10, "Alex Sarr")]
 
     def test_one_name_on_two_rows_is_reported_as_whole(self):
         assert self.pick("Tacko Fall") == ([(8, "Tacko Fall"), (9, "Tacko Fall")], True)

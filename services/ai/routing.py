@@ -16,6 +16,8 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import reduce
+from operator import and_
 from typing import Any, Iterable, Optional, get_args
 
 from peewee import fn
@@ -313,6 +315,10 @@ async def describe_view(
 
 
 _SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
+# Letters with no accent to strip, which NFKD would leave whole and the ASCII step
+# then drop ("Đurišić" as "urisic"). Postgres `unaccent` -- the candidate query's
+# folding -- writes them this way.
+_UNACCENTED = str.maketrans({"đ": "d", "Đ": "D", "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "ı": "i", "ß": "ss"})
 
 
 def _fold(name: str) -> tuple[str, ...]:
@@ -320,7 +326,8 @@ def _fold(name: str) -> tuple[str, ...]:
     periods dropped ("De'Aaron", "P.J."), anything else that isn't a letter or
     digit a space, and generational suffixes gone -- "Jimmy Butler" and "Jimmy
     Butler III" are one name."""
-    folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+    plain = name.translate(_UNACCENTED)
+    folded = unicodedata.normalize("NFKD", plain).encode("ascii", "ignore").decode("ascii").lower()
     words = re.sub(r"[^a-z0-9]+", " ", re.sub(r"['.]", "", folded)).split()
     return tuple(word for word in words if word not in _SUFFIXES)
 
@@ -338,12 +345,24 @@ def _by_relevance(hits: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return sorted(hits, key=lambda hit: (-points.get(hit[0], 0), hit[1], hit[0]))
 
 
-def _pick(wanted: tuple[str, ...], candidates: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], bool]:
+def _pick(
+    wanted: tuple[str, ...],
+    candidates: list[tuple[int, str]],
+    *,
+    complete: bool = True,
+) -> tuple[list[tuple[int, str]], bool]:
     """The candidates a name means, and whether they matched it whole.
 
     The whole name beats part of one, so "Jalen Williams" is one player though
     "Williams" is many. Failing both, a word may be the start of one ("Steph
     Curry" is Stephen), as long as it is long enough to mean something.
+
+    Last, the other way round: a player listed under a shorter first name than
+    the one given ("Alexandre Sarr" is listed as Alex). The surname must be his
+    exactly, and this reading is taken only when it leaves one player -- it is
+    the loosest of the four, so it never asks "which one?". Nor is it taken
+    when the candidates are not `complete`: the only one among some of the
+    players with a surname is not the only one.
     """
     folded = [(player, _fold(player[1])) for player in candidates]
     whole = [player for player, words in folded if words == wanted]
@@ -353,16 +372,28 @@ def _pick(wanted: tuple[str, ...], candidates: list[tuple[int, str]]) -> tuple[l
     if part:
         return part, False
     if all(len(word) >= 3 for word in wanted):
-        return [player for player, words in folded
-                if all(any(have.startswith(word) for have in words) for word in wanted)], False
-    return [], False
+        started = [player for player, words in folded
+                   if all(any(have.startswith(word) for have in words) for word in wanted)]
+        if started:
+            return started, False
+    given, surname = wanted[:-1], wanted[-1:]
+    listed = [player for player, words in folded
+              if given and words[-1:] == surname
+              and all(any(_short_for(word, have) for have in words[:-1]) for word in given)]
+    return (listed if complete and len(listed) == 1 else []), False
+
+
+def _short_for(one: str, other: str) -> bool:
+    """One word is the start of the other ("Alex", "Alexandre"), and long enough to mean something."""
+    short, long = sorted((one, other), key=len)
+    return len(short) >= 3 and long.startswith(short)
 
 
 @db_operation("ai.route_find_players")
 def _find_players(names: list[str]) -> dict[str, list[tuple[int, str]]]:
     """Each name's players in nba.players as (id, name), best first. One hit is
     the player; several means the name alone doesn't say which."""
-    # The stored name with its punctuation squeezed out, to be searched for one word of the name
+    # The stored name with its punctuation squeezed out, to be searched for the words of the name
     squeezed = fn.regexp_replace(fn.unaccent(Player.name_normalized), "[^a-z0-9 ]", "", "g")
     found: dict[str, list[tuple[int, str]]] = {}
     for name in names:
@@ -370,9 +401,16 @@ def _find_players(names: list[str]) -> dict[str, list[tuple[int, str]]]:
         if not wanted:
             found[name] = []
             continue
-        # Any player the name could mean has its longest word, or something starting with it
-        rows = Player.select(Player.id, Player.name).where(squeezed.contains(max(wanted, key=len))).limit(_CANDIDATES)
-        hits, whole = _pick(wanted, [(row.id, row.name) for row in rows])
+        # Any player the name could mean has its last word, or something starting with it: the
+        # surname, which a player listed under a shorter first name ("Alex" for Alexandre) still
+        # has. Rows with every word of the name are read first, so however many players share
+        # the surname, the limit never cuts the one whose whole name it is.
+        *given, surname = wanted
+        rows = Player.select(Player.id, Player.name).where(squeezed.contains(surname))
+        if given:
+            rows = rows.order_by(reduce(and_, (squeezed.contains(word) for word in given)).desc())
+        candidates = [(row.id, row.name) for row in rows.limit(_CANDIDATES)]
+        hits, whole = _pick(wanted, candidates, complete=len(candidates) < _CANDIDATES)
         if len(hits) > 1:
             # Two rows with one whole name are the same name twice: take the one who plays
             hits = _by_relevance(hits)[:1] if whole else _by_relevance(hits)
