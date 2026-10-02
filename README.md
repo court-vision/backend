@@ -203,6 +203,13 @@ docker build -t cv-backend .
 docker run -p 8000:8080 --env-file .env cv-backend
 ```
 
+The container starts with `python serve.py`, not the `uvicorn` command line: it
+listens on port 8080 over IPv4, which is how Railway's public proxy reaches it, and
+over IPv6, which is the only protocol Railway's private network carries in this
+environment. Data-platform calls the jobs routes (`/v1/internal/jobs/*`) at
+`http://backend.railway.internal:8080`; with an IPv4-only listener those calls are
+refused.
+
 ---
 
 ## Key Environment Variables
