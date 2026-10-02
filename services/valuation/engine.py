@@ -153,6 +153,7 @@ class Valued:
     season_value: float                             # what the board is ordered by
     games: float                                    # effective games behind it
     expected_games: float                           # games the projection expects, unweighted
+    share: float = 1.0                              # the fraction of his team's games those are
 
 
 # ---- effective games ---------------------------------------------------------------
@@ -179,14 +180,30 @@ def _average_split(model: LeagueModel) -> Optional[TeamWeeks]:
     )
 
 
+def _split_of(player: ProjectedPlayer, model: LeagueModel) -> Optional[TeamWeeks]:
+    """His team's schedule split; the league-average one for a team not on the calendar."""
+    split = model.team_weeks.get(player.team) if player.team else None
+    return split or _average_split(model)
+
+
+def games_share(player: ProjectedPlayer, model: LeagueModel) -> float:
+    """The fraction of his team's games he is expected to play, at most 1.
+
+    Against an 82-game season when no calendar says how many his team plays.
+    """
+    games = DEFAULT_GAMES if player.games is None else max(float(player.games), 0.0)
+    split = _split_of(player, model)
+    total = split.total if (split is not None and split.total > 0) else NBA_SEASON_GAMES
+    return min(games / total, 1.0)
+
+
 def effective_games(player: ProjectedPlayer, model: LeagueModel, norm: Optional[float] = None) -> float:
     """Expected games, weighted by when they are played (see module docstring)."""
     games = DEFAULT_GAMES if player.games is None else max(float(player.games), 0.0)
-    split = model.team_weeks.get(player.team) if player.team else None
-    split = split or _average_split(model)
+    split = _split_of(player, model)
     if split is None or split.total <= 0:
         return games
-    share = min(games / split.total, 1.0)           # the fraction of his team's games he plays
+    share = games_share(player, model)
     if model.format == "roto":
         return share * split.total
     weighted = split.regular + model.playoff_weight * split.playoff
@@ -219,6 +236,7 @@ def _value_points(players: Sequence[ProjectedPlayer], model: LeagueModel) -> lis
             row=p.row, value=round(fpg, VALUE_DECIMALS), cats=None, z=None, z_sum=None,
             season_value=round(fpg * eg, VALUE_DECIMALS), games=round(eg, 1),
             expected_games=DEFAULT_GAMES if p.games is None else float(p.games),
+            share=games_share(p, model),
         ))
     out.sort(key=lambda v: (-v.season_value, -v.value, v.row.id))
     return out
@@ -326,6 +344,7 @@ def _value_categories(players: Sequence[ProjectedPlayer], model: LeagueModel) ->
             season_value=round(index * DEFAULT_GAMES, VALUE_DECIMALS),
             games=round(games[i], 1),
             expected_games=DEFAULT_GAMES if p.games is None else float(p.games),
+            share=games_share(p, model),
         ))
     out.sort(key=lambda v: (-(v.z_sum or 0.0), -v.row.fpts_avg, v.row.id))
     return out

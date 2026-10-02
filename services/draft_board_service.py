@@ -30,8 +30,8 @@ Composes what already exists rather than inventing a new engine:
           mean of 28 places over ESPN's own top 150).
 - Position: `default_position_id` (ESPN primary, 1-based) and `eligible_slot_ids`
           (0-based lineup slots) off the same snapshot. The two id spaces are
-          kept apart: primary position drives caps and replacement level,
-          eligibility drives the flexibility bonus.
+          kept apart: primary position drives caps, eligibility drives the
+          lineup matching and which seats a player can fill.
 - Caps:   hard per-position roster caps from usr.leagues.position_limits mark
           candidates the caller can no longer draft (flagged, never hidden, and
           never recommended).
@@ -42,8 +42,9 @@ Composes what already exists rather than inventing a new engine:
           zero. `value` says what a player is worth to anyone, `fit_value`
           what he is worth here; both map through the same scale.
 - Congestion: what a candidate would bench on the roster's real game nights
-          (services.draft_congestion) — per-day lineup matching over sampled
-          calendar weeks, so five centres or four Nuggets cost what they cost.
+          (services.draft_congestion) — per-day lineup matching over every
+          week the league scores, so five centres or four Nuggets cost what
+          they cost.
 
 cv_rank is computed over the FULL pool, picked players included, so it reads as
 a pre-draft big-board rank: it stays stable as picks remove rows and remains
@@ -57,15 +58,24 @@ building hundreds of pydantic rows must not hold a DB permit).
 Recommendations rank the available, non-cap-blocked pool by one of two orderings,
 chosen by `rank_source`:
 
-- `cv` (the default): Court Vision's room-aware pick, the composite
+- `cv` (the default): Court Vision's room-aware pick, the room score
 
-      score = vorp + scarcity + flexibility + category_fit − injury − congestion
+      score = value over replacement + punts + injury + congestion
 
-  each term expressed in season-value points so the sum is interpretable, and
-  each returned alongside the score. `season_value` (value × projected games) is
-  the base the rest are computed from and rides along as a non-summed component.
-  The model is deliberately simple: the visible breakdown matters more than its
-  sophistication this season.
+  every term in one currency — season value under the league's own scoring — so
+  the sum is interpretable, and each returned alongside the score.
+  `season_value` (value × the games it is built on) is the base the rest are
+  computed from and rides along as a non-summed component. Value over
+  replacement is measured against the league's last starter still to be filled
+  — one level for everybody, because most of a basketball lineup is seats
+  anyone can fill, and a lower one only at a position whose own seats the
+  league cannot fill (`_replacement_levels`); `punts` is what conceding
+  categories does to it; `congestion` charges back the starts this roster
+  could not use. Injury is priced once: a player whose games are projected has
+  already paid for the ones he will miss, so the flat status discount applies
+  only where nothing projects his games. What the roster is short of is
+  information on the card, not a term — weighting categories by need lost to
+  leaving them alone in the redraft experiments.
 
 - `espn`: ESPN's own draft rank for the league's format, best rank first — the
   next name off the board the room is already ordered by, for a drafter who
@@ -78,7 +88,8 @@ back to `cv` when no market snapshot has been taken, and the meta says so.
 
 The board's own row order is a separate question from the strip's. `board`
 chooses it — `espn` by default, `cv` as the opt-in for a drafter who would
-rather draft off Court Vision's rankings outright — and `rank_basis`
+rather draft off Court Vision's rankings outright, `my_team` for those same
+rankings re-ordered for the caller's roster — and `rank_basis`
 (services.draft_market.rank_basis_for) says what actually ran: ESPN's
 published rank in the gutter of every ESPN room — a league ESPN runs, a room
 with no league at all, or one following an ESPN draft — with CV's rank beside
@@ -88,6 +99,13 @@ naming each row's place. Players the basis does not rank trail every ranked one
 in the other opinion's order with no number of their own, and a rookie ESPN
 ranks that no stat line can value sits at his ESPN rank instead of below the
 whole pool.
+
+`my_team` is the room score above, applied to the whole board instead of to
+five cards: every row carries `room_score` and `room_rank` whichever basis
+orders it, and under `my_team` the rows come back in that order. It is the one
+ordering that moves with every pick — a player the roster can no longer start
+most nights slides, a position being picked clean climbs — and the one that
+answers to the room's punts. Cap-blocked players have no place on it.
 
 Availability answers "will he still be there when I pick again?" as a bucket —
 likely / toss-up / gone — from the gap between ESPN's ADP and the caller's next
@@ -128,12 +146,11 @@ from services.draft_congestion import (
     DEFAULT_SEASON_WEEKS,
     ESPN_POSITIONS,
     NON_STARTING_SLOTS as _NON_STARTING_SLOTS,
-    SLOT_MEMBERS as _SLOT_MEMBERS,
-    UNIVERSAL_SLOTS as _UNIVERSAL_SLOTS,
     CongestionModel,
     CongestionPlayer,
     Penalty,
     SampleWeek,
+    active_slots,
     build_congestion_model,
     week_from_calendar,
 )
@@ -147,7 +164,7 @@ from services.draft_service import (
 )
 from services.player_value_service import PlayerValueService
 from services.rankings_service import GAME_ONLY_KEYS
-from services.scoring.category_rank import PoolRow, compute_category_scores
+from services.scoring.category_rank import PoolRow
 from services.scoring.category_value import (
     CATEGORY_VALUE_SCALE,
     category_value,
@@ -158,6 +175,7 @@ from services.scoring.points import DEFAULT_POINTS
 from services.scoring.pool import baseline_season, load_baseline_pool
 from services.scoring.providers.espn_settings import POSITION_ID_MAP
 from services.valuation.engine import (
+    DEFAULT_GAMES,
     DEFAULT_PLAYOFF_WEIGHT,
     PLAYOFF_WEIGHTS,
     DEFAULT_LEAGUE_SIZE,
@@ -180,10 +198,9 @@ if TYPE_CHECKING:  # pragma: no cover
 _COARSE_GROUP: dict[str, str] = {"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}
 _GROUP_SIZE: dict[str, int] = {"G": 2, "F": 2, "C": 1}
 
-# The lineup vocabulary — ESPN_POSITIONS (re-exported), the universal and
-# non-starting slots, and which positions fill a derived slot — lives in
-# services.draft_congestion, whose matching needs it too; it is imported above
-# under the names this file has always used them by.
+# The lineup vocabulary — ESPN_POSITIONS, the non-starting slots, and how a
+# league's slots expand into seats — lives in services.draft_congestion, whose
+# matching needs it too; it is imported above.
 
 VALUE_DECIMALS = 1
 
@@ -192,29 +209,26 @@ VALUE_DECIMALS = 1
 # of the numbers, not the order.
 DEFAULT_PROJECTED_GP = 65
 
-# Recommendation weights. Small on purpose — VORP does the work, the rest are
-# tiebreakers whose job is to be legible.
-SCARCITY_WEIGHT = 0.5        # at most half a player's VORP again, at a dry position
-SCARCITY_IDLE_NEED = 0.25    # damping when my own roster does not need the position
-FLEX_RATE = 0.02             # per extra startable lineup slot, as a share of season value
 RECOMMENDATION_COUNT = 5
 
-# Congestion is measured for this many candidates, by pre-congestion score, and
-# the rest carry 0: the matching is cheap, but only the band that can still reach
-# the top five needs re-ranking by it.
-CONGESTION_CANDIDATES = 25
-
-# Fantasy weeks the congestion sample reads: ordinary ones — not the short
-# opening week, not the merged All-Star fortnight (18).
-SAMPLE_WEEK_NUMBERS: tuple[int, ...] = (3, 9, 16)
+# ESPN's default lineup: what an ESPN mock lobby drafts for, and so what a room
+# with no league of its own is taken to field — the same assumption that gives
+# it ESPN's default playoff weeks. Thirteen roster spots, ten of them starters.
+DEFAULT_ROSTER_SLOTS: dict[str, int] = {
+    "PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1,
+}
+# Starting seats assumed for a league whose own lineup never synced. Only
+# places the replacement level: with no lineup, nothing can be benched.
+DEFAULT_STARTERS = 10
 
 # How far ADP has to sit from the pick in question before the answer stops
 # being "it depends". Half a round of picks, floored so a tiny league still
 # leaves room for a toss-up band.
 AVAILABILITY_MIN_THRESHOLD = 3
 
-# ESPN injuryStatus -> the share of season value a candidate is discounted by.
-# ACTIVE (and anything unknown) is no discount at all.
+# ESPN injuryStatus -> the share of season value a candidate is discounted by,
+# when nothing projects his games (a projection that does has already priced
+# the ones he will miss). ACTIVE (and anything unknown) is no discount at all.
 INJURY_PENALTY: dict[str, float] = {
     "OUT": 0.15,
     "INJURY_RESERVE": 0.15,
@@ -242,7 +256,8 @@ class BoardSession:
     draft_type: str = "snake"
     punts: tuple[str, ...] = ()
     rank_source: str = "cv"                 # cv | espn — what orders recommendations
-    board_source: str = "espn"              # espn | cv — whose rankings the caller asked to order the rows
+    # espn | cv | my_team — whose rankings the caller asked to order the rows
+    board_source: str = "espn"
     # How much a game in the league's fantasy-playoff weeks counts against one in
     # the regular season: the drafter's λ, 1 (off) to 4. ESPN's order never moves with it.
     playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT
@@ -312,8 +327,9 @@ class BoardInputs:
     # Current NBA team per wanted player (nba.player_profiles): the board's first
     # choice ahead of last season's stats team, which goes stale every summer.
     current_team: dict[int, Optional[str]] = field(default_factory=dict)
-    # Ordinary fantasy weeks the congestion term samples, and how many weeks the
-    # season has; empty / 0 when the calendar could not be read.
+    # The fantasy weeks the congestion term is measured on — the whole calendar,
+    # so nothing is extrapolated from a sample — and how many weeks they stand
+    # for; empty / 0 when the calendar could not be read.
     schedule_weeks: tuple[SampleWeek, ...] = ()
     season_weeks: int = 0
     # Every fantasy week of the season as per-day team sets: where the league's
@@ -324,24 +340,24 @@ class BoardInputs:
 
 @dataclass
 class _Terms:
-    """One candidate's terms before congestion, with everything a detail line
-    reads kept alongside, so the second pass recomputes nothing."""
+    """One candidate's room score, term by term, with everything a detail line
+    reads kept alongside, so building his card recomputes nothing."""
 
     c: dict
     position: Optional[str]
-    season_value: float
-    bar: float
+    season_value: float     # Court Vision's balanced value, every category counted
+    room_value: float       # the same, with the room's punted categories left out
+    bar: float              # the replacement level he is measured against, balanced
+    room_bar: float         # and in the room's values
+    bar_position: Optional[str]     # the short position `bar` came from; None for the league's last starter
+    league_size: int
     vorp: float
-    scarcity: float
-    need: int
-    left: int
-    my_need: float
-    flexibility: float
-    slots: list[str]
-    extra_slots: int
+    punts: float            # what the room's punts add to (or take from) his value over replacement
     injury: float
-    category_fit: float
-    base: float             # the score before congestion
+    category_fit: float     # information only: what the roster's needs would add
+    congestion: float = 0.0
+    congestion_detail: str = ""
+    score: float = 0.0
 
 
 class DraftBoardService:
@@ -506,7 +522,6 @@ class DraftBoardService:
                 PlayerProfile.player.in_(list(wanted))
             ):
                 current_team[rec.player_id] = rec.team_id
-        schedule_weeks, season_weeks = DraftBoardService._sample_weeks()
         calendar = DraftBoardService._calendar_weeks()
 
         market_only = [
@@ -528,32 +543,19 @@ class DraftBoardService:
             used_picks=tuple(sorted(used_picks)), keeper_picks=tuple(sorted(keeper_picks)),
             seat_players={seat: frozenset(ids) for seat, ids in seat_players.items()},
             current_team=current_team,
-            schedule_weeks=schedule_weeks, season_weeks=season_weeks,
+            schedule_weeks=calendar, season_weeks=len(calendar),
             calendar=calendar,
         )
 
     @staticmethod
-    def _sample_weeks() -> tuple[tuple[SampleWeek, ...], int]:
-        """Ordinary fantasy weeks for the congestion sample, and the season's length.
+    def _calendar_weeks() -> tuple[SampleWeek, ...]:
+        """The whole season's fantasy weeks as per-day team sets: what the
+        playoff split and the congestion term both read.
 
         The calendar is a static file the schedule service caches once per
         process, so this is not a second trip anywhere. Empty when the season's
-        calendar is not on disk: the term then says so rather than pretending.
+        calendar is not on disk: both then say so rather than pretending.
         """
-        try:
-            weeks: list[SampleWeek] = []
-            for number in SAMPLE_WEEK_NUMBERS:
-                week = schedule_service.get_matchup_by_number(number)
-                if week:
-                    weeks.append(week_from_calendar(number, week["game_span"], week["games"]))
-            season_weeks = schedule_service.get_max_week() or DEFAULT_SEASON_WEEKS
-        except FileNotFoundError:
-            return (), 0
-        return tuple(weeks), season_weeks
-
-    @staticmethod
-    def _calendar_weeks() -> tuple[SampleWeek, ...]:
-        """The whole season's fantasy weeks, for the playoff split. Same cached file."""
         try:
             return tuple(
                 week_from_calendar(w["matchup_number"], w["game_span"], w["games"])
@@ -774,9 +776,6 @@ class DraftBoardService:
             row, value = entry.row, entry.value
             market = inputs.market.get(row.id, {})
             market_rank = market_rank_of(market, rank_type)
-            # What turns a per-game difference into a season one: effective
-            # games for points, the fixed season the category index is priced at.
-            gp = entry.season_value / value if value else entry.games
             blocked = cap_check(row.id)
             team = inputs.current_team.get(row.id) or row.team
             po = playoffs.teams.get(team) if (playoffs is not None and team) else None
@@ -791,7 +790,7 @@ class DraftBoardService:
                     positions=eligible.get(row.id),
                     injury_status=DraftBoardService._injury_of(market),
                     cv_rank=cv_rank,
-                    board_rank=(market_rank if basis == "espn" else cv_rank),
+                    board_rank=(market_rank if basis == "espn" else cv_rank if basis == "cv" else None),
                     value=value,
                     value_source=inputs.source.get(row.id, "baseline"),
                     value_season=inputs.value_season.get(row.id),
@@ -820,8 +819,13 @@ class DraftBoardService:
                 "cv_rank": cv_rank,
                 "source": inputs.source.get(row.id, "baseline"),
                 "season_value": entry.season_value,
-                "gp": gp,
                 "z": entry.z,
+                "z_sum": entry.z_sum,
+                # A projection that carries his games has priced his availability;
+                # 0 is "nobody projects him", as it is for the value itself.
+                "games_projected": bool(inputs.projected_gp.get(row.id)),
+                "expected_games": entry.expected_games,
+                "share": entry.share,
                 "fit_value": fit_values.get(row.id),
                 "position": primary.get(row.id),
                 "available": row.id not in removed,
@@ -873,29 +877,50 @@ class DraftBoardService:
                 score=None,
             ))
 
+        # What every candidate is worth in this room, then what this roster
+        # would bench on its real game nights, measured once; every candidate's
+        # congestion term is a delta against it.
+        punts = DraftBoardService._room_values(candidates, fit)
+        # Measured on the weeks the league actually scores: a benched night
+        # after the fantasy season ends costs nothing.
+        last_scored = max(playoffs.window.weeks) if playoffs is not None else None
+        scored_weeks = tuple(
+            w for w in inputs.schedule_weeks if last_scored is None or w.number <= last_scored
+        )
+        unscored = len(inputs.schedule_weeks) - len(scored_weeks)
+        congestion = build_congestion_model(
+            [DraftBoardService._congestion_player(c) for c in candidates if c["id"] in mine],
+            roster_slots, scored_weeks,
+            (inputs.season_weeks - unscored) if inputs.season_weeks else DEFAULT_SEASON_WEEKS,
+        )
+        terms = DraftBoardService._room_terms(candidates, scoring, session, fit, congestion, punts)
+        # The room score on every row it was computed for: the `my_team` order,
+        # and the same number the strip's cards decompose.
+        room = {t.c["id"]: (place, t.score) for place, t in enumerate(terms, start=1)}
+        for row in rows:
+            if row.player_id in room:
+                row.room_rank, row.room_score = room[row.player_id]
+                if basis == "my_team":
+                    row.board_rank = row.room_rank
+
         # One ordering for the whole board, valued and market-only rows alike.
         # Whoever the basis does not rank trails everyone it does, in the other
         # opinion's order — never lost, never promoted.
         if basis == "espn":
             rows.sort(key=lambda r: (r.market_rank is None, r.market_rank or 0,
                                      r.cv_rank is None, r.cv_rank or 0))
+        elif basis == "my_team":
+            rows.sort(key=lambda r: (r.room_rank is None, r.room_rank or 0,
+                                     r.cv_rank is None, r.cv_rank or 0,
+                                     r.market_rank is None, r.market_rank or 0))
         else:
             rows.sort(key=lambda r: (r.cv_rank is None, r.cv_rank or 0,
                                      r.market_rank is None, r.market_rank or 0))
 
-        # What this roster would bench on its real game nights, measured once;
-        # every candidate's congestion term is a delta against it.
-        congestion = build_congestion_model(
-            [DraftBoardService._congestion_player(c) for c in candidates if c["id"] in mine],
-            roster_slots, inputs.schedule_weeks, inputs.season_weeks or DEFAULT_SEASON_WEEKS,
-        )
         # `espn` needs ranks to order by; without a snapshot it degrades to the
         # CV composite rather than returning nothing, and the meta says which ran.
         rank_source = session.rank_source if (session.rank_source == "cv" or has_market) else "cv"
-        recommendations = DraftBoardService._recommend(
-            candidates, scoring, session, mine, primary, fit, congestion,
-            rank_source=rank_source,
-        )
+        recommendations = DraftBoardService._recommend(terms, fit, rank_source, punts)
 
         # The caller's drafted players, with what the roster zone needs to place
         # them. Big-board order; the session's picks say when each was taken.
@@ -973,7 +998,7 @@ class DraftBoardService:
                 category_need=DraftBoardService._category_need(fit),
                 pace_source=(fit.pace_source if fit is not None else None),
                 seats_drafted=(fit.seats_drafted if fit is not None else 0),
-                congestion=DraftBoardService._congestion_meta(congestion, candidates),
+                congestion=DraftBoardService._congestion_meta(congestion, len(terms)),
                 playoffs=DraftBoardService._playoffs_meta(playoffs, session.playoff_weight),
                 settings_synced=scoring.settings_synced if scoring.league is not None else None,
                 # dd/td weights score 0 against aggregate lines; name them rather
@@ -1030,7 +1055,17 @@ class DraftBoardService:
 
     @staticmethod
     def _roster_slots(scoring: "ResolvedScoring") -> dict[str, int]:
-        slots = getattr(scoring.league, "roster_slots", None) if scoring.league is not None else None
+        """The lineup the room drafts for.
+
+        A league's own, as synced. A room with no league at all — a mock, a
+        manual room — fields ESPN's default, so its roster zone has seats to
+        fill and the `my_team` order has a lineup to measure against. A league
+        whose settings never synced is the one case left empty: its real
+        lineup is unknown, and assuming the default would say otherwise.
+        """
+        if scoring.league is None:
+            return dict(DEFAULT_ROSTER_SLOTS)
+        slots = getattr(scoring.league, "roster_slots", None)
         return dict(slots) if slots else {}
 
     @staticmethod
@@ -1139,16 +1174,18 @@ class DraftBoardService:
 
     @staticmethod
     def _congestion_player(c: Mapping) -> CongestionPlayer:
-        """A candidate dict as the matching sees him: value floored at zero, ESPN
-        slots when the market knows them, primary position as the fallback."""
+        """A candidate dict as the matching sees him: his per-game value in this
+        room floored at zero, ESPN slots when the market knows them, primary
+        position as the fallback, and the share of his team's games he plays."""
         slots = c.get("slots")
-        value = c.get("value")
+        value = c.get("room_per_game", c.get("value"))
         return CongestionPlayer(
             id=c["id"],
             value=max(float(value), 0.0) if value is not None else 0.0,
             team=c.get("team"),
             slots=frozenset(slots) if slots else None,
             position=c.get("position"),
+            share=float(c.get("share", 1.0)),
         )
 
     @staticmethod
@@ -1157,17 +1194,17 @@ class DraftBoardService:
         if pen.reason:
             return pen.reason
         if pen.games == 0:
-            return f"no sampled games for {pen.team}"
+            return f"no games on the calendar for {pen.team}"
         shared = f"; {pen.stack + 1} would share {pen.team}'s schedule" if pen.stack else ""
         if pen.value < 0:
-            weeks = f"{pen.weeks} sampled week" + ("s" if pen.weeks != 1 else "")
+            weeks = f"{pen.weeks} week" + ("s" if pen.weeks != 1 else "")
             return f"would bench ~{pen.per_week:.1f}/week of starter value over {weeks}" + shared
-        return "fits the lineup every sampled night" + shared
+        return "fits the lineup every game night" + shared
 
     @staticmethod
-    def _congestion_meta(model: CongestionModel, candidates: list[dict]) -> DraftCongestionResp:
-        """The roster-level summary the roster zone renders."""
-        pool = sum(1 for c in candidates if c["available"] and not c["blocked"])
+    def _congestion_meta(model: CongestionModel, pool: int) -> DraftCongestionResp:
+        """The roster-level summary the roster zone renders; `pool` is how many
+        candidates the room scored."""
         return DraftCongestionResp(
             benched_per_week=model.benched_per_week,
             benched_season=model.benched_season,
@@ -1179,7 +1216,7 @@ class DraftBoardService:
                 for s in model.stacks
             ],
             no_team=list(model.no_team),
-            evaluated=min(pool, CONGESTION_CANDIDATES) if model.active else 0,
+            evaluated=pool if model.active else 0,
         )
 
     # ---- playoffs --------------------------------------------------------------
@@ -1337,79 +1374,148 @@ class DraftBoardService:
             return "gone"
         return "tossup"
 
-    # ---- recommendations -------------------------------------------------------
+    # ---- the room score ----------------------------------------------------------
 
     @staticmethod
-    def _starters_per_position(roster_slots: Mapping[str, int]) -> dict[str, float]:
-        """How many starters a team fields at each of the five ESPN positions.
-
-        A league's derived slots are shared out among the positions that can
-        fill them — a `G` slot is half a PG and half an SG, `UT` a fifth of each
-        — because a player is counted at exactly one position below, so the
-        starters have to be spread the same way.
-        """
-        starters: dict[str, float] = {p: 0.0 for p in ESPN_POSITIONS}
-        for slot, count in (roster_slots or {}).items():
-            name = str(slot).strip()
-            if name in _NON_STARTING_SLOTS:
-                continue
-            members = _SLOT_MEMBERS.get(name)
-            if not members:
-                continue
-            try:
-                n = float(count)
-            except (TypeError, ValueError):
-                continue
-            if n <= 0:
-                continue
-            share = n / len(members)
-            for position in members:
-                starters[position] += share
-        return starters
+    def _eligible_at(c: Mapping, position: str) -> bool:
+        """Whether a candidate can fill a seat only `position` fills: ESPN's own
+        lineup slots when the market knows them, his primary position otherwise."""
+        slots = c.get("slots")
+        return position in slots if slots else c.get("position") == position
 
     @staticmethod
-    def _startable_tier_left(
-        candidates: list[dict], startable: Mapping[str, int]
-    ) -> dict[str, int]:
-        """How many of each position's startable tier are still undrafted.
-
-        The tier is the top `startable[position]` players at that position over
-        the whole pool, drafted or not — a fixed set, so "4 startable centres
-        left of 16" counts down through the draft instead of standing still.
-        """
-        ranked: dict[str, list[dict]] = {p: [] for p in ESPN_POSITIONS}
-        for c in candidates:
-            if c["position"] in ranked:
-                ranked[c["position"]].append(c)
-        return {
-            position: DraftBoardService._tier_left(entries, startable.get(position, 0))
-            for position, entries in ranked.items()
-        }
-
-    @staticmethod
-    def _tier_left(candidates: list[dict], size: int) -> int:
-        """How many of the top `size` candidates by season value are undrafted."""
+    def _tier_left(candidates: list[dict], size: int, key: str = "season_value") -> int:
+        """How many of the top `size` candidates by `key` are undrafted."""
         if size <= 0:
             return 0
-        top = sorted(candidates, key=lambda c: -c["season_value"])[:size]
+        top = sorted(candidates, key=lambda c: -c[key])[:size]
         return sum(1 for c in top if c["available"])
 
     @staticmethod
-    def _recommend(
+    def _replacement_levels(
+        candidates: list[dict], pool: list[dict], roster_slots: Mapping[str, int],
+        league_size: int, key: str,
+    ) -> tuple[float, dict[str, float]]:
+        """The replacement level a candidate is measured against, in `key`
+        values: the league's last starter, and — only for a position that is
+        genuinely short — the lower level at that position.
+
+        A basketball lineup is mostly seats anyone can fill: G, F and three UT
+        beside one seat each for the five positions. The players a league
+        starts are therefore, to a first approximation, simply its best
+        `league_size x starting seats`, whatever they play — a second centre
+        starts at UT — and the replacement level is the last of them. Giving
+        each position its own level, as a sport with rigid lineups would, hands
+        whichever position ESPN lists fewest good players at a premium nothing
+        in the lineup earns: on the 2026-27 board it moved power forwards up 35
+        places and centres down 30 before a pick was made.
+
+        A position does earn one when the seats *only it* can fill outnumber
+        the players worth starting in them: its last dedicated starter then
+        sits below the league's, and that lower level is the bar for anyone
+        who can take such a seat. That is positional scarcity in value units,
+        and in an ordinary league it is simply absent. It also ends when the
+        seats are filled: once every dedicated starter at a position has been
+        drafted there is no seat left for the next one to take, and he is
+        measured against the league like everybody else.
+
+        Both levels are the *marginal* starter still to be filled: the tier is
+        fixed against the full pool, drafted or not, and the count of it still
+        undrafted is indexed into the players available. Indexing the original
+        need instead would slide deeper into the distribution as the top came
+        off the board and make the bar FALL through the draft; a tier
+        recomputed over survivors would refill itself from below after every
+        pick and never run dry. Once a tier is gone the bar is the best player
+        left, so the survivors of a run are worth what they are, not a premium.
+        """
+        seats = active_slots(roster_slots)
+        # A league whose lineup never synced is measured against ESPN's default size.
+        starting = len(seats) if roster_slots else DEFAULT_STARTERS
+        need = league_size * starting
+        available = sorted((c[key] for c in pool), reverse=True)
+        if not available or need <= 0:
+            return 0.0, {}
+        left = DraftBoardService._tier_left(candidates, need, key)
+        overall = available[min(left, len(available) - 1)]
+
+        short: dict[str, float] = {}
+        for position in ESPN_POSITIONS:
+            dedicated = league_size * seats.count(position)
+            if dedicated <= 0:
+                continue
+            eligible = [c for c in candidates if DraftBoardService._eligible_at(c, position)]
+            values = sorted(
+                (c[key] for c in pool if DraftBoardService._eligible_at(c, position)), reverse=True
+            )
+            if not values:
+                continue
+            still_to_fill = DraftBoardService._tier_left(eligible, dedicated, key)
+            if still_to_fill <= 0:
+                continue
+            bar = values[min(still_to_fill, len(values) - 1)]
+            if bar < overall:
+                short[position] = bar
+        return overall, short
+
+    @staticmethod
+    def _bar_for(c: Mapping, overall: float, short: Mapping[str, float]) -> tuple[float, Optional[str]]:
+        """A candidate's replacement level, and the short position it came from, if any."""
+        bar, position = overall, None
+        for candidate_position, level in short.items():
+            if level < bar and DraftBoardService._eligible_at(c, candidate_position):
+                bar, position = level, candidate_position
+        return bar, position
+
+    @staticmethod
+    def _room_values(candidates: list[dict], fit: Optional[FitModel]) -> list[str]:
+        """Give every candidate his value *in this room* and return the punts applied.
+
+        Court Vision's value counts every category the league scores. A room
+        that has conceded some does not: `room_value` is the same season value
+        with the punted categories left out of the sum, and `room_per_game` the
+        per-game number the lineup matching weighs him by. With nothing punted —
+        and in a points league, which has nothing to punt — they are the balanced
+        values, exactly.
+        """
+        punts = fit.punts if fit is not None else []
+        for c in candidates:
+            z = c.get("z")
+            if punts and z is not None and c.get("z_sum") is not None:
+                kept = float(c["z_sum"]) - sum(float(z.get(key, 0.0)) for key in punts)
+                c["room_per_game"] = category_value(kept)
+                c["room_value"] = round(c["room_per_game"] * DEFAULT_GAMES, VALUE_DECIMALS)
+            else:
+                c["room_per_game"] = c["value"]
+                c["room_value"] = c["season_value"]
+        return list(punts)
+
+    @staticmethod
+    def _room_terms(
         candidates: list[dict],
         scoring: "ResolvedScoring",
         session: BoardSession,
-        my_ids: frozenset[int],
-        primary: Mapping[int, str],
         fit: Optional[FitModel] = None,
         congestion: Optional[CongestionModel] = None,
-        rank_source: str = "cv",
-    ) -> list[DraftRecommendation]:
-        """The best of what is left, ordered by `rank_source`.
+        punts: Sequence[str] = (),
+    ) -> list[_Terms]:
+        """Every player this roster could still draft, scored for this room, best first.
 
-        Every term is computed either way — an ESPN-ordered list still carries
-        CV's whole decomposed score, which is what makes the two views
-        comparable at a glance instead of two unrelated lists.
+        One currency — season value in the league's own scoring — and four terms:
+
+            score = value over replacement + punts + injury + congestion
+
+        `punts` is how the room's conceded categories move his value over
+        replacement (his own value and the replacement level both move),
+        `injury` only prices what the projection could not — where his games
+        are projected, his availability is already in his value — and
+        `congestion` charges back the starts this roster could not use. What
+        the roster is short of is deliberately not a term: weighting categories
+        by need lost to leaving them alone in the redraft experiments
+        (`experiments/ranking_engine`), so it stays on the card as information.
+
+        Expects `_room_values` to have run over `candidates`. The same list
+        orders the recommendation strip and the `my_team` board, so the strip
+        is always the top of that board.
         """
         pool = [c for c in candidates if c["available"] and not c["blocked"]]
         if not pool:
@@ -1417,233 +1523,208 @@ class DraftBoardService:
 
         roster_slots = DraftBoardService._roster_slots(scoring)
         league_size = DraftBoardService._league_size(scoring, session) or 0
-        starters = DraftBoardService._starters_per_position(roster_slots)
-
-        # The startable tier is fixed against the *full* pool — the top
-        # `league_size x starters` players at each position, drafted or not —
-        # and what moves is how many of it survive. A tier recomputed over
-        # survivors refills itself from below after every pick and never runs
-        # dry, which is the whole thing worth measuring.
-        startable: dict[str, int] = {
-            p: int(round(league_size * starters.get(p, 0.0))) for p in ESPN_POSITIONS
-        }
-        tier_left = DraftBoardService._startable_tier_left(candidates, startable)
-
-        # Replacement level is the *marginal* starter still to be filled: index
-        # the surviving tier count into the available players at that position.
-        # Indexing the original need instead would slide deeper into the
-        # distribution as the top came off the board and make the bar FALL
-        # through the draft — handing a position that had just been picked
-        # clean a growing VORP premium, which the scarcity term would then
-        # double down on.
-        by_position: dict[str, list[float]] = {p: [] for p in ESPN_POSITIONS}
-        for c in pool:
-            if c["position"] in by_position:
-                by_position[c["position"]].append(c["season_value"])
-        for values in by_position.values():
-            values.sort(reverse=True)
-
-        replacement: dict[str, float] = {}
-        for position, values in by_position.items():
-            if not values:
-                replacement[position] = 0.0
-                continue
-            # Tier exhausted: every team that starts one has one, so the next
-            # player at this position is worth what the best remaining one is.
-            remaining = tier_left.get(position, 0) if startable[position] > 0 else len(values) - 1
-            replacement[position] = values[min(max(remaining, 0), len(values) - 1)]
-
-        # A player with no known position is measured against the pool at large,
-        # by the same remaining-need rule.
-        overall = sorted((c["season_value"] for c in pool), reverse=True)
-        overall_need = int(round(league_size * sum(starters.values())))
-        overall_left = DraftBoardService._tier_left(candidates, overall_need)
-        default_replacement = (
-            overall[min(overall_left, len(overall) - 1)] if overall and overall_need > 0 else 0.0
+        overall, short = DraftBoardService._replacement_levels(
+            candidates, pool, roster_slots, league_size, "season_value"
         )
-
-        my_counts = Counter(primary[pid] for pid in my_ids if pid in primary)
-        league_slots = {
-            str(s).strip() for s in (roster_slots or {})
-            if str(s).strip() not in _NON_STARTING_SLOTS and str(s).strip() not in _UNIVERSAL_SLOTS
-        }
+        # In the room's own values when it punts: the replacement level moves
+        # with a punt as surely as the candidate does, and it is the difference
+        # between the two that is worth anything.
+        room_overall, room_short = (
+            DraftBoardService._replacement_levels(candidates, pool, roster_slots, league_size, "room_value")
+            if punts else (overall, short)
+        )
 
         terms: list[_Terms] = []
         for c in pool:
-            position = c["position"]
-            season_value = c["season_value"]
-            bar = replacement.get(position, default_replacement) if position else default_replacement
+            season_value, room_value = c["season_value"], c["room_value"]
+            bar, bar_position = DraftBoardService._bar_for(c, overall, short)
+            room_bar, _ = DraftBoardService._bar_for(c, room_overall, room_short)
             vorp = round(season_value - bar, VALUE_DECIMALS)
-            headroom = max(vorp, 0.0)
+            punted = round((room_value - room_bar) - vorp, VALUE_DECIMALS) if punts else 0.0
 
-            # Scarcity: how far this position's startable tier has been drawn
-            # down, damped when my own roster does not need it yet.
-            need = startable.get(position, 0) if position else 0
-            left = tier_left.get(position, 0) if position else 0
-            pressure = max(0.0, 1.0 - (left / need)) if need > 0 else 0.0
-            my_need = starters.get(position, 0.0) - my_counts.get(position, 0) if position else 0.0
-            need_factor = 1.0 if my_need > 0 else SCARCITY_IDLE_NEED
-            scarcity = round(SCARCITY_WEIGHT * pressure * need_factor * headroom, VALUE_DECIMALS)
-
-            # Flexibility: startable lineup slots beyond the first (UT excluded —
-            # everyone is UT-eligible, so it is not an advantage).
-            slots = [s for s in (c["slots"] or []) if s in league_slots]
-            extra_slots = max(0, len(set(slots)) - 1)
-            flexibility = round(FLEX_RATE * extra_slots * max(season_value, 0.0), VALUE_DECIMALS)
-
+            # Injury is priced once. A projection that carries his games has
+            # already charged for the ones he will miss; the flat discount is
+            # for a player whose games nothing projects.
             penalty = INJURY_PENALTY.get(str(c["injury"]).upper(), 0.0) if c["injury"] else 0.0
-            injury = -round(penalty * max(season_value, 0.0), VALUE_DECIMALS)
+            injury = (
+                0.0 if c.get("games_projected")
+                else -round(penalty * max(room_value, 0.0), VALUE_DECIMALS) or 0.0
+            )
 
-            # What this roster gains (or gives up) beyond the balanced value:
-            # the same season scale, so the sum stays interpretable. Zero for
-            # points leagues and for anyone the pool cannot score.
+            # What the roster is short of, as information: how far the
+            # need-weighted fit sits from the room's own value.
             fit_value = c.get("fit_value")
             category_fit = (
-                round((fit_value - c["value"]) * c["gp"], VALUE_DECIMALS)
+                round((fit_value - c["room_per_game"]) * DEFAULT_GAMES, VALUE_DECIMALS)
                 if fit_value is not None else 0.0
             )
 
             terms.append(_Terms(
-                c=c, position=position, season_value=season_value, bar=bar, vorp=vorp,
-                scarcity=scarcity, need=need, left=left, my_need=my_need,
-                flexibility=flexibility, slots=slots, extra_slots=extra_slots,
+                c=c, position=c["position"], season_value=season_value, room_value=room_value,
+                bar=bar, room_bar=room_bar, bar_position=bar_position,
+                league_size=league_size, vorp=vorp, punts=punted,
                 injury=injury, category_fit=category_fit,
-                base=round(vorp + scarcity + flexibility + injury + category_fit, VALUE_DECIMALS),
             ))
 
-        # Congestion last, and only for the candidates that can still reach the
-        # top: every other term is per player, this one re-runs the roster's
-        # lineup with him in it. The cutoff is read here rather than bound as a
-        # default so a test can move it.
-        if rank_source == "espn":
-            terms.sort(key=lambda t: (t.c.get("market_rank") is None, t.c.get("market_rank") or 0, -t.base))
-        else:
-            terms.sort(key=lambda t: (-t.base, -t.season_value))
-        limit = CONGESTION_CANDIDATES
-        scored: list[DraftRecommendation] = []
-        for index, t in enumerate(terms):
-            if congestion is not None and index < limit:
+        # Congestion last, and for everyone: the `my_team` board is ordered by
+        # the whole score, and the roster's lineup is measured once, so asking
+        # what each candidate would do to it is a lookup per game night.
+        for t in terms:
+            if congestion is not None:
                 pen = congestion.penalty(DraftBoardService._congestion_player(t.c))
-                term, detail = pen.value, DraftBoardService._congestion_detail(pen)
+                t.congestion, t.congestion_detail = pen.value, DraftBoardService._congestion_detail(pen)
             else:
-                term, detail = 0.0, f"not evaluated — outside the top {limit} by score"
-            scored.append(DraftBoardService._recommendation(t, fit, term, detail, rank_source))
+                t.congestion_detail = "not measured"
+            # One rounding over the already-rounded terms, added in the order
+            # the components list them, so summing the visible terms
+            # reproduces the score.
+            t.score = round(t.vorp + t.punts + t.injury + t.congestion, VALUE_DECIMALS)
+        terms.sort(key=lambda t: (-t.score, -t.season_value, t.c.get("cv_rank") or 0))
+        return terms
 
-        # ESPN's board, best rank first; his CV score rides along as the
-        # dissent. Anyone ESPN does not rank sorts after everyone he does, by
-        # CV score — not silently dropped, just never preferred to a ranked player.
+    @staticmethod
+    def _recommend(
+        terms: list[_Terms],
+        fit: Optional[FitModel] = None,
+        rank_source: str = "cv",
+        punts: Sequence[str] = (),
+    ) -> list[DraftRecommendation]:
+        """The best of what is left, ordered by `rank_source`.
+
+        Every term is computed either way — an ESPN-ordered list still carries
+        CV's whole decomposed score, which is what makes the two views
+        comparable at a glance instead of two unrelated lists. Anyone ESPN does
+        not rank sorts after everyone he does, by CV score — not silently
+        dropped, just never preferred to a ranked player.
+        """
         if rank_source == "espn":
-            scored.sort(key=lambda r: (r.market_rank is None, r.market_rank or 0, -r.score))
+            chosen = sorted(
+                terms, key=lambda t: (t.c.get("market_rank") is None, t.c.get("market_rank") or 0, -t.score)
+            )
         else:
-            scored.sort(key=lambda r: (-r.score, -r.season_value))
-        return scored[:RECOMMENDATION_COUNT]
+            chosen = terms
+        return [
+            DraftBoardService._recommendation(t, fit, rank_source, punts)
+            for t in chosen[:RECOMMENDATION_COUNT]
+        ]
 
     @staticmethod
     def _recommendation(
-        t: _Terms, fit: Optional[FitModel], congestion: float, congestion_detail: str,
-        rank_source: str = "cv",
+        t: _Terms, fit: Optional[FitModel], rank_source: str = "cv", punts: Sequence[str] = (),
     ) -> DraftRecommendation:
         """One candidate with the whole score decomposed."""
         c = t.c
-        position = t.position
-        # One rounding over the already-rounded terms, added in the order the
-        # components list them, so summing the visible terms reproduces the score.
-        score = round(
-            t.vorp + t.scarcity + t.flexibility + t.injury + t.category_fit + congestion,
-            VALUE_DECIMALS,
-        )
+        components = [
+            RecommendationComponent(
+                key="season_value", label="Season value", value=t.season_value, in_score=False,
+                detail=f"{c['value']} per game over a projected season",
+            ),
+            RecommendationComponent(
+                key="vorp", label="Value over replacement", value=t.vorp, in_score=True,
+                detail=DraftBoardService._replacement_detail(t),
+            ),
+        ]
+        if fit is not None:
+            components.append(RecommendationComponent(
+                key="punts", label="Punted categories", value=t.punts, in_score=True,
+                detail=DraftBoardService._punt_detail(fit, punts, t),
+            ))
+        components += [
+            RecommendationComponent(
+                key="injury", label="Injury risk", value=t.injury, in_score=True,
+                detail=DraftBoardService._injury_detail(c),
+            ),
+            RecommendationComponent(
+                key="congestion", label="Lineup congestion", value=t.congestion, in_score=True,
+                detail=t.congestion_detail,
+            ),
+        ]
+        if fit is not None:
+            components.append(RecommendationComponent(
+                key="category_fit", label="Category fit", value=t.category_fit, in_score=False,
+                detail=DraftBoardService._fit_detail(fit, c.get("z")),
+            ))
         return DraftRecommendation(
             player_id=c["id"],
             name=c["name"],
-            primary_position=position,
+            primary_position=t.position,
             value=c["value"],
             season_value=t.season_value,
             vorp=t.vorp,
-            score=score,
+            score=t.score,
             source=rank_source,
             market_rank=c.get("market_rank"),
             cv_rank=c.get("cv_rank"),
-            components=[
-                RecommendationComponent(
-                    key="season_value", label="Season value", value=t.season_value, in_score=False,
-                    detail=f"{c['value']} per game over a projected season",
-                ),
-                RecommendationComponent(
-                    key="vorp", label="Value over replacement", value=t.vorp, in_score=True,
-                    detail=(
-                        f"replacement at {position} is {round(t.bar, VALUE_DECIMALS)}" if position
-                        else f"no position data — measured against the pool ({round(t.bar, VALUE_DECIMALS)})"
-                    ),
-                ),
-                RecommendationComponent(
-                    key="scarcity", label="Positional scarcity", value=t.scarcity, in_score=True,
-                    detail=(
-                        f"{t.left} startable {position} left of {t.need}"
-                        + ("" if t.my_need > 0 else "; your roster is already set there")
-                        if position and t.need > 0 else "no positional pressure"
-                    ),
-                ),
-                RecommendationComponent(
-                    key="flexibility", label="Lineup flexibility", value=t.flexibility, in_score=True,
-                    detail=(
-                        f"starts at {', '.join(sorted(set(t.slots)))}" if t.extra_slots
-                        else "one starting slot"
-                    ),
-                ),
-                RecommendationComponent(
-                    key="injury", label="Injury risk", value=t.injury, in_score=True,
-                    detail=(f"listed {c['injury']}" if c["injury"] else "no injury flag"),
-                ),
-                RecommendationComponent(
-                    key="category_fit", label="Category fit", value=t.category_fit, in_score=True,
-                    detail=DraftBoardService._fit_detail(fit, c.get("z"), c["gp"]),
-                ),
-                RecommendationComponent(
-                    key="congestion", label="Lineup congestion", value=congestion, in_score=True,
-                    detail=congestion_detail,
-                ),
-            ],
+            components=components,
             reason=DraftBoardService._reason(
-                c["name"], position, t.vorp, t.scarcity, t.flexibility, t.injury, t.category_fit,
-                congestion, c["injury"], rank_source, c.get("market_rank"),
+                c["name"], t.bar_position, t.vorp, t.punts, t.injury,
+                t.congestion, c["injury"], rank_source, c.get("market_rank"),
             ),
         )
 
     @staticmethod
-    def _fit_detail(
-        fit: Optional[FitModel], z: Optional[Mapping[str, float]], gp: float
-    ) -> str:
-        """Which categories moved this candidate off his balanced value.
+    def _replacement_detail(t: _Terms) -> str:
+        """What he was measured against, and why that level."""
+        bar = round(t.bar, VALUE_DECIMALS)
+        if t.bar_position:
+            return (
+                f"replacement at {t.bar_position} is {bar} — below the league's last starter: "
+                f"startable {t.bar_position} are short"
+            )
+        if not t.league_size:
+            return "no league size on file — measured from zero"
+        return f"replacement is {bar}, the last starter in a {t.league_size}-team league"
 
-        The two named are the largest movers, in the same season-value points
-        as the component. They can fall a little short of summing to it: the
-        value scale is clamped at zero, so for a player below the floor part of
-        the shift has nowhere to land.
+    @staticmethod
+    def _injury_detail(c: Mapping) -> str:
+        """What the injury term did, and — when it did nothing — why not."""
+        if not c["injury"]:
+            return "no injury flag"
+        if c.get("games_projected"):
+            return f"listed {c['injury']} — already in his {c['expected_games']:.0f} projected games"
+        return f"listed {c['injury']}"
+
+    @staticmethod
+    def _punt_detail(fit: FitModel, punts: Sequence[str], t: _Terms) -> str:
+        """Which categories the room conceded, and what leaving them out moved."""
+        if not punts:
+            return "nothing punted — every category counts"
+        labels = {need.key: need.label for need in fit.needs}
+        named = ", ".join(labels.get(key, key) for key in punts)
+        own = round(t.room_value - t.season_value, VALUE_DECIMALS)
+        bar = round(t.room_bar - t.bar, VALUE_DECIMALS)
+        return f"without {named}: his value {own:+.1f}, replacement {bar:+.1f}"
+
+    @staticmethod
+    def _fit_detail(fit: Optional[FitModel], z: Optional[Mapping[str, float]]) -> str:
+        """Which categories this roster is short of that the candidate moves.
+
+        Information, not a term: the two largest need-weighted movers, in the
+        same season-value points as everything else on the card. Punted
+        categories are left out — those are in the score, under their own term.
+        They can fall a little short of summing to the component: the value
+        scale is clamped at zero, so for a player below the floor part of the
+        shift has nowhere to land.
         """
         if fit is None:
             return "points league — value is already this league's own scoring"
-        drivers = fit.drivers(z)[:2]
+        drivers = [(need, shift) for need, shift in fit.drivers(z) if not need.punted][:2]
         if not drivers:
-            return "balanced: no category pulls this pick either way"
+            return "balanced: no category need pulls this pick either way"
         parts = []
         for need, shift in drivers:
-            amount = shift * CATEGORY_VALUE_SCALE * gp
-            if need.punted:
-                why = "punted"
-            else:
-                why = f"{abs(need.need):.1f}σ {'behind' if need.need > 0 else 'ahead of'} pace"
+            amount = shift * CATEGORY_VALUE_SCALE * DEFAULT_GAMES
+            why = f"{abs(need.need):.1f}σ {'behind' if need.need > 0 else 'ahead of'} pace"
             parts.append(f"{amount:+.1f} {need.label} ({why})")
-        return ", ".join(parts)
+        return ", ".join(parts) + " — not in the score"
 
     @staticmethod
     def _reason(
         name: str,
-        position: Optional[str],
+        short_position: Optional[str],
         vorp: float,
-        scarcity: float,
-        flexibility: float,
+        punts: float,
         injury: float,
-        category_fit: float,
         congestion: float,
         injury_status: Optional[str],
         rank_source: str = "cv",
@@ -1657,18 +1738,14 @@ class DraftBoardService:
         has him: the board is ordered by ESPN, so a CV pick is only readable
         next to the number it disagrees with.
         """
-        where = f" at {position}" if position else ""
+        where = f" at {short_position}" if short_position else ""
         place = f"ESPN has him #{market_rank}" if market_rank is not None else "unranked by ESPN"
         if rank_source == "espn":
             top = f"ESPN's #{market_rank}" if market_rank is not None else "unranked by ESPN"
             return f"{name}: {top} and the best left on their board; CV has him {vorp:+.1f} over replacement{where}"
         parts = [f"{vorp:+.1f} over replacement{where}"]
-        if scarcity:
-            parts.append(f"{scarcity:+.1f} for scarcity")
-        if flexibility:
-            parts.append(f"{flexibility:+.1f} for lineup flexibility")
-        if category_fit:
-            parts.append(f"{category_fit:+.1f} for category fit")
+        if punts:
+            parts.append(f"{punts:+.1f} for your punts")
         if injury:
             parts.append(f"{injury:+.1f} for {injury_status}")
         if congestion:

@@ -439,11 +439,14 @@ async def test_the_board_reads_the_current_team_from_profiles_and_summarises_con
     assert all(r.team is None for r in board.data)
 
     meta = board.meta.congestion
-    assert meta.sample_weeks == [3, 9, 16] and meta.season_weeks == 24
+    # Every week the league scores: the 2026-27 calendar has 24, and the last
+    # one falls after the fantasy playoffs.
+    assert meta.sample_weeks == list(range(1, 24)) and meta.season_weeks == 23
     assert meta.slots == 10 and meta.no_team == []
     assert [(s.team, s.count, s.player_ids) for s in meta.stacks] == [("DEN", 2, mine)]
     assert meta.benched_per_week == 0.0 and meta.benched_season == 0.0
-    assert meta.evaluated == 25
+    # Everyone the room can still draft is measured, and carries the room score.
+    assert meta.evaluated == sum(1 for r in board.data if r.room_rank is not None) > 25
     for rec in board.recommendations:
         term = next(c for c in rec.components if c.key == "congestion")
         assert term.value == 0.0 and term.in_score and term.detail == "no team on file"

@@ -23,7 +23,7 @@ from services.draft_congestion import SampleWeek
 from services.scoring.category_value import category_value
 from services.scoring.models import StatLine
 from services.scoring.category_rank import PoolRow
-from services.scoring.resolver import resolve_scoring
+from services.scoring.resolver import resolve_scoring, resolve_scoring_for_room
 
 SEASON = "2026-27"
 
@@ -454,15 +454,15 @@ def test_a_centre_drafted_inside_the_session_spends_the_cap(monkeypatch):
 
 @pytest.mark.unit
 def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkeypatch):
-    """The default fixture has no ESPN positions, so scarcity and flexibility
-    are structurally zero there — assert the sum where all five terms bite."""
-    # Four centres so the position has a replacement level below its best
-    # player (with only one left, VORP is 0 and scarcity has nothing to scale),
-    # and four cheap Denver centres of my own so a fifth collides on the
-    # sampled Denver nights.
+    """The default fixture samples no calendar and flags no injury, so both of
+    those terms are structurally zero there — assert the sum where they bite."""
+    # Four cheap Denver centres of my own, so a fifth collides on the sampled
+    # Denver nights. The guard is hurt and nothing projects his games, which is
+    # the one case the flat injury discount still prices.
     market = _espn_market(
         **{"1": {"default_position_id": 5, "eligible_slot_ids": [4, 9, 11, 12]},
-           "2": {"default_position_id": 1, "eligible_slot_ids": [0, 1, 5, 11, 12]},
+           "2": {"default_position_id": 1, "eligible_slot_ids": [0, 1, 5, 11, 12],
+                 "injury_status": "DOUBTFUL"},
            "3": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12],
                  "injury_status": "DOUBTFUL"},
            "4": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12]},
@@ -480,7 +480,7 @@ def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkey
                         staticmethod(lambda my_ids, session_id=None: inputs))
     resp = _board(resolve_scoring(_league()), picked=[6], mine=[11, 12, 13, 14])
 
-    seen = {"scarcity": False, "flexibility": False, "injury": False, "congestion": False}
+    seen = {"injury": False, "congestion": False}
     for rec in resp.recommendations:
         summed = round(sum(c.value for c in rec.components if c.in_score), 1)
         assert summed == rec.score, f"{rec.name}: components do not sum to the score"
@@ -489,12 +489,18 @@ def test_every_component_is_exercised_and_the_summed_ones_equal_the_score(monkey
                 seen[key] = True
     assert all(seen.values()), f"never exercised: {[k for k, v in seen.items() if not v]}"
     # A fifth centre for C + UT x3 benches one of my 10-a-game centres on each
-    # of the three sampled Denver nights: 30 a week, over 24 weeks.
+    # of the three sampled Denver nights. A benched game is charged at the
+    # share of games he plays (65 of 82, nothing projects him) times the mean
+    # share of the four who play ahead of him (three like him, and the star at
+    # 78 of 82): 10 x 0.793 x 0.832 a night, three nights a week, 24 weeks.
     star = next(r for r in resp.recommendations if r.player_id == 1)
     congestion = next(c for c in star.components if c.key == "congestion")
-    assert congestion.value == -720.0
+    mine, his = 65 / 82, 78 / 82
+    per_week = 3 * 10 * mine * (3 * mine + his) / 4
+    assert congestion.value == -round(per_week * 24, 1)
     assert congestion.detail == (
-        "would bench ~30.0/week of starter value over 1 sampled week; 5 would share DEN's schedule"
+        f"would bench ~{per_week:.1f}/week of starter value over 1 week; "
+        "5 would share DEN's schedule"
     )
 
 
@@ -506,12 +512,9 @@ def test_recommendations_decompose_the_score_and_sum_to_it(stub_inputs):
     best = resp.recommendations[0]
     assert best.player_id == 1                      # the most valuable available player
     keys = [c.key for c in best.components]
-    assert keys == ["season_value", "vorp", "scarcity", "flexibility", "injury", "category_fit",
-                    "congestion"]
-    # A points league has no categories to fit: the term is present (the room
-    # renders every component) and contributes nothing.
-    fit = next(c for c in best.components if c.key == "category_fit")
-    assert fit.value == 0.0 and "points league" in fit.detail
+    # A points league has no categories to punt or to be short of, so neither
+    # of the category terms is on the card.
+    assert keys == ["season_value", "vorp", "injury", "congestion"]
     # Nothing sampled the calendar here, so congestion is present and says so.
     congestion = next(c for c in best.components if c.key == "congestion")
     assert congestion.value == 0.0 and congestion.in_score
@@ -551,7 +554,11 @@ def test_congestion_penalizes_deepening_a_stack_and_the_meta_reports_it(monkeypa
                   session=BoardSession(rank_source="cv"))
 
     meta = resp.meta.congestion
-    assert meta.benched_per_week == 10.0 and meta.benched_season == 240.0
+    # The Laker (10 a game, 65 of 82 games) sits behind the two Nuggets (78 and
+    # 74 of 82) on the one night all three play.
+    laker, nuggets = 65 / 82, (78 / 82 + 74 / 82) / 2
+    assert meta.benched_per_week == round(10 * laker * nuggets, 1)
+    assert meta.benched_season == round(10 * laker * nuggets * 24, 1)
     assert meta.sample_weeks == [3] and meta.season_weeks == 24 and meta.slots == 2
     assert [(s.team, s.count, s.player_ids) for s in meta.stacks] == [("DEN", 2, [1, 3])]
     assert meta.no_team == [] and meta.evaluated == 3
@@ -561,14 +568,19 @@ def test_congestion_penalizes_deepening_a_stack_and_the_meta_reports_it(monkeypa
 
     by_id = {r.player_id: r for r in resp.recommendations}
     guard = next(c for c in by_id[2].components if c.key == "congestion")
-    assert guard.value == -528.0                       # 22 a game, one night a week, 24 weeks
-    assert guard.detail == "would bench ~22.0/week of starter value over 1 sampled week"
-    assert by_id[2].score == -528.0 and "-528.0 for lineup congestion" in by_id[2].reason
+    # 22 a game, one night a week behind the same two Nuggets, 24 weeks — at the
+    # share of games he and they are expected to play.
+    benched = 22 * (65 / 82) * nuggets
+    assert guard.value == -round(benched * 24, 1)
+    assert guard.detail == f"would bench ~{benched:.1f}/week of starter value over 1 week"
+    assert by_id[2].score == round(by_id[2].vorp + guard.value, 1)
+    assert f"{guard.value:+.1f} for lineup congestion" in by_id[2].reason
     for pid in (4, 5):
         assert next(c for c in by_id[pid].components if c.key == "congestion").detail == "no team on file"
-    # Before congestion the guard tied player 5 on score and led him on season
-    # value; the term puts him last.
-    assert [r.player_id for r in resp.recommendations] == [4, 5, 2]
+    # Before congestion the guard led player 4 on value (1430 a season to
+    # 1400); the nights he would sit put him behind.
+    assert by_id[2].season_value > by_id[4].season_value
+    assert [r.player_id for r in resp.recommendations] == [4, 2, 5]
 
 
 @pytest.mark.unit
@@ -592,23 +604,24 @@ def test_the_current_team_wins_over_last_seasons_stats_team(monkeypatch):
 
 
 @pytest.mark.unit
-def test_congestion_is_measured_for_the_top_candidates_only(monkeypatch):
-    from services import draft_board_service as module
-
-    monkeypatch.setattr(module, "CONGESTION_CANDIDATES", 1)
+def test_congestion_is_measured_for_every_candidate(monkeypatch):
+    """The `my_team` board is ordered by the whole score, so nobody is left
+    unmeasured below a cutoff: a candidate either reads a number or the reason
+    there is none."""
     inputs = _inputs(schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),)),), season_weeks=24)
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
                         staticmethod(lambda my_ids, session_id=None: inputs))
 
     resp = _board(resolve_scoring(_league()))
 
-    first, second = resp.recommendations[:2]
-    assert first.player_id == 1
-    top = next(c for c in first.components if c.key == "congestion")
-    assert top.value == 0.0 and top.detail == "fits the lineup every sampled night"
-    tail = next(c for c in second.components if c.key == "congestion")
-    assert tail.value == 0.0 and tail.detail.startswith("not evaluated")
-    assert resp.meta.congestion.evaluated == 1
+    details = {
+        rec.player_id: next(c for c in rec.components if c.key == "congestion").detail
+        for rec in resp.recommendations
+    }
+    assert details[1] == "fits the lineup every game night"
+    assert details[4] == "no team on file"
+    assert not any(detail.startswith("not ") for detail in details.values())
+    assert resp.meta.congestion.evaluated == len(resp.data) == 6
 
 
 @pytest.mark.unit
@@ -634,47 +647,28 @@ def test_cap_blocked_and_drafted_players_are_never_recommended(monkeypatch):
 
 
 @pytest.mark.unit
-def test_flexibility_rewards_extra_startable_slots_and_injury_discounts(monkeypatch):
+def test_injury_is_priced_once(monkeypatch):
+    """A projection that carries a player's games has already charged for the
+    ones he will miss, so the flat status discount is for the player nothing
+    projects. Both still say what ESPN lists them as."""
     market = _espn_market(
-        **{"2": {"default_position_id": 1, "eligible_slot_ids": [0, 1, 5, 11, 12]},   # PG/SG/G
-           "6": {"default_position_id": 5, "eligible_slot_ids": [4, 11, 12],           # C only
-                 "injury_status": "OUT"}}
+        **{"3": {"injury_status": "OUT"},      # projected: 74 games
+           "2": {"injury_status": "OUT"}}      # baseline: nothing projects his games
     )
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
                         staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
     resp = _board(resolve_scoring(_league()))
 
     recs = {r.player_id: r for r in resp.recommendations}
-    flex = next(c for c in recs[2].components if c.key == "flexibility")
-    # PG, SG and G are all real slots in this league: two beyond the first.
-    assert flex.value == round(0.02 * 2 * recs[2].season_value, 1) and flex.value > 0
-    if 6 in recs:
-        injury = next(c for c in recs[6].components if c.key == "injury")
-        assert injury.value < 0 and "OUT" in (injury.detail or "")
-
-
-@pytest.mark.unit
-def test_scarcity_counts_down_the_startable_tier_not_the_whole_pool(monkeypatch):
-    """The tier is fixed against the full pool, so drafting from it raises
-    pressure — a tier recomputed over survivors would never run dry."""
-    market = _espn_market(**{str(pid): {"default_position_id": 5} for pid in (1, 3, 4, 6)})
-    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
-                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
-    league = _league()      # 4-team pick order, 1.6 C starters -> a tier of ~6
-
-    quiet = _board(resolve_scoring(league))
-    drained = _board(resolve_scoring(league), picked=[1, 3])
-
-    def scarcity(resp, pid):
-        rec = next(r for r in resp.recommendations if r.player_id == pid)
-        return next(c for c in rec.components if c.key == "scarcity")
-
-    # Player 4 is a centre above replacement in both boards, so only the tier
-    # pressure moves: two of six startable centres are gone in `drained`.
-    assert scarcity(drained, 4).value > scarcity(quiet, 4).value > 0
-    assert "of 6" in scarcity(drained, 4).detail
-    # The bottom centre sits at replacement, so scarcity has nothing to scale.
-    assert scarcity(quiet, 6).value == 0.0
+    projected = next(c for c in recs[3].components if c.key == "injury")
+    assert projected.value == 0.0 and projected.in_score
+    assert projected.detail == "listed OUT — already in his 74 projected games"
+    unprojected = next(c for c in recs[2].components if c.key == "injury")
+    assert unprojected.value == -round(0.15 * recs[2].season_value, 1) and unprojected.value < 0
+    assert unprojected.detail == "listed OUT"
+    assert "for OUT" in recs[2].reason and "for OUT" not in recs[3].reason
+    # The row shows the status either way.
+    assert {r.player_id: r.injury_status for r in resp.data if r.player_id in (2, 3)} == {2: "OUT", 3: "OUT"}
 
 
 @pytest.mark.unit
@@ -698,55 +692,219 @@ def test_a_category_league_recommends_on_the_category_value(stub_inputs):
     assert [c.key for c in best.components][1] == "vorp"
 
 
+def _centres_and_a_star(drafted_top: int, centres: int = 60) -> list[dict]:
+    """`centres` pure centres, 45 a game downwards in half-point steps, the top
+    `drafted_top` of them gone, and one point guard as good as the best of them."""
+    pool = [
+        {"id": 100 + i, "name": f"C{i}", "value": 45 - i * 0.5,
+         "season_value": round((45 - i * 0.5) * 65, 1), "position": "C",
+         "available": i >= drafted_top, "blocked": False, "injury": None, "slots": ["C", "UT"],
+         "cv_rank": i + 2}
+        for i in range(centres)
+    ]
+    pool.append({"id": 999, "name": "Star", "value": 45.0, "season_value": 2925.0,
+                 "position": "PG", "available": True, "blocked": False,
+                 "injury": None, "slots": ["PG", "G", "UT"], "cv_rank": 1})
+    return pool
+
+
+def _scored(pool, league, league_size=10):
+    DraftBoardService._room_values(pool, None)
+    return DraftBoardService._room_terms(pool, resolve_scoring(league), BoardSession(league_size=league_size))
+
+
 @pytest.mark.unit
-def test_starters_per_position_shares_derived_slots():
-    starters = DraftBoardService._starters_per_position(
-        {"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1}
+def test_one_replacement_level_for_a_lineup_anyone_can_fill():
+    """A league that starts one centre and has a utility seat does not run out
+    of centres: the second one starts at UT. Everybody is measured against the
+    league's last starter, so position alone reorders nothing."""
+    league = _league(roster_slots={"C": 1, "UT": 1, "BE": 3},
+                     draft_settings={"pick_order": list(range(1, 11))})    # 10 teams x 2 seats
+    terms = _scored(_centres_and_a_star(0), league)
+
+    bars = {t.bar for t in terms}
+    assert len(bars) == 1 and all(t.bar_position is None for t in terms)
+    # Twenty starters in the league, the star among them: the bar is the 21st player.
+    bar = round((45 - 19 * 0.5) * 65, 1)
+    assert bars == {bar}
+    star = next(t for t in terms if t.c["id"] == 999)
+    best_centre = next(t for t in terms if t.c["id"] == 100)
+    assert star.vorp == best_centre.vorp == round(2925.0 - bar, 1)
+    rec = DraftBoardService._recommend(terms)[0]
+    assert next(c for c in rec.components if c.key == "vorp").detail == (
+        f"replacement is {bar}, the last starter in a 10-team league"
     )
-    # A G slot is half a PG and half an SG; a UT slot is a fifth of each.
-    assert starters["PG"] == pytest.approx(1 + 0.5 + 0.6)
-    assert starters["C"] == pytest.approx(1 + 0.6)
-    # Every started slot is counted exactly once: 5 + G + F + 3 UT = 10 starters.
-    assert sum(starters.values()) == pytest.approx(10.0)
 
 
 @pytest.mark.unit
-def test_the_replacement_bar_does_not_fall_as_a_position_is_drafted():
-    """Indexing the *original* starter need into a shrinking available list
-    would slide the bar deeper into the distribution and hand a picked-over
-    position a growing VORP premium — the opposite of what scarcity means."""
-    def candidates(drafted_top: int) -> list[dict]:
-        pool = [
-            {"id": 100 + i, "name": f"C{i}", "value": 45 - i * 0.5,
-             "season_value": round((45 - i * 0.5) * 65, 1), "gp": 65, "position": "C",
-             "available": i >= drafted_top, "blocked": False, "injury": None, "slots": ["C", "UT"]}
+def test_a_position_the_league_cannot_fill_is_measured_against_its_own_last_starter():
+    """Two centre seats a team and only eight centres worth the name: the seats
+    only a centre can fill outnumber them, so the last one a team must start
+    sits below the league's last starter — and that lower bar, not a bonus
+    bolted on, is what makes a centre worth more here."""
+    pool = _centres_and_a_star(0, centres=8)
+    pool += [
+        {"id": 200 + i, "name": f"G{i}", "value": 44 - i * 0.2,
+         "season_value": round((44 - i * 0.2) * 65, 1), "position": "SG",
+         "available": True, "blocked": False, "injury": None, "slots": ["SG", "G", "UT"],
+         "cv_rank": 20 + i}
+        for i in range(60)
+    ]
+    # Scrubs who can stand in at centre, far below anyone a team wants to start.
+    pool += [
+        {"id": 300 + i, "name": f"Scrub{i}", "value": 5.0, "season_value": 325.0, "position": "C",
+         "available": True, "blocked": False, "injury": None, "slots": ["C", "UT"], "cv_rank": 90 + i}
+        for i in range(10)
+    ]
+    league = _league(roster_slots={"PG": 1, "SG": 1, "C": 2, "UT": 1, "BE": 3},
+                     draft_settings={"pick_order": [1, 2, 3, 4, 5]})    # 5 teams: 10 centre seats
+
+    terms = {t.c["id"]: t for t in _scored(pool, league, league_size=5)}
+
+    guard, centre = terms[200], terms[107]
+    assert guard.bar_position is None and centre.bar_position == "C"
+    # The tenth centre seat is filled by a scrub.
+    assert centre.bar == 325.0 < guard.bar
+    # The worst real centre is worth far more over his replacement than a much
+    # better guard is over his.
+    assert guard.season_value > centre.season_value and centre.vorp > guard.vorp
+    rec = DraftBoardService._recommendation(centre, None)
+    assert next(c for c in rec.components if c.key == "vorp").detail == (
+        "replacement at C is 325.0 — below the league's last starter: startable C are short"
+    )
+    assert "over replacement at C" in rec.reason
+
+
+@pytest.mark.unit
+def test_a_position_stops_being_short_once_its_seats_are_filled():
+    """The premium is for a seat somebody still has to fill. When every team
+    has its centres, the next one takes nobody's centre seat: he is measured
+    against the league's last starter again, not handed the best remaining
+    centre's value as a bar of his own."""
+    def pool(drafted_centres: int) -> list[dict]:
+        centres = [
+            {"id": 100 + i, "name": f"C{i}", "value": 45 - i, "season_value": (45 - i) * 65.0, "position": "C",
+             "available": i >= drafted_centres, "blocked": False, "injury": None, "slots": ["C", "UT"],
+             "cv_rank": i + 1}
+            for i in range(8)
+        ]
+        scrubs = [
+            {"id": 300 + i, "name": f"Scrub{i}", "value": 5.0, "season_value": 325.0, "position": "C",
+             "available": True, "blocked": False, "injury": None, "slots": ["C", "UT"], "cv_rank": 90 + i}
+            for i in range(10)
+        ]
+        guards = [
+            {"id": 200 + i, "name": f"G{i}", "value": 44 - i * 0.2, "season_value": round((44 - i * 0.2) * 65, 1),
+             "position": "SG", "available": True, "blocked": False, "injury": None,
+             "slots": ["SG", "G", "UT"], "cv_rank": 20 + i}
             for i in range(60)
         ]
-        pool.append({"id": 999, "name": "Star", "value": 45.0, "season_value": 2925.0,
-                     "gp": 65, "position": "PG", "available": True, "blocked": False,
-                     "injury": None, "slots": ["PG", "G", "UT"]})
-        return pool
+        return centres + scrubs + guards
 
-    league = _league(draft_settings={"pick_order": list(range(1, 11))})
-    scoring = resolve_scoring(league)
+    league = _league(roster_slots={"PG": 1, "SG": 1, "C": 2, "UT": 1, "BE": 3},
+                     draft_settings={"pick_order": [1, 2, 3, 4, 5]})    # 5 teams: 10 centre seats
+
+    # Six real centres gone: four centre seats are still to be filled, by two
+    # real centres and two scrubs, so the position is short.
+    open_seats = {t.c["id"]: t for t in _scored(pool(6), league, league_size=5)}
+    assert open_seats[106].bar_position == "C" and open_seats[106].bar == 325.0
+
+    # Every one of the ten seats filled (the eight centres and two scrubs are
+    # the tier; all drafted): the next centre is just another player.
+    filled = pool(8)
+    for c in filled:
+        if c["id"] in (300, 301):
+            c["available"] = False
+    terms = {t.c["id"]: t for t in _scored(filled, league, league_size=5)}
+    assert terms[302].bar_position is None and terms[200].bar_position is None
+    assert terms[302].bar == terms[200].bar
+    assert terms[302].vorp < 0 < terms[200].vorp
+
+
+@pytest.mark.unit
+def test_the_replacement_bar_does_not_fall_as_the_draft_goes_on():
+    """Indexing the *original* starter need into a shrinking available list
+    would slide the bar deeper into the distribution and hand the survivors of
+    a run a growing premium. The bar is the marginal starter still to be
+    filled: the same player while the tier drains, and the best one left once
+    every seat in the league has a starter."""
+    league = _league(roster_slots={"C": 1, "UT": 1, "BE": 3},
+                     draft_settings={"pick_order": list(range(1, 11))})    # 10 teams x 2 seats
 
     def best_centre(drafted):
-        recs = DraftBoardService._recommend(candidates(drafted), scoring,
-                                            BoardSession(league_size=10), frozenset(), {})
-        return next(r for r in recs if r.primary_position == "C"), recs
+        terms = _scored(_centres_and_a_star(drafted), league)
+        return next(t for t in terms if t.position == "C"), terms
 
     fresh, _ = best_centre(0)
     mid, _ = best_centre(10)
-    picked_clean, recs = best_centre(20)
+    picked_clean, terms = best_centre(25)
 
-    # The bar tracks the same replacement-level player while the tier drains...
-    assert mid.season_value - mid.vorp == pytest.approx(fresh.season_value - fresh.vorp)
-    # ...and once every team's centre slot is filled, the next centre is worth
-    # no more than the best one still sitting there.
-    assert picked_clean.vorp == 0.0
-    # So an untouched star outranks the survivors of a run, rather than losing
-    # to them on an inflated VORP.
-    assert recs[0].name == "Star"
+    # Twenty starters in the league, the star among them: the 21st player is
+    # the bar, and stays the bar while the first ten centres come off.
+    assert fresh.bar == mid.bar == round((45 - 19 * 0.5) * 65, 1)
+    assert mid.vorp < fresh.vorp
+    # After a run of 25 the only starter still on the board is the star, so the
+    # best centre left is the replacement level himself — worth nothing over
+    # it, rather than being handed a premium for surviving the run.
+    assert picked_clean.bar == picked_clean.season_value and picked_clean.vorp == 0.0
+    assert terms[0].c["name"] == "Star" and terms[0].vorp > 0
+
+
+@pytest.mark.unit
+def test_a_room_with_no_lineup_on_file_is_measured_against_espns_default(stub_inputs):
+    """A league-less room still has a size, and ESPN's default ten starting
+    seats say where its replacement level is; a room that does not even know
+    its size is measured from zero and says so."""
+    pool = _centres_and_a_star(0, centres=130)
+    DraftBoardService._room_values(pool, None)
+    sized = DraftBoardService._room_terms(pool, resolve_scoring(None), BoardSession(league_size=12))
+    assert {t.bar for t in sized} == {sorted((c["season_value"] for c in pool), reverse=True)[120]}
+
+    unsized = DraftBoardService._room_terms(pool, resolve_scoring(None), BoardSession())
+    assert {t.bar for t in unsized} == {0.0}
+    detail = next(c for c in DraftBoardService._recommend(unsized)[0].components if c.key == "vorp").detail
+    assert detail == "no league size on file — measured from zero"
+
+    # A league whose own lineup never synced: the same ten seats place its bar.
+    unsynced = DraftBoardService._room_terms(
+        pool, resolve_scoring(_league(roster_slots={})), BoardSession(league_size=12))
+    assert {t.bar for t in unsynced} == {t.bar for t in sized}
+
+
+@pytest.mark.unit
+def test_a_league_less_room_fields_espns_default_lineup(monkeypatch):
+    """A mock has no league to read a lineup from, and ESPN's default is what a
+    mock lobby drafts for. With it the roster zone has seats to fill and the
+    my-team order something to measure against: here a third centre has only
+    the three utility seats left to share. A league whose settings never
+    synced is different — its real lineup is unknown — and stays empty."""
+    market = _espn_market(**{str(pid): {"default_position_id": 5, "eligible_slot_ids": [4, 12]}
+                             for pid in (1, 3, 6, 11, 12, 13)})
+    inputs = _inputs(
+        market=market,
+        pool=_inputs().pool + [_row(pid, fpts=12.0, pts=12) for pid in (11, 12, 13)],
+        schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),) * 2),), season_weeks=24,
+    )
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    mock = _board(resolve_scoring(None), mine=[1, 3, 11, 12],
+                  session=BoardSession(league_size=8, rounds=13, board_source="my_team"))
+
+    assert mock.meta.roster_slots == {
+        "PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1}
+    assert mock.meta.congestion.slots == 10
+    # Four Denver centres fill C and the three utility seats; a fifth sits.
+    fifth = next(r for r in mock.recommendations if r.player_id == 13)
+    congestion = next(c for c in fifth.components if c.key == "congestion")
+    assert congestion.value < 0 and "would bench" in congestion.detail
+    assert next(r for r in mock.data if r.player_id == 13).room_score == fifth.score
+
+    unsynced = _board(resolve_scoring(_league(roster_slots={})), mine=[1, 3, 11, 12],
+                      session=BoardSession(board_source="my_team"))
+    assert unsynced.meta.roster_slots == {} and unsynced.meta.congestion.slots == 0
+    details = {c.detail for r in unsynced.recommendations for c in r.components if c.key == "congestion"}
+    assert details == {"no lineup slots known"}
 
 
 # ---- the fetch layer itself ------------------------------------------------
@@ -791,7 +949,7 @@ def fake_tables(monkeypatch):
     monkeypatch.setattr(module.PlayerProfile, "select",
                         classmethod(lambda cls, *fields: _Query(state["profiles"])))
     # The calendar is a real file; the fetch tests are about the tables.
-    monkeypatch.setattr(DraftBoardService, "_sample_weeks", staticmethod(lambda: ((), 0)))
+    monkeypatch.setattr(DraftBoardService, "_calendar_weeks", staticmethod(lambda: ()))
     return state
 
 
@@ -1115,21 +1273,64 @@ def test_an_unknown_punt_key_is_dropped_rather_than_reported_as_applied(cat_tabl
 
 
 @pytest.mark.unit
-def test_the_category_fit_component_is_summed_and_explains_itself(cat_tables):
+def test_the_category_fit_component_is_information_and_explains_itself(cat_tables):
+    """What the roster is short of is on the card and out of the score:
+    weighting categories by need lost to leaving them alone in the redraft
+    experiments, so the need is shown and the pick is not bent by it."""
+    _, balanced = _cat_board(league_size=12, rounds=13)
     _, resp = _cat_board(mine=[2, 5], league_size=12, rounds=13)
 
-    best = resp.recommendations[0]
-    fit = next(c for c in best.components if c.key == "category_fit")
-    assert fit.in_score is True
-    assert round(sum(c.value for c in best.components if c.in_score), 1) == best.score
-    # It names the categories that moved the pick, in this league's own terms.
+    big = next(r for r in resp.recommendations if r.player_id == 1)
+    assert [c.key for c in big.components] == [
+        "season_value", "vorp", "punts", "injury", "congestion", "category_fit",
+    ]
+    fit = next(c for c in big.components if c.key == "category_fit")
+    assert fit.in_score is False
+    assert round(sum(c.value for c in big.components if c.in_score), 1) == big.score
+    # It names the categories the roster needs him for, in this league's own
+    # terms: a guard-heavy roster is short of what a big brings.
     assert any(n.label in fit.detail for n in resp.meta.category_need)
-    assert "pace" in fit.detail
-
-    # The best fit on a guard-heavy roster is a big, and the term is what put
-    # him there rather than his raw value.
-    assert best.player_id in (1, 4)
+    assert "pace" in fit.detail and fit.detail.endswith("not in the score")
     assert fit.value > 0
+    # And the score is what it would be for any roster holding those two.
+    before = next(r for r in balanced.recommendations if r.player_id == 1)
+    assert big.vorp == before.vorp
+
+
+@pytest.mark.unit
+def test_a_punt_moves_the_score_through_its_own_term(cat_tables):
+    """Conceding assists costs the guards and nobody else: their value in this
+    room falls, the replacement level falls with them, and the difference is
+    the `punts` term — summed, named, and zero when nothing is punted."""
+    _, plain = _cat_board(league_size=12, rounds=13)
+    _, punted = _cat_board(punts=["ast"], league_size=12, rounds=13)
+
+    for rec in plain.recommendations:
+        term = next(c for c in rec.components if c.key == "punts")
+        assert term.value == 0.0 and term.in_score
+        assert term.detail == "nothing punted — every category counts"
+
+    by_id = {r.player_id: r for r in punted.recommendations}
+    plain_by_id = {r.player_id: r for r in plain.recommendations}
+    for rec in punted.recommendations:
+        assert round(sum(c.value for c in rec.components if c.in_score), 1) == rec.score
+        # The balanced terms are untouched: a punt has a term of its own.
+        if rec.player_id in plain_by_id:
+            assert rec.vorp == plain_by_id[rec.player_id].vorp
+            assert rec.season_value == plain_by_id[rec.player_id].season_value
+    guard = next(c for c in by_id[2].components if c.key == "punts")
+    big = next(c for c in by_id[1].components if c.key == "punts")
+    assert guard.value < 0 < big.value
+    # His own value falls by more than the replacement level does.
+    assert guard.detail == "without AST: his value -461.5, replacement -117.0"
+    assert guard.value == round(-461.5 - -117.0, 1)
+    # The room's order answers to it — the best passer falls from first to
+    # fourth — and Court Vision's own order, which is nobody's roster, does not.
+    def order(resp, key):
+        return [r.player_id for r in sorted(resp.data, key=key)]
+    assert order(plain, lambda r: r.room_rank)[0] == 2
+    assert order(punted, lambda r: r.room_rank).index(2) == 3
+    assert order(punted, lambda r: r.cv_rank) == order(plain, lambda r: r.cv_rank)
 
 
 @pytest.mark.unit
@@ -1318,10 +1519,12 @@ def test_the_stateless_board_has_no_seats_and_says_so(stub_inputs):
 
 
 @pytest.mark.unit
-def test_the_seats_change_the_recommendation_not_just_the_readout(cat_seat_tables):
-    """The point of reading real teams: the same roster gets a different pick
-    depending on what the rest of the room has taken."""
-    def top_pick(seat_players):
+def test_the_seats_change_the_readout_and_not_the_score(cat_seat_tables):
+    """Reading real teams changes what the room is told about its needs — the
+    fit column and the card's fit line — and, until an opponent-aware scorer
+    earns its place, not what a player is scored at: need-weighting lost to
+    plain value in the redraft experiments."""
+    def room(seat_players):
         cat_seat_tables(_cat_inputs(
             seat_players={s: frozenset(p) for s, p in seat_players.items()}
         ))
@@ -1330,15 +1533,19 @@ def test_the_seats_change_the_recommendation_not_just_the_readout(cat_seat_table
             session=BoardSession(session_id=77, my_slot=3, league_size=12, rounds=13,
                                  rank_source="cv"),
         ))
-        return resp.recommendations[0].player_id, resp.meta.pace_source
+        rec = next(r for r in resp.recommendations if r.player_id == 5)
+        fit = next(c for c in rec.components if c.key == "category_fit")
+        row = next(r for r in resp.data if r.player_id == 5)
+        return resp.meta.pace_source, rec.score, fit.value, row.fit_value
 
     # A room where the bigs are gone: rebounds and blocks are scarce.
-    against_bigs, source_a = top_pick({3: {3}, 1: {1}, 2: {4}, 4: {6}})
-    # A room where the guards are gone instead.
-    against_guards, source_b = top_pick({3: {3}, 1: {2}, 2: {5}, 4: {6}})
+    source_a, score_a, fit_a, column_a = room({3: {3}, 1: {1}, 2: {4}, 4: {6}})
+    # A room where the other guard is gone instead (player 5 is still there).
+    source_b, score_b, fit_b, column_b = room({3: {3}, 1: {2}, 2: {4}, 4: {6}})
 
     assert source_a == source_b == "seats"
-    assert against_bigs != against_guards
+    assert fit_a != fit_b and column_a != column_b
+    assert score_a == score_b
 
 
 @pytest.mark.unit
@@ -1353,28 +1560,61 @@ def test_fetch_reads_the_current_team_from_profiles(fake_tables):
 
 
 @pytest.mark.unit
-def test_sample_weeks_reads_the_ordinary_weeks_and_skips_a_missing_one(monkeypatch):
+def test_calendar_weeks_reads_every_week_and_all_of_a_merged_one(monkeypatch):
     from services import draft_board_service as module
 
-    calendar = {
-        3: {"game_span": 7, "games": {"DEN": {"0": True, "3": True}, "BOS": {"1": True}}},
-        16: {"game_span": 7, "games": {"DEN": {"6": True}}},
-    }
-    monkeypatch.setattr(module.schedule_service, "get_matchup_by_number", lambda n: calendar.get(n))
-    monkeypatch.setattr(module.schedule_service, "get_max_week", lambda: 24)
+    calendar = [
+        {"matchup_number": 3, "game_span": 7,
+         "games": {"DEN": {"0": True, "3": True}, "BOS": {"1": True}}},
+        {"matchup_number": 18, "game_span": 14, "games": {"DEN": {"13": True}}},
+    ]
+    monkeypatch.setattr(module.schedule_service, "iter_weeks", lambda: iter(calendar))
 
-    weeks, season = DraftBoardService._sample_weeks()
+    weeks = DraftBoardService._calendar_weeks()
 
-    assert [w.number for w in weeks] == [3, 16] and season == 24
-    assert len(weeks[0].days) == 7
+    assert [w.number for w in weeks] == [3, 18]
+    assert len(weeks[0].days) == 7 and len(weeks[1].days) == 14
     assert weeks[0].days[0] == {"DEN"} and weeks[0].days[1] == {"BOS"} and weeks[0].days[2] == set()
-    assert weeks[1].days[6] == {"DEN"}
+    assert weeks[1].days[13] == {"DEN"}
 
-    def missing(_number):
+    def missing():
         raise FileNotFoundError("no calendar on disk")
 
-    monkeypatch.setattr(module.schedule_service, "get_matchup_by_number", missing)
-    assert DraftBoardService._sample_weeks() == ((), 0)
+    monkeypatch.setattr(module.schedule_service, "iter_weeks", missing)
+    assert DraftBoardService._calendar_weeks() == ()
+
+
+@pytest.mark.unit
+def test_congestion_is_measured_on_the_weeks_the_league_scores(monkeypatch):
+    """The whole calendar, not a sample of it — and not the week after the
+    fantasy playoffs end, when a benched night costs nobody anything. Roto
+    scores every week."""
+    def week(number, den):
+        return SampleWeek(number, (frozenset({"DEN"}),) * den + (frozenset(),) * (7 - den))
+
+    # A six-week season: ESPN's default shape puts the playoffs in weeks 2-5
+    # and leaves the last week unplayed. Denver plays twice a week, and four
+    # times in that last one.
+    calendar = tuple(week(n, 4 if n == 6 else 2) for n in range(1, 7))
+    market = _espn_market(**{str(pid): {"default_position_id": 5, "eligible_slot_ids": [4]}
+                             for pid in (1, 3, 6)})
+    inputs = _inputs(market=market, calendar=calendar, schedule_weeks=calendar, season_weeks=6)
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+    slots = {"C": 1, "BE": 3}
+
+    h2h = _board(resolve_scoring(_league(roster_slots=slots)), mine=[1, 3])
+    roto = _board(resolve_scoring_for_room(_league(roster_slots=slots, scoring_type="roto", categories=NINE_CAT,
+                                          category_win_mode="roto")), mine=[1, 3])
+
+    assert h2h.meta.playoffs.weeks == [2, 3, 4, 5]
+    assert h2h.meta.congestion.sample_weeks == [1, 2, 3, 4, 5] and h2h.meta.congestion.season_weeks == 5
+    assert roto.meta.playoffs is None
+    assert roto.meta.congestion.sample_weeks == [1, 2, 3, 4, 5, 6] and roto.meta.congestion.season_weeks == 6
+    # Nothing is scaled: the season's benched value is the weeks' own sum.
+    for meta, weeks in ((h2h.meta.congestion, 5), (roto.meta.congestion, 6)):
+        assert meta.benched_season == pytest.approx(meta.benched_per_week * weeks, abs=0.5)
+    assert roto.meta.congestion.benched_season > h2h.meta.congestion.benched_season > 0
 
 
 # ---- ESPN's two boards, and which one orders the room ----------------------
@@ -1462,6 +1702,106 @@ def test_a_drafter_can_ask_for_court_visions_board_outright(stub_inputs):
     # The choice is honoured whatever the room would otherwise get.
     assert rank_basis_for(None, None, True, requested="cv") == ("cv", "caller_chose_cv")
     assert rank_basis_for(_league(provider="yahoo"), None, False, requested="cv") == ("cv", "caller_chose_cv")
+
+
+@pytest.mark.unit
+def test_every_draftable_row_carries_the_room_score_whoever_orders_the_board(stub_inputs):
+    """The room score is not only the strip's: every row the caller can still
+    draft carries it and its place by it, on ESPN's board and CV's alike, so
+    the room can show "my team" beside either."""
+    from services.draft_market import rank_basis_for
+
+    espn = _board(resolve_scoring(_league()))
+    cv = _board(resolve_scoring(_league()), session=BoardSession(board_source="cv"))
+
+    for resp in (espn, cv):
+        assert sorted(r.room_rank for r in resp.data) == [1, 2, 3, 4, 5, 6]
+        by_rank = sorted(resp.data, key=lambda r: r.room_rank)
+        assert [r.room_score for r in by_rank] == sorted((r.room_score for r in by_rank), reverse=True)
+        # The strip is the top of that order, and a card's score is its row's.
+        assert [r.player_id for r in resp.recommendations] == [r.player_id for r in by_rank[:5]]
+        assert all(rec.score == row.room_score for rec, row in zip(resp.recommendations, by_rank))
+    assert [(r.player_id, r.room_rank) for r in espn.data] != [(r.player_id, r.board_rank) for r in espn.data]
+    assert rank_basis_for(None, None, True, requested="my_team") == ("my_team", "caller_chose_my_team")
+    assert rank_basis_for(_league(provider="yahoo"), None, False, requested="my_team") == (
+        "my_team", "caller_chose_my_team")
+
+
+@pytest.mark.unit
+def test_my_team_orders_the_whole_board_by_the_room_score(monkeypatch):
+    """`board=my_team` is the strip's ordering applied to every row. I hold a
+    Denver centre in a league that starts one: the other Denver centre would
+    sit behind him every night Denver plays, so Court Vision's second-best
+    player is the last one this roster should take — and a rookie no stat line
+    can value has no place on the board at all."""
+    market = _espn_market(
+        **{"1": {"default_position_id": 5, "eligible_slot_ids": [4, 12]},
+           "3": {"default_position_id": 5, "eligible_slot_ids": [4, 12]},
+           "6": {"default_position_id": 5, "eligible_slot_ids": [4, 12]},
+           "2": {"default_position_id": 1, "eligible_slot_ids": [0, 12]},
+           "9": {"overall_rank": 30, "default_position_id": 4}}
+    )
+    inputs = _inputs(
+        market=market, current_team={2: "BOS", 6: "LAL"},
+        market_only=[MarketOnlyRow(id=9, name="Rookie", espn_id=109, position="F")],
+        names={9: ("Rookie", 109)},
+        # Denver plays four nights a week, never the night Boston and the Lakers do.
+        schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),) * 4 + (frozenset({"BOS", "LAL"}),)),),
+        season_weeks=24,
+    )
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+    league = _league(roster_slots={"C": 1, "PG": 1, "BE": 3})
+
+    cv = _board(resolve_scoring(league), mine=[1], session=BoardSession(board_source="cv"))
+    resp = _board(resolve_scoring(league), mine=[1], session=BoardSession(board_source="my_team"))
+
+    assert resp.meta.rank_basis == "my_team" and resp.meta.rank_basis_requested == "my_team"
+    assert resp.meta.rank_basis_reason == "caller_chose_my_team"
+    # Court Vision's own order has the second Denver centre on top.
+    assert [r.player_id for r in cv.data] == [3, 2, 4, 6, 5, 9]
+    # For this roster he is last of everyone it can score: 28 a game on the
+    # bench four nights a week, at the games he (74 of 82) and my centre (78 of
+    # 82) are expected to play, is more than he is worth over replacement.
+    assert [r.player_id for r in resp.data] == [2, 4, 6, 5, 3, 9]
+    centre = next(r for r in resp.data if r.player_id == 3)
+    benched = 28 * (74 / 82) * (78 / 82) * 4 * 24
+    recs = {r.player_id: r for r in resp.recommendations}
+    congestion = {pid: next(c for c in rec.components if c.key == "congestion").value
+                  for pid, rec in recs.items()}
+    assert congestion[3] == -round(benched, 1)
+    assert centre.room_score == round(recs[3].vorp + congestion[3], 1) < 0
+    # The Laker centre plays the night mine does not, and costs nothing.
+    assert congestion[6] == 0.0
+
+    ranked = [r for r in resp.data if r.room_rank is not None]
+    assert [r.board_rank for r in ranked] == [r.room_rank for r in ranked] == [1, 2, 3, 4, 5]
+    assert [r.room_score for r in ranked] == sorted((r.room_score for r in ranked), reverse=True)
+    # The strip is, as always, the top of the same order.
+    assert [r.player_id for r in resp.recommendations] == [r.player_id for r in ranked[:5]]
+    # The rookie trails every scored row, with no number of any kind.
+    assert resp.data[-1].player_id == 9
+    assert resp.data[-1].room_rank is None and resp.data[-1].board_rank is None
+    # The same numbers ride on Court Vision's board; only the order differs.
+    assert {r.player_id: r.room_rank for r in cv.data} == {r.player_id: r.room_rank for r in resp.data}
+    assert [r.board_rank for r in cv.data] == [r.cv_rank for r in cv.data]
+
+
+@pytest.mark.unit
+def test_a_capped_out_player_has_no_place_on_my_team_board(monkeypatch):
+    market = _espn_market(**{"1": {"default_position_id": 5}, "3": {"default_position_id": 5},
+                             "6": {"default_position_id": 5}})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: _inputs(market=market)))
+    resp = _board(resolve_scoring(_league(position_limits={"C": 1})), mine=[1],
+                  session=BoardSession(board_source="my_team"))
+
+    blocked = [r for r in resp.data if r.cap_blocked]
+    assert {r.player_id for r in blocked} == {3, 6}
+    assert all(r.room_rank is None and r.room_score is None and r.board_rank is None for r in blocked)
+    # Shown, never hidden: they trail everyone the roster can still take, in CV order.
+    assert [r.player_id for r in resp.data][-2:] == [3, 6]
+    assert all(r.room_rank is not None for r in resp.data[:-2])
 
 
 @pytest.mark.unit
