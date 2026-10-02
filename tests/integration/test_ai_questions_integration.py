@@ -184,3 +184,72 @@ class TestTargetLookup:
 
         assert names == {1627734: "Domantas Sabonis"}
         assert team == "Sacramento Kings"
+
+
+class TestFindPlayers:
+    """The router names players; this is where a name becomes an ID (migration-backed: needs `unaccent`)."""
+
+    @pytest.fixture
+    def roster(self, integration_db):
+        rows = [(203999, "Nikola Jokić"), (1628368, "De'Aaron Fox"), (1629023, "P.J. Washington"),
+                (202710, "Jimmy Butler III"), (1628983, "Shai Gilgeous-Alexander"), (1631114, "Jalen Williams"),
+                (1631119, "Jaylin Williams"), (1629627, "Zion Williamson"), (201939, "Stephen Curry"),
+                (203552, "Seth Curry")]
+        for player_id, name in rows:
+            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+
+    def find(self, *names):
+        return asyncio.run(routing._find_players(list(names)))
+
+    def test_a_name_written_any_reasonable_way_is_the_player(self, roster):
+        found = self.find("Nikola Jokic", "DeAaron Fox", "PJ Washington", "Jimmy Butler", "shai gilgeous alexander",
+                          "Steph Curry")
+        assert {name: [i for i, _ in hits] for name, hits in found.items()} == {
+            "Nikola Jokic": [203999], "DeAaron Fox": [1628368], "PJ Washington": [1629023], "Jimmy Butler": [202710],
+            "shai gilgeous alexander": [1628983], "Steph Curry": [201939],
+        }
+
+    def test_a_full_name_is_one_player_and_a_surname_is_everyone_with_it(self, roster):
+        found = self.find("Jalen Williams", "Williams", "Curry", "Michael Jordan", "%", "")
+        assert found["Jalen Williams"] == [(1631114, "Jalen Williams")]
+        assert sorted(i for i, _ in found["Williams"]) == [1631114, 1631119]      # not Williamson
+        assert sorted(i for i, _ in found["Curry"]) == [201939, 203552]
+        assert (found["Michael Jordan"], found["%"], found[""]) == ([], [], [])
+
+    def test_a_player_listed_under_a_shorter_name_is_found_by_the_longer_one(self, integration_db):
+        """The model writes names in full; NBA.com lists some players short. The longest word of
+        "Alexandre Sarr" is not in "Alex Sarr" at all, so the surname has to bring the row in."""
+        rows = [(1642259, "Alex Sarr"), (1629651, "Nic Claxton"), (1629004, "Svi Mykhailiuk"),
+                (1642365, "Nikola Đurišić"), (1628420, "Monte Morris"), (1629652, "Luguentz Dort")]
+        for player_id, name in rows:
+            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+
+        found = self.find("Alexandre Sarr", "Nicolas Claxton", "Sviatoslav Mykhailiuk", "Nikola Durisic",
+                          "Marcus Morris", "Lu Dort")
+
+        assert {name: [i for i, _ in hits] for name, hits in found.items()} == {
+            "Alexandre Sarr": [1642259], "Nicolas Claxton": [1629651], "Sviatoslav Mykhailiuk": [1629004],
+            "Nikola Durisic": [1642365],
+            "Marcus Morris": [], "Lu Dort": [],   # a surname and an initial, or two letters, is not a name
+        }
+
+    def test_a_common_surname_never_pushes_the_whole_name_past_the_limit(self, integration_db, monkeypatch):
+        """ "len" is in every Jalen. Read in table order, they would fill the limit before Alex Len."""
+        monkeypatch.setattr(routing, "_CANDIDATES", 3)
+        names = ["Jalen Green", "Jalen Suggs", "Jalen Duren", "Jalen Brunson", "Alex Len"]
+        for player_id, name in enumerate(names, start=1):
+            Player.create(id=player_id, name=name, name_normalized=name.lower())
+
+        assert self.find("Alex Len") == {"Alex Len": [(5, "Alex Len")]}
+        assert len(self.find("Jalen")["Jalen"]) == 3   # the limit itself still holds: three of the four are read
+
+    def test_a_shorter_listing_is_not_taken_from_a_list_the_limit_cut(self, integration_db, monkeypatch):
+        """The only Cam among some of the Thomases is not known to be the only one."""
+        for player_id, name in enumerate(["Cam Thomas", "Tim Thomas", "Isaiah Thomas"], start=1):
+            Player.create(id=player_id, name=name, name_normalized=name.lower())
+        assert self.find("Cameron Thomas") == {"Cameron Thomas": [(1, "Cam Thomas")]}
+
+        monkeypatch.setattr(routing, "_CANDIDATES", 3)   # as many as were read: there may be more
+
+        assert self.find("Cameron Thomas") == {"Cameron Thomas": []}
+        assert self.find("Cam Thomas") == {"Cam Thomas": [(1, "Cam Thomas")]}   # his whole name is read first

@@ -34,12 +34,25 @@ from schemas.common import ApiStatus
 from services.ai import guards, questions, routing
 from services.ai.client import get_client
 from services.ai.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
-from services.ai.tools import ASK_TOOL_NAMES, ROUTER_TOOL_NAMES, ROUTER_TOOLS, TOOLS, ToolContext, run_tool
+from services.ai.tools import (
+    ASK_TOOL_NAMES,
+    ROUTER_TOOL_NAMES,
+    ROUTER_TOOLS,
+    TOOLS,
+    ToolContext,
+    list_my_teams,
+    run_tool,
+)
 from services.schedule_service import get_season_bounds
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16_000  # a backstop the model never sees; answer length is set by the prompt
 BUDGET_SPENT = "Not run: this request's lookup budget is used up. Answer with what you have."
+# The router gets one round of lookups, then must answer. Each round is a trip to
+# the model the user waits through, so this is the bound on how slow a routed
+# question can get, whatever tools the router gains: lookups go out together, and
+# a model that asks for the same lookup again gets an answer instead of a third trip.
+ROUTER_MAX_MODEL_CALLS = 2
 
 
 @dataclass
@@ -208,19 +221,23 @@ async def _loop(
     allowed: frozenset[str],
     ctx: ToolContext | None = None,
     output_format: dict[str, Any] | None = None,
+    max_model_calls: int | None = None,
 ) -> Any:
     """Run the bounded loop and return the final response.
 
     `output_format` goes on every call, not just the last: it is part of the
     request, so changing it between calls would change the cached prefix.
+    `max_model_calls` tightens the app-wide bound for one endpoint; it never
+    loosens it.
     """
+    call_limit = min(max_model_calls or settings.ai_max_model_calls, settings.ai_max_model_calls)
     output_config: dict[str, Any] = {"effort": settings.ai_effort}
     if output_format is not None:
         output_config["format"] = output_format
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_turn}]
     response: Any = None
-    for call in range(1, settings.ai_max_model_calls + 1):
-        final = call == settings.ai_max_model_calls or len(run.tool_calls) >= settings.ai_max_tool_calls
+    for call in range(1, call_limit + 1):
+        final = call == call_limit or len(run.tool_calls) >= settings.ai_max_tool_calls
         response = await _create(
             model=settings.ai_model,
             max_tokens=MAX_TOKENS,
@@ -271,7 +288,8 @@ async def _answer(question: str, run: _Run) -> str:
 def _router_turn(question: str, view: dict[str, Any], season: str) -> str:
     """The user turn: the season, the current view, then the question. Kept out of the
     system prompt so the cached prefix is the same for everyone."""
-    return f"{season}\nCurrent view: {json.dumps(view, sort_keys=True)}\n\nQuestion: {question}"
+    # Names as written ("Jokić"), not as \u escapes: the model names players back from this
+    return f"{season}\nCurrent view: {json.dumps(view, sort_keys=True, ensure_ascii=False)}\n\nQuestion: {question}"
 
 
 def _season_line_sync() -> str:
@@ -286,6 +304,16 @@ def _season_line_sync() -> str:
         return (f"NBA season: {current} starts {opening.isoformat()}; "
                 f"the latest season with games is {previous_season(current)}.")
     return f"NBA season: {current}, in progress."
+
+
+async def _view_teams(user_id: int) -> list[dict[str, Any]]:
+    """The caller's teams for the view. Without them the router still works -- it
+    looks a team up when it needs one -- so a failure here costs speed, not the answer."""
+    try:
+        return await list_my_teams(user_id)
+    except Exception:
+        get_logger().warning("ai_route_view_teams_failed", user_id=user_id)
+        return []
 
 
 async def _season_line() -> str:
@@ -363,21 +391,24 @@ class AiService:
             await guards.consume_quota(user_id)
             reached_model = True
             async with asyncio.timeout(settings.ai_request_timeout_seconds):
-                view = await routing.describe_view(context)
-                named = [view.get("player"), *view.get("compare", []), view.get("nba_team")]
-                run.names |= {n["name"] for n in named if n and n.get("name")}
+                view, view_players = await routing.describe_view(context, await _view_teams(user_id))
+                run.names |= {name for name in [*view_players.values(), view.get("nba_team", {}).get("name")] if name}
+                season = await _season_line()
                 response = await _loop(
-                    _router_turn(question, view, await _season_line()),
+                    _router_turn(question, view, season),
                     run,
                     system=ROUTER_PROMPT,
                     tools=ROUTER_TOOLS,
                     allowed=ROUTER_TOOL_NAMES,
                     ctx=ToolContext(user_id=user_id),
                     output_format=routing.ANSWER_FORMAT,
+                    max_model_calls=ROUTER_MAX_MODEL_CALLS,
                 )
                 answer = await routing.validate(
-                    routing.parse_answer(_final_text(response)), user_id=user_id, names=run.names)
-            ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target, run.names)
+                    routing.parse_answer(_final_text(response)), user_id=user_id, names=run.names,
+                    view_players=view_players)
+            ungrounded = routing.ungrounded_numbers(answer.text, question, answer.target, run.names,
+                                                    statmuse_query=answer.statmuse_query, season_line=season)
             outcome = "ok"
         except TimeoutError as exc:
             outcome = "AI_TIMEOUT"

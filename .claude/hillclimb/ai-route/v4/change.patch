@@ -1,0 +1,90 @@
+--- a/services/ai/routing.py
++++ b/services/ai/routing.py
+@@ -147,8 +147,10 @@
+ 
+ 
+ def _tidy(target: dict[str, Any]) -> None:
+-    """The two fields ANSWER_SCHEMA cannot bound, where the model's slip is harmless:
+-    "L15" is `l15`, and a games minimum outside 1..82 is no minimum."""
++    """Slips the schema cannot rule out and the server can put right: "L15" is
++    `l15`, a games minimum outside 1..82 is no minimum, and a category filter
++    means the categories format -- /rankings ignores `cats` in any other, so
++    "top shot blockers" would open plain points rankings."""
+     window = target.get("window")
+     if target.get("type") == "terminal" and isinstance(window, str):
+         target["window"] = window.strip().lower() or None
+@@ -157,6 +159,8 @@
+         games = rankings.get("min_games")
+         if isinstance(games, int) and not 1 <= games <= SEASON_GAMES:
+             rankings["min_games"] = None
++        if rankings.get("cats"):
++            rankings["format"] = "categories"
+ 
+ 
+ def _take_names(target: dict[str, Any]) -> tuple[Optional[str], list[str]]:
+--- a/services/ai/service.py
++++ b/services/ai/service.py
+@@ -40,6 +40,11 @@
+ FALLBACK_BETA = "server-side-fallback-2026-07-01"
+ MAX_TOKENS = 16_000  # a backstop the model never sees; answer length is set by the prompt
+ BUDGET_SPENT = "Not run: this request's lookup budget is used up. Answer with what you have."
++# The router gets one round of lookups, then must answer. Each round is a trip to
++# the model the user waits through, so this is the bound on how slow a routed
++# question can get, whatever tools the router gains: lookups go out together, and
++# a model that asks for the same lookup again gets an answer instead of a third trip.
++ROUTER_MAX_MODEL_CALLS = 2
+ 
+ 
+ @dataclass
+@@ -208,19 +213,23 @@
+     allowed: frozenset[str],
+     ctx: ToolContext | None = None,
+     output_format: dict[str, Any] | None = None,
++    max_model_calls: int | None = None,
+ ) -> Any:
+     """Run the bounded loop and return the final response.
+ 
+     `output_format` goes on every call, not just the last: it is part of the
+     request, so changing it between calls would change the cached prefix.
++    `max_model_calls` tightens the app-wide bound for one endpoint; it never
++    loosens it.
+     """
++    call_limit = min(max_model_calls or settings.ai_max_model_calls, settings.ai_max_model_calls)
+     output_config: dict[str, Any] = {"effort": settings.ai_effort}
+     if output_format is not None:
+         output_config["format"] = output_format
+     messages: list[dict[str, Any]] = [{"role": "user", "content": user_turn}]
+     response: Any = None
+-    for call in range(1, settings.ai_max_model_calls + 1):
+-        final = call == settings.ai_max_model_calls or len(run.tool_calls) >= settings.ai_max_tool_calls
++    for call in range(1, call_limit + 1):
++        final = call == call_limit or len(run.tool_calls) >= settings.ai_max_tool_calls
+         response = await _create(
+             model=settings.ai_model,
+             max_tokens=MAX_TOKENS,
+@@ -375,6 +384,7 @@
+                     allowed=ROUTER_TOOL_NAMES,
+                     ctx=ToolContext(user_id=user_id),
+                     output_format=routing.ANSWER_FORMAT,
++                    max_model_calls=ROUTER_MAX_MODEL_CALLS,
+                 )
+                 answer = await routing.validate(
+                     routing.parse_answer(_final_text(response)), user_id=user_id, names=run.names,
+diff --git a/core/settings.py b/core/settings.py
+index 58f7994..57b0fca 100644
+--- a/core/settings.py
++++ b/core/settings.py
+@@ -100,8 +100,11 @@ class Settings(BaseSettings):
+     # below are the per-request and per-day bounds that sit under it.
+     ai_enabled: bool = False
+     anthropic_api_key: Optional[SecretStr] = None
+-    ai_model: str = "claude-opus-5"
+-    ai_effort: str = "medium"
++    # Chosen on the routing eval (evals/ai_route, 2026-10-02): Opus 5.5 at low effort
++    # routed 90 of 92 with no wasted lookups, at half the cost per question of
++    # Opus 5 at medium. Re-run the eval before changing either.
++    ai_model: str = "claude-opus-5-5"
++    ai_effort: str = "low"
+     # Model calls per request. The last one is made without tools, so a request
+     # always ends in an answer rather than a half-finished tool loop.
+     ai_max_model_calls: int = 4
