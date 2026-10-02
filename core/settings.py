@@ -102,7 +102,9 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[SecretStr] = None
     # Chosen on the routing eval (evals/ai_route, 2026-10-02): Opus 5.5 at low effort
     # routed 90 of 92 with no wasted lookups, at half the cost per question of
-    # Opus 5 at medium. Re-run the eval before changing either.
+    # Opus 5 at medium. Re-run the eval before changing either. Both are app-wide,
+    # so /ai/ask runs on them too: it has no caller yet and was last measured on
+    # Opus 5 at medium, so measure it again before Phase 2 (Tell) builds on it.
     ai_model: str = "claude-opus-5-5"
     ai_effort: str = "low"
     # Model calls per request. The last one is made without tools, so a request
