@@ -569,6 +569,30 @@ class TestValidate:
         routed = asyncio.run(routing.validate(named("Thompson"), user_id=42, view_players={1641708: "Amen Thompson"}))
         assert (routed.gap, lookups.names) == ("ambiguous", [["Thompson"]])
 
+    def test_a_comparison_too_long_to_show_is_refused_before_anyone_is_looked_up(self, lookups):
+        """Each name is a query; fifty of them were fifty-one queries and fifty names in the question log."""
+        raw = terminal_answer()
+        raw["target"]["compare"] = [f"Player Number{i}" for i in range(50)]
+
+        routed = asyncio.run(routing.validate(routing.parse_answer(json.dumps(raw)), user_id=42))
+
+        assert (routed.kind, routed.gap, routed.missing) == ("cannot", "invalid_target", "rejected: compare")
+        assert (lookups.names, lookups.ids) == ([], [])
+        # The log keeps enough of the list to show it was too long, not all fifty
+        assert routed.rejected_target["compare"] == [f"Player Number{i}" for i in range(routing.MAX_COMPARE + 2)]
+
+    def test_the_focus_player_named_again_does_not_count_against_the_comparison(self, monkeypatch):
+        others = ["Domantas Sabonis", "Alperen Sengun", "Nikola Jokic", "Amen Thompson", "Klay Thompson"]
+        players = {**PLAYERS, "Amen Thompson": [(1641708, "Amen Thompson")], "Klay Thompson": [(202691, "Klay Thompson")]}
+
+        async def find(names):
+            return {name: players[name] for name in names}
+        monkeypatch.setattr(routing, "_find_players", find)
+
+        routed = asyncio.run(routing.validate(named(compare=others), user_id=42))
+
+        assert (routed.target.player_id, routed.target.compare_ids) == (SENGUN, [SABONIS, JOKIC, 1641708, 202691])
+
     def test_names_outside_player_mode_are_not_looked_up(self, lookups):
         asyncio.run(routing.validate(named("Alperen Sengun", mode="nba_team", nba_team="HOU"), user_id=42))
         assert (lookups.names, lookups.ids) == ([], [([], [], ["HOU"], 42)])

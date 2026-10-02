@@ -51,6 +51,7 @@ MAX_TEXT = 300
 MAX_QUERY = 200
 MAX_SUGGESTIONS = 2
 MAX_COMPARE = 4
+MAX_COMPARE_NAMES = MAX_COMPARE + 1  # as the model lists them: the focus player may be named again
 MAX_NAME = 80
 MAX_LISTED = 4      # players named in a "which one?" reply
 _CANDIDATES = 80    # rows read per name; the most common surname has about twenty
@@ -177,7 +178,9 @@ def _take_names(target: dict[str, Any]) -> tuple[Optional[str], list[str]]:
     raw = target.pop("compare", None)
     compare = [name for name in map(clean, raw if isinstance(raw, list) else []) if name]
     target.update(player_id=None, compare_ids=[])
-    return player, list(dict.fromkeys(compare))
+    # A list too long to show is kept one name past the limit, enough for `validate`
+    # to see it is too long: every name kept is a query to run and a line in the question log
+    return player, list(dict.fromkeys(compare))[:MAX_COMPARE_NAMES + 1]
 
 
 def _unreadable(exc: Exception, fields: Iterable[str] = ()) -> ProviderError:
@@ -544,6 +547,10 @@ async def validate(
     nba_teams: list[str] = []
     if isinstance(target, TerminalTarget):
         if target.mode == "player":
+            if len(answer._compare) > MAX_COMPARE_NAMES:
+                # More than a comparison holds whoever they are: refused before any of them is looked up
+                return _invalid("compare", {**target.model_dump(), "player": answer._player,
+                                            "compare": answer._compare})
             wanted = [name for name in [answer._player, *answer._compare] if name]
         team_ids = [target.team_id] if target.team_id is not None else []
         nba_teams = [target.nba_team.upper()] if target.nba_team else []
