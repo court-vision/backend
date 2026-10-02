@@ -865,6 +865,47 @@ def test_a_room_with_no_lineup_on_file_is_measured_against_espns_default(stub_in
     detail = next(c for c in DraftBoardService._recommend(unsized)[0].components if c.key == "vorp").detail
     assert detail == "no league size on file — measured from zero"
 
+    # A league whose own lineup never synced: the same ten seats place its bar.
+    unsynced = DraftBoardService._room_terms(
+        pool, resolve_scoring(_league(roster_slots={})), BoardSession(league_size=12))
+    assert {t.bar for t in unsynced} == {t.bar for t in sized}
+
+
+@pytest.mark.unit
+def test_a_league_less_room_fields_espns_default_lineup(monkeypatch):
+    """A mock has no league to read a lineup from, and ESPN's default is what a
+    mock lobby drafts for. With it the roster zone has seats to fill and the
+    my-team order something to measure against: here a third centre has only
+    the three utility seats left to share. A league whose settings never
+    synced is different — its real lineup is unknown — and stays empty."""
+    market = _espn_market(**{str(pid): {"default_position_id": 5, "eligible_slot_ids": [4, 12]}
+                             for pid in (1, 3, 6, 11, 12, 13)})
+    inputs = _inputs(
+        market=market,
+        pool=_inputs().pool + [_row(pid, fpts=12.0, pts=12) for pid in (11, 12, 13)],
+        schedule_weeks=(SampleWeek(3, (frozenset({"DEN"}),) * 2),), season_weeks=24,
+    )
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs",
+                        staticmethod(lambda my_ids, session_id=None: inputs))
+
+    mock = _board(resolve_scoring(None), mine=[1, 3, 11, 12],
+                  session=BoardSession(league_size=8, rounds=13, board_source="my_team"))
+
+    assert mock.meta.roster_slots == {
+        "PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1}
+    assert mock.meta.congestion.slots == 10
+    # Four Denver centres fill C and the three utility seats; a fifth sits.
+    fifth = next(r for r in mock.recommendations if r.player_id == 13)
+    congestion = next(c for c in fifth.components if c.key == "congestion")
+    assert congestion.value < 0 and "would bench" in congestion.detail
+    assert next(r for r in mock.data if r.player_id == 13).room_score == fifth.score
+
+    unsynced = _board(resolve_scoring(_league(roster_slots={})), mine=[1, 3, 11, 12],
+                      session=BoardSession(board_source="my_team"))
+    assert unsynced.meta.roster_slots == {} and unsynced.meta.congestion.slots == 0
+    details = {c.detail for r in unsynced.recommendations for c in r.components if c.key == "congestion"}
+    assert details == {"no lineup slots known"}
+
 
 # ---- the fetch layer itself ------------------------------------------------
 

@@ -211,8 +211,14 @@ DEFAULT_PROJECTED_GP = 65
 
 RECOMMENDATION_COUNT = 5
 
-# Starting seats assumed when a room has no lineup on file: ESPN's default
-# (PG, SG, SF, PF, C, G, F and three UT). Only places the replacement level.
+# ESPN's default lineup: what an ESPN mock lobby drafts for, and so what a room
+# with no league of its own is taken to field — the same assumption that gives
+# it ESPN's default playoff weeks. Thirteen roster spots, ten of them starters.
+DEFAULT_ROSTER_SLOTS: dict[str, int] = {
+    "PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UT": 3, "BE": 3, "IR": 1,
+}
+# Starting seats assumed for a league whose own lineup never synced. Only
+# places the replacement level: with no lineup, nothing can be benched.
 DEFAULT_STARTERS = 10
 
 # How far ADP has to sit from the pick in question before the answer stops
@@ -1049,7 +1055,17 @@ class DraftBoardService:
 
     @staticmethod
     def _roster_slots(scoring: "ResolvedScoring") -> dict[str, int]:
-        slots = getattr(scoring.league, "roster_slots", None) if scoring.league is not None else None
+        """The lineup the room drafts for.
+
+        A league's own, as synced. A room with no league at all — a mock, a
+        manual room — fields ESPN's default, so its roster zone has seats to
+        fill and the `my_team` order has a lineup to measure against. A league
+        whose settings never synced is the one case left empty: its real
+        lineup is unknown, and assuming the default would say otherwise.
+        """
+        if scoring.league is None:
+            return dict(DEFAULT_ROSTER_SLOTS)
+        slots = getattr(scoring.league, "roster_slots", None)
         return dict(slots) if slots else {}
 
     @staticmethod
@@ -1413,7 +1429,7 @@ class DraftBoardService:
         left, so the survivors of a run are worth what they are, not a premium.
         """
         seats = active_slots(roster_slots)
-        # A room with no lineup on file is measured against ESPN's default one.
+        # A league whose lineup never synced is measured against ESPN's default size.
         starting = len(seats) if roster_slots else DEFAULT_STARTERS
         need = league_size * starting
         available = sorted((c[key] for c in pool), reverse=True)
