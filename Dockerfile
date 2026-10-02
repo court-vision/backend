@@ -41,4 +41,6 @@ USER appuser
 
 EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
+# serve.py runs uvicorn on IPv4 (Railway's public proxy) and on IPv6 (its
+# private network, where data-platform calls the jobs routes).
+CMD ["python", "serve.py"]
