@@ -91,6 +91,8 @@ jobs:
   # the jobs routes).
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -108,8 +110,12 @@ jobs:
           --health-retries=5
 
     steps:
+      # No token left in .git/config: the build below copies the checkout into
+      # the image (and .dockerignore keeps .git out of it as well).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

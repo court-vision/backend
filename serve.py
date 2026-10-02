@@ -20,6 +20,7 @@ Local development is unchanged: `uvicorn main:app --reload --port 8000`.
 
 from __future__ import annotations
 
+import errno
 import logging
 import socket
 import sys
@@ -28,6 +29,9 @@ import uvicorn
 
 PORT = 8080
 STARTUP_FAILURE = 3  # uvicorn's own exit code when the application fails to start
+
+# What binding [::] raises on a host that has no IPv6.
+NO_IPV6 = frozenset({errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT})
 
 log = logging.getLogger("uvicorn.error")
 
@@ -54,7 +58,12 @@ def open_sockets(port: int = PORT) -> list[socket.socket]:
     try:
         sockets.append(_bound(socket.AF_INET6, "::", port))
     except OSError as exc:
-        log.warning("No IPv6 listener (%s): calls over the private network will be refused", exc)
+        # The API starts either way. The IPv4 listener serves every user, and
+        # refusing to start over the private one would trade a refused jobs
+        # call for an outage. A host without IPv6 is expected somewhere;
+        # anything else is not, and is logged as an error.
+        level = logging.WARNING if exc.errno in NO_IPV6 else logging.ERROR
+        log.log(level, "No IPv6 listener (%s): calls over the private network will be refused", exc)
     return sockets
 
 

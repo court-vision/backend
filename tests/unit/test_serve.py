@@ -3,7 +3,9 @@ The container's launcher: one server heard on IPv4 (Railway's public proxy) and
 on IPv6 (its private network), and still starting where there is no IPv6.
 """
 
+import errno
 import http.client
+import logging
 import socket
 import threading
 import time
@@ -88,12 +90,22 @@ def test_one_server_answers_on_both(sockets):
     assert not thread.is_alive()
 
 
-def test_a_host_without_ipv6_still_listens_on_ipv4(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "error, level",
+    [
+        # No IPv6 on the host: expected somewhere, so a warning.
+        (OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol"), logging.WARNING),
+        (OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address"), logging.WARNING),
+        # Anything else is not expected. The API still starts; the log says so louder.
+        (OSError(errno.EADDRINUSE, "Address already in use"), logging.ERROR),
+    ],
+)
+def test_without_the_ipv6_listener_the_api_still_starts_on_ipv4(monkeypatch, caplog, error, level):
     real = serve._bound
 
     def no_ipv6(family, host, port):
         if family == socket.AF_INET6:
-            raise OSError(97, "Address family not supported by protocol")
+            raise error
         return real(family, host, port)
 
     monkeypatch.setattr(serve, "_bound", no_ipv6)
@@ -106,7 +118,8 @@ def test_a_host_without_ipv6_still_listens_on_ipv4(monkeypatch, caplog):
         serve.log.removeHandler(caplog.handler)
     try:
         assert [s.family for s in opened] == [socket.AF_INET]
-        assert "No IPv6 listener" in caplog.text
+        (record,) = [r for r in caplog.records if "No IPv6 listener" in r.getMessage()]
+        assert record.levelno == level
     finally:
         for sock in opened:
             sock.close()
