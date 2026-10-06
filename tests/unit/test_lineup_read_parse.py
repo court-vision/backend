@@ -117,6 +117,16 @@ def test_scoring_period_falls_back_to_status_then_none():
 
 
 @pytest.mark.unit
+def test_a_requested_day_is_the_board_period_while_status_keeps_today():
+    body = payload(period=15)                     # ESPN echoes the requested day at the top level
+    body["status"] = {"latestScoringPeriod": 12, "finalScoringPeriod": 167}
+    parsed = parse_espn_lineup(body, team_name="Lvl. 3 Goblins")
+    assert (parsed.scoring_period_id, parsed.current_scoring_period_id, parsed.final_scoring_period_id) == (15, 12, 167)
+    body["status"] = {}
+    assert parse_espn_lineup(body, team_name="Lvl. 3 Goblins").current_scoring_period_id is None   # never the echo
+
+
+@pytest.mark.unit
 def test_slot_rows_follow_render_order_and_skip_unused_slots():
     rows = slot_rows({int(k): v for k, v in COUNTS.items()})
     assert [(r.slot, r.count) for r in rows] == [("PG", 1), ("SG", 1), ("SF", 1), ("PF", 1), ("C", 1), ("G", 1),

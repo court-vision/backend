@@ -2,7 +2,7 @@
 /v1/internal/teams/{id}/lineup[/plan|/moves] over the test app: ownership via the
 usual `ensure_team_owned` stub, the credential loader stubbed at the route, and
 the service replaced per test so every documented status is exercised:
-200 (board / Yahoo empty state), 403 ROSTER_WRITE_DISABLED, 409 ROSTER_STALE
+200 (board / later day / Yahoo empty state), 400 SCORING_PERIOD_OUT_OF_RANGE, 403 ROSTER_WRITE_DISABLED, 409 ROSTER_STALE
 with the fresh board, 422 ROSTER_MOVE_INVALID with codes, 409 ROSTER_WRITE_REJECTED,
 503 ROSTER_WRITE_UNAVAILABLE, and FastAPI's own 422 for a malformed body.
 """
@@ -62,6 +62,30 @@ def test_get_lineup_returns_the_board(authed_client, owned, monkeypatch):
     body = r.json()
     assert body["data"]["roster_version"] == "abc" and body["data"]["can_write"] is False
     assert body["data"]["write_blocked_reason"] == "writes_disabled"
+
+
+@pytest.mark.api
+def test_get_lineup_passes_a_requested_day_through(authed_client, owned, monkeypatch):
+    _league(monkeypatch, ESPN)
+    seen = []
+    async def fake(team, league_info, scoring_period_id=None):
+        seen.append(scoring_period_id)
+        return LineupStateResp(status=ApiStatus.SUCCESS, message="ok", data=STATE)
+    monkeypatch.setattr(svc.LineupEditorService, "read_state", staticmethod(fake))
+    assert authed_client.get("/v1/internal/teams/7/lineup?scoring_period_id=4").status_code == 200
+    assert authed_client.get("/v1/internal/teams/7/lineup").status_code == 200
+    assert seen == [4, None]
+    assert authed_client.get("/v1/internal/teams/7/lineup?scoring_period_id=0").status_code == 422
+    assert seen == [4, None]
+
+
+@pytest.mark.api
+def test_out_of_range_day_is_a_400(authed_client, owned, monkeypatch):
+    from core.errors import BadRequestError
+    _league(monkeypatch, ESPN)
+    _stub(monkeypatch, "read_state", BadRequestError("SCORING_PERIOD_OUT_OF_RANGE", "ESPN day 1 has passed"))
+    r = authed_client.get("/v1/internal/teams/7/lineup?scoring_period_id=1")
+    assert r.status_code == 400 and r.json()["error_code"] == "SCORING_PERIOD_OUT_OF_RANGE"
 
 
 @pytest.mark.api

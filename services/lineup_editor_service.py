@@ -6,7 +6,7 @@ Three entry points share one write chain:
 
     read_state    GET  /teams/{id}/lineup         the editor's board
     plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes)
-    apply_manual  POST /teams/{id}/lineup/moves   the user's own moves
+    apply_manual  POST /teams/{id}/lineup/moves   the user's own moves, for today or a later day
     evaluate      POST /jobs/lineup/evaluate      the alerts pipeline: plan, and
                                                   apply it for auto-lineup users
 
@@ -217,12 +217,13 @@ class LineupEditorService:
     # ---- reads ----
 
     @staticmethod
-    async def read_state(team, league_info: LeagueInfo) -> LineupStateResp:
+    async def read_state(team, league_info: LeagueInfo, scoring_period_id: Optional[int] = None) -> LineupStateResp:
         adapter = get_provider_adapter(league_info.provider)
         if not adapter.capabilities(league_info).lineup_read:
             return LineupStateResp(status=ApiStatus.SUCCESS,
                                    message=unavailable_message("lineup_editing", league_info.provider), data=None)
-        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team),
+                                          scoring_period_id=scoring_period_id)
         return LineupStateResp(status=ApiStatus.SUCCESS, message="Lineup fetched", data=state)
 
     @staticmethod
@@ -249,7 +250,13 @@ class LineupEditorService:
             raise RosterWriteBlocked(message=unavailable_message("lineup_changes", league_info.provider),
                                      data={"reason": "provider_not_supported"})
 
-        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+        slots = _roster_slots(team)
+        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
+        if state.scoring_period_id and req.expected_scoring_period_id > state.scoring_period_id:
+            # The client is editing a later day. An earlier day than today falls through to
+            # ROSTER_STALE below with today's board, as it always has when the day rolls over.
+            state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots,
+                                              scoring_period_id=req.expected_scoring_period_id)
         if not state.can_write:
             raise RosterWriteBlocked(data={"reason": state.write_blocked_reason})
         if state.roster_version != req.roster_version or state.scoring_period_id != req.expected_scoring_period_id:
@@ -263,7 +270,7 @@ class LineupEditorService:
 
         fresh, verified, audit_id = await LineupEditorService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
-            moves=moves, source="manual", fallback_slot_counts=_roster_slots(team),
+            moves=moves, source="manual", fallback_slot_counts=slots,
         )
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
@@ -364,7 +371,8 @@ class LineupEditorService:
 
         try:
             fresh = await get_provider_adapter(league_info.provider).read_lineup(
-                team_id, league_info, fallback_slot_counts=fallback_slot_counts
+                team_id, league_info, fallback_slot_counts=fallback_slot_counts,
+                scoring_period_id=state.scoring_period_id if state.future else None,
             )
         except Exception as exc:
             # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
