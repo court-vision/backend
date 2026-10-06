@@ -1,6 +1,7 @@
 """
-/v1/internal/jobs/lineup/evaluate: the pipeline-token route. No Clerk user — a
-missing or wrong bearer is refused, the right one reaches the (stubbed) service.
+/v1/internal/jobs/lineup/evaluate and /jobs/pickups/execute: the pipeline-token
+routes. No Clerk user — a missing or wrong bearer is refused, the right one reaches
+the (stubbed) service.
 """
 
 import pytest
@@ -8,7 +9,9 @@ import pytest
 from core import pipeline_auth
 from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluationData, LineupEvaluationResp
+from schemas.scheduled_pickup import PickupExecuteData, PickupExecuteResp
 from services import lineup_editor_service as svc
+from services import scheduled_pickup_service as pickups
 
 BODY = {"team_id": 21, "user_id": 11, "nba_date": "2026-10-20", "apply": False}
 
@@ -49,6 +52,36 @@ def test_unconfigured_token_is_a_500(client, monkeypatch):
     monkeypatch.setattr(pipeline_auth, "PIPELINE_API_TOKEN", None)
     r = client.post("/v1/internal/jobs/lineup/evaluate", json=BODY, headers={"Authorization": "Bearer x"})
     assert r.status_code == 500
+
+
+# ---- /v1/internal/jobs/pickups/execute ------------------------------------------
+
+PICKUPS = "/v1/internal/jobs/pickups/execute"
+
+
+@pytest.mark.api
+def test_pickups_missing_or_wrong_bearer_is_refused(client, token):
+    assert client.post(PICKUPS, json={}).status_code in (401, 403)
+    assert client.post(PICKUPS, json={}, headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+@pytest.mark.api
+def test_pickups_right_bearer_reaches_the_service_with_defaults(client, token, monkeypatch):
+    seen = []
+
+    async def fake(req):
+        seen.append(req)
+        return PickupExecuteResp(status=ApiStatus.SUCCESS, message="0 pickup(s) attempted",
+                                 data=PickupExecuteData(due=0, results=[]))
+
+    monkeypatch.setattr(pickups.ScheduledPickupService, "execute_due", staticmethod(fake))
+    r = client.post(PICKUPS, json={}, headers={"Authorization": "Bearer pipe-token"})
+    assert r.status_code == 200 and r.json()["data"] == {"due": 0, "results": []}
+    assert seen[0].limit == 4 and seen[0].now is None
+
+    r = client.post(PICKUPS, json={"limit": 2, "now": "2026-10-22T00:05:00Z"}, headers={"Authorization": "Bearer pipe-token"})
+    assert r.status_code == 200 and seen[1].limit == 2 and seen[1].now.isoformat() == "2026-10-22T00:05:00+00:00"
+    assert client.post(PICKUPS, json={"limit": 0}, headers={"Authorization": "Bearer pipe-token"}).status_code == 422
 
 
 # ---- /v1/internal/jobs/valuation/standard --------------------------------------

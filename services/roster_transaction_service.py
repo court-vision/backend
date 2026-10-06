@@ -3,7 +3,8 @@ Add/drop transactions: read the board, check the request against it and ESPN's
 player pool, send it through the private fantasy-writer, verify by re-reading,
 and audit in usr.roster_moves as a `kind='transaction'` row.
 
-One entry point:
+One entry point, plus the scheduled-pickup executor, which reuses `_validate`
+and `_write` (services.scheduled_pickup_service):
 
     apply    POST /teams/{id}/roster/transactions    pick up and/or release one player
 
@@ -148,9 +149,13 @@ class RosterTransactionService:
 
     @staticmethod
     async def _validate(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
-                        ) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
+                        *, for_future_day: bool = False) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
         """The board's answer for the drop and ESPN's pool answer for the add — or the
-        first reason the request cannot go. Only the add needs the pool lookup."""
+        first reason the request cannot go. Only the add needs the pool lookup.
+
+        `for_future_day` is the scheduled-pickup check: today's locks and a waiver
+        period say nothing about a later day, so those three refusals are skipped and
+        only the roster / pool facts (on the board, in the league, on another team) count."""
         if add is None and drop is None:
             raise _invalid("nothing_to_do", "Choose a player to add or a player to drop")
         if add is not None and add == drop:
@@ -162,7 +167,7 @@ class RosterTransactionService:
             holder = on_board.get(drop)
             if holder is None:
                 raise _invalid("drop_not_on_roster", "That player is not on your roster", drop)
-            if holder.locked:
+            if holder.locked and not for_future_day:
                 raise _invalid("drop_locked", f"{holder.name} is locked for today and cannot be dropped", drop)
 
         pool_entry: Optional[PoolEntry] = None
@@ -176,12 +181,12 @@ class RosterTransactionService:
             pool_entry = entries.get(add)
             if pool_entry is None:
                 raise _invalid("add_not_found", f"{label} does not list that player in this league", add)
-            if pool_entry.status == "WAIVERS":
+            if pool_entry.status == "WAIVERS" and not for_future_day:
                 until = f" until {pool_entry.waivers_until.isoformat()}" if pool_entry.waivers_until else ""
                 raise _invalid("add_on_waivers", f"{pool_entry.name} is on waivers{until} — place the claim on {label}", add)
             if pool_entry.status == "ONTEAM" or pool_entry.on_team_id:
                 raise _invalid("add_not_available", f"{pool_entry.name} is on another team's roster", add)
-            if pool_entry.roster_locked:
+            if pool_entry.roster_locked and not for_future_day:
                 raise _invalid("add_locked", f"{pool_entry.name} is locked for today and cannot be added", add)
         return holder, pool_entry
 
@@ -190,12 +195,13 @@ class RosterTransactionService:
     @staticmethod
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
                      add: Optional[int], drop: Optional[int], moves: list[dict[str, Any]],
-                     fallback_slot_counts) -> tuple[LineupState, bool, int]:
+                     fallback_slot_counts, source: str = "manual") -> tuple[LineupState, bool, int]:
+        """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
         audit_id = await run_db("roster_txn.audit_insert", _audit_insert, user_id, team_id,
-                                date.fromisoformat(state.nba_date), state.scoring_period_id, "manual",
+                                date.fromisoformat(state.nba_date), state.scoring_period_id, source,
                                 moves, key, kind="transaction")
         try:
             result = await get_roster_writer(league_info.provider).apply_transaction(league_info, state, add, drop, key)

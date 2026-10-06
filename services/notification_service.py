@@ -3,8 +3,9 @@ Notification Service
 
 Emails users about today's lineup: either the fill plan the backend suggested
 (`send_lineup_alert`) or the moves auto-lineup already applied to ESPN
-(`send_auto_lineup_summary`). Sends through Resend when configured; otherwise
-logs the email and reports success (the stub path for dev and tests).
+(`send_auto_lineup_summary`) — and what became of a scheduled pickup
+(`send_scheduled_pickup_result`). Sends through Resend when configured;
+otherwise logs the email and reports success (the stub path for dev and tests).
 
 Mirrored byte-for-byte between backend and data-platform
 (scripts/check_backend_mirror.py) — keep it free of service-specific imports.
@@ -39,7 +40,7 @@ class NotificationResult:
 
 
 class NotificationService:
-    """Sends lineup alert and auto-lineup summary emails."""
+    """Sends lineup alert, auto-lineup summary and scheduled-pickup result emails."""
 
     def __init__(self):
         self.log = get_logger("notification_service")
@@ -121,6 +122,35 @@ class NotificationService:
 
         return self._send_email(email, subject, body)
 
+    def send_scheduled_pickup_result(
+        self,
+        user,
+        team,
+        result: dict,
+        prefs=None,
+    ) -> NotificationResult:
+        """
+        Email the user what became of a scheduled pickup once the executor settled it.
+
+        Args:
+            result: The backend's PickupResult as a dict — `outcome` (executed |
+                skipped | failed | expired), `reason`, `detail`, `add` / `drop`
+                ({name, team}), `nba_date` (ISO), `seated_slot`, `verified`.
+        """
+        email = self._recipient(user, prefs)
+        team_name = self._team_name(team)
+        subject, body = self._build_pickup_email(team_name, result)
+
+        self.log.info(
+            "sending_scheduled_pickup_result",
+            to=email,
+            outcome=result.get("outcome"),
+            reason=result.get("reason"),
+            subject=subject,
+        )
+
+        return self._send_email(email, subject, body)
+
     # ---- body rendering ---------------------------------------------------------
 
     def _build_alert_body(
@@ -162,6 +192,82 @@ class NotificationService:
         lines.append("")
         lines.append(SIGNATURE)
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_pickup_email(team_name: str, result: dict) -> tuple[str, str]:
+        """Subject and body for one settled scheduled pickup."""
+        add = (result.get("add") or {}).get("name") or "the player"
+        drop = (result.get("drop") or {}).get("name")
+        day = NotificationService._format_day(result.get("nba_date"))
+        outcome = result.get("outcome")
+        reason = result.get("reason") or ""
+        detail = result.get("detail")
+        lines = [f"Team: {team_name}", f"Pickup for: {day}", ""]
+
+        if outcome == "executed":
+            subject = f"Court Vision picked up {add} for {team_name}"
+            made = f"Added {add}" + (f", dropped {drop}" if drop and reason not in ("drop_missing", "drop_locked") else "")
+            made += " on ESPN."
+            if result.get("verified") is False:
+                made += UNVERIFIED_SUFFIX
+            lines.append(made)
+            seat = result.get("seated_slot")
+            if seat:
+                lines.append(f"He is in your {seat} slot for {day}.")
+            else:
+                lines.append(f"He is on your bench for {day} — set your lineup.")
+            if reason == "drop_missing" and drop:
+                lines.append(f"{drop} was no longer on your roster, so this was an add only.")
+            elif reason == "drop_locked" and drop:
+                lines.append(f"{drop} was locked for the day, so this was an add only.")
+        elif outcome == "skipped":
+            subject = f"Pickup skipped: {add} for {team_name}"
+            why = {
+                "unavailable": f"{add} is no longer available in your league.",
+                "already_on_roster": f"{add} is already on your roster.",
+                "drop_missing": f"{drop} is no longer on your roster and there was no open seat.",
+                "drop_locked": f"{drop} was locked for the day and there was no open seat.",
+                "roster_full": "your roster is full.",
+            }.get(reason, (reason or "nothing to do") + ".")
+            lines.append(f"The pickup was not made: {why}")
+            lines.append("Nothing was changed on ESPN.")
+        elif outcome == "expired":
+            subject = f"Pickup missed: {add} for {team_name}"
+            why = {
+                "locked_on_day": f"{add} was locked by the time the move was possible.",
+                "deadline": "the day's games started before the move was possible.",
+                "day_passed": "the day had already passed.",
+            }.get(reason, (reason or "the window closed") + ".")
+            lines.append(f"The pickup could not be made in time: {why}")
+            lines.append("Nothing was changed on ESPN.")
+        else:
+            subject = f"Pickup failed: {add} for {team_name}"
+            why = {
+                "espn_rejected": "ESPN refused the transaction.",
+                "auth_expired": "your ESPN connection has expired — reconnect it on Court Vision.",
+                "max_attempts": "it was retried too many times without going through.",
+                "team_not_found": "the team is no longer on Court Vision.",
+            }.get(reason, (reason or "an unexpected error") + ".")
+            lines.append(f"The pickup failed: {why}")
+            if detail and reason == "espn_rejected":
+                lines.append(f"ESPN said: {detail}")
+            lines.append("Nothing was changed on ESPN.")
+
+        lines.append("")
+        lines.append(SIGNATURE)
+        return subject, "\n".join(lines)
+
+    @staticmethod
+    def _format_day(iso_date) -> str:
+        """\"Thu, Nov 12\" from an ISO date; the raw value when it is not one."""
+        if not iso_date:
+            return "that day"
+        try:
+            from datetime import date as _date
+            d = _date.fromisoformat(str(iso_date))
+        except ValueError:
+            return str(iso_date)
+        return f"{d.strftime('%a')}, {d.strftime('%b')} {d.day}"
 
     def _header_lines(self, team, first_game_time) -> list[str]:
         return [

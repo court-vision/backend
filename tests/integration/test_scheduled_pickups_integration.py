@@ -1,0 +1,201 @@
+"""
+Integration: migration 0028 against the real schema.
+
+The unit layer decides what each attempt does; here the table decides what may be
+stored and claimed: the status CHECK, one pending row per (team, player), the
+widened roster_moves source CHECK (with the auto-lineup index untouched), the
+FKs, and the repository functions the service runs through `run_db` — the claim
+lease, the writes-off release, settle / defer, cancel, list — plus the rollback.
+"""
+
+import json
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from peewee import IntegrityError
+
+from db.base import db
+from db.migrate import MIGRATIONS_DIR
+from db.models.roster_moves import RosterMove
+from db.models.scheduled_pickups import ScheduledPickup
+from db.models.teams import Team
+from db.models.users import User
+from services import scheduled_pickup_service as svc
+
+pytestmark = [pytest.mark.integration]
+
+DAY = date(2026, 10, 22)
+NOW = datetime(2026, 10, 21, 23, 5, tzinfo=timezone.utc)
+KAWHI, EDWARDS = 6450, 4594268
+
+
+@pytest.fixture
+def user(integration_db):
+    return User.create(email="pickups@courtvision.dev", clerk_user_id="user_pickups", created_at=datetime.utcnow())
+
+
+@pytest.fixture
+def team(user):
+    info = {"provider": "espn", "league_id": 426893737, "team_name": "Lvl. 3 Goblins", "year": 2027}
+    return Team.create(user_id=user.user_id, team_identifier="426893737Lvl. 3 Goblins", league_info=json.dumps(info))
+
+
+def _pickup(user, team, *, add=KAWHI, drop=EDWARDS, not_before=NOW - timedelta(hours=1), **kw):
+    fields = dict(user=user.user_id, team=team.team_id, add_player_id=add, drop_player_id=drop, add_name="Kawhi Leonard",
+                  add_team="LAC", drop_name="Anthony Edwards", drop_team="MIN", scoring_period_id=3, nba_date=DAY,
+                  not_before_at=not_before, deadline_at=NOW + timedelta(days=1), created_at=NOW, updated_at=NOW)
+    fields.update(kw)
+    return ScheduledPickup.create(**fields)
+
+
+def _source_check_values():
+    (definition,) = db.execute_sql(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'roster_moves_source_check' AND conrelid = 'usr.roster_moves'::regclass"
+    ).fetchone()
+    return definition
+
+
+# ---- 0028 ---------------------------------------------------------------------------
+
+
+def test_0028_is_applied_by_the_chain(integration_db):
+    ids = {r[0] for r in db.execute_sql("SELECT migration_id FROM public._yoyo_migration").fetchall()}
+    assert "0028__scheduled_pickups" in ids
+    assert "'scheduled'" in _source_check_values()
+
+
+def test_scheduled_is_an_audit_source_outside_the_auto_index(user, team):
+    for _ in range(2):   # two counted scheduled writes on one day both insert: not the auto dedup's business
+        RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, scoring_period_id=3, source="scheduled",
+                          kind="transaction", status="applied", moves=[{"player_id": KAWHI, "action": "add", "name": "K"}])
+    assert RosterMove.select().where(RosterMove.source == "scheduled").count() == 2
+    with pytest.raises(IntegrityError):
+        RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, source="cron", status="applied", moves=[])
+
+
+def test_one_pending_row_per_team_and_player(user, team):
+    first = _pickup(user, team)
+    with pytest.raises(IntegrityError):
+        _pickup(user, team, scoring_period_id=4)
+    _pickup(user, team, add=99)                                     # another player is fine
+    svc._cancel_pickup(team.team_id, first.id, NOW)
+    _pickup(user, team)                                             # a settled row frees the slot
+
+
+def test_the_status_check(user, team):
+    with pytest.raises(IntegrityError):
+        _pickup(user, team, status="queued")
+
+
+def test_fks_cascade_and_null(user, team):
+    audit = RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, source="scheduled", kind="transaction",
+                              status="applied", moves=[])
+    row = _pickup(user, team, status="executed", audit_id=audit.id, executed_at=NOW)
+    audit.delete_instance()
+    assert ScheduledPickup.get_by_id(row.id).audit_id is None
+    team.delete_instance()
+    assert ScheduledPickup.select().count() == 0
+
+
+# ---- repository functions ---------------------------------------------------------------
+
+
+def test_claim_takes_only_due_unleased_rows_in_order_and_leases_them(user, team):
+    late = _pickup(user, team, add=1, not_before=NOW - timedelta(minutes=5))
+    early = _pickup(user, team, add=2, not_before=NOW - timedelta(hours=2))
+    _pickup(user, team, add=3, not_before=NOW + timedelta(hours=1))                          # not due yet
+    _pickup(user, team, add=4, next_attempt_at=NOW + timedelta(minutes=30))                  # deferred
+    _pickup(user, team, add=5, not_before=NOW - timedelta(minutes=3),
+            next_attempt_at=NOW - timedelta(minutes=1))                                      # deferral elapsed
+    _pickup(user, team, add=6, status="cancelled")
+
+    rows = svc._claim_due(NOW, limit=2)
+    assert [r.add_player_id for r in rows] == [2, 1]                   # soonest first, the limit respected
+    for r in rows:
+        assert r.attempts == 1 and r.next_attempt_at == NOW + svc.LEASE and r.last_attempt_at == NOW
+
+    assert [r.add_player_id for r in svc._claim_due(NOW, limit=10)] == [5]   # the leased two are invisible
+    assert svc._claim_due(NOW, limit=10) == []
+    stored = ScheduledPickup.get_by_id(early.id)
+    assert stored.attempts == 1 and stored.status == "pending"
+    assert ScheduledPickup.get_by_id(late.id).attempts == 1
+    # after the lease the rows are claimable again, and the attempt count keeps growing
+    again = svc._claim_due(NOW + svc.LEASE, limit=10)
+    assert [r.add_player_id for r in again] == [2, 1, 5]
+    assert all(r.attempts == 2 for r in again)
+
+
+def test_release_pushes_due_rows_without_counting_an_attempt(user, team):
+    row = _pickup(user, team)
+    assert svc._release_due(NOW, NOW + svc.RETRY) == 1
+    stored = ScheduledPickup.get_by_id(row.id)
+    assert (stored.attempts, stored.next_attempt_at, stored.reason) == (0, NOW + svc.RETRY, "writes_disabled")
+    assert svc._claim_due(NOW, limit=10) == []
+
+
+def test_settle_and_defer(user, team):
+    row = _pickup(user, team)
+    (claimed,) = svc._claim_due(NOW, limit=1)
+    svc._defer_row(claimed.id, NOW, NOW + svc.RETRY, "add_locked", "Kawhi is locked")
+    stored = ScheduledPickup.get_by_id(row.id)
+    assert (stored.status, stored.reason, stored.detail, stored.next_attempt_at) == ("pending", "add_locked", "Kawhi is locked", NOW + svc.RETRY)
+
+    audit = RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, source="scheduled", kind="transaction",
+                              status="applied", moves=[])
+    svc._settle_row(row.id, NOW, status="executed", reason=None, detail=None, audit_id=audit.id, lineup_audit_id=None,
+                    seated_slot_id=11, executed_at=NOW)
+    stored = ScheduledPickup.get_by_id(row.id)
+    assert (stored.status, stored.audit_id, stored.seated_slot_id, stored.executed_at) == ("executed", audit.id, 11, NOW)
+    assert stored.next_attempt_at is None and stored.reason is None
+
+
+def test_cancel(user, team):
+    other = Team.create(user_id=user.user_id, team_identifier="x", league_info="{}")
+    row = _pickup(user, team)
+    assert svc._cancel_pickup(other.team_id, row.id, NOW) is None
+    prior, stored = svc._cancel_pickup(team.team_id, row.id, NOW)
+    assert prior == "pending" and stored.status == "cancelled" and stored.next_attempt_at is None
+    prior, stored = svc._cancel_pickup(team.team_id, row.id, NOW)
+    assert prior == "cancelled"
+
+
+def test_list_keeps_pending_and_the_recent_week(user, team):
+    _pickup(user, team, add=1)
+    _pickup(user, team, add=2, status="executed", updated_at=NOW - timedelta(days=2))
+    _pickup(user, team, add=3, status="skipped", updated_at=NOW - timedelta(days=9))
+    rows = svc._list_pickups(team.team_id, NOW - timedelta(days=7))
+    assert sorted(r.add_player_id for r in rows) == [1, 2]
+
+
+def test_window_reads_the_schedule(user, team):
+    from db.models.nba.games import Game
+    from db.models.nba.teams import NBATeam
+    from datetime import time
+    for abbrev in ("MIN", "LAL", "BOS", "DEN"):
+        NBATeam.get_or_create(id=abbrev, defaults={"name": abbrev, "abbreviation": abbrev, "city": abbrev,
+                                                   "conference": "West", "division": "NW"})
+    Game.create(game_id="g1", game_date=DAY - timedelta(days=1), season="2026-27", home_team="MIN", away_team="LAL",
+                start_time_et=time(19, 30))
+    Game.create(game_id="g2", game_date=DAY, season="2026-27", home_team="BOS", away_team="DEN", start_time_et=time(19, 0))
+    w = svc._window_for(DAY, "MIN")
+    assert w.rule == "rollover_into_day" and w.deadline_at == svc.et_at(DAY, time(19, 0))
+    assert svc._window_for(DAY, "BOS").rule == "first_tip_prev"
+
+
+# ---- rollback -----------------------------------------------------------------------------
+
+
+def test_0028_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.rollback.sql").read_text()
+
+    def table_exists():
+        return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
+
+    assert table_exists() and "'scheduled'" in _source_check_values()
+    db.execute_sql(rollback)
+    assert not table_exists() and "'scheduled'" not in _source_check_values()
+    db.execute_sql(forward)
+    assert table_exists() and "'scheduled'" in _source_check_values()

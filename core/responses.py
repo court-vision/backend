@@ -71,6 +71,10 @@ ERROR_CODE_STATUS: dict[str, int] = {
     "ROSTER_WRITE_UNAVAILABLE": 503,
     # Roster transactions (services.roster_transaction_service)
     "ROSTER_TRANSACTION_INVALID": 422,
+    # Scheduled pickups (services.scheduled_pickup_service)
+    "SCHEDULED_PICKUP_INVALID": 422,
+    "SCHEDULED_PICKUP_DUPLICATE": 409,
+    "SCHEDULED_PICKUP_NOT_PENDING": 409,
 }
 
 # error_code to fill in when the service left it empty, by envelope status
