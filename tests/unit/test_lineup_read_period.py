@@ -34,7 +34,7 @@ def _day(period):
     return OPENING + timedelta(days=period - 1)
 
 
-def _payload(requested, *, latest=TODAY):
+def _payload(requested, *, latest=TODAY, final=FINAL):
     entries = [{
         "playerId": 1, "lineupSlotId": 12, "injuryStatus": "ACTIVE",
         "playerPoolEntry": {"id": 1, "lineupLocked": False, "onTeamId": 4,
@@ -42,7 +42,9 @@ def _payload(requested, *, latest=TODAY):
                                        "eligibleSlots": [0, 5, 11, 12], "injured": False,
                                        "injuryStatus": "ACTIVE", "defaultPositionId": 1}},
     }]
-    status = {"firstScoringPeriod": 1, "finalScoringPeriod": FINAL}
+    status = {"firstScoringPeriod": 1}
+    if final is not None:
+        status["finalScoringPeriod"] = final
     if latest is not None:
         status["latestScoringPeriod"] = latest
     return {
@@ -56,11 +58,11 @@ def _payload(requested, *, latest=TODAY):
 
 @pytest.fixture
 def espn(monkeypatch):
-    h = SimpleNamespace(calls=[], latest=TODAY)
+    h = SimpleNamespace(calls=[], latest=TODAY, final=FINAL)
 
     async def fake_fetch(league_info, views, *, expect_key="teams", scoring_period_id=None):
         h.calls.append(scoring_period_id)
-        return _payload(scoring_period_id, latest=h.latest)
+        return _payload(scoring_period_id, latest=h.latest, final=h.final)
 
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -119,6 +121,16 @@ def test_days_outside_today_to_the_final_day_are_400(espn, period, needle):
     with pytest.raises(BadRequestError) as exc:
         read(period)
     assert exc.value.error_code == "SCORING_PERIOD_OUT_OF_RANGE" and needle in exc.value.message
+
+
+@pytest.mark.unit
+def test_without_espns_last_day_only_today_can_be_asked_for(espn):
+    # No upper bound to check a later day against, and ESPN would answer day 300 too.
+    espn.final = None
+    assert read().scoring_period_id == TODAY and read(TODAY).scoring_period_id == TODAY
+    with pytest.raises(BadRequestError) as exc:
+        read(TODAY + 1)
+    assert exc.value.error_code == "SCORING_PERIOD_OUT_OF_RANGE" and "last day" in exc.value.message
 
 
 @pytest.mark.unit

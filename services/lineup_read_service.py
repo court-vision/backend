@@ -363,12 +363,15 @@ class LineupReadService:
         """(scoring_period_id, nba_date) for a day the caller asked for.
 
         ESPN answers 200 for any number (a past day's lineup, a full roster for
-        days past the season), so the bounds are ours: today through `finalScoringPeriod`.
+        days past the season), so the bounds are ours: today through `finalScoringPeriod`,
+        and only today when ESPN does not report that last day.
         """
         if current is None:
             reason = "ESPN reports no current day for this league"
         elif requested < current:
             reason = f"ESPN day {requested} has passed; today is day {current}"
+        elif final is None and requested > current:
+            reason = f"ESPN did not report the season's last day, so only today (day {current}) can be read"
         elif final and requested > final:
             reason = f"ESPN day {requested} is after the season's last day ({final})"
         else:
