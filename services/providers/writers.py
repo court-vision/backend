@@ -34,7 +34,7 @@ class RosterWriter(Protocol):
 
 
 def espn_lineup_payload(league_info: LeagueInfo, state: LineupState, moves: Sequence[Move], key: str) -> dict[str, Any]:
-    return {
+    payload = {
         "season": league_info.year,
         "league_id": league_info.league_id,
         "espn_team_id": state.espn_team_id,
@@ -44,6 +44,10 @@ def espn_lineup_payload(league_info: LeagueInfo, state: LineupState, moves: Sequ
         "moves": [{"player_id": m.player_id, "from_slot_id": m.from_slot_id, "to_slot_id": m.to_slot_id} for m in moves],
         "idempotency_key": key,
     }
+    if state.future:
+        # The writer sends a later day as FUTURE_ROSTER; today's writes leave the field out.
+        payload["current_scoring_period_id"] = state.current_scoring_period_id
+    return payload
 
 
 def espn_transaction_payload(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
@@ -51,6 +55,7 @@ def espn_transaction_payload(league_info: LeagueInfo, state: LineupState, add: O
     """The lineup envelope with `add_player_id` / `drop_player_id` in place of `moves`."""
     payload = espn_lineup_payload(league_info, state, [], key)
     del payload["moves"]
+    payload.pop("current_scoring_period_id", None)  # add/drop is today-only
     payload["add_player_id"] = add
     payload["drop_player_id"] = drop
     return payload

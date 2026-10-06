@@ -57,7 +57,7 @@ class LineupPlayer(ApiModel):
     injury_status: Optional[str] = None
     default_position_id: Optional[int] = None    # ESPN's defaultPositionId (1 PG … 5 C), what positionLimits count
     lineup_locked: bool = False                  # ESPN's flag on the roster entry
-    has_game_today: bool = False
+    has_game_today: bool = False                 # on the board's day (nba_date), which may be a later one
     opponent: Optional[str] = None               # "vs LAL" / "@ BOS"
     game_time_et: Optional[str] = None           # "19:30"
     game_started: bool = False                   # derived from nba.games + now (ET)
@@ -74,7 +74,9 @@ class LineupState(ApiModel):
     espn_team_id: Optional[int] = None
     nba_date: Optional[str] = None               # the ESPN fantasy day this board is for
     scoring_period_id: Optional[int] = None
-    scoring_period_source: ScoringPeriodSource = "none"
+    scoring_period_source: ScoringPeriodSource = "none"   # where today's period came from
+    current_scoring_period_id: Optional[int] = None       # ESPN's today; != scoring_period_id on a future board
+    final_scoring_period_id: Optional[int] = None         # the season's last ESPN day (status.finalScoringPeriod)
     first_game_time_et: Optional[str] = None
     slot_counts: dict[str, int] = {}             # id-keyed ("11": 3); JSON keys are strings
     slots: list[LineupSlotDef] = []              # ordered rows for rendering
@@ -86,6 +88,12 @@ class LineupState(ApiModel):
     write_blocked_reason: Optional[WriteBlockedReason] = None
     roster_version: str                          # changes whenever any slot assignment changes
     fetched_at: str
+
+    @property
+    def future(self) -> bool:
+        """A later ESPN day than today; ESPN takes its edits as FUTURE_ROSTER."""
+        return bool(self.scoring_period_id and self.current_scoring_period_id
+                    and self.scoring_period_id > self.current_scoring_period_id)
 
 
 class LineupStateResp(BaseResponse):
@@ -104,7 +112,8 @@ class LineupMoveReq(ApiModel):
 class ApplyLineupMovesReq(ApiModel):
     moves: list[LineupMoveReq] = Field(min_length=1, max_length=30)
     # Both must match the board the client is looking at; otherwise 409 ROSTER_STALE
-    # hands back the fresh board instead of writing over a changed roster.
+    # hands back the fresh board instead of writing over a changed roster. A period
+    # later than today edits that day (ESPN's FUTURE_ROSTER).
     expected_scoring_period_id: int = Field(gt=0)
     roster_version: str = Field(min_length=1, max_length=64)
 

@@ -1,5 +1,5 @@
 """
-Today's lineup as ESPN sees it: slots, eligibility, per-game locks, game times.
+A day's lineup as ESPN sees it: slots, eligibility, per-game locks, game times.
 
 `parse_espn_lineup` is pure (payload in, dataclasses out). `LineupReadService.read`
 does the one ESPN call (mTeam + mRoster + mSettings) and the small DB lookups
@@ -11,6 +11,11 @@ evaluate route.
 "Today" here is ESPN's fantasy day: the board is for `scoringPeriodId`, mapped
 to a date through the season calendar (`date_for_espn_scoring_period`), never
 `core.nba_calendar.nba_date_et` (the 6 AM game-date rule).
+
+A caller may ask for a later ESPN day (`scoring_period_id`): ESPN returns the
+roster as set for that day, and edits to it go out as FUTURE_ROSTER
+(`services.providers.writers`). ESPN carries an edit forward to later days until
+the next day that has its own edit.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal, Mapping, Optional
 
 import pytz
@@ -78,6 +83,9 @@ class ParsedLineup:
     owner_check: OwnerCheck
     # Only the capped positions (ESPN sends -1 / 0 for the rest): defaultPositionId -> max players
     position_limits: dict[int, int] = field(default_factory=dict)
+    # status.latestScoringPeriod / finalScoringPeriod: ESPN's today and last day, whatever day was read
+    current_scoring_period_id: Optional[int] = None
+    final_scoring_period_id: Optional[int] = None
 
 
 def slot_counts_from_names(named: Optional[Mapping[str, int]]) -> dict[int, int]:
@@ -147,7 +155,10 @@ def parse_espn_lineup(
             default_position_id=int(player["defaultPositionId"]) if player.get("defaultPositionId") is not None else None,
         ))
 
-    period = payload.get("scoringPeriodId") or (payload.get("status") or {}).get("latestScoringPeriod")
+    status = payload.get("status") or {}
+    period = payload.get("scoringPeriodId") or status.get("latestScoringPeriod")
+    current = status.get("latestScoringPeriod")    # never the top-level echo of a requested day
+    final = status.get("finalScoringPeriod")
     return ParsedLineup(
         espn_team_id=int(target.get("id")),
         team_name=target.get("name") or team_name,
@@ -158,6 +169,8 @@ def parse_espn_lineup(
         entries=tuple(entries),
         owner_check=owner_check,
         position_limits=position_limits,
+        current_scoring_period_id=int(current) if current else None,
+        final_scoring_period_id=int(final) if final else None,
     )
 
 
@@ -214,13 +227,16 @@ class LineupReadService:
         *,
         fallback_slot_counts: Optional[Mapping[str, int]] = None,
         now: Optional[datetime] = None,
+        scoring_period_id: Optional[int] = None,
     ) -> LineupState:
+        """The board for ESPN's current day, or for `scoring_period_id` (today or a
+        later day of the season; anything else is 400 SCORING_PERIOD_OUT_OF_RANGE)."""
         # This is ESPN's reader; every consumer reaches it through the adapter's
         # `read_lineup`, which is where another provider's board will come from.
         if league_info.provider != FantasyProvider.ESPN:
             raise ProviderCapabilityMissing(league_info.provider, "lineup_editing")
 
-        payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS)
+        payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS, scoring_period_id=scoring_period_id)
         parsed = parse_espn_lineup(
             payload,
             team_name=league_info.team_name,
@@ -232,7 +248,14 @@ class LineupReadService:
             log.info("lineup_team_resolved_by_name", team_id=team_id, espn_team_id=parsed.espn_team_id)
 
         now_et = (now or datetime.now(EASTERN)).astimezone(EASTERN)
-        period, source, nba_date = LineupReadService._resolve_period(parsed.scoring_period_id, now_et)
+        if scoring_period_id is None:
+            period, source, nba_date = LineupReadService._resolve_period(parsed.scoring_period_id, now_et)
+            current = period
+        else:
+            # The payload's top-level period is the echo of our request; today is in `status`.
+            current, source, today = LineupReadService._resolve_period(parsed.current_scoring_period_id, now_et)
+            period, nba_date = LineupReadService._requested_period(
+                scoring_period_id, current, today, parsed.final_scoring_period_id)
 
         team_game_map: dict[str, Any] = {}
         first_tip: Optional[time] = None
@@ -294,6 +317,8 @@ class LineupReadService:
             nba_date=nba_date.isoformat() if nba_date else None,
             scoring_period_id=period,
             scoring_period_source=source,
+            current_scoring_period_id=current,
+            final_scoring_period_id=parsed.final_scoring_period_id,
             first_game_time_et=first_tip.strftime("%H:%M") if first_tip else None,
             slot_counts={str(k): v for k, v in sorted(parsed.slot_counts.items())},
             slots=slot_rows(parsed.slot_counts),
@@ -330,6 +355,34 @@ class LineupReadService:
         if calendar_period:
             return calendar_period, "calendar", fantasy_today
         return None, "none", None
+
+    @staticmethod
+    def _requested_period(
+        requested: int, current: Optional[int], today: Optional[date], final: Optional[int],
+    ) -> tuple[int, Optional[date]]:
+        """(scoring_period_id, nba_date) for a day the caller asked for.
+
+        ESPN answers 200 for any number (a past day's lineup, a full roster for
+        days past the season), so the bounds are ours: today through `finalScoringPeriod`,
+        and only today when ESPN does not report that last day.
+        """
+        if current is None:
+            reason = "ESPN reports no current day for this league"
+        elif requested < current:
+            reason = f"ESPN day {requested} has passed; today is day {current}"
+        elif final is None and requested > current:
+            reason = f"ESPN did not report the season's last day, so only today (day {current}) can be read"
+        elif final and requested > final:
+            reason = f"ESPN day {requested} is after the season's last day ({final})"
+        else:
+            reason = None
+        if reason:
+            raise BadRequestError("SCORING_PERIOD_OUT_OF_RANGE", reason)
+        try:
+            nba_date = schedule_service.date_for_espn_scoring_period(requested)
+        except Exception:
+            nba_date = today + timedelta(days=requested - current) if today else None
+        return requested, nba_date
 
     @staticmethod
     def _write_gate(league_info: LeagueInfo, period: Optional[int], parsed: ParsedLineup) -> tuple[bool, Optional[WriteBlockedReason]]:

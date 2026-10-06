@@ -196,12 +196,24 @@ class EspnService:
         return {'espn_s2': league_info.espn_s2, 'SWID': league_info.swid}
 
     @staticmethod
-    async def fetch_league(league_info: LeagueInfo, views: list[str], *, expect_key: str = "teams") -> dict:
-        """One authenticated read of the league endpoint with the given ESPN views."""
+    async def fetch_league(
+        league_info: LeagueInfo, views: list[str], *, expect_key: str = "teams",
+        scoring_period_id: Optional[int] = None,
+    ) -> dict:
+        """One authenticated read of the league endpoint with the given ESPN views.
+
+        `scoring_period_id` reads that ESPN day instead of the current one (rosters
+        come back as set for that day). ESPN echoes it as the top-level
+        `scoringPeriodId` and answers 200 for any number, even past the season's
+        `status.finalScoringPeriod`; `status.latestScoringPeriod` stays today's.
+        """
+        params: dict = {'view': list(views)}
+        if scoring_period_id:
+            params['scoringPeriodId'] = int(scoring_period_id)
         return await provider_get(
             "espn",
             ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
-            params={'view': list(views)},
+            params=params,
             cookies=EspnService._cookies(league_info),
             expect_key=expect_key,
         )

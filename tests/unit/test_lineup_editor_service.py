@@ -44,10 +44,11 @@ def player(pid, slot, eligible, *, game=True, status=None, locked=False, value=1
     )
 
 
-def state(players, *, can_write=True, reason=None, version="v1", period=12, nba_date="2026-10-20"):
+def state(players, *, can_write=True, reason=None, version="v1", period=12, nba_date="2026-10-20", current=None):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="Lvl. 3 Goblins", espn_team_id=4, nba_date=nba_date,
-        scoring_period_id=period, scoring_period_source="provider", first_game_time_et="19:00",
+        scoring_period_id=period, scoring_period_source="provider", current_scoring_period_id=current,
+        first_game_time_et="19:00",
         slot_counts=COUNTS, slots=[], lock_type="INDIVIDUAL_GAME", players=players,
         can_write=can_write, write_blocked_reason=reason, roster_version=version, fetched_at="now",
     )
@@ -65,9 +66,11 @@ def after_swap():
 @pytest.fixture
 def harness(monkeypatch):
     """Stub the read (a queue of states), the writer (a queue of results) and the audit repo."""
-    h = SimpleNamespace(reads=[], writer=[], writer_calls=[], audits=[], updates=[], counted=False, noops=[])
+    h = SimpleNamespace(reads=[], read_periods=[], writer=[], writer_calls=[], audits=[], updates=[], counted=False,
+                        noops=[])
 
     async def fake_read(team_id, league_info, **kwargs):
+        h.read_periods.append(kwargs.get("scoring_period_id"))
         nxt = h.reads.pop(0)
         if isinstance(nxt, Exception):
             raise nxt
@@ -127,8 +130,32 @@ def test_manual_apply_writes_verifies_and_audits(harness):
     assert payload["moves"] == [{"player_id": 11, "from_slot_id": BE, "to_slot_id": UT},
                                 {"player_id": 8, "from_slot_id": UT, "to_slot_id": BE}]
     assert payload["idempotency_key"].startswith("21:12:v1:")
+    assert "current_scoring_period_id" not in payload           # today's write goes out as ROSTER
     assert harness.audits[0]["source"] == "manual" and harness.audits[0]["nba_date"] == date(2026, 10, 20)
     assert harness.updates == [(1, "applied", 200, None)]
+    assert harness.read_periods == [None, None]                 # today's board, today's re-read
+
+
+@pytest.mark.unit
+def test_a_later_day_is_read_written_and_verified_as_that_day(harness):
+    today = state(board(), period=12, current=12)
+    friday = state(board(), period=15, current=12, nba_date="2026-10-23")
+    harness.reads = [today, friday, state(after_swap(), period=15, current=12, nba_date="2026-10-23", version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=15)))
+
+    assert harness.read_periods == [None, 15, 15]
+    payload = harness.writer_calls[0]
+    assert (payload["scoring_period_id"], payload["current_scoring_period_id"]) == (15, 12)
+    assert payload["idempotency_key"].startswith("21:15:v1:")
+    assert (harness.audits[0]["period"], harness.audits[0]["nba_date"]) == (15, date(2026, 10, 23))
+    assert resp.data.verified is True and resp.data.lineup.scoring_period_id == 15
+
+
+@pytest.mark.unit
+def test_add_drop_never_carries_the_future_marker():
+    from services.providers.writers import espn_transaction_payload
+    friday = state(board(), period=15, current=12)
+    assert "current_scoring_period_id" not in espn_transaction_payload(LEAGUE, friday, 11, None, "k")
 
 
 @pytest.mark.unit
@@ -179,9 +206,11 @@ def test_stale_version_returns_the_fresh_board(harness):
 
 @pytest.mark.unit
 def test_stale_period_is_stale_too(harness):
+    # The day rolled over under the client: today's board comes back, never a past day's.
     harness.reads = [state(board(), period=13)]
-    with pytest.raises(svc.RosterStale):
+    with pytest.raises(svc.RosterStale) as exc:
         asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=12)))
+    assert exc.value.data["lineup"]["scoring_period_id"] == 13 and harness.read_periods == [None]
 
 
 @pytest.mark.unit
