@@ -68,6 +68,28 @@ def test_single_day_errors_map_to_http(authed_client, owned, monkeypatch):
 
 
 @pytest.mark.api
+def test_a_day_the_calendar_does_not_have_is_a_validation_error_not_a_500(authed_client, owned, monkeypatch):
+    from services import lineup_snapshot_service as svc
+    reached = []
+
+    async def never(*args, **kwargs):
+        reached.append(args)
+        raise AssertionError("an invalid day never reaches the service")
+
+    monkeypatch.setattr(svc.LineupSnapshotService, "get_day", staticmethod(never))
+    monkeypatch.setattr(svc.LineupSnapshotService, "list_range", staticmethod(never))
+    for url, loc in (
+        ("/v1/internal/teams/7/lineup-snapshots/2026-02-30", ["path", "date"]),
+        ("/v1/internal/teams/7/lineup-snapshots?from=2026-02-30", ["query", "from"]),
+        ("/v1/internal/teams/7/lineup-snapshots?from=2026-11-09&to=2026-11-31", ["query", "to"]),
+    ):
+        res = authed_client.get(url)
+        assert (res.status_code, res.json()["error_code"]) == (422, "VALIDATION_ERROR"), url
+        assert [e["loc"] for e in res.json()["data"]["errors"]] == [loc], url
+    assert reached == []
+
+
+@pytest.mark.api
 def test_range_passes_from_and_to(authed_client, owned, monkeypatch):
     from services import lineup_snapshot_service as svc
     calls = []
