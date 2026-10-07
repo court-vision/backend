@@ -3,6 +3,7 @@
 from datetime import date as date_type, timedelta
 
 from core.errors import NotFoundError
+from core.logging import get_logger
 from db.base import db_operation, run_db
 from db.models.stats.daily_matchup_score import DailyMatchupScore
 from schemas.common import ApiStatus
@@ -17,8 +18,15 @@ from schemas.matchup import (
     WeeklyMatchupData,
     WeeklyMatchupResp,
 )
-from services.matchup_days import build_day, make_nba_id_resolver, nba_today as _nba_today
+from schemas.common import FantasyProvider
+from services.matchup_days import (
+    DayRosters, RosterSide, build_day, fantasy_today as _fantasy_today, make_nba_id_resolver, nba_today as _nba_today,
+)
 from services.scoring.resolver import resolve_scoring_for_team
+from services.team_service import TeamService
+
+
+log = get_logger("matchup_history")
 
 
 class MatchupHistoryService:
@@ -72,14 +80,18 @@ class MatchupHistoryService:
         )
 
     @staticmethod
-    def _build_daily_from_db(md, team_id: int, target_date: date_type, period_start: date_type) -> DailyMatchupResp:
+    def _build_daily_from_db(md, team_id: int, target_date: date_type, period_start: date_type,
+                             rosters: DayRosters | None = None) -> DailyMatchupResp:
         from db.models.nba.games import Game
         from db.models.nba.live_player_stats import LivePlayerStats
         from db.models.nba.player_game_stats import PlayerGameStats
 
         today = _nba_today()
         scoring = resolve_scoring_for_team(team_id)
-        all_roster = md.your_team.roster + md.opponent_team.roster
+        sides = rosters or DayRosters()
+        your_players = sides.your.players if sides.your.players is not None else md.your_team.roster
+        opp_players = sides.opp.players if sides.opp.players is not None else md.opponent_team.roster
+        all_roster = list(your_players) + list(opp_players)
         resolve = make_nba_id_resolver(all_roster)
         games_on_date = list(Game.get_games_on_date(target_date))
         nba_id_to_stats: dict[int, object] = {}
@@ -95,7 +107,8 @@ class MatchupHistoryService:
                         (LivePlayerStats.player_id.in_(nba_ids)) & (LivePlayerStats.game_date == target_date)
                     ):
                         nba_id_to_stats.setdefault(stat.player_id, stat)
-        day = build_day(md, target_date, today, period_start, nba_id_to_stats, games_on_date, resolve, scoring)
+        day = build_day(md, target_date, today, period_start, nba_id_to_stats, games_on_date, resolve, scoring,
+                        rosters=sides)
         return DailyMatchupResp(status=ApiStatus.SUCCESS, message="Daily matchup data fetched successfully", data=day)
 
     @staticmethod
@@ -167,7 +180,44 @@ class MatchupHistoryService:
                 message=f"Date {target_date} is outside matchup period {period_start} to {period_end}",
                 data=None,
             )
-        return await run_db("matchups.daily", cls._build_daily_from_db, md, team_id, target_date, period_start)
+        # Whose roster a day shows is ESPN's question: once ESPN has rolled past
+        # the day (~2 AM ET) the current roster is already the next day's, so
+        # the day's own lineup is used. That is the rule the snapshot endpoints
+        # use and the Matchup page's own "today". The box scores stay on the
+        # 6 AM game date (`_build_daily_from_db`): until then last night's live
+        # rows still fill in any line the post-game run has not written yet.
+        rosters = None
+        if target_date < _fantasy_today():
+            rosters = await cls._past_rosters(team_id, md, target_date)
+        return await run_db("matchups.daily", cls._build_daily_from_db, md, team_id, target_date, period_start, rosters)
+
+    @staticmethod
+    async def _past_rosters(team_id: int, md, target_date: date_type) -> DayRosters | None:
+        """Both teams' rosters as they stood on a finished day: the nightly
+        lineup snapshot first, ESPN's own per-day history when the row is not
+        there yet, and today's roster (labelled `current`) as the last resort.
+        Any failure here falls back rather than failing the day."""
+        from services.lineup_snapshot_service import LineupSnapshotService
+
+        try:
+            league_info = await TeamService.credentials_for(team_id)
+            if league_info.provider != FantasyProvider.ESPN:
+                return None
+            sides = {
+                md.your_team.team_id: md.your_team.team_name,
+                md.opponent_team.team_id: md.opponent_team.team_name,
+            }
+            found = await LineupSnapshotService.rosters_for_matchup(league_info, sides, target_date)
+        except Exception as exc:  # the day still renders on today's roster
+            log.warning("matchup_past_rosters_unavailable", team_id=team_id, date=str(target_date), error=str(exc))
+            return None
+
+        def side(snapshot):
+            if snapshot is None:
+                return RosterSide()
+            return RosterSide(players=list(snapshot.players), source=snapshot.source, captured_at=snapshot.captured_at)
+
+        return DayRosters(your=side(found.get(md.your_team.team_id)), opp=side(found.get(md.opponent_team.team_id)))
 
     @classmethod
     async def get_weekly_matchup(cls, user_id: int, team_id: int) -> WeeklyMatchupResp:

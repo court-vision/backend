@@ -5,8 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from schemas.lineup_snapshots import LineupSnapshotPlayer
 from schemas.matchup import MatchupData, MatchupPlayerResp, MatchupTeamResp
-from services.matchup_days import build_day, build_past_roster, index_games, score_stat_row, team_day_totals
+from services.matchup_days import (
+    DayRosters, RosterSide, build_day, build_past_roster, index_games, score_stat_row, team_day_totals,
+)
 from services.scoring import CategoryDef, CategoryScoring, DEFAULT_CATEGORIES, DEFAULT_POINT_WEIGHTS
 from services.scoring.resolver import ResolvedScoring
 
@@ -90,3 +93,55 @@ def test_build_day_past_and_future_shapes():
                            lambda p: resolve(p.player_id), POINTS)
     assert points_day.scoring_format == "points" and points_day.your_team.categories is None
     assert set(points_day.model_dump().keys()) == set(day.model_dump().keys())   # daily/weekly share one shape
+
+
+def _dated(pid, name, team, slot_id, slot, status="ACTIVE"):
+    return LineupSnapshotPlayer(player_id=pid, name=name, team=team, position="PG", lineup_slot_id=slot_id,
+                                lineup_slot=slot, injury_status=status)
+
+
+@pytest.mark.unit
+def test_dated_roster_carries_slots_sits_in_lineup_order_and_counts_starters_only():
+    resolve = {1: 101, 2: 102, 3: 103}.get
+    players = [_dated(2, "Bench Guy", "LAL", 12, "BE"), _dated(3, "Hurt Guy", "BOS", 13, "IR", "OUT"),
+               _dated(1, "Starter", "BOS", 11, "UT")]
+    stats = {101: _row(fpts=30), 102: _row(fpts=40), 103: _row(fpts=50)}
+    roster = build_past_roster(players, lambda p: resolve(p.player_id), {"BOS", "LAL"}, stats, POINTS, with_slots=True)
+    assert [(p.player_id, p.lineup_slot, p.lineup_slot_id, p.injury_status) for p in roster] == [
+        (1, "UT", 11, "ACTIVE"), (2, "BE", 12, "ACTIVE"), (3, "IR", 13, "OUT"),
+    ]
+    assert team_day_totals(roster, POINTS, active_only=True)[0] == 30.0    # bench and IR points do not count
+    assert team_day_totals(roster, POINTS)[0] == 120.0                     # the old all-players sum, on request
+    _, cats = team_day_totals(roster, CATS, active_only=True)
+    assert cats["pts"] == 20                                               # one starter's line, not three
+
+
+@pytest.mark.unit
+def test_todays_roster_standing_in_never_carries_slots():
+    resolve = {1: 101}.get
+    roster = build_past_roster([_player(1, "A", "BOS", slot="UT")], lambda p: resolve(p.player_id), {"BOS"},
+                               {101: _row()}, POINTS)
+    assert roster[0].lineup_slot is None and roster[0].lineup_slot_id is None and roster[0].injury_status is None
+
+
+@pytest.mark.unit
+def test_build_day_labels_each_side_by_its_source():
+    md = _matchup()
+    resolve = {1: 101, 2: 102, 3: 103, 9: 109}.get
+    stats = {101: _row(fpts=30), 102: _row(fpts=40), 103: _row(pts=10), 109: _row(fpts=25)}
+    rosters = DayRosters(
+        your=RosterSide(players=[_dated(1, "A One", "BOS", 0, "PG"), _dated(9, "Added Later", "LAL", 12, "BE")],
+                        source="snapshot", captured_at="2027-01-13T08:00:00+00:00"),
+        opp=RosterSide(),   # the opponent's day could not be found: today's roster, labelled
+    )
+    day = build_day(md, date(2027, 1, 12), date(2027, 1, 14), date(2027, 1, 11), stats, [GAME],
+                    lambda p: resolve(p.player_id), POINTS, rosters=rosters)
+    you, opp = day.your_team, day.opponent_team
+    assert you.roster_source == "snapshot" and you.lineup_captured_at == "2027-01-13T08:00:00+00:00"
+    assert [p.player_id for p in you.roster] == [1, 9] and you.total_fpts == 30.0      # the bench pickup does not count
+    assert opp.roster_source == "current" and opp.lineup_captured_at is None
+    assert opp.roster[0].lineup_slot is None and opp.total_fpts == 30.0
+
+    plain = build_day(md, date(2027, 1, 12), date(2027, 1, 14), date(2027, 1, 11), stats, [GAME],
+                      lambda p: resolve(p.player_id), POINTS)
+    assert plain.your_team.roster_source == "current" and plain.your_team.total_fpts == 70.0
