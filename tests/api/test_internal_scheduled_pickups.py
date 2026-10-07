@@ -3,8 +3,9 @@
 `ensure_team_owned` stub, the credential loader stubbed at the route, and the service
 replaced per test so every documented status is exercised — 200, 404, 403
 ROSTER_WRITE_DISABLED, 409 ROSTER_WRITE_BLOCKED / SCHEDULED_PICKUP_DUPLICATE /
-SCHEDULED_PICKUP_NOT_PENDING, 422 SCHEDULED_PICKUP_INVALID with `data.reason`, 400
-SCORING_PERIOD_OUT_OF_RANGE, and FastAPI's own 422.
+SCHEDULED_PICKUP_NOT_PENDING / SCHEDULED_PICKUP_IN_PROGRESS, 422
+SCHEDULED_PICKUP_INVALID with `data.reason`, 400 SCORING_PERIOD_OUT_OF_RANGE, and
+FastAPI's own 422.
 """
 
 from datetime import date, datetime, timezone
@@ -161,3 +162,12 @@ def test_cancel_of_a_settled_row_is_409_and_of_an_unknown_one_404(authed_client,
     assert r.status_code == 409 and r.json()["error_code"] == "SCHEDULED_PICKUP_NOT_PENDING"
     _stub(monkeypatch, "cancel", NotFoundError("SCHEDULED_PICKUP_NOT_FOUND", "Scheduled pickup not found"))
     assert authed_client.delete("/v1/internal/teams/7/pickups/6").status_code == 404
+
+
+@pytest.mark.api
+def test_cancel_of_a_pickup_being_attempted_is_409_in_progress(authed_client, owned, monkeypatch):
+    _stub(monkeypatch, "cancel", svc.ScheduledPickupInProgress(data={"status": "pending"}))
+    r = authed_client.delete("/v1/internal/teams/7/pickups/5")
+    assert r.status_code == 409
+    body = r.json()
+    assert body["error_code"] == "SCHEDULED_PICKUP_IN_PROGRESS" and body["data"]["status"] == "pending"

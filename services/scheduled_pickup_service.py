@@ -4,7 +4,7 @@ a later ESPN day, made by a job at the earliest moment the roster can take it.
 
     schedule       POST   /teams/{id}/pickups              check against today's board and the pool, store
     list_for_team  GET    /teams/{id}/pickups              pending rows + the last week's settled ones
-    cancel         DELETE /teams/{id}/pickups/{pickup_id}  a pending row only
+    cancel         DELETE /teams/{id}/pickups/{pickup_id}  a pending row no attempt holds
     execute_due    POST   /jobs/pickups/execute            the pipeline route: claim the due rows, try each
 
 Timing. ESPN counts an acquisition for the day it is made only before that day's
@@ -31,6 +31,11 @@ the board: the player on it settles the row executed (and seats him), his absenc
 settles it failed `interrupted`. Only a writer that was provably never reached (no
 free slot, no connection) clears the mark, so that retry may send.
 
+Cancelling. Refused while an attempt holds the row — claimed (reason
+`in_progress`) and inside its lease, or with a write out — so a user told
+"cancelled" never sees the move made anyway; the check and the update are one
+statement, so a claim cannot slip between them.
+
 The rules (`attempt_window`, `on_refusal`, `pick_seat`) are pure and table-tested;
 the repository functions run through `run_db`; the service composes them.
 """
@@ -44,7 +49,7 @@ from typing import Callable, Optional
 
 import httpx
 import pytz
-from peewee import IntegrityError
+from peewee import IntegrityError, fn
 
 from core.errors import AppError, ConflictError, NotFoundError, ProviderAuthError
 from core.logging import get_logger
@@ -88,6 +93,7 @@ log = get_logger("scheduled_pickup")
 
 PENDING, EXECUTED, SKIPPED, FAILED, CANCELLED, EXPIRED = "pending", "executed", "skipped", "failed", "cancelled", "expired"
 DEFERRED = "deferred"
+IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt runs
 
 EASTERN = pytz.timezone("US/Eastern")
 ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
@@ -123,6 +129,11 @@ class ScheduledPickupDuplicate(ConflictError):
 class ScheduledPickupNotPending(ConflictError):
     error_code = "SCHEDULED_PICKUP_NOT_PENDING"
     default_message = "That pickup is no longer pending"
+
+
+class ScheduledPickupInProgress(ConflictError):
+    error_code = "SCHEDULED_PICKUP_IN_PROGRESS"
+    default_message = "That pickup is being attempted right now and cannot be cancelled — check back in a few minutes"
 
 
 class ClaimLost(Exception):
@@ -268,14 +279,15 @@ def _due_clause(Row, now: datetime):
 
 def _claim_due(now: datetime, limit: int) -> list:
     """Lease up to `limit` due rows to this run: bump attempts, push next_attempt_at by the
-    lease, return the rows (soonest first). A concurrent run sees nothing until the lease ends."""
+    lease, mark the attempt running (reason IN_PROGRESS, which a cancel waits out), return the
+    rows (soonest first). A concurrent run sees nothing until the lease ends."""
     Row = _model()
     due = _due_clause(Row, now)
     ids = [r.id for r in Row.select(Row.id).where(due).order_by(Row.not_before_at, Row.id).limit(limit)]
     if not ids:
         return []
     rows = list(Row.update(next_attempt_at=now + LEASE, attempts=Row.attempts + 1, last_attempt_at=now,
-                           updated_at=now)
+                           reason=IN_PROGRESS, updated_at=now)
                 .where(due & Row.id.in_(ids)).returning(Row).execute())
     return sorted(rows, key=lambda r: (r.not_before_at, r.id))
 
@@ -340,17 +352,24 @@ def _list_pickups(team_id: int, since: datetime) -> list:
 
 
 def _cancel_pickup(team_id: int, pickup_id: int, now: datetime):
-    """(prior status, row) for the team's row, or None when it is not theirs."""
+    """(prior status, row) for the team's row, or None when it is not theirs. A pending row an
+    attempt holds is left as it is, prior IN_PROGRESS: claimed and inside its lease (a dead
+    attempt's ran out), or with a write out, whose outcome only the next attempt can learn."""
     Row = _model()
     row = Row.get_or_none((Row.id == pickup_id) & (Row.team == team_id))
     if row is None:
         return None
     if row.status != PENDING:
         return row.status, row
+    no_attempt_running = ((fn.COALESCE(Row.reason, "") != IN_PROGRESS) | Row.next_attempt_at.is_null(True)
+                          | (Row.next_attempt_at <= now))
     changed = (Row.update(status=CANCELLED, next_attempt_at=None, updated_at=now)
-               .where((Row.id == pickup_id) & (Row.status == PENDING)).execute())
+               .where((Row.id == pickup_id) & (Row.status == PENDING) & Row.audit_id.is_null(True)
+                      & no_attempt_running).execute())
     row = Row.get_by_id(pickup_id)
-    return (PENDING if changed else row.status), row
+    if changed:
+        return PENDING, row
+    return (IN_PROGRESS if row.status == PENDING else row.status), row
 
 
 def _window_for(nba_date: date, drop_team: Optional[str]) -> AttemptWindow:
@@ -479,6 +498,8 @@ class ScheduledPickupService:
         if found is None:
             raise NotFoundError("SCHEDULED_PICKUP_NOT_FOUND", "Scheduled pickup not found")
         prior, row = found
+        if prior == IN_PROGRESS:
+            raise ScheduledPickupInProgress(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
         if prior != PENDING:
             raise ScheduledPickupNotPending(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
         log.info("scheduled_pickup_cancelled", team_id=team.team_id, pickup_id=pickup_id)

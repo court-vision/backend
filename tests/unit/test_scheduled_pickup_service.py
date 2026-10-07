@@ -759,6 +759,13 @@ def test_cancel_outcomes(h, monkeypatch):
         run(svc.ScheduledPickupService.cancel(TEAM, 1))
     assert exc.value.data["status"] == "executed"
 
+    held = row(status="pending", reason="in_progress")
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: ("in_progress", held))
+    with pytest.raises(svc.ScheduledPickupInProgress) as exc:
+        run(svc.ScheduledPickupService.cancel(TEAM, 1))
+    assert exc.value.status_code == 409 and exc.value.data["status"] == "pending"
+    assert exc.value.data["pickup"]["reason"] == "in_progress"
+
     from core.errors import NotFoundError
     monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: None)
     with pytest.raises(NotFoundError):

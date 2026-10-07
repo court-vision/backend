@@ -116,6 +116,7 @@ def test_claim_takes_only_due_unleased_rows_in_order_and_leases_them(user, team)
     assert [r.add_player_id for r in rows] == [2, 1]                   # soonest first, the limit respected
     for r in rows:
         assert r.attempts == 1 and r.next_attempt_at == NOW + svc.LEASE and r.last_attempt_at == NOW
+        assert r.reason == "in_progress"
 
     assert [r.add_player_id for r in svc._claim_due(NOW, limit=10)] == [5]   # the leased two are invisible
     assert svc._claim_due(NOW, limit=10) == []
@@ -201,6 +202,29 @@ def test_cancel(user, team):
     assert prior == "pending" and stored.status == "cancelled" and stored.next_attempt_at is None
     prior, stored = svc._cancel_pickup(team.team_id, row.id, NOW)
     assert prior == "cancelled"
+
+
+def test_cancel_waits_out_an_attempt_that_holds_the_row(user, team):
+    row = _pickup(user, team)
+    (claimed,) = svc._claim_due(NOW, limit=1)
+    prior, stored = svc._cancel_pickup(team.team_id, row.id, NOW + timedelta(minutes=1))      # the attempt is running
+    assert (prior, stored.status, stored.reason) == ("in_progress", "pending", "in_progress")
+    # a deferral ends the attempt, and the row can be cancelled again
+    assert svc._defer_row(row.id, claimed.attempts, NOW, NOW + svc.RETRY, "add_on_waivers", None, None)
+    prior, stored = svc._cancel_pickup(team.team_id, row.id, NOW + timedelta(minutes=1))
+    assert (prior, stored.status) == ("pending", "cancelled")
+
+
+def test_cancel_goes_through_once_a_dead_attempts_lease_ran_out_unless_its_write_is_out(user, team):
+    quiet = _pickup(user, team, add=1)
+    sent = _pickup(user, team, add=2)
+    claimed = {r.add_player_id: r for r in svc._claim_due(NOW, limit=2)}
+    assert svc._mark_in_flight(sent.id, claimed[2].attempts, _audit(user, team).id, NOW, NOW + svc.LEASE)
+    later = NOW + svc.LEASE + timedelta(minutes=1)                                            # both workers died
+    prior, stored = svc._cancel_pickup(team.team_id, quiet.id, later)
+    assert (prior, stored.status) == ("pending", "cancelled")
+    prior, stored = svc._cancel_pickup(team.team_id, sent.id, later)
+    assert (prior, stored.status) == ("in_progress", "pending") and stored.audit_id is not None
 
 
 def test_list_keeps_pending_and_the_recent_week(user, team):

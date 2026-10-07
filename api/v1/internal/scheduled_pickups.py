@@ -43,5 +43,6 @@ async def list_pickups(team: OwnedTeamContext = Depends(get_owned_team)):
 @router.delete("/{team_id}/pickups/{pickup_id}", response_model=ScheduledPickupResp)
 async def cancel_pickup(pickup_id: int, team: OwnedTeamContext = Depends(get_owned_team)):
     """Cancel a pending pickup. 404 when it is not this team's; 409 SCHEDULED_PICKUP_NOT_PENDING
-    when it already ran (or was cancelled)."""
+    when it already ran (or was cancelled); 409 SCHEDULED_PICKUP_IN_PROGRESS while an attempt is
+    making it — its outcome follows in a few minutes, and a deferred pickup can be cancelled again."""
     return respond(await ScheduledPickupService.cancel(team, pickup_id))
