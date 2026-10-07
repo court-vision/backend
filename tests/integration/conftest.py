@@ -43,6 +43,8 @@ def clean_tables(integration_db):
     db.execute_sql("""
         TRUNCATE TABLE
             usr.scheduled_pickups,
+            usr.lineup_snapshot_players,
+            usr.lineup_snapshots,
             usr.roster_moves,
             usr.lineups,
             usr.teams,
