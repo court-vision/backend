@@ -79,8 +79,9 @@ def world(monkeypatch):
     def load(ref, team_ids, dates):
         return {k: v for k, v in w.rows.items() if k[0] in team_ids and k[1] in dates}
 
-    def by_name(ref, nba_date, team_name):
-        return next((tid for (tid, d), snap in w.rows.items() if d == nba_date and snap.team_name == team_name), None)
+    def by_name(ref, dates, team_name):
+        newest_first = sorted(w.rows.items(), key=lambda kv: kv[0][1], reverse=True)
+        return next((tid for (tid, d), snap in newest_first if d in dates and snap.team_name == team_name), None)
 
     async def fetch(league_info, views, *, expect_key="teams", scoring_period_id=None):
         w.espn_calls.append((tuple(views), scoring_period_id))
@@ -225,6 +226,14 @@ def test_range_lists_stored_days_and_names_the_missing_ones(world):
     data = asyncio.run(svc.LineupSnapshotService.list_range(OWNER, date(2026, 11, 7), date(2026, 11, 9))).data
     assert data.missing_dates == ["2026-11-07", "2026-11-08"] and len(data.snapshots) == 1
     assert world.espn_calls == []                       # the list never reads ESPN
+
+
+@pytest.mark.unit
+def test_an_unknown_own_id_is_learned_from_any_stored_day_in_the_range(world):
+    stored(world, nba_date=date(2026, 11, 7))           # the newest finished day has no row yet
+    data = asyncio.run(svc.LineupSnapshotService.list_range(OWNER_NO_ID, date(2026, 11, 7), date(2026, 11, 9))).data
+    assert data.provider_team_id == 1 and [s.nba_date for s in data.snapshots] == ["2026-11-07"]
+    assert data.missing_dates == ["2026-11-08", "2026-11-09"]
 
 
 @pytest.mark.unit

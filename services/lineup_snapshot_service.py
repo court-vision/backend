@@ -193,14 +193,17 @@ def _load_snapshots(ref: LeagueRef, team_ids: list[int], dates: list[date]) -> d
     }
 
 
-def _team_id_by_name(ref: LeagueRef, nba_date: date, team_name: str) -> Optional[int]:
-    """The provider team id a stored day gives to this team name (the id is learned, never guessed)."""
+def _team_id_by_name(ref: LeagueRef, dates: list[date], team_name: str) -> Optional[int]:
+    """The provider team id stored days give to this team name, from the newest
+    of `dates` that has it (the id is learned, never guessed). Any stored day
+    will do: the newest finished day is the one most likely to be missing."""
     wanted = (team_name or "").strip()
-    if not wanted:
+    if not wanted or not dates:
         return None
     row = (
         SnapshotRow.select(SnapshotRow.provider_team_id)
-        .where(_league_rows(ref) & (SnapshotRow.nba_date == nba_date) & (SnapshotRow.team_name == wanted))
+        .where(_league_rows(ref) & (SnapshotRow.nba_date.in_(dates)) & (SnapshotRow.team_name == wanted))
+        .order_by(SnapshotRow.nba_date.desc())
         .first()
     )
     return row.provider_team_id if row else None
@@ -260,7 +263,7 @@ class LineupSnapshotService:
         wanted = provider_team_id if provider_team_id is not None else own_id
         learned_own_id = False
         if wanted is None:
-            wanted = await run_db("lineup_snapshots.team_by_name", _team_id_by_name, ref, target, info.team_name)
+            wanted = await run_db("lineup_snapshots.team_by_name", _team_id_by_name, ref, [target], info.team_name)
             learned_own_id = wanted is not None
 
         snapshot: Optional[LineupSnapshot] = None
@@ -310,7 +313,7 @@ class LineupSnapshotService:
         finished = [d for d in dates if d < today]
         own_id = info.espn_team_id
         if own_id is None and finished:
-            own_id = await run_db("lineup_snapshots.team_by_name", _team_id_by_name, ref, finished[-1], info.team_name)
+            own_id = await run_db("lineup_snapshots.team_by_name", _team_id_by_name, ref, finished, info.team_name)
         stored = {}
         if own_id is not None and finished:
             stored = await run_db("lineup_snapshots.range", _load_snapshots, ref, [own_id], finished)
