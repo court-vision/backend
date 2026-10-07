@@ -81,7 +81,7 @@ def make_test_app() -> FastAPI:
         matchups, streamers, notifications, api_keys,
         rankings as internal_rankings, sqlmate as internal_sqlmate,
         drafts, lineup_editor, jobs, team_streamers, roster_transactions,
-        connections, ai,
+        connections, ai, lineup_snapshots,
     )
     from api.v1.public import (
         rankings, players, games,
@@ -134,6 +134,7 @@ def make_test_app() -> FastAPI:
     api_v1_internal.include_router(internal_sqlmate.router)
     api_v1_internal.include_router(drafts.router)
     api_v1_internal.include_router(lineup_editor.router)
+    api_v1_internal.include_router(lineup_snapshots.router)
     api_v1_internal.include_router(jobs.router)
     api_v1_internal.include_router(team_streamers.router)
     api_v1_internal.include_router(roster_transactions.router)

@@ -9,6 +9,7 @@ category leagues get per-category day totals plus a comparison.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Optional
 
@@ -22,6 +23,7 @@ from schemas.matchup import (
     DailyMatchupPlayerStats,
     DailyMatchupTeam,
     MatchupData,
+    RosterSource,
 )
 from core.nba_calendar import nba_date_et
 from services.scoring.models import CategoryComparisonData, StatLine
@@ -29,6 +31,38 @@ from services.scoring.resolver import ResolvedScoring
 
 EASTERN = pytz.timezone("US/Eastern")
 STAT_FIELDS = ("pts", "reb", "ast", "stl", "blk", "tov", "min", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta")
+BENCH_SLOT_ID = 12
+IR_SLOT_ID = 13
+
+
+@dataclass(frozen=True)
+class RosterSide:
+    """One team's roster for a past day and where it came from.
+
+    `players` None means the team's current roster stands in (the old
+    behaviour); a snapshot or provider-history roster carries each player's
+    `lineup_slot_id`, which is what lets the day total count starters only.
+    """
+
+    players: Optional[list[Any]] = None
+    source: RosterSource = "current"
+    captured_at: Optional[str] = None
+
+    @property
+    def dated(self) -> bool:
+        return self.players is not None and self.source != "current"
+
+
+@dataclass(frozen=True)
+class DayRosters:
+    your: RosterSide = RosterSide()
+    opp: RosterSide = RosterSide()
+
+
+def counts_for_the_day(p: Any) -> bool:
+    """A player whose slot that day was not bench or IR (slot unknown counts)."""
+    slot_id = getattr(p, "lineup_slot_id", None)
+    return slot_id is None or slot_id not in (BENCH_SLOT_ID, IR_SLOT_ID)
 
 
 def nba_today() -> date:
@@ -79,11 +113,20 @@ def score_stat_row(row: Any, scoring: ResolvedScoring) -> float:
 
 
 def build_past_roster(roster: Iterable[Any], resolve: Callable[[Any], Optional[int]], teams_playing: set[str],
-                      nba_id_to_stats: dict[int, Any], scoring: ResolvedScoring) -> list[DailyMatchupPlayerStats]:
+                      nba_id_to_stats: dict[int, Any], scoring: ResolvedScoring, *,
+                      with_slots: bool = False) -> list[DailyMatchupPlayerStats]:
+    """Box scores for a roster on a past day.
+
+    `with_slots` is for a roster that is really that day's (a snapshot or
+    ESPN's history): each player's slot comes through and the rows sit in
+    lineup order — starters by slot, then bench, then IR, fpts desc within a
+    slot. Today's roster standing in for a past day never carries slots.
+    """
     result: list[DailyMatchupPlayerStats] = []
     for p in roster:
         nba_id = resolve(p)
         stats = nba_id_to_stats.get(nba_id) if nba_id else None
+        slot_id = getattr(p, "lineup_slot_id", None) if with_slots else None
         result.append(DailyMatchupPlayerStats(
             player_id=p.player_id,
             name=p.name,
@@ -91,11 +134,17 @@ def build_past_roster(roster: Iterable[Any], resolve: Callable[[Any], Optional[i
             position=p.position,
             nba_player_id=nba_id,
             had_game=p.team in teams_playing,
+            lineup_slot=getattr(p, "lineup_slot", None) if with_slots else None,
+            lineup_slot_id=slot_id,
+            injury_status=getattr(p, "injury_status", None) if with_slots else None,
             fpts=score_stat_row(stats, scoring) if stats else None,
             **{k: (getattr(stats, k) if stats else None) for k in STAT_FIELDS},
         ))
-    # Players with stats first (by fpts desc), then had a game but no stats, then no game
-    result.sort(key=lambda x: (0 if x.fpts is not None else (1 if x.had_game else 2), -(x.fpts or 0)))
+    if with_slots:
+        result.sort(key=lambda x: (x.lineup_slot_id if x.lineup_slot_id is not None else 99, -(x.fpts or 0), x.name))
+    else:
+        # Players with stats first (by fpts desc), then had a game but no stats, then no game
+        result.sort(key=lambda x: (0 if x.fpts is not None else (1 if x.had_game else 2), -(x.fpts or 0)))
     return result
 
 
@@ -125,12 +174,19 @@ def player_stat_line(p: DailyMatchupPlayerStats) -> Optional[StatLine]:
     return StatLine.from_dict({k: getattr(p, k) or 0 for k in STAT_FIELDS})
 
 
-def team_day_totals(roster: list[DailyMatchupPlayerStats], scoring: ResolvedScoring
-                    ) -> tuple[float, Optional[dict[str, float]]]:
-    total = float(sum(p.fpts for p in roster if p.fpts is not None))
+def team_day_totals(roster: list[DailyMatchupPlayerStats], scoring: ResolvedScoring, *,
+                    active_only: bool = False) -> tuple[float, Optional[dict[str, float]]]:
+    """The day's fpts and (category leagues) per-category totals.
+
+    `active_only` counts the players whose slot that day was not bench/IR —
+    ESPN's own accounting — and is used whenever the roster is really that
+    day's. Without slots every rostered player counts, as before.
+    """
+    counted = [p for p in roster if counts_for_the_day(p)] if active_only else list(roster)
+    total = float(sum(p.fpts for p in counted if p.fpts is not None))
     if not scoring.is_categories or scoring.categories is None:
         return total, None
-    lines = [line for line in (player_stat_line(p) for p in roster) if line is not None]
+    lines = [line for line in (player_stat_line(p) for p in counted) if line is not None]
     return total, scoring.categories.team_totals(lines)
 
 
@@ -144,8 +200,13 @@ def comparison_to_schema(cmp: CategoryComparisonData) -> CategoryComparison:
 
 def build_day(md: MatchupData, target_date: date, today: date, period_start: date,
               nba_id_to_stats: dict[int, Any], games_on_date: Iterable[Any],
-              resolve: Callable[[Any], Optional[int]], scoring: ResolvedScoring) -> DailyMatchupData:
-    """One day of a matchup: box scores for past/today, schedule for future days."""
+              resolve: Callable[[Any], Optional[int]], scoring: ResolvedScoring,
+              rosters: Optional[DayRosters] = None) -> DailyMatchupData:
+    """One day of a matchup: box scores for past/today, schedule for future days.
+
+    `rosters` supplies a past day's real rosters (lineup snapshots or ESPN's
+    history) side by side; a side left at its default uses the current roster.
+    """
     if target_date < today:
         day_type = "past"
     elif target_date == today:
@@ -155,18 +216,25 @@ def build_day(md: MatchupData, target_date: date, today: date, period_start: dat
 
     teams_playing, team_game_map = index_games(games_on_date)
     comparison: Optional[CategoryComparison] = None
+    sides = rosters or DayRosters()
 
     if day_type in ("past", "today"):
-        your_roster = build_past_roster(md.your_team.roster, resolve, teams_playing, nba_id_to_stats, scoring)
-        opp_roster = build_past_roster(md.opponent_team.roster, resolve, teams_playing, nba_id_to_stats, scoring)
-        your_total, your_cats = team_day_totals(your_roster, scoring)
-        opp_total, opp_cats = team_day_totals(opp_roster, scoring)
+        your_players = sides.your.players if sides.your.players is not None else md.your_team.roster
+        opp_players = sides.opp.players if sides.opp.players is not None else md.opponent_team.roster
+        your_roster = build_past_roster(your_players, resolve, teams_playing, nba_id_to_stats, scoring,
+                                        with_slots=sides.your.dated)
+        opp_roster = build_past_roster(opp_players, resolve, teams_playing, nba_id_to_stats, scoring,
+                                       with_slots=sides.opp.dated)
+        your_total, your_cats = team_day_totals(your_roster, scoring, active_only=sides.your.dated)
+        opp_total, opp_cats = team_day_totals(opp_roster, scoring, active_only=sides.opp.dated)
         if your_cats is not None and opp_cats is not None and scoring.categories is not None:
             comparison = comparison_to_schema(scoring.categories.compare(your_cats, opp_cats))
         your_team = DailyMatchupTeam(team_name=md.your_team.team_name, team_id=md.your_team.team_id,
-                                     total_fpts=your_total, roster=your_roster, categories=your_cats)
+                                     total_fpts=your_total, roster=your_roster, categories=your_cats,
+                                     roster_source=sides.your.source, lineup_captured_at=sides.your.captured_at)
         opponent_team = DailyMatchupTeam(team_name=md.opponent_team.team_name, team_id=md.opponent_team.team_id,
-                                         total_fpts=opp_total, roster=opp_roster, categories=opp_cats)
+                                         total_fpts=opp_total, roster=opp_roster, categories=opp_cats,
+                                         roster_source=sides.opp.source, lineup_captured_at=sides.opp.captured_at)
     else:
         your_team = DailyMatchupTeam(team_name=md.your_team.team_name, team_id=md.your_team.team_id,
                                      total_fpts=None, roster=build_future_roster(md.your_team.roster, team_game_map, resolve))

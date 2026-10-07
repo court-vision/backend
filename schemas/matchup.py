@@ -190,14 +190,25 @@ class LiveMatchupResp(BaseResponse):
 
 # ------------------------------- Daily Matchup Models ------------------------------- #
 
+RosterSource = Literal["snapshot", "provider_history", "current"]
+
+
 class DailyMatchupPlayerStats(ApiModel):
-    """Player stats for a single past day. No lineup_slot since we don't snapshot rosters."""
+    """Player stats for a single past day.
+
+    The lineup fields are set when the day's roster came from a lineup snapshot
+    (or ESPN's per-day history) and left None when the team's current roster
+    stood in for it — today's slots are never presented as that day's.
+    """
     player_id: int                             # ESPN player ID (from roster)
     name: str
     team: str                                  # NBA team abbreviation
     position: str
     nba_player_id: Optional[int] = None        # Resolved NBA player ID
     had_game: bool                             # Whether their team had a game that day
+    lineup_slot: Optional[str] = None          # e.g. "PG", "UT", "BE", "IR" — that day's slot
+    lineup_slot_id: Optional[int] = None
+    injury_status: Optional[str] = None        # as the provider reported it that day
     fpts: Optional[float] = None               # scored with the league's point weights
     pts: Optional[int] = None
     reb: Optional[int] = None
@@ -232,9 +243,13 @@ class DailyMatchupTeam(ApiModel):
     """Team data for a daily matchup view."""
     team_name: str
     team_id: int
-    total_fpts: Optional[float] = None         # Sum of roster fpts (past days only)
+    total_fpts: Optional[float] = None         # Past days: the day's fpts — starters only when the roster is a snapshot
     roster: list[DailyMatchupPlayerStats] | list[DailyMatchupFuturePlayer]
     categories: Optional[dict[str, float]] = None   # category leagues: day totals per category
+    # Where a past day's roster came from: the nightly lineup snapshot, ESPN's
+    # per-day history read live, or (the old behaviour) today's roster.
+    roster_source: RosterSource = "current"
+    lineup_captured_at: Optional[str] = None   # snapshot rows only
 
 
 class DailyMatchupData(ApiModel):
