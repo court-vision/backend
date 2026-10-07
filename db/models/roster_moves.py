@@ -1,11 +1,13 @@
 """
 usr.roster_moves — every roster write Court Vision sent (or tried to send) to a
 provider on a user's behalf: lineup slot moves (manual or automatic) and
-add/drop transactions (manual only), told apart by `kind`.
+add/drop transactions (manual, or a scheduled pickup's), told apart by `kind`.
 
 The row is the audit trail and the auto-run dedup: a partial unique index keeps
 one *counted* auto attempt (applied / applied_unverified / noop) per team per
-day, while rejected / failed rows — and every manual row — may repeat.
+day, while rejected / failed rows — and every manual or scheduled row — may
+repeat. `source` 'scheduled' is the scheduled-pickup executor's (migration
+0028); it stays outside the auto index and the auto dedup.
 Backend-only; data-platform never reads or writes it.
 """
 
@@ -18,7 +20,7 @@ from db.base import BaseModel
 from db.models.teams import Team
 from db.models.users import User
 
-SOURCES = ("manual", "auto")
+SOURCES = ("manual", "auto", "scheduled")
 KINDS = ("lineup", "transaction")
 STATUSES = ("applied", "applied_unverified", "rejected", "failed", "noop")
 COUNTED_AUTO_STATUSES = ("applied", "applied_unverified", "noop")
@@ -30,7 +32,7 @@ class RosterMove(BaseModel):
     team = ForeignKeyField(Team, on_delete="CASCADE", backref="roster_moves")
     nba_date = DateField()
     scoring_period_id = IntegerField(null=True)
-    source = CharField(max_length=10)          # manual | auto
+    source = CharField(max_length=10)          # manual | auto | scheduled
     kind = CharField(max_length=12, default="lineup")   # lineup | transaction
     status = CharField(max_length=20)          # applied | applied_unverified | rejected | failed | noop
     # lineup rows: [{player_id, from_slot_id, to_slot_id, role, note}]
