@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal, Optional
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from schemas.common import ApiModel, BaseResponse
 
@@ -81,7 +81,7 @@ class ScheduledPickupListResp(BaseResponse):
 
 class PickupExecuteReq(ApiModel):
     limit: int = Field(default=4, ge=1, le=50)   # rows per run; each is several ESPN calls
-    now: Optional[datetime] = None               # clock override for dogfooding (tz-aware); omit in production
+    now: Optional[AwareDatetime] = None          # clock override for dogfooding, with its offset; omit in production
 
 
 class PickupResult(ApiModel):

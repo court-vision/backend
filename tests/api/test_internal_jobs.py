@@ -4,6 +4,8 @@ routes. No Clerk user — a missing or wrong bearer is refused, the right one re
 the (stubbed) service.
 """
 
+from datetime import timedelta
+
 import pytest
 
 from core import pipeline_auth
@@ -82,6 +84,24 @@ def test_pickups_right_bearer_reaches_the_service_with_defaults(client, token, m
     r = client.post(PICKUPS, json={"limit": 2, "now": "2026-10-22T00:05:00Z"}, headers={"Authorization": "Bearer pipe-token"})
     assert r.status_code == 200 and seen[1].limit == 2 and seen[1].now.isoformat() == "2026-10-22T00:05:00+00:00"
     assert client.post(PICKUPS, json={"limit": 0}, headers={"Authorization": "Bearer pipe-token"}).status_code == 422
+
+
+@pytest.mark.api
+def test_pickups_clock_override_without_an_offset_is_422(client, token, monkeypatch):
+    seen = []
+
+    async def fake(req):
+        seen.append(req)
+        return PickupExecuteResp(status=ApiStatus.SUCCESS, message="0 pickup(s) attempted",
+                                 data=PickupExecuteData(due=0, results=[]))
+
+    monkeypatch.setattr(pickups.ScheduledPickupService, "execute_due", staticmethod(fake))
+    auth = {"Authorization": "Bearer pipe-token"}
+    # read in the server's own zone it would claim rows for another instant than the caller meant
+    assert client.post(PICKUPS, json={"now": "2026-10-22T00:05:00"}, headers=auth).status_code == 422
+    assert seen == []
+    r = client.post(PICKUPS, json={"now": "2026-10-21T20:05:00-04:00"}, headers=auth)
+    assert r.status_code == 200 and seen[0].now.utcoffset() == timedelta(hours=-4)
 
 
 # ---- /v1/internal/jobs/valuation/standard --------------------------------------
