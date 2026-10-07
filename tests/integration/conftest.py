@@ -42,6 +42,8 @@ def clean_tables(integration_db):
     """Truncate mutable tables between tests for isolation."""
     db.execute_sql("""
         TRUNCATE TABLE
+            usr.lineup_snapshot_players,
+            usr.lineup_snapshots,
             usr.roster_moves,
             usr.lineups,
             usr.teams,
