@@ -103,7 +103,7 @@ class PickupResult(ApiModel):
 
 
 class PickupExecuteData(ApiModel):
-    due: int                                     # rows claimed this run (results may hold fewer)
+    due: int                                     # due rows this run took (results may hold fewer)
     results: list[PickupResult] = []
 
 

@@ -394,6 +394,18 @@ def test_the_attempt_budget_fails_the_row(h):
     assert (r.outcome, r.reason) == ("failed", "max_attempts")
 
 
+@pytest.mark.unit
+def test_a_write_out_on_the_last_attempt_still_gets_one_attempt_to_confirm_it(h):
+    arrange_day_before(h)
+    h.txn = [FantasyWriterUnavailable("timed out", espn_status=None)]
+    r = execute(h, row(attempts=svc.MAX_ATTEMPTS))
+    assert (r.outcome, r.reason) == ("deferred", "writer_unavailable") and h.settled == []
+
+    h.boards[None] = RuntimeError("espn 503")    # ... and only one: a confirming read that fails ends it
+    r = execute(h, row(attempts=svc.MAX_ATTEMPTS + 1, audit_id=1), now=NOW + svc.WRITER_RETRY)
+    assert (r.outcome, r.reason) == ("failed", "max_attempts") and len(h.txn_calls) == 1
+
+
 # ---- settled without a write ------------------------------------------------------------
 
 
@@ -598,6 +610,17 @@ def test_a_broken_row_is_deferred_and_the_batch_continues(h, monkeypatch):
     outcomes = [(r.pickup_id, r.outcome) for r in resp.data.results]
     assert outcomes == [(1, "deferred"), (2, "executed")]
     assert h.deferred[0][2:] == ("error", "db hiccup")
+
+
+@pytest.mark.unit
+def test_a_row_over_its_attempt_budget_is_reported_failed_without_an_attempt(h, monkeypatch):
+    spent = row(status="failed", reason="max_attempts", detail="in_progress", attempts=svc.MAX_ATTEMPTS,
+                next_attempt_at=None)                  # settled by the claim
+    monkeypatch.setattr(svc, "_claim_due", lambda now, limit: [spent])
+    resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(now=NOW)))
+    (r,) = resp.data.results
+    assert (r.pickup_id, r.outcome, r.reason, r.detail) == (1, "failed", "max_attempts", "in_progress")
+    assert h.reads == [] and h.txn_calls == [] and h.settled == [] and h.deferred == []
 
 
 @pytest.mark.unit

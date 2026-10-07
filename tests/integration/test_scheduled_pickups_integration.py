@@ -129,6 +129,31 @@ def test_claim_takes_only_due_unleased_rows_in_order_and_leases_them(user, team)
     assert all(r.attempts == 2 for r in again)
 
 
+def test_a_row_that_used_up_its_attempts_settles_when_due_instead_of_being_claimed(user, team):
+    spent = _pickup(user, team, add=1, attempts=svc.MAX_ATTEMPTS, reason="in_progress",
+                    next_attempt_at=NOW - timedelta(minutes=1))                # its last attempt died after the claim
+    last = _pickup(user, team, add=2, attempts=svc.MAX_ATTEMPTS - 1)
+    rows = svc._claim_due(NOW, limit=10)
+    assert [(r.add_player_id, r.status, r.reason) for r in rows] == [(1, "failed", "max_attempts"),
+                                                                     (2, "pending", "in_progress")]
+    stored = ScheduledPickup.get_by_id(spent.id)
+    assert (stored.status, stored.detail, stored.attempts, stored.next_attempt_at) == ("failed", "in_progress",
+                                                                                      svc.MAX_ATTEMPTS, None)
+    # the other row's claim was its last: when its lease runs out it settles too, and neither comes back
+    assert [(r.id, r.status) for r in svc._claim_due(NOW + svc.LEASE, limit=10)] == [(last.id, "failed")]
+    assert svc._claim_due(NOW + 2 * svc.LEASE, limit=10) == []
+
+
+def test_a_row_whose_write_is_out_is_claimed_once_past_the_budget_to_confirm_it(user, team):
+    sent = _pickup(user, team, attempts=svc.MAX_ATTEMPTS, audit_id=_audit(user, team).id, reason="writer_unavailable",
+                   next_attempt_at=NOW - timedelta(minutes=1))                 # its last attempt's write got no answer
+    (confirming,) = svc._claim_due(NOW, limit=10)
+    assert (confirming.status, confirming.attempts) == ("pending", svc.MAX_ATTEMPTS + 1)
+    (settled,) = svc._claim_due(NOW + svc.LEASE, limit=10)                       # ... and that attempt died too
+    assert (settled.id, settled.status, settled.reason, settled.detail) == (sent.id, "failed", "max_attempts",
+                                                                            "in_progress")
+
+
 def test_release_pushes_due_rows_without_counting_an_attempt(user, team):
     row = _pickup(user, team)
     assert svc._release_due(NOW, NOW + svc.RETRY) == 1

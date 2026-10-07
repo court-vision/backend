@@ -101,7 +101,7 @@ RETRY = timedelta(minutes=10)
 WAIVER_RETRY = timedelta(minutes=60)
 WRITER_RETRY = timedelta(minutes=5)
 LEASE = timedelta(minutes=5)        # a claimed row is invisible to the next tick this long
-MAX_ATTEMPTS = 48
+MAX_ATTEMPTS = 48                   # one more for a row whose write is out: a read-only attempt that confirms it
 RECENT_DAYS = 7
 ROSTER_FULL_CODE = "TRAN_ROSTER_FULL"
 
@@ -280,16 +280,28 @@ def _due_clause(Row, now: datetime):
 def _claim_due(now: datetime, limit: int) -> list:
     """Lease up to `limit` due rows to this run: bump attempts, push next_attempt_at by the
     lease, mark the attempt running (reason IN_PROGRESS, which a cancel waits out), return the
-    rows (soonest first). A concurrent run sees nothing until the lease ends."""
+    rows (soonest first). A concurrent run sees nothing until the lease ends.
+
+    A due row that has used up its attempt budget is not claimed again — its last attempts died
+    before they could settle or defer it (where `_defer` enforces the budget). It settles here
+    as failed max_attempts, keeping its last reason in `detail`, and comes back settled for the
+    run to report. A row whose write is out is still claimed once past the budget: that attempt
+    only reads the board, and learns whether the write landed."""
     Row = _model()
     due = _due_clause(Row, now)
     ids = [r.id for r in Row.select(Row.id).where(due).order_by(Row.not_before_at, Row.id).limit(limit)]
     if not ids:
         return []
-    rows = list(Row.update(next_attempt_at=now + LEASE, attempts=Row.attempts + 1, last_attempt_at=now,
-                           reason=IN_PROGRESS, updated_at=now)
-                .where(due & Row.id.in_(ids)).returning(Row).execute())
-    return sorted(rows, key=lambda r: (r.not_before_at, r.id))
+    picked = due & Row.id.in_(ids)
+    with db.atomic():
+        over = (Row.attempts >= MAX_ATTEMPTS) & (Row.audit_id.is_null(True) | (Row.attempts > MAX_ATTEMPTS))
+        spent = list(Row.update(status=FAILED, reason="max_attempts", detail=fn.CONCAT_WS(": ", Row.reason, Row.detail),
+                                next_attempt_at=None, updated_at=now)
+                     .where(picked & over).returning(Row).execute())
+        rows = list(Row.update(next_attempt_at=now + LEASE, attempts=Row.attempts + 1, last_attempt_at=now,
+                               reason=IN_PROGRESS, updated_at=now)
+                    .where(picked).returning(Row).execute())
+    return sorted(spent + rows, key=lambda r: (r.not_before_at, r.id))
 
 
 def _release_due(now: datetime, until: datetime) -> int:
@@ -522,6 +534,13 @@ class ScheduledPickupService:
         rows = await run_db("pickup.claim", _claim_due, now, req.limit)
         results: list[PickupResult] = []
         for row in rows:
+            if row.status != PENDING:
+                # Over its attempt budget: the claim settled it, and nothing is read or sent.
+                log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=row.status,
+                         reason=row.reason, attempts=row.attempts)
+                results.append(ScheduledPickupService._result(row, row.status, row.reason, detail=row.detail,
+                                                              audit_id=row.audit_id))
+                continue
             try:
                 result = await ScheduledPickupService._execute_one(row, now)
             except Exception as exc:  # one broken row must not take the batch down
@@ -776,9 +795,10 @@ class ScheduledPickupService:
                      team_name: str = "") -> Optional[PickupResult]:
         """Keep the row pending and try again at `at`, or after `after` (default RETRY) — unless
         that is past the deadline or the attempt budget, which settles it instead. A row whose
-        write is out keeps its mark, is retried no sooner than the lease its send renewed, and is
-        not expired by the deadline: the retry only reads the board, and D's first tip-off does
-        not change whether the write landed. None when the row is no longer this attempt's."""
+        write is out keeps its mark, is retried no sooner than the lease its send renewed, is not
+        expired by the deadline, and gets one attempt past the budget: the retry only reads the
+        board, and D's first tip-off does not change whether the write landed. None when the row
+        is no longer this attempt's."""
         when = max(at, now + RETRY) if at is not None else now + (after or RETRY)
         in_flight = row.audit_id is not None
         if in_flight and row.next_attempt_at is not None:
@@ -786,7 +806,7 @@ class ScheduledPickupService:
         if not in_flight and row.deadline_at is not None and when >= row.deadline_at:
             return await ScheduledPickupService._settle(row, now, EXPIRED, "deadline", detail=f"{reason}: {detail}" if detail else reason,
                                                         team_name=team_name)
-        if row.attempts >= MAX_ATTEMPTS:
+        if row.attempts >= MAX_ATTEMPTS + (1 if in_flight else 0):
             return await ScheduledPickupService._settle(row, now, FAILED, "max_attempts", detail=f"{reason}: {detail}" if detail else reason,
                                                         team_name=team_name)
         if not await run_db("pickup.defer", _defer_row, row.id, row.attempts, now, when, reason, detail, row.audit_id):
