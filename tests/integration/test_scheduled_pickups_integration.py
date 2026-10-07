@@ -6,7 +6,7 @@ stored and claimed: the status CHECK, one pending row per (team, player), the
 widened roster_moves source CHECK (with the auto-lineup index untouched), the
 FKs, and the repository functions the service runs through `run_db` — the claim
 lease, the writes-off release, the in-flight mark, settle / defer (both fenced by
-the claim), cancel, list — plus the rollback.
+the claim), cancel, list — plus the rollback, after the feature has run.
 """
 
 import json
@@ -278,15 +278,21 @@ def test_window_reads_the_schedule(user, team):
 # ---- rollback -----------------------------------------------------------------------------
 
 
-def test_0028_rollback_applies_and_the_forward_file_restores_it(integration_db):
+def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_restores_it(user, team):
     forward = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.rollback.sql").read_text()
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
 
+    ran = _audit(user, team, "applied")                      # the feature ran before it was rolled back
+    _pickup(user, team, status="executed", audit_id=ran.id, executed_at=NOW)
     assert table_exists() and "'scheduled'" in _source_check_values()
     db.execute_sql(rollback)
     assert not table_exists() and "'scheduled'" not in _source_check_values()
+    assert RosterMove.get_by_id(ran.id).source == "scheduled"                # the audit history stays
+    with pytest.raises(IntegrityError), db.atomic():
+        _audit(user, team)                                                    # but a new 'scheduled' write is refused
     db.execute_sql(forward)
     assert table_exists() and "'scheduled'" in _source_check_values()
+    assert "NOT VALID" not in _source_check_values()
