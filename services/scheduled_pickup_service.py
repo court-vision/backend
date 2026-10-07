@@ -20,6 +20,17 @@ first tip-off is the deadline. After the add, the player is seated in day D's
 lineup through the lineup-move chain (FUTURE_ROSTER while D is still ahead),
 best effort: a seat that cannot be given never undoes an executed pickup.
 
+Sending. A row's add/drop goes out at most once. Right before it is sent, the row
+is checked and marked in one step (`_mark_in_flight`): still pending, still this
+attempt's claim (`attempts` unchanged — every claim bumps it), no write out yet.
+The mark is the write's audit id on the pending row, and the lease is renewed from
+the send. Every settle and deferral is fenced the same way, so an attempt that lost
+its row changes nothing and reports nothing. A write that got no answer — the
+worker died, the writer timed out — keeps its mark, and the next attempt only reads
+the board: the player on it settles the row executed (and seats him), his absence
+settles it failed `interrupted`. Only a writer that was provably never reached (no
+free slot, no connection) clears the mark, so that retry may send.
+
 The rules (`attempt_window`, `on_refusal`, `pick_seat`) are pure and table-tested;
 the repository functions run through `run_db`; the service composes them.
 """
@@ -31,6 +42,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Optional
 
+import httpx
 import pytz
 from peewee import IntegrityError
 
@@ -53,6 +65,7 @@ from schemas.scheduled_pickup import (
     ScheduledPickupResp,
 )
 from services.daily_actions_service import has_open_seat
+from services.fantasy_writer_client import FantasyWriterUnavailable
 from services.lineup_editor_service import (
     LineupEditorService,
     RosterWriteBlocked,
@@ -112,8 +125,23 @@ class ScheduledPickupNotPending(ConflictError):
     default_message = "That pickup is no longer pending"
 
 
+class ClaimLost(Exception):
+    """The row stopped being this attempt's before its write was sent — the user cancelled it, or
+    a later run claimed it once the lease ran out. Nothing is sent, and the attempt reports nothing."""
+
+
 def _invalid(reason: str, message: str, player_id: Optional[int] = None) -> ScheduledPickupInvalid:
     return ScheduledPickupInvalid(message=message, data={"reason": reason, "player_id": player_id})
+
+
+def _never_sent(exc: BaseException) -> bool:
+    """A writer outage that provably happened before the request left this process — no free
+    writer slot, no connection to the writer — as fantasy_writer_client raises it (`from` its
+    cause). Anything else (a timeout, a writer 5xx) may have reached ESPN."""
+    writer_error = exc.__cause__
+    return (isinstance(writer_error, FantasyWriterUnavailable)
+            and isinstance(writer_error.__cause__, (TimeoutError, httpx.ConnectError, httpx.ConnectTimeout,
+                                                     httpx.PoolTimeout)))
 
 
 # ------------------------------- rules (pure) ------------------------------- #
@@ -127,6 +155,13 @@ def et_at(d: date, t: time) -> datetime:
 def rollover_at(d: date) -> datetime:
     """When the ESPN fantasy day `d` begins (02:00 ET), as UTC."""
     return et_at(d, ROLLOVER_ET)
+
+
+def _lease_from_now(now: datetime) -> datetime:
+    """A lease that runs LEASE from this moment in real time: `now` is the run's clock, read at its
+    start, and rows earlier in the batch may have used up the claim's lease. Never shorter than
+    one from `now` (the dogfood override may be ahead of the wall clock)."""
+    return max(now, datetime.now(timezone.utc)) + LEASE
 
 
 @dataclass(frozen=True)
@@ -251,23 +286,41 @@ def _release_due(now: datetime, until: datetime) -> int:
     return Row.update(next_attempt_at=until, reason="writes_disabled", updated_at=now).where(_due_clause(Row, now)).execute()
 
 
-def _settle_row(pickup_id: int, now: datetime, *, status: str, reason: Optional[str] = None,
+def _held(Row, pickup_id: int, attempts: int):
+    """The row is still the attempt's that claimed it: pending (no cancel landed) and not claimed
+    again since — every claim bumps `attempts`, which makes it the claim's fencing token."""
+    return (Row.id == pickup_id) & (Row.status == PENDING) & (Row.attempts == attempts)
+
+
+def _mark_in_flight(pickup_id: int, attempts: int, audit_id: int, now: datetime, lease_until: datetime) -> bool:
+    """The last check before a write is sent, and its record: store the write's audit id on the
+    row while it is still this attempt's and no write is out yet. True = send. On a pending row
+    the audit id is the in-flight mark the next attempt confirms from the board; the renewed
+    lease keeps every other run off the row while the write is out."""
+    Row = _model()
+    return bool(Row.update(audit_id=audit_id, next_attempt_at=lease_until, updated_at=now)
+                .where(_held(Row, pickup_id, attempts) & Row.audit_id.is_null(True)).execute())
+
+
+def _settle_row(pickup_id: int, attempts: int, now: datetime, *, status: str, reason: Optional[str] = None,
                 detail: Optional[str] = None, audit_id: Optional[int] = None,
                 lineup_audit_id: Optional[int] = None, seated_slot_id: Optional[int] = None,
-                executed_at: Optional[datetime] = None) -> None:
+                executed_at: Optional[datetime] = None) -> bool:
+    """False when the row is no longer this attempt's (nothing changed)."""
     Row = _model()
-    (Row.update(status=status, reason=reason, detail=detail, audit_id=audit_id, lineup_audit_id=lineup_audit_id,
-                seated_slot_id=seated_slot_id, executed_at=executed_at, next_attempt_at=None, updated_at=now)
-     .where(Row.id == pickup_id).execute())
+    return bool(Row.update(status=status, reason=reason, detail=detail, audit_id=audit_id,
+                           lineup_audit_id=lineup_audit_id, seated_slot_id=seated_slot_id,
+                           executed_at=executed_at, next_attempt_at=None, updated_at=now)
+                .where(_held(Row, pickup_id, attempts)).execute())
 
 
-def _defer_row(pickup_id: int, now: datetime, when: datetime, reason: str, detail: Optional[str],
-               audit_id: Optional[int] = None) -> None:
+def _defer_row(pickup_id: int, attempts: int, now: datetime, when: datetime, reason: str,
+               detail: Optional[str], audit_id: Optional[int]) -> bool:
+    """`audit_id` stays on a row whose write is out (the next attempt confirms it) and is None
+    otherwise. False when the row is no longer this attempt's (nothing changed)."""
     Row = _model()
-    fields = dict(next_attempt_at=when, reason=reason, detail=detail, updated_at=now)
-    if audit_id is not None:
-        fields["audit_id"] = audit_id
-    Row.update(**fields).where(Row.id == pickup_id).execute()
+    return bool(Row.update(next_attempt_at=when, reason=reason, detail=detail, audit_id=audit_id, updated_at=now)
+                .where(_held(Row, pickup_id, attempts)).execute())
 
 
 def _insert_pickup(**fields):
@@ -449,17 +502,21 @@ class ScheduledPickupService:
         results: list[PickupResult] = []
         for row in rows:
             try:
-                results.append(await ScheduledPickupService._execute_one(row, now))
+                result = await ScheduledPickupService._execute_one(row, now)
             except Exception as exc:  # one broken row must not take the batch down
                 log.exception("scheduled_pickup_error", pickup_id=row.id, team_id=row.team_id, error=str(exc))
-                results.append(await ScheduledPickupService._defer(row, now, "error", detail=str(exc)[:300]))
+                result = await ScheduledPickupService._defer(row, now, "error", detail=str(exc)[:300])
+            if result is not None:    # None: the row stopped being this run's, and its holder reports it
+                results.append(result)
         log.info("scheduled_pickups_run", due=len(rows),
                  outcomes=dict(Counter(r.outcome for r in results)))
         return PickupExecuteResp(status=ApiStatus.SUCCESS, message=f"{len(rows)} pickup(s) attempted",
                                  data=PickupExecuteData(due=len(rows), results=results))
 
     @staticmethod
-    async def _execute_one(row, now: datetime) -> PickupResult:
+    async def _execute_one(row, now: datetime) -> Optional[PickupResult]:
+        """One attempt at a claimed row. None when the row stopped being this attempt's under it
+        (cancelled, or claimed by a later run once the lease ran out): nothing is sent then."""
         day, nba_date = row.scoring_period_id, row.nba_date
         settle, defer = ScheduledPickupService._settle, ScheduledPickupService._defer
 
@@ -478,6 +535,12 @@ class ScheduledPickupService:
             return await settle(row, now, FAILED, "auth_expired", team_name=team_name)
         except Exception as exc:
             return await defer(row, now, "provider_error", detail=str(exc)[:300], team_name=team_name)
+
+        if row.audit_id is not None:
+            # A write went out on an earlier attempt and was never settled — the worker died, or
+            # the writer gave no answer. It is never sent again: the board says whether it landed.
+            return await ScheduledPickupService._confirm_sent(row, now, state, league_info, slots, adapter,
+                                                              team_name=team_name)
 
         period = state.scoring_period_id
         if not state.can_write:
@@ -500,13 +563,8 @@ class ScheduledPickupService:
         note: Optional[str] = None
 
         if add in on_board:
-            # Already here: an earlier attempt's write landed before its row was settled,
-            # or the user picked him up by hand. Either way nothing is sent.
-            if row.audit_id is not None:
-                seated = await ScheduledPickupService._seat_on_day(row, league_info, slots, adapter,
-                                                                   period=period, preferred=None)
-                return await settle(row, now, EXECUTED, "already_rostered", audit_id=row.audit_id,
-                                    seated=seated, verified=True, team_name=team_name)
+            # Already here with no write of ours out (one that is out was confirmed above): the
+            # user picked him up by hand. Nothing is sent.
             return await settle(row, now, SKIPPED, "already_on_roster", team_name=team_name)
 
         holder = on_board.get(drop) if drop is not None else None
@@ -542,14 +600,25 @@ class ScheduledPickupService:
         # Where he should sit on day D: the seat of the player he replaces, read before the add changes it.
         preferred = await ScheduledPickupService._holder_slot_on_day(row, league_info, slots, adapter, holder, period)
 
+        async def last_check(audit_id: int) -> None:
+            # Right before the write leaves: the row must still be this attempt's, and takes the
+            # in-flight mark, or nothing is sent.
+            lease_until = _lease_from_now(now)
+            if not await run_db("pickup.in_flight", _mark_in_flight, row.id, row.attempts, audit_id, now, lease_until):
+                raise ClaimLost("the pickup was cancelled or claimed by another run before its write was sent")
+            row.audit_id, row.next_attempt_at = audit_id, lease_until
+
         names = {p.player_id: p.name for p in state.players}
         names[pool_entry.player_id] = pool_entry.name
         try:
             fresh, verified, audit_id = await RosterTransactionService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=state,
                 add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-                source="scheduled",
+                source="scheduled", before_send=last_check,
             )
+        except ClaimLost:
+            log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
+            return None
         except RosterWriteRejected as exc:
             code = (exc.data or {}).get("espn_error_code")
             if code == ROSTER_FULL_CODE:
@@ -558,6 +627,9 @@ class ScheduledPickupService:
         except ProviderAuthError:
             return await settle(row, now, FAILED, "auth_expired", team_name=team_name)
         except RosterWriteUnavailable as exc:
+            if _never_sent(exc):
+                row.audit_id = None     # the writer was never reached: the retry may send
+            # Otherwise the write may have reached ESPN: it keeps its mark, and the retry only reads the board.
             return await defer(row, now, "writer_unavailable", after=WRITER_RETRY, detail=exc.message,
                                team_name=team_name)
 
@@ -582,6 +654,28 @@ class ScheduledPickupService:
             log.warning("scheduled_pickup_day_board_unavailable", pickup_id=row.id, error=str(exc))
             return None
         return next((p.lineup_slot_id for p in board.players if p.player_id == holder.player_id), None)
+
+    @staticmethod
+    async def _confirm_sent(row, now: datetime, state: LineupState, league_info, slots, adapter, *,
+                            team_name: str) -> Optional[PickupResult]:
+        """Settle a row whose write went out on an earlier attempt, from today's board alone — never
+        by sending again, since a write that got no answer may still have reached ESPN. The player on
+        the board: executed, and seated on day D unless D has passed (or the board is read-only). Not
+        on it: the write never landed — failed `interrupted`, and the user makes the move by hand."""
+        on_board = {p.player_id for p in state.players}
+        if row.add_player_id not in on_board:
+            return await ScheduledPickupService._settle(
+                row, now, FAILED, "interrupted", team_name=team_name,
+                detail="A write for this pickup went out with no answer recorded, and the roster does not "
+                       "show it; it is not sent again")
+        period = state.scoring_period_id
+        seated = Seated()
+        if state.can_write and period is not None and period <= row.scoring_period_id:
+            seated = await ScheduledPickupService._seat_on_day(row, league_info, slots, adapter,
+                                                               period=period, preferred=None)
+        dropped = row.drop_player_id is None or row.drop_player_id not in on_board
+        return await ScheduledPickupService._settle(row, now, EXECUTED, "already_rostered", seated=seated,
+                                                    verified=dropped, team_name=team_name)
 
     @staticmethod
     async def _seat_on_day(row, league_info, slots, adapter, *, period: int, preferred: Optional[int]) -> Seated:
@@ -636,13 +730,19 @@ class ScheduledPickupService:
     @staticmethod
     async def _settle(row, now: datetime, status: str, reason: Optional[str], *, detail: Optional[str] = None,
                       audit_id: Optional[int] = None, seated: Optional[Seated] = None,
-                      verified: Optional[bool] = None, team_name: str = "") -> PickupResult:
+                      verified: Optional[bool] = None, team_name: str = "") -> Optional[PickupResult]:
+        """None when the row is no longer this attempt's: nothing is changed or reported. A write
+        that went out keeps its audit id on the row whatever the outcome."""
         seated = seated or Seated()
+        audit_id = audit_id if audit_id is not None else row.audit_id
         if seated.note:
             detail = f"{detail}; {seated.note}" if detail else seated.note
-        await run_db("pickup.settle", _settle_row, row.id, now, status=status, reason=reason, detail=detail,
-                     audit_id=audit_id, lineup_audit_id=seated.lineup_audit_id, seated_slot_id=seated.slot_id,
-                     executed_at=now if status == EXECUTED else None)
+        if not await run_db("pickup.settle", _settle_row, row.id, row.attempts, now, status=status, reason=reason,
+                            detail=detail, audit_id=audit_id, lineup_audit_id=seated.lineup_audit_id,
+                            seated_slot_id=seated.slot_id, executed_at=now if status == EXECUTED else None):
+            log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="settle",
+                        status=status, reason=reason)
+            return None
         log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=status, reason=reason,
                  seated_slot=seated.slot_id, attempts=row.attempts)
         return ScheduledPickupService._result(row, status, reason, detail=detail, audit_id=audit_id,
@@ -652,17 +752,26 @@ class ScheduledPickupService:
     @staticmethod
     async def _defer(row, now: datetime, reason: str, *, after: Optional[timedelta] = None,
                      at: Optional[datetime] = None, detail: Optional[str] = None,
-                     team_name: str = "") -> PickupResult:
+                     team_name: str = "") -> Optional[PickupResult]:
         """Keep the row pending and try again at `at`, or after `after` (default RETRY) — unless
-        that is past the deadline or the attempt budget, which settles it instead."""
+        that is past the deadline or the attempt budget, which settles it instead. A row whose
+        write is out keeps its mark, is retried no sooner than the lease its send renewed, and is
+        not expired by the deadline: the retry only reads the board, and D's first tip-off does
+        not change whether the write landed. None when the row is no longer this attempt's."""
         when = max(at, now + RETRY) if at is not None else now + (after or RETRY)
-        if row.deadline_at is not None and when >= row.deadline_at:
+        in_flight = row.audit_id is not None
+        if in_flight and row.next_attempt_at is not None:
+            when = max(when, row.next_attempt_at)
+        if not in_flight and row.deadline_at is not None and when >= row.deadline_at:
             return await ScheduledPickupService._settle(row, now, EXPIRED, "deadline", detail=f"{reason}: {detail}" if detail else reason,
                                                         team_name=team_name)
         if row.attempts >= MAX_ATTEMPTS:
             return await ScheduledPickupService._settle(row, now, FAILED, "max_attempts", detail=f"{reason}: {detail}" if detail else reason,
                                                         team_name=team_name)
-        await run_db("pickup.defer", _defer_row, row.id, now, when, reason, detail)
+        if not await run_db("pickup.defer", _defer_row, row.id, row.attempts, now, when, reason, detail, row.audit_id):
+            log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="defer",
+                        reason=reason)
+            return None
         log.info("scheduled_pickup_deferred", pickup_id=row.id, team_id=row.team_id, reason=reason,
                  next_attempt_at=when.isoformat(), attempts=row.attempts)
         return ScheduledPickupService._result(row, DEFERRED, reason, detail=detail, next_attempt_at=when,

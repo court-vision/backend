@@ -51,8 +51,10 @@ async def execute_pickups(req: PickupExecuteReq):
     gates on whether anything is due). Each row's outcome is reported in
     `data.results`, never raised: executed, skipped (the player is gone — the
     no-op), failed, expired, or deferred (a lock, a waiver period or a writer
-    outage; the row waits for `next_attempt_at`). With roster writes switched off
-    nothing is attempted and due rows are pushed back ten minutes.
+    outage; the row waits for `next_attempt_at`). A write is sent at most once:
+    one that got no answer is settled by the next attempt from the board alone
+    (executed, or failed `interrupted`). With roster writes switched off nothing
+    is attempted and due rows are pushed back ten minutes.
     """
     return respond(await ScheduledPickupService.execute_due(req))
 

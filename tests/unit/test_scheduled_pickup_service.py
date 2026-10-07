@@ -15,6 +15,7 @@ import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from core.errors import BadRequestError
@@ -83,7 +84,8 @@ def run(coro):
 def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
-                        settled=[], deferred=[], team=(LEAGUE, dict(COUNTS)), claimed=[], released=[])
+                        settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
+                        claimed=[], released=[], held=True, settle_crashes=False)
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
         h.reads.append(scoring_period_id)
@@ -125,11 +127,21 @@ def h(monkeypatch):
     def audit_update(audit_id, status, *, provider_status=None, error=None):
         h.updates.append((audit_id, status, provider_status, error))
 
-    def settle_row(pickup_id, now, **fields):
+    # The fenced writes apply while `h.held` (the row is still this attempt's claim).
+    def settle_row(pickup_id, attempts, now, **fields):
+        if h.settle_crashes:
+            raise RuntimeError("the worker died")
         h.settled.append((pickup_id, fields))
+        return h.held
 
-    def defer_row(pickup_id, now, when, reason, detail, audit_id=None):
+    def defer_row(pickup_id, attempts, now, when, reason, detail, audit_id):
         h.deferred.append((pickup_id, when, reason, detail))
+        h.deferred_audit_ids.append(audit_id)
+        return h.held
+
+    def mark_in_flight(pickup_id, attempts, audit_id, now, lease_until):
+        h.marked.append((pickup_id, attempts, audit_id, lease_until, len(h.txn_calls)))
+        return h.held
 
     monkeypatch.setattr(LineupReadService, "read", staticmethod(fake_read))
     monkeypatch.setattr(txn.EspnService, "get_player_pool_entries", staticmethod(fake_pool))
@@ -143,6 +155,8 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_load_team_for_job", lambda team_id, user_id: h.team)
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
+    monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
+    monkeypatch.setattr(svc, "_lease_from_now", lambda now: now + svc.LEASE)   # the wall clock stays out of it
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
     return h
 
@@ -177,6 +191,13 @@ def arrange_day_of(h):
 
 def execute(h, r=None, now=NOW):
     return run(svc.ScheduledPickupService._execute_one(r or row(), now))
+
+
+def unreachable(cause):
+    """The writer client's outage raised `from` a cause that never left this process."""
+    exc = FantasyWriterUnavailable("down", espn_status=None)
+    exc.__cause__ = cause
+    return exc
 
 
 # ---- executed ------------------------------------------------------------------------
@@ -342,7 +363,7 @@ def test_waivers_retry_hourly(h):
 @pytest.mark.unit
 def test_writer_outage_retries_in_five_minutes_and_audits_the_failure(h):
     arrange_day_before(h)
-    h.txn = [FantasyWriterUnavailable("down", espn_status=None)]
+    h.txn = [unreachable(httpx.ConnectError("connection refused"))]
     r = execute(h)
     assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "writer_unavailable", NOW + svc.WRITER_RETRY)
     assert h.updates == [(1, "failed", None, "down")] and h.lineup_calls == []
@@ -445,6 +466,100 @@ def test_a_missing_team_fails_the_row(h, monkeypatch):
     assert (r.outcome, r.reason) == ("failed", "team_not_found")
 
 
+# ---- a write goes out once ---------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_write_is_marked_in_flight_on_the_row_before_it_is_sent(h):
+    arrange_day_before(h)
+    r = execute(h)
+    assert (r.outcome, r.audit_id) == ("executed", 1)
+    # pickup 1, still held by claim 1, takes audit row 1 and a lease from the send — before anything went out
+    assert h.marked == [(1, 1, 1, NOW + svc.LEASE, 0)]
+    assert len(h.txn_calls) == 1 and h.settled[0][1]["audit_id"] == 1
+
+
+@pytest.mark.unit
+def test_a_row_cancelled_or_claimed_again_before_the_send_is_left_alone(h):
+    arrange_day_before(h)
+    h.held = False
+    assert execute(h) is None
+    assert h.txn_calls == [] and h.settled == [] and h.deferred == []
+    assert h.updates == [(1, "failed", None, "not_sent: the pickup was cancelled or claimed by another run "
+                                             "before its write was sent")]
+
+
+@pytest.mark.unit
+def test_a_write_that_landed_before_the_worker_died_is_executed_by_the_next_attempt(h):
+    arrange_day_before(h)
+    h.settle_crashes = True                      # ESPN took the add, then the worker died before settling
+    with pytest.raises(RuntimeError):
+        execute(h)
+    assert len(h.txn_calls) == 1 and h.marked[0][2] == 1
+
+    h.settle_crashes = False                     # the lease runs out and the next run claims the row
+    r = execute(h, row(attempts=2, audit_id=1))
+    assert (r.outcome, r.reason, r.audit_id, r.verified, r.seated_slot) == ("executed", "already_rostered", 1, True, "PG")
+    assert len(h.txn_calls) == 1                 # never sent a second time
+
+
+@pytest.mark.unit
+def test_a_write_the_board_does_not_show_fails_and_is_never_sent_again(h):
+    arrange_day_before(h)                        # no Kawhi on the board: the write that went out never landed
+    r = execute(h, row(audit_id=41))
+    assert (r.outcome, r.reason, r.audit_id) == ("failed", "interrupted", 41)
+    assert h.txn_calls == [] and h.pool_calls == [] and h.lineup_calls == []
+
+
+@pytest.mark.unit
+def test_a_writer_timeout_keeps_the_write_in_flight_and_the_retry_only_reads(h):
+    arrange_day_before(h)
+    h.txn = [FantasyWriterUnavailable("timed out", espn_status=None)]   # no answer: it may have reached ESPN
+    r = execute(h)
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "writer_unavailable", NOW + svc.WRITER_RETRY)
+    assert h.deferred_audit_ids == [1]
+
+    r = execute(h, row(attempts=2, audit_id=1), now=NOW + svc.WRITER_RETRY)
+    assert (r.outcome, r.reason) == ("failed", "interrupted") and len(h.txn_calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cause", [httpx.ConnectError("connection refused"), httpx.ConnectTimeout("connect"),
+                                   TimeoutError()])
+def test_a_writer_that_was_never_reached_is_retried_with_a_fresh_send(h, cause):
+    arrange_day_before(h)
+    h.txn = [unreachable(cause)]
+    assert execute(h).outcome == "deferred" and h.deferred_audit_ids == [None]   # the mark is cleared
+
+    r = execute(h, row(attempts=2), now=NOW + svc.WRITER_RETRY)
+    assert r.outcome == "executed" and len(h.txn_calls) == 2
+
+
+@pytest.mark.unit
+def test_a_write_out_near_the_deadline_waits_for_the_board_instead_of_expiring(h):
+    arrange_day_before(h)
+    h.txn = [FantasyWriterUnavailable("timed out", espn_status=None)]
+    near = NOW + timedelta(minutes=2)
+    r = execute(h, row(deadline_at=near))
+    assert (r.outcome, r.reason) == ("deferred", "writer_unavailable") and h.settled == []
+
+    h.boards = dict(h.after_txn)                 # it had landed after all; the retry comes after the deadline
+    r = execute(h, row(attempts=2, audit_id=1, deadline_at=near), now=NOW + svc.WRITER_RETRY)
+    assert (r.outcome, r.reason) == ("executed", "already_rostered") and len(h.txn_calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("board", [
+    state([player(KAWHI, "Kawhi Leonard", BE, team="LAC")], period=4, current=4, nba_date="2026-10-23"),  # D passed
+    state([player(KAWHI, "Kawhi Leonard", BE, team="LAC")], can_write=False, reason="not_team_owner"),    # read-only
+])
+def test_a_confirmed_write_is_not_seated_after_its_day_or_on_a_read_only_board(h, board):
+    arrange_day_of(h)
+    h.boards[None] = board
+    r = execute(h, row(audit_id=41))
+    assert (r.outcome, r.seated_slot) == ("executed", None) and h.lineup_calls == [] and h.reads == [None]
+
+
 # ---- execute_due ------------------------------------------------------------------------
 
 
@@ -483,6 +598,16 @@ def test_a_broken_row_is_deferred_and_the_batch_continues(h, monkeypatch):
     outcomes = [(r.pickup_id, r.outcome) for r in resp.data.results]
     assert outcomes == [(1, "deferred"), (2, "executed")]
     assert h.deferred[0][2:] == ("error", "db hiccup")
+
+
+@pytest.mark.unit
+def test_a_row_that_stopped_being_the_runs_is_not_reported(h, monkeypatch):
+    arrange_day_before(h)
+    h.pool = {}                                  # the attempt would settle it skipped ...
+    h.held = False                               # ... but a cancel or a later claim got there first
+    monkeypatch.setattr(svc, "_claim_due", lambda now, limit: [row()])
+    resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(now=NOW)))
+    assert resp.data.due == 1 and resp.data.results == []
 
 
 # ---- schedule -----------------------------------------------------------------------------

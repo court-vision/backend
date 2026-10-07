@@ -1,16 +1,21 @@
 """
 The pure rules behind scheduled pickups: when the first attempt is (`attempt_window`),
-what a pre-send refusal means for a stored row (`on_refusal`), and which seat the new
-player gets on day D (`pick_seat`). No I/O — the schedule lookups are injected.
+what a pre-send refusal means for a stored row (`on_refusal`), which seat the new
+player gets on day D (`pick_seat`), and the send's two helpers: the lease it renews
+(`_lease_from_now`) and which writer outages provably never left (`_never_sent`). No
+I/O — the schedule lookups are injected.
 """
 
 from datetime import date, datetime, time, timezone
 
+import httpx
 import pytest
 
 from schemas.common import FantasyProvider
 from schemas.lineup_editor import LineupPlayer, LineupState
 from services import scheduled_pickup_service as svc
+from services.fantasy_writer_client import FantasyWriterUnavailable
+from services.lineup_editor_service import RosterWriteUnavailable
 
 PG, SG, UT, BE, IR = 0, 1, 11, 12, 13
 D = date(2026, 11, 12)          # a Thursday in EST
@@ -188,3 +193,34 @@ def test_his_own_current_slot_does_not_count_as_taken():
     me = player(9, UT)                               # already seated (ESPN did it); UT counts as open for him
     board = state([me, player(1, PG)])
     assert svc.pick_seat(board, me, preferred=UT) == UT
+
+
+# ---- the send ------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_lease_from_a_send_runs_from_the_later_of_the_wall_clock_and_the_override():
+    ahead = utc(2100, 1, 1, 0)
+    assert svc._lease_from_now(ahead) == ahead + svc.LEASE
+    before = datetime.now(timezone.utc)
+    lease = svc._lease_from_now(utc(2000, 1, 1, 0))
+    assert before + svc.LEASE <= lease <= datetime.now(timezone.utc) + svc.LEASE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cause,never_sent", [
+    (httpx.ConnectError("connection refused"), True),
+    (httpx.ConnectTimeout("connect"), True),
+    (httpx.PoolTimeout("pool"), True),
+    (TimeoutError(), True),                          # no free writer slot
+    (httpx.ReadTimeout("read"), False),              # the request was out: ESPN may have taken it
+    (httpx.RemoteProtocolError("server disconnected"), False),
+    (None, False),                                   # the writer answered, but not with a verdict
+])
+def test_only_a_writer_that_was_never_reached_counts_as_never_sent(cause, never_sent):
+    writer_error = FantasyWriterUnavailable("down")
+    writer_error.__cause__ = cause
+    exc = RosterWriteUnavailable()
+    exc.__cause__ = writer_error
+    assert svc._never_sent(exc) is never_sent
+    assert svc._never_sent(RosterWriteUnavailable()) is False

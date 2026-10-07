@@ -10,7 +10,9 @@ skipped (he was gone — the no-op), failed (ESPN refused, the connection
 expired), expired (D's games started first) or cancelled.
 
 `PickupExecuteReq` / `PickupResult` are the pipeline route's: one result per
-row attempted this run, `deferred` meaning it stays pending and waits.
+row attempted this run, `deferred` meaning it stays pending and waits. A row
+that stopped being the run's under it (cancelled, or claimed by a later run)
+has no result.
 """
 
 from __future__ import annotations
@@ -101,7 +103,7 @@ class PickupResult(ApiModel):
 
 
 class PickupExecuteData(ApiModel):
-    due: int                                     # rows claimed this run
+    due: int                                     # rows claimed this run (results may hold fewer)
     results: list[PickupResult] = []
 
 

@@ -20,7 +20,7 @@ refusal arrives as ROSTER_WRITE_REJECTED carrying ESPN's own sentence.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from core.errors import AppError, ProviderAuthError
 from utils.constants import PROVIDER_AUTH_MESSAGES
@@ -195,14 +195,23 @@ class RosterTransactionService:
     @staticmethod
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
                      add: Optional[int], drop: Optional[int], moves: list[dict[str, Any]],
-                     fallback_slot_counts, source: str = "manual") -> tuple[LineupState, bool, int]:
-        """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor."""
+                     fallback_slot_counts, source: str = "manual",
+                     before_send: Optional[Callable[[int], Awaitable[None]]] = None) -> tuple[LineupState, bool, int]:
+        """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor.
+        `before_send(audit_id)` runs once the audit row exists, right before the writer is called
+        (the pickup executor's last check); when it raises, nothing is sent and the audit row says so."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
         audit_id = await run_db("roster_txn.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
                                 moves, key, kind="transaction")
+        if before_send is not None:
+            try:
+                await before_send(audit_id)
+            except Exception as exc:
+                await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed", error=f"not_sent: {exc}")
+                raise
         try:
             result = await get_roster_writer(league_info.provider).apply_transaction(league_info, state, add, drop, key)
         except FantasyWriterRejected as exc:

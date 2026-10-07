@@ -5,7 +5,8 @@ The unit layer decides what each attempt does; here the table decides what may b
 stored and claimed: the status CHECK, one pending row per (team, player), the
 widened roster_moves source CHECK (with the auto-lineup index untouched), the
 FKs, and the repository functions the service runs through `run_db` — the claim
-lease, the writes-off release, settle / defer, cancel, list — plus the rollback.
+lease, the writes-off release, the in-flight mark, settle / defer (both fenced by
+the claim), cancel, list — plus the rollback.
 """
 
 import json
@@ -135,20 +136,61 @@ def test_release_pushes_due_rows_without_counting_an_attempt(user, team):
     assert svc._claim_due(NOW, limit=10) == []
 
 
+def _audit(user, team, status="failed"):
+    return RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, source="scheduled", kind="transaction",
+                             status=status, moves=[])
+
+
 def test_settle_and_defer(user, team):
     row = _pickup(user, team)
     (claimed,) = svc._claim_due(NOW, limit=1)
-    svc._defer_row(claimed.id, NOW, NOW + svc.RETRY, "add_locked", "Kawhi is locked")
+    assert svc._defer_row(claimed.id, claimed.attempts, NOW, NOW + svc.RETRY, "add_locked", "Kawhi is locked", None)
     stored = ScheduledPickup.get_by_id(row.id)
     assert (stored.status, stored.reason, stored.detail, stored.next_attempt_at) == ("pending", "add_locked", "Kawhi is locked", NOW + svc.RETRY)
 
-    audit = RosterMove.create(user=user.user_id, team=team.team_id, nba_date=DAY, source="scheduled", kind="transaction",
-                              status="applied", moves=[])
-    svc._settle_row(row.id, NOW, status="executed", reason=None, detail=None, audit_id=audit.id, lineup_audit_id=None,
-                    seated_slot_id=11, executed_at=NOW)
+    audit = _audit(user, team, "applied")
+    assert svc._settle_row(row.id, claimed.attempts, NOW, status="executed", reason=None, detail=None, audit_id=audit.id,
+                           lineup_audit_id=None, seated_slot_id=11, executed_at=NOW)
     stored = ScheduledPickup.get_by_id(row.id)
     assert (stored.status, stored.audit_id, stored.seated_slot_id, stored.executed_at) == ("executed", audit.id, 11, NOW)
     assert stored.next_attempt_at is None and stored.reason is None
+
+
+def test_the_in_flight_mark_takes_only_the_claim_that_holds_the_row(user, team):
+    row = _pickup(user, team)
+    (claimed,) = svc._claim_due(NOW, limit=1)
+    first, second = _audit(user, team), _audit(user, team)
+    lease = NOW + timedelta(minutes=9)
+    assert not svc._mark_in_flight(row.id, claimed.attempts + 1, first.id, NOW, lease)    # another claim's token
+    assert svc._mark_in_flight(row.id, claimed.attempts, first.id, NOW, lease)
+    stored = ScheduledPickup.get_by_id(row.id)
+    assert (stored.status, stored.audit_id, stored.next_attempt_at) == ("pending", first.id, lease)
+    assert not svc._mark_in_flight(row.id, claimed.attempts, second.id, NOW, lease)       # a write is already out
+    assert ScheduledPickup.get_by_id(row.id).audit_id == first.id
+    # the mark survives a deferral, so the next attempt only confirms
+    assert svc._defer_row(row.id, claimed.attempts, NOW, NOW + svc.WRITER_RETRY, "writer_unavailable", None, first.id)
+    assert ScheduledPickup.get_by_id(row.id).audit_id == first.id
+
+
+def test_a_cancelled_row_never_takes_the_in_flight_mark(user, team):
+    row = _pickup(user, team)
+    (claimed,) = svc._claim_due(NOW, limit=1)
+    svc._cancel_pickup(team.team_id, row.id, NOW + svc.LEASE)                             # the claim's lease ran out
+    assert not svc._mark_in_flight(row.id, claimed.attempts, _audit(user, team).id, NOW, NOW + svc.LEASE)
+    assert ScheduledPickup.get_by_id(row.id).audit_id is None
+
+
+def test_an_attempt_that_lost_its_row_can_neither_settle_nor_defer_it(user, team):
+    row = _pickup(user, team)
+    (stale,) = svc._claim_due(NOW, limit=1)
+    (current,) = svc._claim_due(NOW + svc.LEASE, limit=1)                                 # claimed again after the lease
+    assert not svc._settle_row(row.id, stale.attempts, NOW, status="skipped", reason="unavailable")
+    assert not svc._defer_row(row.id, stale.attempts, NOW, NOW + svc.RETRY, "add_on_waivers", None, None)
+    stored = ScheduledPickup.get_by_id(row.id)
+    assert (stored.status, stored.attempts, stored.next_attempt_at) == ("pending", 2, NOW + 2 * svc.LEASE)
+    assert svc._settle_row(row.id, current.attempts, NOW, status="skipped", reason="unavailable")
+    assert not svc._settle_row(row.id, current.attempts, NOW, status="failed", reason="espn_rejected")   # settled once
+    assert ScheduledPickup.get_by_id(row.id).status == "skipped"
 
 
 def test_cancel(user, team):
