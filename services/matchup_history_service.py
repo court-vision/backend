@@ -19,7 +19,9 @@ from schemas.matchup import (
     WeeklyMatchupResp,
 )
 from schemas.common import FantasyProvider
-from services.matchup_days import DayRosters, RosterSide, build_day, make_nba_id_resolver, nba_today as _nba_today
+from services.matchup_days import (
+    DayRosters, RosterSide, build_day, fantasy_today as _fantasy_today, make_nba_id_resolver, nba_today as _nba_today,
+)
 from services.scoring.resolver import resolve_scoring_for_team
 from services.team_service import TeamService
 
@@ -178,8 +180,14 @@ class MatchupHistoryService:
                 message=f"Date {target_date} is outside matchup period {period_start} to {period_end}",
                 data=None,
             )
+        # Whose roster a day shows is ESPN's question: once ESPN has rolled past
+        # the day (~2 AM ET) the current roster is already the next day's, so
+        # the day's own lineup is used. That is the rule the snapshot endpoints
+        # use and the Matchup page's own "today". The box scores stay on the
+        # 6 AM game date (`_build_daily_from_db`): until then last night's live
+        # rows still fill in any line the post-game run has not written yet.
         rosters = None
-        if target_date < _nba_today():
+        if target_date < _fantasy_today():
             rosters = await cls._past_rosters(team_id, md, target_date)
         return await run_db("matchups.daily", cls._build_daily_from_db, md, team_id, target_date, period_start, rosters)
 

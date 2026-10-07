@@ -26,6 +26,7 @@ from schemas.matchup import (
     RosterSource,
 )
 from core.nba_calendar import nba_date_et
+from services import schedule_service
 from services.scoring.models import CategoryComparisonData, StatLine
 from services.scoring.resolver import ResolvedScoring
 
@@ -68,6 +69,20 @@ def counts_for_the_day(p: Any) -> bool:
 def nba_today() -> date:
     """NBA date convention: before 6 AM ET counts as the previous day."""
     return nba_date_et()
+
+
+def fantasy_today() -> date:
+    """ESPN's fantasy day: before 2 AM ET counts as the previous day.
+
+    The day a lineup belongs to. ESPN rolls its day at ~2 AM ET
+    (`schedule_service.get_nba_today`); from then on the previous day's lineup
+    is history (a lineup snapshot, or ESPN's per-day history) and the current
+    roster is already the next day's. `nba_today` is the game date, which stays
+    on last night until 6 AM ET. The two rules disagree for four hours a night
+    on purpose and must not be merged: this one answers "is that day's lineup
+    final", that one "which night's box scores are these".
+    """
+    return schedule_service.get_nba_today()
 
 
 def make_nba_id_resolver(all_roster: Iterable[Any]) -> Callable[[Any], Optional[int]]:

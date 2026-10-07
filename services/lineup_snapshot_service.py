@@ -13,6 +13,11 @@ Rows are keyed by the provider's ids (league, season, team), so a caller may
 read another team in the SAME league — the opponent — and nothing else: the
 query always carries the owner's league key, and a foreign team id is simply
 not found.
+
+A day is finished once ESPN has rolled past it, at ~2 AM ET
+(`matchup_days.fantasy_today`), not at the 6 AM ET game-date turn: from 2 AM
+the current roster is already the next day's. ESPN's own `latestScoringPeriod`
+stays the final word for the live history read.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from schemas.lineup_snapshots import (
 from services import schedule_service
 from services.espn_service import EspnService
 from services.lineup_read_service import ParsedLineup, _persist_espn_team_id, parse_espn_lineup
-from services.matchup_days import nba_today
+from services.matchup_days import fantasy_today
 from services.providers.identity import nba_ids_by_espn_id
 from services.team_service import TeamService
 from utils.espn_helpers import POSITION_MAP
@@ -256,7 +261,7 @@ class LineupSnapshotService:
         info = public_league_info(team)
         if info.provider != FantasyProvider.ESPN:
             raise NotFoundError(NOT_FOUND, "Lineup snapshots are kept for ESPN teams only")
-        if target >= nba_today():
+        if target >= fantasy_today():
             raise BadRequestError("DATE_NOT_PAST", f"{target} is not a finished day yet")
         ref = league_ref(info)
         own_id = info.espn_team_id
@@ -296,7 +301,7 @@ class LineupSnapshotService:
         info = public_league_info(team)
         if info.provider != FantasyProvider.ESPN:
             raise NotFoundError(NOT_FOUND, "Lineup snapshots are kept for ESPN teams only")
-        today = nba_today()
+        today = fantasy_today()
         if from_date is None or to_date is None:
             week = schedule_service.get_current_matchup(today)
             if week:

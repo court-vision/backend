@@ -9,10 +9,12 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
+from freezegun import freeze_time
 
 from schemas.common import ApiStatus, FantasyProvider
 from schemas.lineup_snapshots import LineupSnapshot, LineupSnapshotPlayer
 from schemas.matchup import DailyMatchupResp, MatchupData, MatchupResp, MatchupTeamResp
+from services import matchup_days
 from services import matchup_history_service as module
 from services.matchup_service import MatchupService
 
@@ -62,6 +64,7 @@ def world(monkeypatch):
     monkeypatch.setattr(MatchupService, "get_matchup_by_team_id", staticmethod(fake_matchup))
     monkeypatch.setattr(module, "run_db", direct_run_db)
     monkeypatch.setattr(module, "_nba_today", lambda: TODAY)
+    monkeypatch.setattr(module, "_fantasy_today", lambda: TODAY)
     monkeypatch.setattr(MatchupService, "_build_daily_from_db", staticmethod(fake_build))
     monkeypatch.setattr(module.TeamService, "credentials_for", staticmethod(credentials_for))
     from services import lineup_snapshot_service
@@ -98,6 +101,21 @@ def test_today_and_future_days_never_look_for_history(world):
     daily(TODAY)
     daily(date(2026, 11, 12))
     assert world.rosters_calls == [] and [r for _, r in world.built] == [None, None]
+
+
+@pytest.mark.unit
+def test_between_2_and_6_am_the_day_espn_just_finished_shows_its_own_rosters(world, monkeypatch):
+    # The Matchup page already shows 11-09 as a past day; today's roster is ESPN's 11-10 by then.
+    monkeypatch.setattr(module, "_fantasy_today", matchup_days.fantasy_today)    # both real clock rules
+    monkeypatch.setattr(module, "_nba_today", matchup_days.nba_today)
+    world.found = {1: _snapshot(1), 5: _snapshot(5)}
+    with freeze_time("2026-11-10T08:00:00Z"):           # 3 AM ET: the game date is still 11-09
+        daily(date(2026, 11, 9))
+    assert world.rosters_calls == [({1: "You", 5: "Opp"}, date(2026, 11, 9))]
+    assert world.built[0][1].your.source == "snapshot"
+    with freeze_time("2026-11-10T06:30:00Z"):           # 1:30 AM ET: ESPN is still on 11-09
+        daily(date(2026, 11, 9))
+    assert len(world.rosters_calls) == 1 and world.built[1][1] is None
 
 
 @pytest.mark.unit

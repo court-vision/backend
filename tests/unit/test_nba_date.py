@@ -79,6 +79,16 @@ class TestOneDefinition:
             assert fantasy_day() == date(2026, 3, 5)   # past 2 AM: today
             assert nba_date_et() == date(2026, 3, 4)   # before 6 AM: yesterday
 
+    def test_a_lineup_day_is_finished_on_the_fantasy_day_rule(self):
+        """Lineup snapshots and /matchups/daily's roster choice share ESPN's 2 AM ET rule."""
+        from services import lineup_snapshot_service, matchup_history_service
+        from services.matchup_days import fantasy_today
+        assert lineup_snapshot_service.fantasy_today is fantasy_today
+        assert matchup_history_service._fantasy_today is fantasy_today
+        with freeze_time("2026-03-05T09:00:00Z"):  # 4:00 AM ET
+            assert fantasy_today() == date(2026, 3, 5)   # ESPN has rolled: 3-4's lineup is final
+            assert nba_date_et() == date(2026, 3, 4)     # 3-4 is still the game date
+
 
 @pytest.mark.unit
 class TestExplicitNow:

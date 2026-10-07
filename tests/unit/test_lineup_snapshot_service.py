@@ -9,9 +9,11 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from freezegun import freeze_time
 
 from core.errors import BadRequestError, NotFoundError
 from services import lineup_snapshot_service as svc
+from services import matchup_days
 
 TODAY = date(2026, 11, 10)
 YESTERDAY = date(2026, 11, 9)
@@ -98,7 +100,7 @@ def world(monkeypatch):
     monkeypatch.setattr(svc, "nba_ids_by_espn_id", lambda ids: {i: 9000 + i for i in ids})
     monkeypatch.setattr(svc.EspnService, "fetch_league", staticmethod(fetch))
     monkeypatch.setattr(svc, "load_owned_league_info", hydrate)
-    monkeypatch.setattr(svc, "nba_today", lambda: TODAY)
+    monkeypatch.setattr(svc, "fantasy_today", lambda: TODAY)
     monkeypatch.setattr(svc.schedule_service, "season_day", lambda d=None, season=None: (d - date(2026, 10, 20)).days + 1)
     monkeypatch.setattr(svc.schedule_service, "get_current_matchup",
                         lambda d=None: {"matchup_number": 4, "start_date": date(2026, 11, 9), "end_date": date(2026, 11, 15)})
@@ -189,6 +191,20 @@ def test_todays_and_future_days_are_refused(world):
     for target in (TODAY, TODAY.replace(day=20)):
         with pytest.raises(BadRequestError) as err:
             get_day(target=target)
+        assert err.value.error_code == "DATE_NOT_PAST"
+
+
+@pytest.mark.unit
+def test_a_day_is_finished_once_espn_rolls_past_it_not_at_the_6_am_game_date(world, monkeypatch):
+    monkeypatch.setattr(svc, "fantasy_today", matchup_days.fantasy_today)    # the real clock rule
+    stored(world)
+    with freeze_time("2026-11-10T08:00:00Z"):           # 3 AM ET: ESPN is on 11-10, the game date still 11-09
+        assert get_day(target=YESTERDAY).data.source == "snapshot"
+        data = asyncio.run(svc.LineupSnapshotService.list_range(OWNER, YESTERDAY, TODAY)).data
+        assert [s.nba_date for s in data.snapshots] == ["2026-11-09"]
+    with freeze_time("2026-11-10T06:30:00Z"):           # 1:30 AM ET: ESPN is still on 11-09
+        with pytest.raises(BadRequestError) as err:
+            get_day(target=YESTERDAY)
         assert err.value.error_code == "DATE_NOT_PAST"
 
 
