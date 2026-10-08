@@ -236,11 +236,29 @@ def test_valid_swap_passes_and_apply_moves_reassigns():
     ([Move(11, BE, SF)], ["INELIGIBLE"]),
     ([Move(11, BE, IR)], ["INELIGIBLE"]),                 # 13 not in eligible_slot_ids => ESPN would refuse
     ([Move(11, BE, UT)], ["CAPACITY"]),                    # 4 in UT
-    ([Move(1, PG, BE)], ["CAPACITY"]),                     # 4 on the bench
 ])
 def test_each_validation_code(moves, expected):
     roster = full_lineup()
     assert codes(validate_moves(roster, SLOT_COUNTS, moves)) == expected
+
+
+@pytest.mark.unit
+def test_the_bench_is_unbounded():
+    """ESPN lets any starter be benched, leaving his spot empty: a 4th bench player is fine."""
+    assert validate_moves(full_lineup(), SLOT_COUNTS, [Move(1, PG, BE)]) == []
+    assert validate_moves(full_lineup(), SLOT_COUNTS, [Move(1, PG, BE), Move(2, SG, BE)]) == []
+
+
+@pytest.mark.unit
+def test_coming_off_ir_needs_a_roster_spot():
+    full = full_lineup() + [player(14, IR, IR_GUARD)]
+    errors = validate_moves(full, SLOT_COUNTS, [Move(14, IR, BE)])
+    assert codes(errors) == ["ROSTER_FULL"] and errors[0].player_id is None
+    # Trading places with an injured starter keeps the count: fine.
+    hurt = without(full, 5) + [player(5, C, IR_BIG, status="OUT")]
+    assert validate_moves(hurt, SLOT_COUNTS, [Move(14, IR, BE), Move(5, C, IR)]) == []
+    # With a spot free (a bench player gone), he may come back.
+    assert validate_moves(without(full, 13), SLOT_COUNTS, [Move(14, IR, BE)]) == []
 
 
 @pytest.mark.unit
@@ -347,9 +365,17 @@ def test_healthy_ir_player_with_a_full_roster_is_blocked_not_moved():
 
 
 @pytest.mark.unit
-def test_healthy_ir_player_takes_an_open_active_slot_when_the_bench_is_full():
-    roster = without(full_lineup(), 1) + [player(14, IR, IR_GUARD)]   # PG empty, bench full
+def test_healthy_ir_player_takes_an_open_active_slot_he_fits_before_the_bench():
+    roster = without(full_lineup(), 1) + [player(14, IR, IR_GUARD)]   # PG empty, bench at its count
     assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, PG), None)]
+
+
+@pytest.mark.unit
+def test_healthy_ir_player_returns_to_the_bench_past_its_count_when_the_open_slot_doesnt_fit():
+    """C is empty and the guard can't play it: the roster has his spot, so he goes to the
+    bench (a 4th player there) rather than being reported as roster_full."""
+    roster = without(full_lineup(), 5) + [player(14, IR, IR_GUARD)]
+    assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, BE), None)]
 
 
 @pytest.mark.unit

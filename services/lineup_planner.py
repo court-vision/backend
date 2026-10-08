@@ -136,6 +136,17 @@ def _active_capacity(slot_counts: Mapping[int, int]) -> dict[int, int]:
     return {s: int(slot_counts.get(s, 0) or 0) for s in ACTIVE_SLOT_IDS}
 
 
+def roster_spots(slot_counts: Mapping[int, int]) -> int:
+    """ESPN's roster limit: how many players may be off IR (every slot but IR).
+    The bench itself is unbounded — its slot count only sizes the roster, and a
+    starter can always be benched, leaving his spot empty."""
+    return sum(int(v or 0) for k, v in slot_counts.items() if int(k) != IR_SLOT_ID)
+
+
+def _off_ir(players: Sequence[PlannerPlayer]) -> int:
+    return sum(1 for p in players if p.slot_id != IR_SLOT_ID)
+
+
 def _occupants(players: Iterable[PlannerPlayer]) -> dict[int, list[PlannerPlayer]]:
     by_slot: dict[int, list[PlannerPlayer]] = {}
     for p in players:
@@ -300,31 +311,30 @@ class IrAction:
 
 def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> tuple[IrAction, ...]:
     """IR housekeeping, every action judged against the CURRENT board so each one can be
-    staged on its own: healthy players leave IR while the bench (or an eligible open
-    active slot) has room, otherwise they are reported as blocked; injured players on
-    slots 0-12 take the open IR seats, active-slot holders first, then the lowest value.
-    Locked players never move, and an ir_out here does not free a seat for an ir_in in
-    the same pass — the next read does."""
+    staged on its own: healthy players leave IR while the roster has a spot for them —
+    into an eligible open active slot when there is one, else the (unbounded) bench —
+    otherwise they are reported as blocked; injured players on slots 0-12 take the open
+    IR seats, active-slot holders first, then the lowest value. Locked players never
+    move, and an ir_out here does not free a seat for an ir_in in the same pass — the
+    next read does."""
     occupants = _occupants(players)
     capacity = _active_capacity(slot_counts)
-    bench_open = int(slot_counts.get(BENCH_SLOT_ID, 0) or 0) - len(occupants.get(BENCH_SLOT_ID, []))
+    room = roster_spots(slot_counts) - _off_ir(players)
     ir_open = int(slot_counts.get(IR_SLOT_ID, 0) or 0) - len(occupants.get(IR_SLOT_ID, []))
     out: list[IrAction] = []
 
     returning = sorted((p for p in occupants.get(IR_SLOT_ID, []) if not p.locked and not p.ir_eligible),
                        key=lambda p: (-p.value, p.name))
     for p in returning:
-        if bench_open > 0:
-            out.append(IrAction("ir_out", p.player_id, Move(p.player_id, IR_SLOT_ID, BENCH_SLOT_ID, role="shift", note="healthy")))
-            bench_open -= 1
+        if room <= 0:
+            out.append(IrAction("ir_out", p.player_id, None, "roster_full"))
             continue
+        room -= 1
         open_slot = next((s for s in sorted(p.eligible_slot_ids)
                           if s in ACTIVE_SLOT_IDS and len(occupants.get(s, [])) < capacity.get(s, 0)), None)
-        if open_slot is not None:
-            out.append(IrAction("ir_out", p.player_id, Move(p.player_id, IR_SLOT_ID, open_slot, role="shift", note="healthy")))
-            occupants.setdefault(open_slot, []).append(p)
-            continue
-        out.append(IrAction("ir_out", p.player_id, None, "roster_full"))
+        to = open_slot if open_slot is not None else BENCH_SLOT_ID
+        out.append(IrAction("ir_out", p.player_id, Move(p.player_id, IR_SLOT_ID, to, role="shift", note="healthy")))
+        occupants.setdefault(to, []).append(p)
 
     injured = sorted(
         (p for p in players
@@ -392,10 +402,16 @@ def validate_moves(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, i
     after = apply_moves(players, moves)
     occupancy = _occupants(after)
     for slot_id, holders in sorted(occupancy.items()):
-        if slot_id in UNTOUCHABLE_SLOT_IDS:
-            continue
+        if slot_id in UNTOUCHABLE_SLOT_IDS or slot_id == BENCH_SLOT_ID:
+            continue   # the bench is bounded only by the roster, checked below
         limit = int(slot_counts.get(slot_id, 0) or 0)
         if len(holders) > limit:
             errors.append(MoveError(None, "CAPACITY",
                                     f"Slot {slot_id} would hold {len(holders)} players (limit {limit})"))
+    # Coming off IR needs a roster spot; a board already over the limit isn't this send's doing.
+    spots, before_off, after_off = roster_spots(slot_counts), _off_ir(players), _off_ir(after)
+    if after_off > before_off and after_off > spots:
+        errors.append(MoveError(None, "ROSTER_FULL",
+                                f"Your roster is full: {after_off} players off IR for {spots} spots — "
+                                "drop someone or move a player to IR first"))
     return errors
