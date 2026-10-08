@@ -68,6 +68,21 @@ class LineupPlayer(ApiModel):
     value_source: Optional[str] = None
 
 
+class AcquisitionState(ApiModel):
+    """ESPN's limits on adds and what this team has used: `settings.acquisitionSettings`
+    (mSettings) and the team's `transactionCounter` (mTeam). A day's own adds (what a
+    per-day limit counts) are not in the counter: `services.acquisitions.adds_for_day`."""
+
+    per: Literal["matchup", "day"]               # what `limit` counts over
+    limit: Optional[int] = None                  # adds per matchup (or per day); None = no limit
+    matchup_period_id: Optional[int] = None      # ESPN's current matchup
+    matchup_start: Optional[date] = None         # its first and last days
+    matchup_end: Optional[date] = None
+    matchup_used: int = 0                        # adds counted this matchup
+    season_limit: Optional[int] = None           # None = no season cap
+    season_used: int = 0
+
+
 class LineupState(ApiModel):
     provider: FantasyProvider
     team_name: str
@@ -88,6 +103,7 @@ class LineupState(ApiModel):
     write_blocked_reason: Optional[WriteBlockedReason] = None
     roster_version: str                          # changes whenever any slot assignment changes
     fetched_at: str
+    acquisitions: Optional[AcquisitionState] = None   # None when the league sends no acquisition settings
 
     @property
     def future(self) -> bool:

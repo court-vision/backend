@@ -1,6 +1,7 @@
 """
 The pure rules behind scheduled pickups: when the first attempt is (`attempt_window`),
-what a pre-send refusal means for a stored row (`on_refusal`), which seat the new
+what a pre-send refusal means for a stored row (`on_refusal`), what ESPN refusing an add
+over its acquisition limit means (`on_limit_refusal`), which seat the new
 player gets on day D (`pick_seat`), and the send's two helpers: the lease it renews
 (`_lease_from_now`) and which writer outages provably never left (`_never_sent`). No
 I/O — the schedule lookups are injected.
@@ -12,7 +13,7 @@ import httpx
 import pytest
 
 from schemas.common import FantasyProvider
-from schemas.lineup_editor import LineupPlayer, LineupState
+from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
 from services import scheduled_pickup_service as svc
 from services.fantasy_writer_client import FantasyWriterUnavailable
 from services.lineup_editor_service import RosterWriteUnavailable
@@ -143,6 +144,47 @@ def test_a_missing_drop_becomes_add_only_when_a_seat_is_free():
 @pytest.mark.unit
 def test_an_unknown_reason_fails_the_row():
     assert refusal("same_player") == svc.Decision("settle", "failed", "same_player")
+
+
+# ---- on_limit_refusal -------------------------------------------------------------------
+
+DAY_D = date(2026, 10, 22)        # ESPN day 3 of a matchup running 10/20 - 10/26
+
+
+def limited(**kw):
+    base = dict(per="matchup", limit=4, matchup_period_id=1, matchup_start=date(2026, 10, 20),
+                matchup_end=date(2026, 10, 26), matchup_used=4)
+    base.update(kw)
+    return AcquisitionState(**base)
+
+
+def over_limit(acq, *, period=2, day=3, nba_date=DAY_D):
+    return svc.on_limit_refusal(acq, period=period, day=day, nba_date=nba_date)
+
+
+@pytest.mark.unit
+def test_a_per_day_limit_the_day_before_waits_for_the_days_own_allowance():
+    d = over_limit(limited(per="day", limit=1, matchup_used=1))
+    assert d.action == "defer" and d.at == svc.rollover_at(DAY_D)
+
+
+@pytest.mark.unit
+def test_on_the_day_itself_nothing_frees_up():
+    assert over_limit(limited(per="day", limit=1), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
+
+
+@pytest.mark.unit
+def test_a_per_matchup_limit_skips_inside_the_matchup_and_waits_for_the_next_one():
+    assert over_limit(limited()) == svc.Decision("settle", "skipped", "acquisition_limit")
+    # Day D opens the next matchup: its allowance starts at the rollover into D.
+    opener = date(2026, 10, 27)
+    d = over_limit(limited(), nba_date=opener)
+    assert d.action == "defer" and d.at == svc.rollover_at(opener)
+
+
+@pytest.mark.unit
+def test_without_the_leagues_settings_a_limit_refusal_is_skipped():
+    assert over_limit(None) == svc.Decision("settle", "skipped", "acquisition_limit")
 
 
 # ---- pick_seat ----------------------------------------------------------------------

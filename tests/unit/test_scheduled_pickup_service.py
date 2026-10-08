@@ -20,7 +20,7 @@ import pytest
 
 from core.errors import BadRequestError
 from schemas.common import FantasyProvider, LeagueInfo
-from schemas.lineup_editor import LineupPlayer, LineupState
+from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
 from schemas.scheduled_pickup import PickupExecuteReq, SchedulePickupReq
 from services import fantasy_writer_client
 from services import lineup_editor_service as editor
@@ -52,14 +52,30 @@ def player(pid, name, slot=UT, *, team="DEN", game=False, started=False, locked=
 
 
 def state(players, *, period=2, current=2, final=167, nba_date="2026-10-21", can_write=True, reason=None,
-          version="v1"):
+          version="v1", acq=None):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
         scoring_period_id=period, scoring_period_source="provider", current_scoring_period_id=current,
         final_scoring_period_id=final, first_game_time_et="19:00", slot_counts=COUNTS, slots=[],
         lock_type="INDIVIDUAL_GAME", players=players, can_write=can_write, write_blocked_reason=reason,
-        roster_version=version, fetched_at="now",
+        roster_version=version, fetched_at="now", acquisitions=acq,
     )
+
+
+def limits(**kw):
+    """The league's add limits: four a matchup (10/20 - 10/26) unless told otherwise."""
+    base = dict(per="matchup", limit=4, matchup_period_id=1, matchup_start=date(2026, 10, 20),
+                matchup_end=date(2026, 10, 26), matchup_used=0)
+    base.update(kw)
+    return AcquisitionState(**base)
+
+
+def with_limits(h, acq):
+    """Today's board (and the boards the write re-reads) carry `acq`."""
+    for boards in (h.boards, h.after_txn, h.after_lineup):
+        for key, board in list(boards.items()):
+            if key is None:
+                boards[key] = board.model_copy(update={"acquisitions": acq})
 
 
 def pool(pid=KAWHI, status="FREEAGENT", on_team=0, locked=False, name="Kawhi Leonard", team="LAC"):
@@ -450,6 +466,84 @@ def test_roster_full_is_skipped_but_another_rejection_fails(h):
     assert r.detail == "Too many players with default position C (maximum 4)"
 
 
+# ---- acquisition limits ------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_used_up_matchup_skips_the_pickup_without_sending(h):
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=4))
+    r = execute(h)
+    assert (r.outcome, r.reason, r.detail) == ("skipped", "acquisition_limit", "Every add this matchup allows is used (4 of 4)")
+    assert h.txn_calls == [] and h.marked == []
+
+
+@pytest.mark.unit
+def test_room_left_in_the_matchup_sends(h):
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))
+    assert execute(h).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_a_per_day_limit_reads_the_days_adds(h, monkeypatch):
+    calls = []
+
+    async def adds(league_info, espn_team_id, period):
+        calls.append((espn_team_id, period))
+        return used
+
+    monkeypatch.setattr(svc, "adds_for_day", adds)
+    used = 1
+    arrange_day_before(h)
+    with_limits(h, limits(per="day", limit=1))
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit") and calls == [(1, 3)]
+    assert h.txn_calls == []
+
+    used = 0
+    h.settled.clear()
+    arrange_day_before(h)
+    with_limits(h, limits(per="day", limit=1))
+    assert execute(h).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_an_unreadable_day_count_leaves_the_limit_to_espn(h, monkeypatch):
+    async def broken(league_info, espn_team_id, period):
+        raise RuntimeError("ESPN is down")
+
+    monkeypatch.setattr(svc, "adds_for_day", broken)
+    arrange_day_before(h)
+    with_limits(h, limits(per="day", limit=1))
+    assert execute(h).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_espn_refusing_a_per_day_limit_the_day_before_waits_for_the_rollover_and_may_send_again(h, monkeypatch):
+    async def none_yet(league_info, espn_team_id, period):
+        return 0
+
+    monkeypatch.setattr(svc, "adds_for_day", none_yet)
+    arrange_day_before(h)
+    with_limits(h, limits(per="day", limit=1))
+    h.txn = [FantasyWriterRejected("You have reached the acquisition limit for this scoring period.", espn_status=400,
+                                   espn_error_code="TRAN_SOMETHING_NEW")]
+    r = execute(h)
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "acquisition_limit", ROLLOVER)
+    # ESPN refused it, so nothing landed: the in-flight mark is cleared and the retry may send.
+    assert h.deferred_audit_ids == [None]
+
+
+@pytest.mark.unit
+def test_espn_refusing_a_used_up_matchup_skips(h):
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))        # the counter lags: ESPN knows better
+    h.txn = [FantasyWriterRejected("Matchup acquisition limit reached", espn_status=400, espn_error_code=None)]
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit")
+
+
 @pytest.mark.unit
 def test_dead_cookies_fail_the_row(h):
     arrange_day_before(h)
@@ -687,6 +781,19 @@ def test_schedule_accepts_a_player_on_waivers_and_an_open_seat(scheduling):
     h.pool = {KAWHI: pool(status="WAIVERS")}
     resp = schedule(SchedulePickupReq(add_player_id=KAWHI, scoring_period_id=5))
     assert resp.data.drop is None and h.windows == [(date(2026, 10, 24), None)]
+
+
+@pytest.mark.unit
+def test_schedule_refuses_an_add_the_leagues_limit_leaves_no_room_for(scheduling):
+    h = scheduling
+    h.boards = {None: h.boards[None].model_copy(update={"acquisitions": limits(matchup_used=4)})}
+    with pytest.raises(svc.ScheduledPickupInvalid) as exc:
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert exc.value.data["reason"] == "acquisition_limit" and "4 of 4" in exc.value.message
+    assert h.inserted == []
+    # A day in the next matchup may still count there.
+    resp = schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=8))
+    assert resp.data.status == "pending"
 
 
 @pytest.mark.unit

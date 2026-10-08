@@ -31,6 +31,13 @@ the board: the player on it settles the row executed (and seats him), his absenc
 settles it failed `interrupted`. Only a writer that was provably never reached (no
 free slot, no connection) clears the mark, so that retry may send.
 
+Acquisition limits. Scheduling refuses, and an attempt skips, an add the league's limit
+certainly leaves no room for (`services.acquisitions.budget_block`): the season used up, a
+per-matchup limit used up for a day in the current matchup, or a per-day limit used up on
+the day itself. ESPN refusing an add as over the limit waits for the rollover into the day
+when that brings a fresh allowance (a per-day limit, or a day that opens a new matchup),
+and is skipped otherwise (`on_limit_refusal`).
+
 Cancelling. Refused while an attempt holds the row — claimed (reason
 `in_progress`) and inside its lease, or with a write out — so a user told
 "cancelled" never sees the move made anyway; the check and the update are one
@@ -56,7 +63,7 @@ from core.logging import get_logger
 from core.settings import settings
 from db.base import db, run_db
 from schemas.common import ApiStatus, LeagueInfo
-from schemas.lineup_editor import LineupPlayer, LineupState
+from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
 from schemas.scheduled_pickup import (
     PickupExecuteData,
     PickupExecuteReq,
@@ -69,6 +76,7 @@ from schemas.scheduled_pickup import (
     ScheduledPickupPlayer,
     ScheduledPickupResp,
 )
+from services.acquisitions import adds_for_day, budget_block, in_current_matchup, is_limit_refusal
 from services.daily_actions_service import has_open_seat
 from services.fantasy_writer_client import FantasyWriterUnavailable
 from services.lineup_editor_service import (
@@ -112,7 +120,7 @@ ROSTER_FULL_CODE = "TRAN_ROSTER_FULL"
 class ScheduledPickupInvalid(AppError):
     """The board or the pool refuses the pickup before it is stored. `data.reason` is one
     of: not_future, no_scoring_period, same_player, add_already_on_roster, add_not_found,
-    add_not_available, drop_not_on_roster."""
+    add_not_available, drop_not_on_roster, acquisition_limit."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -243,6 +251,17 @@ def on_refusal(reason: str, *, period: int, day: int, nba_date: date, seat_free:
     if reason == "drop_not_on_roster":
         return Decision("add_only", reason="drop_missing") if seat_free else Decision("settle", SKIPPED, "drop_missing")
     return Decision("settle", FAILED, reason)                       # nothing_to_do / same_player: not storable
+
+
+def on_limit_refusal(acq: Optional[AcquisitionState], *, period: int, day: int, nba_date: date) -> Decision:
+    """ESPN refused the add for day `day` (on `nba_date`), attempted on ESPN day `period`, as over
+    its acquisition limit. Before the day itself, the rollover into it brings a fresh allowance
+    when the limit is per day, or when the day opens a new matchup: wait for it. Otherwise
+    nothing frees up before the day's games: skipped."""
+    fresh = acq is not None and (acq.per == "day" or (acq.limit is not None and not in_current_matchup(acq, nba_date)))
+    if period < day and fresh:
+        return Decision("defer", at=rollover_at(nba_date))
+    return Decision("settle", SKIPPED, "acquisition_limit")
 
 
 def pick_seat(state: LineupState, player: LineupPlayer, preferred: Optional[int]) -> Optional[int]:
@@ -469,6 +488,9 @@ class ScheduledPickupService:
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
+        blocked = budget_block(state.acquisitions, nba_date)
+        if blocked:
+            raise _invalid("acquisition_limit", blocked)
 
         window = await run_db("pickup.window", _window_for, nba_date, holder.team if holder else None)
         now = datetime.now(timezone.utc)
@@ -616,6 +638,19 @@ class ScheduledPickupService:
             # Dropping him before his game tonight loses it; after it starts he is locked.
             return await defer(row, now, "holder_plays_today", at=rollover_at(nba_date), team_name=team_name)
 
+        # The league's add limit: skip what it certainly leaves no room for. A per-day limit needs
+        # the day's own adds; when they can't be read, ESPN refuses an over-limit add itself.
+        acq, day_adds = state.acquisitions, None
+        if acq is not None and acq.per == "day" and acq.limit is not None and state.espn_team_id is not None:
+            try:
+                day_adds = await adds_for_day(league_info, state.espn_team_id, day)
+            except Exception as exc:
+                log.warning("scheduled_pickup_day_adds_unavailable", pickup_id=row.id, team_id=row.team_id,
+                            error=str(exc))
+        blocked = budget_block(acq, nba_date, day_adds=day_adds)
+        if blocked:
+            return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
+
         try:
             holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
         except RosterTransactionInvalid as exc:
@@ -663,6 +698,17 @@ class ScheduledPickupService:
             code = (exc.data or {}).get("espn_error_code")
             if code == ROSTER_FULL_CODE:
                 return await settle(row, now, SKIPPED, "roster_full", detail=exc.message, team_name=team_name)
+            if is_limit_refusal(code, exc.message):
+                # ESPN's code for this is unconfirmed: log it, so the first real one can be pinned down.
+                log.info("scheduled_pickup_limit_refused", pickup_id=row.id, team_id=row.team_id, code=code,
+                         message=exc.message)
+                decision = on_limit_refusal(state.acquisitions, period=period, day=day, nba_date=nba_date)
+                if decision.action == "defer":
+                    row.audit_id = None     # ESPN refused it: nothing landed, so the retry may send
+                    return await defer(row, now, "acquisition_limit", at=decision.at, detail=exc.message,
+                                       team_name=team_name)
+                return await settle(row, now, SKIPPED, "acquisition_limit", detail=exc.message, team_name=team_name)
+            log.info("scheduled_pickup_espn_rejected", pickup_id=row.id, team_id=row.team_id, code=code)
             return await settle(row, now, FAILED, "espn_rejected", detail=exc.message, team_name=team_name)
         except ProviderAuthError:
             return await settle(row, now, FAILED, "auth_expired", team_name=team_name)

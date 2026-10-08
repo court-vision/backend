@@ -34,7 +34,8 @@ from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
 from schemas.common import FantasyProvider, LeagueInfo
-from schemas.lineup_editor import LineupPlayer, LineupSlotDef, LineupState, WriteBlockedReason
+from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupSlotDef, LineupState, WriteBlockedReason
+from services.acquisitions import parse_acquisitions
 from services.credential_service import normalize_swid
 from services.espn_service import EspnService
 from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, OUT_STATUSES
@@ -86,6 +87,8 @@ class ParsedLineup:
     # status.latestScoringPeriod / finalScoringPeriod: ESPN's today and last day, whatever day was read
     current_scoring_period_id: Optional[int] = None
     final_scoring_period_id: Optional[int] = None
+    # acquisitionSettings + the team's transactionCounter (None when the league sends no settings)
+    acquisitions: Optional[AcquisitionState] = None
 
 
 def slot_counts_from_names(named: Optional[Mapping[str, int]]) -> dict[int, int]:
@@ -171,7 +174,25 @@ def parse_espn_lineup(
         position_limits=position_limits,
         current_scoring_period_id=int(current) if current else None,
         final_scoring_period_id=int(final) if final else None,
+        acquisitions=parse_acquisitions(payload, target),
     )
+
+
+def _with_matchup_dates(acq: Optional[AcquisitionState], payload: dict) -> Optional[AcquisitionState]:
+    """The current matchup's first and last days, from the league's matchup periods and our
+    calendar; the counts stand without them when the calendar can't say."""
+    if acq is None or acq.matchup_period_id is None:
+        return acq
+    try:
+        periods = ((payload.get("settings") or {}).get("scheduleSettings") or {}).get("matchupPeriods")
+        latest = (payload.get("status") or {}).get("latestScoringPeriod")
+        dates = schedule_service.get_espn_matchup_dates(periods, acq.matchup_period_id, latest)
+    except Exception as exc:  # the calendar is a nicety here, never a reason to fail the read
+        log.warning("lineup_matchup_dates_unavailable", matchup_period=acq.matchup_period_id, error=str(exc))
+        return acq
+    if not dates:
+        return acq
+    return acq.model_copy(update={"matchup_start": dates[0], "matchup_end": dates[1]})
 
 
 def roster_version(scoring_period_id: Optional[int], players: list[LineupPlayer]) -> str:
@@ -329,6 +350,7 @@ class LineupReadService:
             write_blocked_reason=reason,
             roster_version=roster_version(period, players),
             fetched_at=now_et.isoformat(timespec="seconds"),
+            acquisitions=_with_matchup_dates(parsed.acquisitions, payload),
         )
 
         if league_info.espn_team_id != parsed.espn_team_id:
