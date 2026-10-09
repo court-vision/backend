@@ -228,6 +228,7 @@ class NotificationService:
                 "drop_missing": f"{drop} is no longer on your roster and there was no open seat.",
                 "drop_locked": f"{drop} was locked for the day and there was no open seat.",
                 "roster_full": "your roster is full.",
+                "acquisition_limit": "you had used every add your league allows for it.",
             }.get(reason, (reason or "nothing to do") + ".")
             lines.append(f"The pickup was not made: {why}")
             lines.append("Nothing was changed on ESPN.")

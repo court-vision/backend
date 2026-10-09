@@ -156,3 +156,47 @@ def test_position_limits_keep_only_the_capped_positions_and_entries_carry_their_
     assert [e.default_position_id for e in parsed.entries] == [1, 5]
     # No limits block at all (older payloads, the name-keyed fallback): nothing is capped.
     assert parse_espn_lineup(payload(), team_name="Lvl. 3 Goblins", espn_team_id=4).position_limits == {}
+
+
+# ---- acquisition limits ---------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_leagues_add_limits_and_the_teams_counts_come_with_the_board():
+    body = payload()
+    body["settings"]["acquisitionSettings"] = SETTINGS["settings"]["acquisitionSettings"]   # 1 a day, no cap
+    body["status"]["currentMatchupPeriod"] = 3
+    body["teams"][0]["transactionCounter"] = {"acquisitions": 9, "matchupAcquisitionTotals": {"2": 5, "3": 2}}
+    acq = parse_espn_lineup(body, team_name="Lvl. 3 Goblins", espn_team_id=4, swid=SWID).acquisitions
+    assert (acq.per, acq.limit, acq.season_limit) == ("day", 1, None)
+    assert (acq.matchup_period_id, acq.matchup_used, acq.season_used) == (3, 2, 9)
+    # A league that sends no acquisition settings: no limits on the board.
+    assert parse_espn_lineup(payload(), team_name="Lvl. 3 Goblins", espn_team_id=4, swid=SWID).acquisitions is None
+
+
+@pytest.mark.unit
+def test_the_current_matchups_days_are_attached_when_the_calendar_knows_them(monkeypatch):
+    from datetime import date
+    from services import lineup_read_service as lrs
+
+    body = payload()
+    body["settings"]["acquisitionSettings"] = {"matchupAcquisitionLimit": 4, "matchupLimitPerScoringPeriod": False}
+    body["settings"]["scheduleSettings"] = {"matchupPeriods": {"1": [1]}}
+    body["status"]["currentMatchupPeriod"] = 1
+    acq = parse_espn_lineup(body, team_name="Lvl. 3 Goblins", espn_team_id=4, swid=SWID).acquisitions
+    seen = []
+
+    def dates(periods, matchup, latest):
+        seen.append((periods, matchup, latest))
+        return date(2026, 10, 20), date(2026, 10, 26)
+
+    monkeypatch.setattr(lrs.schedule_service, "get_espn_matchup_dates", dates)
+    out = lrs._with_matchup_dates(acq, body)
+    assert (out.matchup_start, out.matchup_end) == (date(2026, 10, 20), date(2026, 10, 26))
+    assert seen == [({"1": [1]}, 1, 12)]
+
+    def broken(periods, matchup, latest):
+        raise FileNotFoundError("no calendar")
+
+    monkeypatch.setattr(lrs.schedule_service, "get_espn_matchup_dates", broken)
+    assert lrs._with_matchup_dates(acq, body) == acq          # the counts stand without the days
