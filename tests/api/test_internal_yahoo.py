@@ -104,6 +104,59 @@ def test_callback_refuses_a_grant_yahoo_will_not_put_a_name_to(client, stored, m
 
 
 @pytest.mark.api
+def test_the_callback_lands_on_the_path_the_state_carries(client, stored, monkeypatch):
+    """A desk starts the connect from where it is and gets the browser back
+    there; the path's own query is kept and the callback's parameters follow it."""
+    monkeypatch.setattr(YahooService, "validate_state",
+                        staticmethod(lambda state: {"user_id": "user_test_123", "return_to": "/week?view=matchup"}))
+
+    res = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+
+    assert res.status_code in (302, 307)
+    assert res.headers["location"].endswith("/week?view=matchup&yahoo_connected=true&yahoo_connection=99")
+
+
+@pytest.mark.api
+def test_a_decline_goes_back_to_the_same_place(client, stored, monkeypatch):
+    monkeypatch.setattr(YahooService, "validate_state",
+                        staticmethod(lambda state: {"user_id": "user_test_123", "return_to": "/me"}))
+
+    res = client.get("/v1/internal/yahoo/callback?error=access_denied&state=signed", follow_redirects=False)
+
+    assert res.headers["location"].endswith("/me?yahoo_error=access_denied")
+    assert stored == []
+
+
+@pytest.mark.api
+def test_a_return_path_in_the_state_is_checked_again_before_use(client, stored, monkeypatch):
+    """The signature covers the payload, not what was put in it: a value that
+    would leave our origin is dropped even when it arrives signed."""
+    monkeypatch.setattr(YahooService, "validate_state",
+                        staticmethod(lambda state: {"user_id": "user_test_123", "return_to": "//evil.example/x"}))
+
+    res = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+
+    assert res.headers["location"].endswith("/manage-teams?yahoo_connected=true&yahoo_connection=99")
+
+
+@pytest.mark.api
+def test_authorize_hands_the_return_path_to_the_state(authed_client, monkeypatch):
+    asked: list[tuple] = []
+
+    def fake_get_auth_url(user_id, return_to=None):
+        asked.append((user_id, return_to))
+        return "https://api.login.yahoo.com/oauth2/request_auth?state=s", "s"
+
+    monkeypatch.setattr(YahooService, "get_auth_url", staticmethod(fake_get_auth_url))
+
+    res = authed_client.get("/v1/internal/yahoo/authorize?return_to=%2Fme%3Fadd")
+
+    assert res.status_code == 200
+    assert res.json()["auth_url"].startswith("https://api.login.yahoo.com/")
+    assert asked == [("user_test_123", "/me?add")]
+
+
+@pytest.mark.api
 @pytest.mark.parametrize("path", [
     "/v1/internal/yahoo/validate_league",
     "/v1/internal/yahoo/get_roster_data",

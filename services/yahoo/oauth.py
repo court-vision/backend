@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -31,6 +32,27 @@ YAHOO_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token"
 # a connection was granted is stored on its row so the write gate can read it.
 YAHOO_SCOPE = "fspt-r"
 
+# Where the callback may send the browser afterwards: a path on the frontend's
+# own origin, with an optional query. The state is signed, so the value cannot
+# be forged in transit, but authorize takes it from the client, so it is
+# checked here before it is signed: no scheme, no host, no protocol-relative
+# `//host`, no `..`, no fragment.
+RETURN_PATH_MAX_LENGTH = 200
+_RETURN_PATH = re.compile(r"/(?:[A-Za-z0-9_\-.~]+/?)*(?:\?[A-Za-z0-9_\-.~=&%]*)?")
+
+
+def safe_return_path(value: Optional[str]) -> Optional[str]:
+    """`value` when it is a path the callback may redirect to, else None."""
+    if not value or len(value) > RETURN_PATH_MAX_LENGTH:
+        return None
+    if value.startswith("//") or value.startswith("/\\"):
+        return None
+    if not _RETURN_PATH.fullmatch(value):
+        return None
+    if any(part == ".." for part in value.split("?", 1)[0].split("/")):
+        return None
+    return value
+
 
 def _b64encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
@@ -49,7 +71,14 @@ def _state_key() -> bytes:
 
 class YahooOAuthService:
     @staticmethod
-    def get_auth_url(user_id: str) -> tuple[str, str]:
+    def get_auth_url(user_id: str, return_to: Optional[str] = None) -> tuple[str, str]:
+        """The Yahoo authorize URL and the signed state it carries.
+
+        `return_to` is the frontend path the callback sends the browser back to
+        (`safe_return_path`-checked; anything else is dropped and the callback
+        uses its default). It rides in the signed state, so the callback trusts
+        it without a cookie or any server-side record.
+        """
         if not settings.yahoo_client_id:
             raise ServiceUnavailableError("YAHOO_NOT_CONFIGURED", "Yahoo OAuth is not configured")
 
@@ -60,6 +89,9 @@ class YahooOAuthService:
             "expires_at": (now + timedelta(minutes=10)).isoformat(),
             "nonce": secrets.token_urlsafe(16),
         }
+        path = safe_return_path(return_to)
+        if path:
+            payload["return_to"] = path
         encoded = _b64encode(json.dumps(payload, separators=(",", ":")).encode())
         signature = _b64encode(hmac.new(_state_key(), encoded.encode(), hashlib.sha256).digest())
         state = f"{encoded}.{signature}"
