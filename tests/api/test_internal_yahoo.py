@@ -119,11 +119,11 @@ def test_the_callback_lands_on_the_path_the_state_carries(client, stored, monkey
 @pytest.mark.api
 def test_a_decline_goes_back_to_the_same_place(client, stored, monkeypatch):
     monkeypatch.setattr(YahooService, "validate_state",
-                        staticmethod(lambda state: {"user_id": "user_test_123", "return_to": "/account"}))
+                        staticmethod(lambda state: {"user_id": "user_test_123", "return_to": "/week"}))
 
     res = client.get("/v1/internal/yahoo/callback?error=access_denied&state=signed", follow_redirects=False)
 
-    assert res.headers["location"].endswith("/account?yahoo_error=access_denied")
+    assert res.headers["location"].endswith("/week?yahoo_error=access_denied")
     assert stored == []
 
 
