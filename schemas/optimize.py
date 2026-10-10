@@ -62,7 +62,7 @@ class OptimizeResp(BaseResponse):
 class GenerateLineupRequest(ApiModel):
     """Request body for lineup generation from a connected team."""
 
-    team_id: int = Field(..., description="ID of the user's stored team (from manage-teams)")
+    team_id: int = Field(..., description="ID of the user's stored team (from the Account desk)")
     week: int = Field(..., ge=1, le=26, description="Fantasy week to optimize for")
     streaming_slots: int = Field(default=2, ge=0, le=10, description="Number of streaming add/drop moves to consider")
     use_recent_stats: bool = Field(default=False, description="Use decay-weighted recent stats instead of season averages")
