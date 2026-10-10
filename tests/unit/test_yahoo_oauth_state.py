@@ -49,6 +49,18 @@ def test_anything_else_is_dropped(value):
 
 
 @pytest.mark.unit
+def test_the_check_is_linear_in_the_input():
+    """A path shaped to make a backtracking regex crawl is answered at once."""
+    import time
+
+    evil = "/" + "a/" * 5000 + "!"
+    started = time.perf_counter()
+    assert safe_return_path(evil) is None
+    assert safe_return_path(evil[:199]) == evil[:199]
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.unit
 def test_the_state_round_trips_the_return_path(configured):
     _url, state = YahooOAuthService.get_auth_url("user_1", "/week?view=matchup")
 

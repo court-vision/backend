@@ -157,6 +157,24 @@ def test_authorize_hands_the_return_path_to_the_state(authed_client, monkeypatch
 
 
 @pytest.mark.api
+def test_an_overlong_return_path_falls_back_instead_of_refusing_the_authorize(authed_client, monkeypatch):
+    """The path is a nicety; a bad one must not stop the sign-in. It reaches the
+    state builder, which drops it, rather than failing validation at the door."""
+    asked: list[tuple] = []
+
+    def fake_get_auth_url(user_id, return_to=None):
+        asked.append((user_id, return_to))
+        return "https://api.login.yahoo.com/oauth2/request_auth?state=s", "s"
+
+    monkeypatch.setattr(YahooService, "get_auth_url", staticmethod(fake_get_auth_url))
+
+    res = authed_client.get("/v1/internal/yahoo/authorize?return_to=/" + "a" * 400)
+
+    assert res.status_code == 200
+    assert asked[0][1] == "/" + "a" * 400
+
+
+@pytest.mark.api
 @pytest.mark.parametrize("path", [
     "/v1/internal/yahoo/validate_league",
     "/v1/internal/yahoo/get_roster_data",

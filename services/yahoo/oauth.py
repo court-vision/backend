@@ -36,9 +36,10 @@ YAHOO_SCOPE = "fspt-r"
 # own origin, with an optional query. The state is signed, so the value cannot
 # be forged in transit, but authorize takes it from the client, so it is
 # checked here before it is signed: no scheme, no host, no protocol-relative
-# `//host`, no `..`, no fragment.
+# `//host`, no `..`, no fragment. One character class per part, no nested
+# repetition, so the match is linear in the input however it is shaped.
 RETURN_PATH_MAX_LENGTH = 200
-_RETURN_PATH = re.compile(r"/(?:[A-Za-z0-9_\-.~]+/?)*(?:\?[A-Za-z0-9_\-.~=&%]*)?")
+_RETURN_PATH = re.compile(r"/[A-Za-z0-9_\-.~/]*(?:\?[A-Za-z0-9_\-.~=&%]*)?")
 
 
 def safe_return_path(value: Optional[str]) -> Optional[str]:

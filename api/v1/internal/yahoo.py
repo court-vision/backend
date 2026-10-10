@@ -22,7 +22,7 @@ from core.logging import get_logger
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
 from services.yahoo_service import YahooService
-from services.yahoo.oauth import RETURN_PATH_MAX_LENGTH, safe_return_path
+from services.yahoo.oauth import safe_return_path
 from services import credential_service
 from services.user_sync_service import UserSyncService
 from api.deps import UserContext, get_db_user
@@ -91,11 +91,11 @@ def _frontend_redirect(return_to: Optional[str], **params: str) -> RedirectRespo
 async def yahoo_authorize(
     return_to: Optional[str] = Query(
         None,
-        max_length=RETURN_PATH_MAX_LENGTH,
         description=(
             "Frontend path the callback sends the browser back to, e.g. `/week`; "
-            "a path on the app's own origin only (optionally with a query). "
-            "Anything else is ignored and the callback returns to Manage Teams."
+            "a path on the app's own origin only (optionally with a query), at most "
+            "200 characters. Anything else is ignored and the callback returns to "
+            "Manage Teams."
         ),
     ),
     current_user: dict = Depends(get_current_user),
