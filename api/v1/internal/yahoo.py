@@ -6,7 +6,7 @@ raise `core.errors` AppErrors — 403 PROVIDER_AUTH_EXPIRED for a rejected token
 502/504 for a Yahoo outage, 503 YAHOO_NOT_CONFIGURED without client credentials —
 and render through the global handlers. The OAuth callback is the one exception:
 the browser is mid-redirect, so it sends the user back to the frontend (the
-`return_to` path authorize was given, else Manage Teams) with
+`return_to` path authorize was given, else the Account desk) with
 `?yahoo_error=oauth_failed` and logs the cause instead of rendering an error body.
 """
 
@@ -68,7 +68,7 @@ class YahooTeamsResponse(BaseResponse):
     teams: Optional[list[YahooTeamResponse]] = None
 
 
-DEFAULT_RETURN_PATH = "/manage-teams"
+DEFAULT_RETURN_PATH = "/account"
 
 
 def _frontend_redirect(return_to: Optional[str], **params: str) -> RedirectResponse:
@@ -95,7 +95,7 @@ async def yahoo_authorize(
             "Frontend path the callback sends the browser back to, e.g. `/week`; "
             "a path on the app's own origin only (optionally with a query), at most "
             "200 characters. Anything else is ignored and the callback returns to "
-            "Manage Teams."
+            "the Account desk."
         ),
     ),
     current_user: dict = Depends(get_current_user),
