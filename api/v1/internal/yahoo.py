@@ -5,7 +5,8 @@ Handles the OAuth 2.0 flow and Yahoo Fantasy API integration. Provider failures
 raise `core.errors` AppErrors — 403 PROVIDER_AUTH_EXPIRED for a rejected token,
 502/504 for a Yahoo outage, 503 YAHOO_NOT_CONFIGURED without client credentials —
 and render through the global handlers. The OAuth callback is the one exception:
-the browser is mid-redirect, so it sends the user back to Manage Teams with
+the browser is mid-redirect, so it sends the user back to the frontend (the
+`return_to` path authorize was given, else Manage Teams) with
 `?yahoo_error=oauth_failed` and logs the cause instead of rendering an error body.
 """
 
@@ -21,6 +22,7 @@ from core.logging import get_logger
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
 from services.yahoo_service import YahooService
+from services.yahoo.oauth import safe_return_path
 from services import credential_service
 from services.user_sync_service import UserSyncService
 from api.deps import UserContext, get_db_user
@@ -66,24 +68,48 @@ class YahooTeamsResponse(BaseResponse):
     teams: Optional[list[YahooTeamResponse]] = None
 
 
-def _manage_teams_redirect(**params: str) -> RedirectResponse:
-    """Redirect to the frontend's Manage Teams page with URL-encoded query params."""
+DEFAULT_RETURN_PATH = "/manage-teams"
+
+
+def _frontend_redirect(return_to: Optional[str], **params: str) -> RedirectResponse:
+    """Redirect to a frontend path with URL-encoded query params appended.
+
+    `return_to` is the path carried in the signed state (already checked by
+    `safe_return_path` before it was signed, and checked again here since the
+    state's payload is what the signature covers, not its meaning). It may hold
+    a query of its own; the callback's parameters are added after it.
+    """
+    path = safe_return_path(return_to) or DEFAULT_RETURN_PATH
     query = "&".join(f"{key}={quote(str(value), safe='')}" for key, value in params.items())
-    return RedirectResponse(url=f"{settings.frontend_url}/manage-teams?{query}")
+    joiner = "&" if "?" in path else "?"
+    return RedirectResponse(url=f"{settings.frontend_url}{path}{joiner}{query}")
 
 
 # ---------------------- OAuth Endpoints ---------------------- #
 
 @router.get("/authorize", response_model=YahooAuthUrlResponse)
-async def yahoo_authorize(current_user: dict = Depends(get_current_user)):
+async def yahoo_authorize(
+    return_to: Optional[str] = Query(
+        None,
+        description=(
+            "Frontend path the callback sends the browser back to, e.g. `/week`; "
+            "a path on the app's own origin only (optionally with a query), at most "
+            "200 characters. Anything else is ignored and the callback returns to "
+            "Manage Teams."
+        ),
+    ),
+    current_user: dict = Depends(get_current_user),
+):
     """
     Initiate Yahoo OAuth flow.
 
     Returns the Yahoo authorization URL that the frontend should redirect to
-    (503 YAHOO_NOT_CONFIGURED when the client credentials are missing).
+    (503 YAHOO_NOT_CONFIGURED when the client credentials are missing). The
+    callback lands on `return_to` with `?yahoo_connected=true&yahoo_connection=<id>`
+    or `?yahoo_error=<code>` added.
     """
     # Yahoo's OAuth state is keyed by the Clerk user id string, not usr.user_id
-    auth_url, _state = YahooService.get_auth_url(current_user.get("clerk_user_id", ""))
+    auth_url, _state = YahooService.get_auth_url(current_user.get("clerk_user_id", ""), return_to)
     return YahooAuthUrlResponse(
         status=ApiStatus.SUCCESS,
         message="Authorization URL generated",
@@ -104,25 +130,30 @@ async def yahoo_callback(
     This endpoint is called by Yahoo after the user authorizes the app.
     It exchanges the authorization code for tokens and redirects to the frontend.
     """
+    # Where to land: the path authorize was asked for, read from the signed
+    # state. Yahoo echoes the state on a refusal too, so a decline goes back
+    # to the same place; a missing or bad state falls back to the default.
+    state_data = YahooService.validate_state(state) if state else None
+    return_to = state_data.get("return_to") if state_data else None
+
     # The user declined, or Yahoo could not authorize
     if error:
         log.info("yahoo_oauth_denied", error=error)
-        return _manage_teams_redirect(yahoo_error=error_description or error)
+        return _frontend_redirect(return_to, yahoo_error=error_description or error)
 
-    state_data = YahooService.validate_state(state) if state else None
     if not state_data:
         log.warning("yahoo_oauth_invalid_state")
-        return _manage_teams_redirect(yahoo_error="invalid_state")
+        return _frontend_redirect(None, yahoo_error="invalid_state")
     if not code:
         log.warning("yahoo_oauth_missing_code")
-        return _manage_teams_redirect(yahoo_error="oauth_failed")
+        return _frontend_redirect(return_to, yahoo_error="oauth_failed")
 
     try:
         tokens = await YahooService.exchange_code_for_tokens(code)
     except Exception as exc:  # mid-redirect: never render an error body, never echo the cause
         log.warning("yahoo_oauth_exchange_failed", error=type(exc).__name__,
                     error_code=getattr(exc, "error_code", None))
-        return _manage_teams_redirect(yahoo_error="oauth_failed")
+        return _frontend_redirect(return_to, yahoo_error="oauth_failed")
 
     # Yahoo names the account in the token response; when it does not, ask the
     # Fantasy API. That read is also the first thing the grant is used for, so
@@ -133,17 +164,17 @@ async def yahoo_callback(
         guid = tokens.get("guid") or await YahooService.get_user_guid(tokens.get("access_token", ""))
     except ProviderAuthError:
         log.warning("yahoo_fantasy_not_authorized")
-        return _manage_teams_redirect(yahoo_error="fantasy_not_authorized")
+        return _frontend_redirect(return_to, yahoo_error="fantasy_not_authorized")
     except Exception as exc:
         log.warning("yahoo_oauth_account_lookup_failed", error=type(exc).__name__,
                     error_code=getattr(exc, "error_code", None))
-        return _manage_teams_redirect(yahoo_error="oauth_failed")
+        return _frontend_redirect(return_to, yahoo_error="oauth_failed")
 
     if not guid:
         # A row with no account id is the pre-0025 shape: two such accounts
         # would share one row. Refuse rather than store what cannot be told apart.
         log.warning("yahoo_oauth_no_account_id")
-        return _manage_teams_redirect(yahoo_error="no_account_id")
+        return _frontend_redirect(return_to, yahoo_error="no_account_id")
 
     # Tokens are stored server-side and the redirect carries only an opaque,
     # user-scoped connection id. They used to travel as query parameters, which
@@ -169,9 +200,9 @@ async def yahoo_callback(
         # CREDENTIAL_KEYS unset: nothing can be stored, so the flow cannot
         # complete without putting tokens in the URL. Refuse rather than regress.
         log.error("yahoo_oauth_store_unavailable")
-        return _manage_teams_redirect(yahoo_error="oauth_storage_unavailable")
+        return _frontend_redirect(return_to, yahoo_error="oauth_storage_unavailable")
 
-    return _manage_teams_redirect(
+    return _frontend_redirect(return_to, 
         yahoo_connected="true",
         yahoo_connection=str(connection_id),
     )
