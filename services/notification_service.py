@@ -3,9 +3,11 @@ Notification Service
 
 Emails users about today's lineup: either the fill plan the backend suggested
 (`send_lineup_alert`) or the moves auto-lineup already applied to ESPN
-(`send_auto_lineup_summary`) — and what became of a scheduled pickup
-(`send_scheduled_pickup_result`). Sends through Resend when configured;
-otherwise logs the email and reports success (the stub path for dev and tests).
+(`send_auto_lineup_summary`) — what became of a scheduled pickup
+(`send_scheduled_pickup_result`, a stream lane's included), and a stream lane
+that paused or missed a day (`send_stream_lane_notice`). Sends through Resend
+when configured; otherwise logs the email and reports success (the stub path
+for dev and tests).
 
 Mirrored byte-for-byte between backend and data-platform
 (scripts/check_backend_mirror.py) — keep it free of service-specific imports.
@@ -40,7 +42,7 @@ class NotificationResult:
 
 
 class NotificationService:
-    """Sends lineup alert, auto-lineup summary and scheduled-pickup result emails."""
+    """Sends lineup alert, auto-lineup summary, scheduled-pickup result and stream lane emails."""
 
     def __init__(self):
         self.log = get_logger("notification_service")
@@ -151,6 +153,33 @@ class NotificationService:
 
         return self._send_email(email, subject, body)
 
+    def send_stream_lane_notice(
+        self,
+        user,
+        team,
+        notice: dict,
+        prefs=None,
+    ) -> NotificationResult:
+        """
+        Email the user that their stream lane could not act by itself.
+
+        Args:
+            notice: The backend's LaneNotice as a dict — `action` (paused | blocked),
+                `reason`, `detail`, `holder` ({name}), `nba_date` (ISO).
+        """
+        email = self._recipient(user, prefs)
+        subject, body = self._build_lane_notice_email(self._team_name(team), notice)
+
+        self.log.info(
+            "sending_stream_lane_notice",
+            to=email,
+            action=notice.get("action"),
+            reason=notice.get("reason"),
+            subject=subject,
+        )
+
+        return self._send_email(email, subject, body)
+
     # ---- body rendering ---------------------------------------------------------
 
     def _build_alert_body(
@@ -254,6 +283,65 @@ class NotificationService:
                 lines.append(f"ESPN said: {detail}")
             lines.append("Nothing was changed on ESPN.")
 
+        lane = result.get("lane")
+        if lane:
+            subject = {
+                "executed": f"Stream lane picked up {add} for {team_name}",
+                "skipped": f"Stream lane skipped {add} for {team_name}",
+                "expired": f"Stream lane missed {add} for {team_name}",
+            }.get(outcome, f"Stream lane pickup failed: {add} for {team_name}")
+            lines.extend(NotificationService._lane_pickup_lines(lane, outcome, add, drop))
+
+        lines.append("")
+        lines.append(SIGNATURE)
+        return subject, "\n".join(lines)
+
+    @staticmethod
+    def _lane_pickup_lines(lane: dict, outcome, add: str, drop) -> list[str]:
+        """What a stream lane's pickup adds: that the lane made it, and how it compares with the
+        projection shown before it (which can change as the market does)."""
+        if outcome != "executed":
+            return ["", "This was your stream lane's pickup. The lane carries on and re-plans before the next day."]
+        lines = ["", "Your stream lane made this move: it re-plans the spot before each day."]
+        projected = (lane.get("projected") or {}).get("name")
+        why = lane.get("why")
+        if projected:
+            if why == "as_projected":
+                lines.append("This was the move the lane had projected.")
+            elif why == "projected_gone":
+                lines.append(f"The lane had projected {projected} for this day, but {projected} was no longer "
+                             f"available, so it picked {add}.")
+            elif why == "replanned" and projected == drop:
+                lines.append(f"The lane had projected keeping {drop} for this day; with the latest projections "
+                             f"{add} was the better pick.")
+            elif why == "replanned":
+                lines.append(f"The lane had projected {projected} for this day; with the latest projections "
+                             f"{add} was the better pick.")
+        return lines
+
+    @staticmethod
+    def _build_lane_notice_email(team_name: str, notice: dict) -> tuple[str, str]:
+        """Subject and body for a stream lane that paused, or a day it missed."""
+        holder = (notice.get("holder") or {}).get("name") or "the spot's player"
+        reason = notice.get("reason") or ""
+        lines = [f"Team: {team_name}", f"Stream lane on: {holder}'s spot", ""]
+        if notice.get("action") == "paused":
+            subject = f"Stream lane paused for {team_name}"
+            why = {
+                "holder_gone": f"{holder} is no longer on your roster, so the lane has no spot to stream. "
+                               "Start a new lane from a seat on Court Vision.",
+                "auth_expired": "your ESPN connection has expired — reconnect it on Court Vision, then resume the lane.",
+                "provider_not_supported": "your league's rosters can't be changed from Court Vision.",
+                "waiver_period_unsupported": "your league's waiver period is longer than stream lanes support.",
+            }.get(reason, f"{reason or 'an unexpected problem'}. Resume it on Court Vision when it is fixed.")
+            lines.append(f"The lane paused: {why}")
+            lines.append("The lane won't change anything else on ESPN." if reason == "holder_gone"
+                         else "Nothing more will be changed on ESPN until you resume it.")
+        else:
+            day = NotificationService._format_day(notice.get("nba_date"))
+            subject = f"Stream lane missed a day for {team_name}"
+            lines.append(f"No decision was made in time for {day}, so the spot stayed as it was.")
+            lines.append("The lane carries on with the next day.")
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)

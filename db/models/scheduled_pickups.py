@@ -2,8 +2,9 @@
 usr.scheduled_pickups — a free-agent add (optionally with a drop) a user asked
 Court Vision to make for a later ESPN day. The executor job claims the rows
 that are due and settles them; the writes themselves are audited in
-usr.roster_moves under source 'scheduled' (the two audit ids are plain
-columns here; the FKs live in the schema, migration 0028).
+usr.roster_moves under source 'scheduled' (the two audit ids and the lane
+id are plain columns here; the FKs live in the schema, migrations 0028 and
+0030). A stream lane's pickups carry its `lane_id`.
 
 Mirrored byte-for-byte between backend and data-platform
 (scripts/check_backend_mirror.py): the backend writes it, data-platform only
@@ -53,6 +54,7 @@ class ScheduledPickup(BaseModel):
     created_at = DateTimeField(default=_now)
     updated_at = DateTimeField(default=_now)
     executed_at = DateTimeField(null=True)
+    lane_id = IntegerField(null=True)              # usr.stream_lanes row when a lane made it
 
     class Meta:
         table_name = "scheduled_pickups"
