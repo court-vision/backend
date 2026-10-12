@@ -1,6 +1,8 @@
 """
 services.stream_lane_service without ESPN or Postgres: the board, the pool and the schedule are
-fakes, and every repository function is an in-memory stand-in recording what was written.
+fakes, and every repository function is an in-memory stand-in recording what was written. The
+pickups' timing rule is the real one (`scheduled_pickup_service._window_for`) over the fake
+schedule, so the lane's decision times follow the executor's whatever that rule becomes.
 
 Covers starting a lane (its gates and what is stored), the dry run, a decision's every branch
 (switch, keep, waiting on its pickup, before the window, a provider error, the holder gone or
@@ -15,12 +17,13 @@ from types import SimpleNamespace
 import pytest
 
 from core.errors import NotFoundError, ProviderAuthError
+from db.models.nba.games import Game
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.espn import PlayerResp, TeamDataResp
 from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
 from schemas.stream_lane import StreamLanePlanReq, StreamLaneStartReq, StreamLaneUpdateReq
 from services import stream_lane_service as svc
-from services.scheduled_pickup_service import AttemptWindow, et_at
+from services.scheduled_pickup_service import et_at
 
 PG, C, UT, BE, IR = 0, 4, 11, 12, 13
 LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=552315826, team_name="GloatingSoap369", year=2027,
@@ -81,7 +84,7 @@ def h(monkeypatch):
     h = SimpleNamespace(board=board(), pool=[free_agent(FA, "Free Agent", "LAL")], reads=0, schedule=schedule,
                         pending=[], open_lane=None, inserted=[], recorded=[], steps=[], held=True,
                         lane_pending=False, adopted=None, team=(LEAGUE, {}), cancelled=[], cancel_prior="pending",
-                        lane_pickups=[], windows=[], day_adds=0)
+                        lane_pickups=[], day_adds=0)
 
     class Adapter:
         def capabilities(self, league_info):
@@ -104,15 +107,8 @@ def h(monkeypatch):
             out.append(svc.LaneDay(p, d, teams, tip(d) if teams else None))
         return out
 
-    def window_for(nba_date, drop_team):
-        """D-1's first tip, or the rollover into D when the player to drop plays D-1."""
-        h.windows.append((nba_date, drop_team))
-        prev = nba_date - timedelta(days=1)
-        if drop_team and drop_team in h.schedule.get(prev, set()):
-            start = svc.rollover_at(nba_date)
-        else:
-            start = tip(prev)
-        return AttemptWindow(start, tip(nba_date) if h.schedule.get(nba_date) else None, "test")
+    def first_tip(d):
+        return time(19, 0) if h.schedule.get(d) else None
 
     def record(lane_id, attempts, now, lane_fields, events, pickup):
         h.recorded.append(SimpleNamespace(lane_id=lane_id, attempts=attempts, fields=lane_fields, events=events,
@@ -147,7 +143,8 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_load_team_for_job", lambda team_id, user_id: h.team)
     monkeypatch.setattr(svc, "_roster_slots", lambda team: {})
     monkeypatch.setattr(svc, "_days", days)
-    monkeypatch.setattr(svc, "_window_for", window_for)
+    monkeypatch.setattr(Game, "get_earliest_game_time_on_date", staticmethod(first_tip))
+    monkeypatch.setattr(Game, "get_teams_playing_on_date", staticmethod(lambda d: set(h.schedule.get(d, ()))))
     monkeypatch.setattr(svc, "_pending_pickups", lambda team_id: list(h.pending))
     monkeypatch.setattr(svc, "_open_lane", lambda team_id: h.open_lane)
     monkeypatch.setattr(svc, "_insert_lane", insert)
