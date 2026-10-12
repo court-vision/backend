@@ -43,6 +43,14 @@ the day itself. ESPN refusing an add as over the limit waits for the rollover in
 when that brings a fresh allowance (a per-day limit, or a day that opens a new matchup),
 and is skipped otherwise (`on_limit_refusal`).
 
+Stream lanes. Each run first makes the lane decisions that are due
+(`StreamLaneService.decide_due`); a decision that switches inserts a pickup with the lane's
+id, which the same run then claims. Settling a lane's pickup tells the lane
+(`note_pickup_settled`: an executed one moves its holder), and its result carries the lane
+for the email. Scheduling refuses to drop the player an active lane holds its spot with. A
+lane's pickup is made only while the lane is active: pausing or stopping it cancels the
+pickup, and an attempt that finds the lane paused or ended cancels it instead of sending.
+
 Cancelling. Refused while an attempt holds the row — claimed (reason
 `in_progress`) and inside its lease, or with a write out — so a user told
 "cancelled" never sees the move made anyway; the check and the update are one
@@ -73,6 +81,7 @@ from schemas.scheduled_pickup import (
     PickupExecuteData,
     PickupExecuteReq,
     PickupExecuteResp,
+    PickupLane,
     PickupResult,
     SchedulePickupReq,
     ScheduledPickup,
@@ -127,7 +136,7 @@ POSITION_LIMIT_CODE = "TRAN_ROSTER_POSITION_LIMIT_EXCEEDED"   # waiting changes 
 class ScheduledPickupInvalid(AppError):
     """The board or the pool refuses the pickup before it is stored. `data.reason` is one
     of: not_future, no_scoring_period, same_player, add_already_on_roster, add_not_found,
-    add_not_available, drop_not_on_roster, acquisition_limit."""
+    add_not_available, drop_not_on_roster, acquisition_limit, drop_is_lane_holder."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -408,6 +417,18 @@ def _window_for(nba_date: date) -> AttemptWindow:
     return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
 
 
+def _lane_holder(team_id: int) -> Optional[int]:
+    """The player an active stream lane holds its spot with, whom no pickup may drop."""
+    from db.models.stream_lanes import active_lane_holder
+    return active_lane_holder(team_id)
+
+
+def _lane_status(lane_id: int) -> Optional[str]:
+    from db.models.stream_lanes import StreamLane
+    lane = StreamLane.get_or_none(StreamLane.id == lane_id)
+    return lane.status if lane is not None else None
+
+
 def _nba_ids(rows) -> dict[int, int]:
     ids = {r.add_player_id for r in rows} | {r.drop_player_id for r in rows if r.drop_player_id}
     return nba_ids_by_espn_id(sorted(ids))
@@ -437,7 +458,7 @@ def to_schema(row, nba_ids: Optional[dict[int, int]] = None) -> ScheduledPickup:
         not_before_at=row.not_before_at, deadline_at=row.deadline_at, next_attempt_at=row.next_attempt_at,
         attempts=row.attempts, audit_id=row.audit_id, lineup_audit_id=row.lineup_audit_id,
         seated_slot_id=row.seated_slot_id, seated_slot=_slot_name(row.seated_slot_id),
-        created_at=row.created_at, executed_at=row.executed_at,
+        created_at=row.created_at, executed_at=row.executed_at, lane_id=getattr(row, "lane_id", None),
     )
 
 
@@ -486,6 +507,10 @@ class ScheduledPickupService:
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
+        if drop is not None and holder is not None and await run_db("pickup.lane_holder", _lane_holder,
+                                                                    team.team_id) == drop:
+            raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
+                                                  "stop the lane to drop them", drop)
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             raise _invalid("acquisition_limit", blocked)
@@ -542,15 +567,21 @@ class ScheduledPickupService:
 
     @staticmethod
     async def execute_due(req: PickupExecuteReq) -> PickupExecuteResp:
+        from services.stream_lane_service import StreamLaneService
+
         now = (req.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         if not settings.roster_writes_enabled:
             pushed = await run_db("pickup.release", _release_due, now, now + RETRY)
-            log.info("scheduled_pickups_writes_disabled", due=pushed)
+            lanes_pushed = await StreamLaneService.release_due(now, now + RETRY)
+            log.info("scheduled_pickups_writes_disabled", due=pushed, lanes_due=lanes_pushed)
             return PickupExecuteResp(
                 status=ApiStatus.SUCCESS,
-                message=f"Roster writes are switched off — {pushed} due pickup(s) pushed back {RETRY.seconds // 60} min",
+                message=f"Roster writes are switched off — {pushed} due pickup(s) and {lanes_pushed} lane "
+                        f"decision(s) pushed back {RETRY.seconds // 60} min",
                 data=PickupExecuteData(due=pushed, results=[]),
             )
+        # Lane decisions first: a switch inserts a pickup that is due now, and this run makes it.
+        lanes = await StreamLaneService.decide_due(now, req.limit)
         rows = await run_db("pickup.claim", _claim_due, now, req.limit)
         results: list[PickupResult] = []
         for row in rows:
@@ -558,8 +589,10 @@ class ScheduledPickupService:
                 # Over its attempt budget: the claim settled it, and nothing is read or sent.
                 log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=row.status,
                          reason=row.reason, attempts=row.attempts)
+                lane = (await StreamLaneService.note_pickup_settled(row, row.status, row.reason, row.detail, now)
+                        if getattr(row, "lane_id", None) else None)
                 results.append(ScheduledPickupService._result(row, row.status, row.reason, detail=row.detail,
-                                                              audit_id=row.audit_id))
+                                                              audit_id=row.audit_id, lane=lane))
                 continue
             try:
                 result = await ScheduledPickupService._execute_one(row, now)
@@ -569,16 +602,29 @@ class ScheduledPickupService:
             if result is not None:    # None: the row stopped being this run's, and its holder reports it
                 results.append(result)
         log.info("scheduled_pickups_run", due=len(rows),
-                 outcomes=dict(Counter(r.outcome for r in results)))
+                 outcomes=dict(Counter(r.outcome for r in results)), lane_notices=len(lanes))
         return PickupExecuteResp(status=ApiStatus.SUCCESS, message=f"{len(rows)} pickup(s) attempted",
-                                 data=PickupExecuteData(due=len(rows), results=results))
+                                 data=PickupExecuteData(due=len(rows), results=results, lanes=lanes))
 
     @staticmethod
     async def _execute_one(row, now: datetime) -> Optional[PickupResult]:
         """One attempt at a claimed row. None when the row stopped being this attempt's under it
-        (cancelled, or claimed by a later run once the lease ran out): nothing is sent then."""
+        (cancelled, or claimed by a later run once the lease ran out), or when its stream lane is no
+        longer active and the row is cancelled here: nothing is sent then."""
         day, nba_date = row.scoring_period_id, row.nba_date
         settle, defer = ScheduledPickupService._settle, ScheduledPickupService._defer
+
+        lane_id = getattr(row, "lane_id", None)
+        if lane_id is not None and row.audit_id is None:
+            # A lane paused or stopped since it scheduled this: the pause / stop cancels it, and this
+            # catches one that slipped past them. Nothing is sent; a cancel is told to nobody.
+            lane_status = await run_db("pickup.lane_status", _lane_status, lane_id)
+            if lane_status != "active":
+                if await run_db("pickup.settle", _settle_row, row.id, row.attempts, now, status=CANCELLED,
+                                reason=f"lane_{lane_status or 'gone'}"):
+                    log.info("scheduled_pickup_cancelled", pickup_id=row.id, team_id=row.team_id, lane_id=lane_id,
+                             lane_status=lane_status)
+                return None
 
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)
@@ -831,7 +877,7 @@ class ScheduledPickupService:
     def _result(row, outcome: str, reason: Optional[str], *, detail: Optional[str] = None,
                 audit_id: Optional[int] = None, seated_slot: Optional[str] = None,
                 verified: Optional[bool] = None, next_attempt_at: Optional[datetime] = None,
-                team_name: str = "") -> PickupResult:
+                team_name: str = "", lane: Optional[PickupLane] = None) -> PickupResult:
         return PickupResult(
             pickup_id=row.id, team_id=row.team_id, user_id=row.user_id, team_name=team_name,
             outcome=outcome, reason=reason, detail=detail,
@@ -839,6 +885,7 @@ class ScheduledPickupService:
             drop=_player(row.drop_player_id, row.drop_name, row.drop_team),
             nba_date=row.nba_date, scoring_period_id=row.scoring_period_id,
             seated_slot=seated_slot, verified=verified, audit_id=audit_id, next_attempt_at=next_attempt_at,
+            lane=lane,
         )
 
     @staticmethod
@@ -859,9 +906,13 @@ class ScheduledPickupService:
             return None
         log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=status, reason=reason,
                  seated_slot=seated.slot_id, attempts=row.attempts)
+        lane = None
+        if getattr(row, "lane_id", None):
+            from services.stream_lane_service import StreamLaneService
+            lane = await StreamLaneService.note_pickup_settled(row, status, reason, detail, now)
         return ScheduledPickupService._result(row, status, reason, detail=detail, audit_id=audit_id,
                                               seated_slot=_slot_name(seated.slot_id), verified=verified,
-                                              team_name=team_name)
+                                              team_name=team_name, lane=lane)
 
     @staticmethod
     async def _defer(row, now: datetime, reason: str, *, after: Optional[timedelta] = None,

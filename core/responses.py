@@ -75,6 +75,12 @@ ERROR_CODE_STATUS: dict[str, int] = {
     "SCHEDULED_PICKUP_INVALID": 422,
     "SCHEDULED_PICKUP_DUPLICATE": 409,
     "SCHEDULED_PICKUP_NOT_PENDING": 409,
+    # Stream lanes (services.stream_lane_service)
+    "STREAM_LANE_INVALID": 422,
+    "STREAM_LANE_EXISTS": 409,
+    "STREAM_LANE_ENDED": 409,
+    "STREAM_LANE_BUSY": 409,
+    "STREAM_LANE_NOT_FOUND": 404,
 }
 
 # error_code to fill in when the service left it empty, by envelope status

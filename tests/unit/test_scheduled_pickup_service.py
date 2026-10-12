@@ -21,7 +21,7 @@ import pytest
 from core.errors import BadRequestError
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
-from schemas.scheduled_pickup import PickupExecuteReq, SchedulePickupReq
+from schemas.scheduled_pickup import LaneNotice, PickupExecuteReq, PickupLane, SchedulePickupReq
 from services import fantasy_writer_client
 from services import lineup_editor_service as editor
 from services import roster_transaction_service as txn
@@ -29,6 +29,7 @@ from services import scheduled_pickup_service as svc
 from services.espn_service import PoolEntry
 from services.fantasy_writer_client import FantasyWriterAuthRejected, FantasyWriterRejected, FantasyWriterUnavailable, WriterResult
 from services.lineup_read_service import LineupReadService
+from services.stream_lane_service import StreamLaneService
 
 PG, UT, BE, IR = 0, 11, 12, 13
 COUNTS = {"0": 1, "11": 1, "12": 2, "13": 1}          # 4 non-IR seats
@@ -101,7 +102,8 @@ def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
-                        claimed=[], released=[], held=True, settle_crashes=False)
+                        claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
+                        lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
         h.reads.append(scoring_period_id)
@@ -172,6 +174,19 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
+    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
+
+    async def no_lanes_due(now, limit):
+        h.lane_runs.append((now, limit))
+        return list(h.lane_notices)
+
+    async def release_lanes(now, until):
+        h.lanes_released.append((now, until))
+        return 0
+
+    monkeypatch.setattr(StreamLaneService, "decide_due", staticmethod(no_lanes_due))
+    monkeypatch.setattr(StreamLaneService, "release_due", staticmethod(release_lanes))
     monkeypatch.setattr(svc, "_lease_from_now", lambda now: now + svc.LEASE)   # the wall clock stays out of it
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
     return h
@@ -767,6 +782,62 @@ def test_execute_due_with_writes_off_pushes_rows_back_without_claiming(h, monkey
     resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(now=NOW)))
     assert h.released == [(NOW, NOW + svc.RETRY)]
     assert resp.data.due == 3 and resp.data.results == [] and "switched off" in resp.message
+    assert h.lanes_released == [(NOW, NOW + svc.RETRY)] and h.lane_runs == []
+
+
+@pytest.mark.unit
+def test_the_run_makes_the_lane_decisions_first_and_reports_their_notices(h, monkeypatch):
+    order = []
+    notice = LaneNotice(lane_id=7, team_id=21, user_id=11, notify="email", action="paused", reason="holder_gone",
+                        holder=svc.ScheduledPickupPlayer(player_id=EDWARDS, name="Anthony Edwards"))
+    h.lane_notices = [notice]
+    monkeypatch.setattr(svc, "_claim_due", lambda now, limit: order.append("claim") or [])
+    real = StreamLaneService.decide_due
+
+    async def decide(now, limit):
+        order.append("lanes")
+        return await real(now, limit)
+    monkeypatch.setattr(StreamLaneService, "decide_due", staticmethod(decide))
+    resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(limit=4, now=NOW)))
+    assert order == ["lanes", "claim"] and h.lane_runs == [(NOW, 4)]
+    assert resp.data.lanes == [notice]
+
+
+@pytest.mark.unit
+def test_a_lane_pickups_result_carries_the_lane(h, monkeypatch):
+    arrange_day_before(h)
+    seen = []
+
+    async def noted(r, status, reason, detail, now):
+        seen.append((r.id, status))
+        return PickupLane(lane_id=7, notify="desk", why="as_projected")
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled", staticmethod(noted))
+    result = execute(h, row(lane_id=7))
+    assert result.outcome == "executed" and seen == [(1, "executed")]
+    assert (result.lane.lane_id, result.lane.notify) == (7, "desk")
+    # A user's own pickup tells no lane.
+    seen.clear()
+    arrange_day_before(h)
+    assert execute(h, row(lane_id=None)).lane is None and seen == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lane_status", ["paused", "ended"])
+def test_a_lane_pickup_whose_lane_is_no_longer_active_is_cancelled_unsent(h, monkeypatch, lane_status):
+    arrange_day_before(h)
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled", staticmethod(lambda *args: _none()))
+    h.lane_status = lane_status
+    assert execute(h, row(lane_id=7)) is None
+    assert h.settled == [(1, {"status": "cancelled", "reason": f"lane_{lane_status}"})]
+    assert h.txn_calls == [] and h.reads == []
+    # A write already out is still confirmed from the board, whatever the lane did since.
+    h.settled.clear()
+    r = execute(h, row(lane_id=7, audit_id=41))
+    assert (r.outcome, r.reason) == ("failed", "interrupted")
+
+
+async def _none():
+    return None
 
 
 @pytest.mark.unit
@@ -853,6 +924,14 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
     assert h.windows == [DAY_D]
     assert resp.data.id == 7 and resp.data.status == "pending" and resp.data.add.name == "Kawhi Leonard"
     assert resp.data.drop.player_id == EDWARDS and "scheduled for ESPN day 3" in resp.message
+
+
+@pytest.mark.unit
+def test_schedule_refuses_to_drop_a_stream_lanes_holder(scheduling):
+    scheduling.lane_holder = EDWARDS
+    with pytest.raises(svc.ScheduledPickupInvalid) as exc:
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert exc.value.data["reason"] == "drop_is_lane_holder" and scheduling.inserted == []
 
 
 @pytest.mark.unit
@@ -947,7 +1026,7 @@ def test_schedule_gates(scheduling, monkeypatch):
 
 @pytest.mark.unit
 def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
-    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25)),
+    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25), lane_id=7),
             row(id=2, status="pending", nba_date=date(2026, 10, 23)),
             row(id=3, status="executed", updated_at=NOW - timedelta(days=1), seated_slot_id=UT, audit_id=9)]
     monkeypatch.setattr(svc, "_list_pickups", lambda team_id, since: rows)
@@ -956,6 +1035,7 @@ def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
     assert [p.id for p in resp.data.pending] == [2, 1]
     assert [p.id for p in resp.data.recent] == [3]
     assert resp.data.recent[0].seated_slot == "UT" and resp.data.recent[0].add.nba_player_id == 1627
+    assert [p.lane_id for p in resp.data.pending] == [None, 7]       # a stream lane's pickup says so
 
 
 @pytest.mark.unit
