@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytz
 
 from core.logging import get_logger
+from core.season import previous_season
+from core.settings import settings
 from db.base import DB_RUNTIME_ERRORS, run_db
 from db.models.nba.games import Game
 from db.models.nba.teams import NBATeam
@@ -106,7 +108,10 @@ class NBATeamLiveGameService:
             return None
         player_ids = _get_team_player_ids(team_id)
         today_games = Game.get_team_games(team_id=team_id, start_date=nba_today, end_date=nba_today)
-        all_games = [] if today_games else Game.get_team_games(team_id=team_id)
+        # This season and last: nba.games holds every season since 2012-13.
+        all_games = [] if today_games else Game.get_team_games(
+            team_id=team_id, seasons=(previous_season(settings.nba_season), settings.nba_season),
+        )
         return {
             "team_name": team.name,
             "player_ids": player_ids,

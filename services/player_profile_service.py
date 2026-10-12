@@ -73,7 +73,9 @@ class PlayerProfileService:
                 JOIN.LEFT_OUTER,
                 on=(Player.id == PlayerProfile.player),
             )
-            .where(predicate)
+            # Players of today's game: nba.players also holds retired players
+            # from the game-history load (migration 0031), who have no Scout page.
+            .where(predicate & Player.in_play())
         )
 
         total = query.count()

@@ -8,11 +8,14 @@ static player information. Game statistics reference this table via player_id.
 from datetime import datetime
 
 from peewee import (
+    SQL,
     IntegerField,
     CharField,
     DateTimeField,
 )
 
+from core.season import previous_season
+from core.settings import settings
 from db.base import BaseModel
 
 
@@ -105,15 +108,38 @@ class Player(BaseModel):
         return player
 
     @classmethod
+    def in_play(cls):
+        """Where-clause: players of today's game.
+
+        That is a PlayerIndex profile whose career reaches last season
+        (nba.player_profiles.to_year, rookies included; profiles are never
+        deleted, so an old one ages out) or season stats from last season on.
+        nba.players also holds everyone the game-history load brings in
+        (2012-13 onward, migration 0031) and the All-Star celebrity game's
+        rows; a lookup by name that means a current player uses this, so a
+        retired namesake can never take his place.
+        """
+        since = previous_season(settings.nba_season)
+        return cls.id.in_(
+            SQL("(SELECT player_id FROM nba.player_profiles WHERE to_year IS NULL OR to_year >= %s)", (int(since[:4]),))
+        ) | cls.id.in_(
+            SQL("(SELECT player_id FROM nba.player_season_stats WHERE season >= %s)", (since,))
+        )
+
+    @classmethod
     def find_by_name(cls, name: str) -> "Player | None":
         """
-        Find a player by normalized name.
+        Find the one player in play with this normalized name.
 
         Args:
             name: Player name to search for
 
         Returns:
-            Player instance or None if not found
+            Player instance, or None if no player in play has the name or more
+            than one does (a guess between namesakes is worse than no match)
         """
         name_normalized = name.lower().strip()
-        return cls.get_or_none(cls.name_normalized == name_normalized)
+        matches = list(
+            cls.select().where((cls.name_normalized == name_normalized) & cls.in_play()).limit(2)
+        )
+        return matches[0] if len(matches) == 1 else None

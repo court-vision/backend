@@ -85,6 +85,8 @@ def test_player_list_uses_fresh_league_ranks_and_accent_search():
 def test_dimension_search_includes_mapped_players_without_season_stats():
     rookie = player(1, "Rookie One")
     player(2, "Rookie Two")
+    snapshot(2, OLD)  # in play by his season stats, with no profile yet
+    player(3, "Rookie Retired")  # neither: a player the game-history load brought in
     profile_updated_at = datetime(2026, 9, 7, 12, 30)
     PlayerProfile.create(
         player=rookie,
@@ -103,11 +105,13 @@ def test_dimension_search_includes_mapped_players_without_season_stats():
     assert response.data.players[0].team == "LAL"
     assert response.data.players[0].profile_updated_at.isoformat() == "2026-09-07T12:30:00+00:00"
     assert response.data.players[1].profile_updated_at is None
-    assert PlayersListService.list_players.__wrapped__().data.players == []
+    # The ranked list needs season stats: Rookie One is found by search alone.
+    assert [p.id for p in PlayersListService.list_players.__wrapped__().data.players] == [2]
 
 
 def test_dimension_search_matches_accents_and_both_identifier_systems():
     player(1, "Nikola Jokić")
+    PlayerProfile.create(player=1)
     search = PlayerProfileService.search_players.__wrapped__
 
     assert search("jokic").data.players[0].id == 1
@@ -202,7 +206,9 @@ def test_percentiles_read_normalized_game_rows():
 
 def test_stats_keep_nba_and_espn_ids_distinct_and_normalize_name_and_team():
     player(1, "Nikola Jokić")
+    PlayerProfile.create(player=1)
     player(9001)
+    player(77, "Nikola Jokić")   # a retired namesake (no profile) is never the one a name means
     PlayerGameStats.upsert_game_stats(1, OLD, {"pts": 20}, team_id="DEN")
     PlayerGameStats.upsert_game_stats(9001, OLD, {"pts": 10}, team_id="BOS")
     lookup = PlayerService.get_player_stats.__wrapped__

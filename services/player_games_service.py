@@ -3,6 +3,8 @@ Service for player game log operations.
 """
 
 from core.logging import get_logger
+from core.season import previous_season
+from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.games import Game
@@ -44,7 +46,10 @@ class PlayerGamesService:
                 )
 
             # Get game stats
-            games = PlayerGameStats.get_player_games(player_id=player_id, limit=limit)
+            # Fantasy rows of this season and last, as before the history load
+            games = PlayerGameStats.get_player_games(
+                player_id=player_id, limit=limit, since_season=previous_season(settings.nba_season),
+            )
 
             fixtures = GameContext.for_rows(games)
 

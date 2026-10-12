@@ -158,6 +158,11 @@ def _season_opening_night():
         return None
 
 
+def _recent_seasons(model):
+    """Where-clause: rows of the active season or the one before it (or not yet tied to a game)."""
+    return (model.season >= previous_season(settings.nba_season)) | model.season.is_null()
+
+
 def _season_scoped_logs(all_logs: list) -> tuple[list, Optional[str]]:
     """Game logs for the active season; last season's when the season hasn't started.
 
@@ -204,17 +209,29 @@ class PlayerService:
             player = Player.get_or_none(Player.id == player_id)
         elif name is not None:
             normalized_name = _normalize_name(name)
-            player = Player.get_or_none(fn.unaccent(Player.name_normalized) == normalized_name)
+            # One player in play with the name, or none: never a guess between namesakes
+            matches = list(
+                Player.select()
+                .where((fn.unaccent(Player.name_normalized) == normalized_name) & Player.in_play())
+                .limit(2)
+            )
+            player = matches[0] if len(matches) == 1 else None
         else:
             raise BadRequestError("PLAYER_LOOKUP_REQUIRED", "Provide espn_id, player_id, or name")
 
         if not player:
             raise NotFoundError("PLAYER_NOT_FOUND", "Player not found")
 
-        # Step 2: Get all game logs for the player from PlayerGameStats
+        # Step 2: Get the player's game logs from PlayerGameStats: fantasy rows
+        # of this season and last (the scope below picks one), never the
+        # playoffs or the history loaded for the Ask desk (migration 0031).
         game_logs_query = (
             PlayerGameStats.select()
-            .where(PlayerGameStats.player_id == player.id)
+            .where(
+                (PlayerGameStats.player_id == player.id)
+                & PlayerGameStats.for_fantasy()
+                & _recent_seasons(PlayerGameStats)
+            )
             .order_by(PlayerGameStats.game_date.asc())
         )
 
@@ -355,6 +372,7 @@ class PlayerService:
             PlayerGameStats.select().where(
                 (PlayerGameStats.player_id == player_id)
                 & (PlayerGameStats.game_date >= cutoff_date)
+                & PlayerGameStats.for_fantasy()
             )
         )
         if not games:
@@ -415,6 +433,7 @@ class PlayerService:
             .where(
                 (Player.espn_id.in_(espn_ids)) &
                 (PlayerGameStats.game_date >= cutoff_date)
+                & PlayerGameStats.for_fantasy()
             )
         )
         player_games: dict[int, list] = {eid: [] for eid in espn_ids}
@@ -464,6 +483,7 @@ class PlayerService:
             .where(
                 (Player.espn_id.in_(espn_ids)) &
                 (PlayerGameStats.game_date >= cutoff_date)
+                & PlayerGameStats.for_fantasy()
             )
         )
 
@@ -556,6 +576,7 @@ class PlayerService:
             .where(
                 (Player.name_normalized.in_(normalized_names)) &
                 (PlayerGameStats.game_date >= cutoff_date)
+                & PlayerGameStats.for_fantasy()
             )
         )
         player_games: dict[str, list] = {name: [] for name in normalized_names}
@@ -618,7 +639,7 @@ class PlayerService:
                 PlayerGameStats.player_id,
                 fn.COUNT(PlayerGameStats.id).alias("games"),
                 *[expr.alias(name) for name, expr in stat_fields.items()],
-            )
+            ).where(PlayerGameStats.for_fantasy() & _recent_seasons(PlayerGameStats))
             if start is not None:
                 q = q.where(PlayerGameStats.game_date >= start)
             if end is not None:

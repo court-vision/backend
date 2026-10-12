@@ -417,7 +417,9 @@ def _find_players(names: list[str]) -> dict[str, list[tuple[int, str]]]:
         # has. Rows with every word of the name are read first, so however many players share
         # the surname, the limit never cuts the one whose whole name it is.
         *given, surname = wanted
-        rows = Player.select(Player.id, Player.name).where(squeezed.contains(surname))
+        # Players of today's game only: nba.players also holds retired players
+        # from the game-history load (migration 0031), and no view shows them.
+        rows = Player.select(Player.id, Player.name).where(squeezed.contains(surname) & Player.in_play())
         if given:
             rows = rows.order_by(reduce(and_, (squeezed.contains(word) for word in given)).desc())
         candidates = [(row.id, row.name) for row in rows.limit(_CANDIDATES)]

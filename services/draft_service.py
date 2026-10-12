@@ -513,7 +513,8 @@ def resolve_lagging_picks(picks: Iterable) -> int:
     if espn_ids:
         clauses.append(Player.espn_id.in_(list(espn_ids)))
     if names:
-        clauses.append(Player.name_normalized.in_(list(names)))
+        # A name means a player in play: nba.players also holds retired namesakes (migration 0031)
+        clauses.append(Player.name_normalized.in_(list(names)) & Player.in_play())
     where = clauses[0]
     for clause in clauses[1:]:
         where = where | clause

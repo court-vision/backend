@@ -15,6 +15,9 @@ from schemas.common import FantasyProvider, LeagueInfo
 from schemas.espn import PlayerResp
 from services.team_insights_service import TeamInsightsService
 
+# No marker kept this file out of CI's `-m "unit or api"` run.
+pytestmark = pytest.mark.unit
+
 ESPN = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="T", year=2027)
 YAHOO = LeagueInfo(provider=FantasyProvider.YAHOO, league_id=1, team_name="T", year=2027)
 
@@ -30,15 +33,17 @@ def _player(player_id: int, name: str, team: str = "LAL") -> PlayerResp:
 def stub_players(monkeypatch):
     """Stand in for `PlayerModel.select(...).where(...)` with fixed rows."""
     def _field():
-        # Peewee fields build an expression via `.in_()`; the stub only has to
-        # be callable, since the stubbed `.where()` ignores what it is given.
-        return SimpleNamespace(in_=lambda values: None)
+        # Peewee fields build an expression via `.in_()`, which name lookups
+        # combine with `Player.in_play()` using `&`; the stub only has to
+        # support that, since the stubbed `.where()` ignores what it is given.
+        return SimpleNamespace(in_=lambda values: True)
 
     def _install(rows):
         monkeypatch.setattr(
             "services.providers.identity.PlayerModel",
             SimpleNamespace(
                 id=_field(), espn_id=_field(), name_normalized=_field(),
+                in_play=lambda: True,
                 select=lambda *a: SimpleNamespace(where=lambda *w: rows),
             ),
         )

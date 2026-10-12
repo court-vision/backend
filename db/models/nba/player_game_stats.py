@@ -22,7 +22,7 @@ from peewee import (
 )
 
 from db.base import BaseModel, db
-from db.models.nba.games import Game
+from db.models.nba.games import FANTASY_SEASON_TYPES, Game, season_for, season_type_for
 from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
 
@@ -39,10 +39,13 @@ class PlayerGameStats(BaseModel):
         player: Foreign key to Player dimension
         team: Foreign key to NBATeam dimension (team player played for)
         game_date: Date of the game
+        season, season_type: Copied from the game id on every save
+            ("2025-26", "regular"); NULL while the row has no game.
         fpts: Fantasy points (calculated)
         pts, reb, ast, stl, blk, tov: Basic counting stats
         min: Minutes played
         fgm, fga, fg3m, fg3a, ftm, fta: Shooting stats
+        oreb, dreb, pf, plus_minus: NULL on rows written before migration 0031
         pipeline_run_id: Reference to the pipeline run that created/updated this record
         created_at: When this record was first created
         updated_at: When this record was last modified
@@ -76,6 +79,12 @@ class PlayerGameStats(BaseModel):
         index=True,
     )
 
+    # From the game id, on every save (see `save`). Fantasy readers keep to the
+    # regular season (plus the Cup final they always counted); history and the
+    # playoffs share this table since migration 0031.
+    season = CharField(max_length=7, null=True)
+    season_type = CharField(max_length=12, null=True)
+
     # Fantasy points (calculated based on league scoring)
     fpts = SmallIntegerField()
 
@@ -95,6 +104,12 @@ class PlayerGameStats(BaseModel):
     fg3a = SmallIntegerField()
     ftm = SmallIntegerField()
     fta = SmallIntegerField()
+
+    # Since migration 0031; NULL on rows written before it
+    oreb = SmallIntegerField(null=True)
+    dreb = SmallIntegerField(null=True)
+    pf = SmallIntegerField(null=True)
+    plus_minus = SmallIntegerField(null=True)
 
     # Audit columns
     pipeline_run_id = UUIDField(null=True, index=True)
@@ -124,8 +139,10 @@ class PlayerGameStats(BaseModel):
         )
 
     def save(self, *args, **kwargs):
-        """Override save to auto-update updated_at timestamp."""
+        """Override save to auto-update updated_at and copy season fields from the game id."""
         self.updated_at = datetime.utcnow()
+        self.season = season_for(self.game_id)
+        self.season_type = season_type_for(self.game_id)
         return super().save(*args, **kwargs)
 
     @classmethod
@@ -176,6 +193,11 @@ class PlayerGameStats(BaseModel):
             "fta": stats.get("fta", 0),
             "pipeline_run_id": pipeline_run_id,
         }
+        # Only when the source sent them: a caller that never knew these must
+        # not blank what an earlier run stored.
+        for key in ("oreb", "dreb", "pf", "plus_minus"):
+            if key in stats:
+                defaults[key] = stats[key]
 
         # An id nba.games has never heard of cannot be stored — the column is a
         # foreign key, and inserting it would fail the whole row rather than
@@ -225,27 +247,37 @@ class PlayerGameStats(BaseModel):
             return apply(row)
 
     @classmethod
+    def for_fantasy(cls):
+        """Where-clause for the rows fantasy readers use (FANTASY_SEASON_TYPES).
+
+        A row whose game is not known yet has no season type and is kept, as
+        every row was before migration 0031.
+        """
+        return cls.season_type.in_(FANTASY_SEASON_TYPES) | cls.season_type.is_null()
+
+    @classmethod
     def get_player_games(
         cls,
         player_id: int,
         limit: int = 10,
+        since_season: str | None = None,
     ) -> list["PlayerGameStats"]:
         """
-        Get recent game stats for a player.
+        Get recent fantasy game stats for a player (no play-in or playoffs).
 
         Args:
             player_id: NBA player ID
             limit: Maximum number of games to return
+            since_season: Only this season ("2025-26") and later; the table
+                holds every season since 2012-13
 
         Returns:
             List of PlayerGameStats ordered by date descending
         """
-        return list(
-            cls.select()
-            .where(cls.player_id == player_id)
-            .order_by(cls.game_date.desc())
-            .limit(limit)
-        )
+        query = cls.select().where((cls.player_id == player_id) & cls.for_fantasy())
+        if since_season:
+            query = query.where((cls.season >= since_season) | cls.season.is_null())
+        return list(query.order_by(cls.game_date.desc()).limit(limit))
 
     @classmethod
     def get_games_by_date(cls, game_date) -> list["PlayerGameStats"]:
