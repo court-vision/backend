@@ -201,10 +201,14 @@ class RosterTransactionService:
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
                      add: Optional[int], drop: Optional[int], moves: list[dict[str, Any]],
                      fallback_slot_counts, source: str = "manual",
-                     before_send: Optional[Callable[[int], Awaitable[None]]] = None) -> tuple[LineupState, bool, int]:
+                     before_send: Optional[Callable[[int], Awaitable[None]]] = None,
+                     verify_scoring_period_id: Optional[int] = None) -> tuple[LineupState, bool, int]:
         """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor.
         `before_send(audit_id)` runs once the audit row exists, right before the writer is called
-        (the pickup executor's last check); when it raises, nothing is sent and the audit row says so."""
+        (the pickup executor's last check); when it raises, nothing is sent and the audit row says so.
+        `verify_scoring_period_id` is the day whose board the write is checked against (today's when
+        None): the executor's swap the day before is next-day business on ESPN, so today's board
+        still shows the player dropped and only day D's shows the swap."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
@@ -235,7 +239,8 @@ class RosterTransactionService:
 
         try:
             fresh = await get_provider_adapter(league_info.provider).read_lineup(
-                team_id, league_info, fallback_slot_counts=fallback_slot_counts
+                team_id, league_info, fallback_slot_counts=fallback_slot_counts,
+                scoring_period_id=verify_scoring_period_id,
             )
         except Exception as exc:
             # ESPN took the transaction and only the read-back failed: settle the row as applied,

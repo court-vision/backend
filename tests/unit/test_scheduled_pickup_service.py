@@ -179,7 +179,9 @@ def h(monkeypatch):
 
 def arrange_day_before(h, *, drop_game=False, drop_started=False):
     """Wednesday evening (ESPN day 2), pickup for Thursday (day 3): Jokic plays tonight,
-    Edwards (the drop) sits at BE today and at PG on Thursday's board."""
+    Edwards (the drop) sits at BE today and at PG on Thursday's board. A swap after
+    tonight's first tip is next-day business: today's board stays as it was, and only
+    Thursday's shows it."""
     jokic = player(JOKIC, "Nikola Jokic", UT, game=True, started=True)
     edwards = player(EDWARDS, "Anthony Edwards", BE, team="MIN", game=drop_game, started=drop_started)
     h.boards = {None: state([jokic, edwards]),
@@ -187,7 +189,7 @@ def arrange_day_before(h, *, drop_game=False, drop_started=False):
                          period=3, nba_date="2026-10-22", version="d3")}
     h.pool = {KAWHI: pool()}
     kawhi = player(KAWHI, "Kawhi Leonard", BE, team="LAC")
-    h.after_txn = {None: state([jokic, kawhi], version="v2"),
+    h.after_txn = {None: h.boards[None],
                    3: state([player(JOKIC, "Nikola Jokic", UT), kawhi], period=3, nba_date="2026-10-22", version="d3b")}
     h.after_lineup = {3: state([player(JOKIC, "Nikola Jokic", UT), player(KAWHI, "Kawhi Leonard", PG, team="LAC")],
                                period=3, nba_date="2026-10-22", version="d3c")}
@@ -238,8 +240,9 @@ def test_executed_the_day_before_sends_todays_transaction_and_a_future_roster_se
     assert (s["scoring_period_id"], s["current_scoring_period_id"]) == (3, 2)
     assert s["moves"] == [{"player_id": KAWHI, "from_slot_id": BE, "to_slot_id": PG}]
     assert [(a["source"], a["kind"]) for a in h.audits] == [("scheduled", "transaction"), ("scheduled", "lineup")]
+    assert h.updates == [(1, "applied", 200, None), (2, "applied", 200, None)]
     assert h.pool_calls == [([KAWHI], 2)]
-    assert h.reads == [None, 3, None, 3, 3]     # today, D for the seat, verify, D after the add, D verify
+    assert h.reads == [None, 3, 3, 3, 3]        # today, D for the seat, D verify, D after the add, D verify
 
 
 @pytest.mark.unit
@@ -316,7 +319,8 @@ def test_already_rostered_after_an_earlier_landed_write_is_executed_and_seated(h
 @pytest.mark.unit
 def test_already_on_roster_by_hand_is_skipped(h):
     arrange_day_before(h)
-    h.boards[None] = h.after_txn[None]
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True, started=True),
+                            player(KAWHI, "Kawhi Leonard", BE, team="LAC")])
     r = execute(h)
     assert (r.outcome, r.reason) == ("skipped", "already_on_roster") and h.txn_calls == []
 
@@ -630,10 +634,32 @@ def test_a_write_that_landed_before_the_worker_died_is_executed_by_the_next_atte
 
 @pytest.mark.unit
 def test_a_write_the_board_does_not_show_fails_and_is_never_sent_again(h):
-    arrange_day_before(h)                        # no Kawhi on the board: the write that went out never landed
+    arrange_day_before(h)                        # no Kawhi on today's or D's board: the write never landed
     r = execute(h, row(audit_id=41))
     assert (r.outcome, r.reason, r.audit_id) == ("failed", "interrupted", 41)
     assert h.txn_calls == [] and h.pool_calls == [] and h.lineup_calls == []
+    assert h.reads == [None, 3]
+
+
+@pytest.mark.unit
+def test_a_timed_out_write_the_day_before_that_shows_only_on_ds_board_is_executed_and_seated(h):
+    arrange_day_before(h, drop_game=True)
+    h.txn = [FantasyWriterUnavailable("timed out", espn_status=None)]
+    assert execute(h).outcome == "deferred" and h.deferred_audit_ids == [1]
+
+    h.boards[3] = h.after_txn[3]                 # ESPN took it as next-day business; today's roster is unchanged
+    r = execute(h, row(attempts=2, audit_id=1), now=NOW + svc.WRITER_RETRY)
+    assert (r.outcome, r.reason, r.audit_id, r.verified, r.seated_slot) == ("executed", "already_rostered", 1, True, "PG")
+    assert len(h.txn_calls) == 1 and h.lineup_calls[0]["scoring_period_id"] == 3
+
+
+@pytest.mark.unit
+def test_an_unreadable_ds_board_keeps_the_write_in_flight_instead_of_failing_it(h):
+    arrange_day_before(h)
+    h.boards[3] = RuntimeError("espn 503")
+    r = execute(h, row(audit_id=41))
+    assert (r.outcome, r.reason, r.detail) == ("deferred", "provider_error", "espn 503")
+    assert h.deferred_audit_ids == [41] and h.settled == [] and h.txn_calls == []
 
 
 @pytest.mark.unit
@@ -681,8 +707,11 @@ def test_a_write_out_near_the_deadline_waits_for_the_board_instead_of_expiring(h
 def test_a_confirmed_write_is_not_seated_after_its_day_or_on_a_read_only_board(h, board):
     arrange_day_of(h)
     h.boards[None] = board
+    h.boards[3] = state([player(KAWHI, "Kawhi Leonard", BE, team="LAC")], period=3, nba_date="2026-10-22")
     r = execute(h, row(audit_id=41))
-    assert (r.outcome, r.seated_slot) == ("executed", None) and h.lineup_calls == [] and h.reads == [None]
+    assert (r.outcome, r.seated_slot) == ("executed", None) and h.lineup_calls == []
+    # the day before, the confirm reads D's board too; nothing reads it to seat him
+    assert h.reads == ([None, 3] if board.scoring_period_id < 3 else [None])
 
 
 # ---- execute_due ------------------------------------------------------------------------

@@ -16,7 +16,8 @@ attempt today's locks are ESPN's business, not ours: the pre-checks skip them an
 an ESPN refusal other than a full roster or a position limit gets one more try
 at the rollover into D. Every attempt re-reads the board and the pool through a
 manual transaction's checks (`RosterTransactionService._validate`) and sends
-through its chain (`_write`), audited under source 'scheduled'. A waiver period
+through its chain (`_write`, verified against D's board when sent the day
+before), audited under source 'scheduled'. A waiver period
 or a writer outage defers the row; a player who is gone settles it as `skipped`
 — the no-op; D's first tip-off is the deadline. After the add, the player is seated in day D's
 lineup through the lineup-move chain (FUTURE_ROSTER while D is still ahead),
@@ -29,8 +30,9 @@ The mark is the write's audit id on the pending row, and the lease is renewed fr
 the send. Every settle and deferral is fenced the same way, so an attempt that lost
 its row changes nothing and reports nothing. A write that got no answer — the
 worker died, the writer timed out — keeps its mark, and the next attempt only reads
-the board: the player on it settles the row executed (and seats him), his absence
-settles it failed `interrupted`. Only a writer that was provably never reached (no
+the board (the day before, D's board too, where a next-day swap shows): the player
+on it settles the row executed (and seats him), his absence settles it failed
+`interrupted`. Only a writer that was provably never reached (no
 free slot, no connection) clears the mark, so that retry may send.
 
 Acquisition limits. Scheduling refuses, and an attempt skips, an add the league's limit
@@ -684,7 +686,7 @@ class ScheduledPickupService:
             fresh, verified, audit_id = await RosterTransactionService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=state,
                 add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-                source="scheduled", before_send=last_check,
+                source="scheduled", before_send=last_check, verify_scoring_period_id=day if period < day else None,
             )
         except ClaimLost:
             log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
@@ -747,22 +749,33 @@ class ScheduledPickupService:
     @staticmethod
     async def _confirm_sent(row, now: datetime, state: LineupState, league_info, slots, adapter, *,
                             team_name: str) -> Optional[PickupResult]:
-        """Settle a row whose write went out on an earlier attempt, from today's board alone — never
-        by sending again, since a write that got no answer may still have reached ESPN. The player on
-        the board: executed, and seated on day D unless D has passed (or the board is read-only). Not
-        on it: the write never landed — failed `interrupted`, and the user makes the move by hand."""
-        on_board = {p.player_id for p in state.players}
-        if row.add_player_id not in on_board:
+        """Settle a row whose write went out on an earlier attempt, from the boards alone — never by
+        sending again, since a write that got no answer may still have reached ESPN. Before day D that
+        is D's board as well as today's: a swap ESPN took after today's first tip leaves today's roster
+        as it was and shows only on D's. The player on either: executed, and seated on day D unless D
+        has passed (or the board is read-only). On neither: the write never landed — failed
+        `interrupted`, and the user makes the move by hand. D's board unreadable: the mark stays, and
+        the next attempt reads again."""
+        period = state.scoring_period_id
+        on_board = on_day = {p.player_id for p in state.players}
+        if period is not None and period < row.scoring_period_id:
+            try:
+                board = await adapter.read_lineup(row.team_id, league_info, fallback_slot_counts=slots,
+                                                  scoring_period_id=row.scoring_period_id)
+            except Exception as exc:
+                return await ScheduledPickupService._defer(row, now, "provider_error", detail=str(exc)[:300],
+                                                           team_name=team_name)
+            on_day = {p.player_id for p in board.players}
+        if row.add_player_id not in on_board | on_day:
             return await ScheduledPickupService._settle(
                 row, now, FAILED, "interrupted", team_name=team_name,
                 detail="A write for this pickup went out with no answer recorded, and the roster does not "
                        "show it; it is not sent again")
-        period = state.scoring_period_id
         seated = Seated()
         if state.can_write and period is not None and period <= row.scoring_period_id:
             seated = await ScheduledPickupService._seat_on_day(row, league_info, slots, adapter,
                                                                period=period, preferred=None)
-        dropped = row.drop_player_id is None or row.drop_player_id not in on_board
+        dropped = row.drop_player_id is None or row.drop_player_id not in on_day
         return await ScheduledPickupService._settle(row, now, EXECUTED, "already_rostered", seated=seated,
                                                     verified=dropped, team_name=team_name)
 
