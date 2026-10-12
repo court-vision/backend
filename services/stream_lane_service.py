@@ -13,12 +13,13 @@ A lane is intent, not a list of pickups. What it shows is a projection: the best
 plan if nobody else touched the market. What it does is decide each day afresh,
 at the moment a pickup for that day can first be made — a scheduled pickup's
 timing rule (`scheduled_pickup_service.attempt_window`): the previous day's first
-tip-off, or the rollover into the day when the spot's player plays the day
-before. A decision re-reads the board, the pool and the adds left, re-plans the
-rest of the matchup (`services.stream_planner`), and when the plan's first step
-is a switch inserts a scheduled pickup for the day carrying the lane's id; the
-pickup executor then makes it like any other (locks, waivers, the roster check,
-the seat, the email). Otherwise it records a keep. A projected player who is gone
+tip-off (the rollover into it when it has no games), after which ESPN takes the
+switch for the day and the player dropped plays the previous day out. A decision
+re-reads the board, the pool and the adds left, re-plans the rest of the matchup
+(`services.stream_planner`), and when the plan's first step is a switch inserts a
+scheduled pickup for the day carrying the lane's id; the pickup executor then
+makes it like any other (locks, waivers, the roster check, the seat, the email).
+Otherwise it records a keep. A projected player who is gone
 is not a failure: the plan picks again.
 
 Holder. An executed lane pickup makes the added player the lane's holder
@@ -213,8 +214,8 @@ def first_open_period(today: LaneDay, now: datetime) -> int:
 
 def rehold_after_for(acq: Optional[AcquisitionState]) -> Optional[int]:
     """Days before a player the lane drops can hold the spot again, from the league's waiver
-    period. A switch for day s is made around day s-1's first tip-off (or the rollover into s);
-    the player dropped clears waivers about `waiver_hours` later, past day s+1's decision point
+    period. A switch for day s is made at day s-1's first tip-off (or the rollover into s-1);
+    the player dropped clears waivers about `waiver_hours` later, around day s+1's decision point
     with 24 hours, so they can be taken back from day s+2. None when that is longer than the
     planner handles; a league that sends no waiver period is taken as 24 hours."""
     hours = 24 if acq is None or acq.waiver_hours is None else acq.waiver_hours
@@ -739,7 +740,7 @@ class StreamLaneService:
             team, league_info, req.player_id, now)
         prepared = await StreamLaneService._prepare(team.team_id, league_info, adapter, board, holder, start, end,
                                                     rehold, now)
-        window = await run_db("lane.window", _window_for, prepared.days[0].nba_date, holder.team)
+        window = await run_db("lane.window", _window_for, prepared.days[0].nba_date)
         return StreamLanePlanResp(
             status=ApiStatus.SUCCESS,
             message=f"Projected gain {prepared.projection.gain:+.1f} with {prepared.projection.adds} add(s)",
@@ -764,7 +765,7 @@ class StreamLaneService:
             raise _invalid("scheduled_out", f"A pickup already scheduled drops {holder.name} — cancel it first")
         prepared = await StreamLaneService._prepare(team.team_id, league_info, adapter, board, holder, start, end,
                                                     rehold, now)
-        window = await run_db("lane.window", _window_for, prepared.days[0].nba_date, holder.team)
+        window = await run_db("lane.window", _window_for, prepared.days[0].nba_date)
         lane = await run_db("lane.insert", _insert_lane, dict(
             user=team.user_id, team=team.team_id, holder_player_id=holder.player_id, holder_name=holder.name,
             holder_team=holder.team, original_player_id=holder.player_id, original_name=holder.name,
@@ -853,7 +854,7 @@ class StreamLaneService:
         nxt = max(lane.next_period, first_open_period(today, now))
         if nxt > lane.end_period:
             return None
-        window = await run_db("lane.window", _window_for, today_date + timedelta(days=nxt - period), holder.team)
+        window = await run_db("lane.window", _window_for, today_date + timedelta(days=nxt - period))
         return dict(status=ACTIVE, next_period=nxt, next_decision_at=window.not_before_at, reason=None, detail=None)
 
     @staticmethod
@@ -981,11 +982,10 @@ class StreamLaneService:
                                                   events=events)
 
         day_date = today_date + timedelta(days=period - today_period)
-        window = await run_db("lane.window", _window_for, day_date, holder.team)
+        window = await run_db("lane.window", _window_for, day_date)
         if window.not_before_at > now:
-            # Too early for this holder: a pickup for the day can't be made before the window
-            # opens (the holder plays the day before), so the decision waits to be made with the
-            # pool as it is then — after missed days too, which the run at the window tells.
+            # Too early: a pickup for the day can't be made before its window opens (the day
+            # before's first tip-off), so the decision waits to be made with the pool as it is then.
             return await StreamLaneService._wait(lane, now, "window_not_open", at=window.not_before_at)
         try:
             prepared = await StreamLaneService._prepare(lane.team_id, league_info, adapter, board, holder, period,
@@ -1019,12 +1019,11 @@ class StreamLaneService:
         else:
             events.append(dict(action="keep", **base_event))
 
-        # The next decision: the next day's, when a pickup for it can first be made — the player who
-        # would be dropped then is the one this decision leaves holding the spot. After the last
-        # day, the run at its first tip-off ends the lane (once the last pickup has settled).
+        # The next decision: the next day's, when a pickup for it can first be made (this day's first
+        # tip-off). After the last day, the run at its first tip-off ends the lane (once the last
+        # pickup has settled).
         if period < lane.end_period:
-            next_team = prepared.players[move.player_id].team if move is not None else holder.team
-            next_window = await run_db("lane.window", _window_for, day.nba_date + timedelta(days=1), next_team)
+            next_window = await run_db("lane.window", _window_for, day.nba_date + timedelta(days=1))
             next_at = next_window.not_before_at
         else:
             next_at = window.deadline_at or rollover_at(day.nba_date + timedelta(days=1))

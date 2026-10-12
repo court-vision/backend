@@ -39,6 +39,12 @@ def tip(d: date) -> datetime:
     return et_at(d, time(19, 0))
 
 
+def opens(d: date) -> datetime:
+    """When a pickup for day `d` can first be made: the executor's own rule over the fake schedule
+    (the previous day's first tip-off)."""
+    return svc._window_for(d).not_before_at
+
+
 def lineup_player(pid, name, slot, team, *, eligible, avg=20.0):
     return LineupPlayer(player_id=pid, name=name, team=team, lineup_slot_id=slot, lineup_slot=str(slot),
                         eligible_slot_ids=list(eligible), eligible_slots=[str(s) for s in eligible], avg_points=avg)
@@ -189,8 +195,8 @@ def test_after_todays_tip_the_lane_starts_tomorrow(h, monkeypatch):
     run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
     fields, _ = h.inserted[0]
     assert fields["start_period"] == fields["next_period"] == 29
-    # The holder plays Monday: the decision for Tuesday waits for the rollover into it.
-    assert fields["next_decision_at"] == svc.rollover_at(MON + timedelta(days=1))
+    # Tuesday's decision is made when a pickup for it can first be made, at Monday's first tip-off: due at once.
+    assert fields["next_decision_at"] == opens(TUE) <= late
 
 
 @pytest.mark.unit
@@ -251,7 +257,7 @@ def test_writes_off_refuse_a_start_but_not_a_dry_run(h, monkeypatch):
 
 
 def tuesday(h):
-    """The rollover into Tuesday: the holder played Monday, so Tuesday's decision is made now."""
+    """The rollover into Tuesday: Tuesday's decision, due since Monday's first tip-off, is made now."""
     h.board = board(period=29, nba_date=TUE.isoformat())
     return svc.rollover_at(TUE)
 
@@ -270,10 +276,9 @@ def test_a_switch_schedules_the_pickup_and_the_next_decision(h):
     assert pk["not_before_at"] <= now
     (event,) = rec.events
     assert event["action"] == "switch" and (event["add_player_id"], event["drop_player_id"]) == (FA, HOLDER)
-    # The next decision is Wednesday's, made at Tuesday's tip: the free agent, who'd be dropped then, plays Tuesday,
-    # so it waits for the rollover into Wednesday.
+    # The next decision is Wednesday's, made at Tuesday's first tip-off (whoever is dropped then plays Tuesday out).
     assert rec.fields["next_period"] == 30
-    assert rec.fields["next_decision_at"] == svc.rollover_at(MON + timedelta(days=2))
+    assert rec.fields["next_decision_at"] == opens(TUE + timedelta(days=1))
     assert rec.fields["projection"]["days"][0]["player"]["player_id"] == FA
 
 
@@ -305,12 +310,11 @@ def test_while_its_last_pickup_is_pending_the_decision_waits_without_reading(h):
 
 @pytest.mark.unit
 def test_before_the_window_opens_the_decision_waits_for_it(h):
-    """Due at Monday's tip for Tuesday, but the holder plays Monday: a pickup can't go before the rollover."""
-    now = tip(MON)
-    h.schedule[MON] = {"MIA"}
+    """Run a minute before Monday's first tip-off for Tuesday: a pickup for Tuesday can't go before that tip."""
+    now = tip(MON) - timedelta(minutes=1)
     decide(h, lane(next_period=29), now)
     assert not h.recorded and h.steps[0].fields["reason"] == "window_not_open"
-    assert h.steps[0].fields["next_decision_at"] == svc.rollover_at(MON + timedelta(days=1))
+    assert h.steps[0].fields["next_decision_at"] == opens(TUE)
 
 
 @pytest.mark.unit
@@ -338,7 +342,7 @@ def test_a_holder_replaced_by_the_lanes_own_pickup_is_adopted(h):
     h.board = board([lineup_player(FA2, "New", UT, "LAL", eligible=(UT, BE)),
                      lineup_player(GUARD, "Guard", PG, "DEN", eligible=(PG, UT, BE))])
     h.adopted = SimpleNamespace(add_player_id=FA2)
-    decide(h, lane(), tip(MON))
+    decide(h, lane(), opens(TUE))
     rec = h.recorded[0]
     assert rec.fields["holder_player_id"] == FA2 and rec.fields["holder_name"] == "New"
 
@@ -370,20 +374,16 @@ def test_days_missed_up_to_the_matchups_end_end_the_lane_and_its_notice_says_so(
 
 @pytest.mark.unit
 def test_after_missed_days_the_next_decision_still_waits_for_its_window(h):
-    """As above, but the holder played Tuesday: Wednesday's pickup can't go before the rollover, so the decision
-    (and the word about Tuesday) waits for it rather than choosing from Tuesday night's pool."""
+    """As above, but the holder played Tuesday: Wednesday's window (Tuesday's first tip-off) has opened all the
+    same, so the decision is made now and its pickup is due now — never one waiting hours on an early choice."""
     h.schedule[TUE] = {"LAL", "MIA"}
-    wed = TUE + timedelta(days=1)
     h.board = board(period=29, nba_date=TUE.isoformat())
-    assert decide(h, lane(next_period=29), tip(TUE) + timedelta(hours=1)) is None
-    assert not h.recorded and h.steps[0].fields["reason"] == "window_not_open"
-    assert h.steps[0].fields["next_decision_at"] == svc.rollover_at(wed)
-    h.board = board(period=30, nba_date=wed.isoformat())
-    notice = decide(h, lane(next_period=29), svc.rollover_at(wed))
+    now = tip(TUE) + timedelta(hours=1)
+    notice = decide(h, lane(next_period=29), now)
     rec = h.recorded[0]
     assert (rec.events[0]["action"], rec.events[0]["reason"], notice.reason) == ("blocked", "missed", "missed")
     assert rec.events[1]["scoring_period_id"] == 30 and rec.fields["next_period"] == 31
-    assert rec.pickup is None or rec.pickup["not_before_at"] <= svc.rollover_at(wed)
+    assert rec.pickup is None or rec.pickup["not_before_at"] <= now
 
 
 @pytest.mark.unit
