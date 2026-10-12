@@ -10,9 +10,10 @@ a later ESPN day, made by a job at the earliest moment the roster can take it.
 Timing. ESPN counts a transaction for the day it is made only before that day's
 first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
 (the player dropped plays out D-1) and takes effect for D. So the first attempt
-for day D is the first tip-off of D-1 (the rollover into D-1, 02:00 ET, when D-1
-has no games), and the add and the drop go out as one transaction. On that
-attempt today's locks are ESPN's business, not ours: the pre-checks skip them and
+for day D is the first tip-off of D-1, TIP_MARGIN after it and checked again on
+the board it is sent from (the rollover into D-1, 02:00 ET, when D-1 has no
+games), and the add and the drop go out as one transaction. On that attempt
+today's locks are ESPN's business, not ours: the pre-checks skip them and
 an ESPN refusal other than a full roster or a position limit gets one more try
 at the rollover into D. Every attempt re-reads the board and the pool through a
 manual transaction's checks (`RosterTransactionService._validate`) and sends
@@ -110,6 +111,7 @@ IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt r
 EASTERN = pytz.timezone("US/Eastern")
 ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
 RETRY = timedelta(minutes=10)
+TIP_MARGIN = timedelta(minutes=2)   # the day-before swap waits this long past the first tip, clear of ESPN's cutoff
 WAIVER_RETRY = timedelta(minutes=60)
 WRITER_RETRY = timedelta(minutes=5)
 LEASE = timedelta(minutes=5)        # a claimed row is invisible to the next tick this long
@@ -202,15 +204,16 @@ def attempt_window(
 ) -> AttemptWindow:
     """When the executor first tries a pickup for `nba_date` (day D), and when it gives up.
 
-    The first attempt is D-1's first tip-off, after which an ESPN transaction counts for
-    D and the player dropped still plays out D-1. A D-1 without games means the rollover
-    into D-1. The deadline is D's own first tip-off; None when the schedule has no row
-    for D, and the executor then expires the row once the board's day has passed D.
+    The first attempt is D-1's first tip-off (TIP_MARGIN after it), after which an ESPN
+    transaction counts for D and the player dropped still plays out D-1. A D-1 without
+    games means the rollover into D-1. The deadline is D's own first tip-off; None when
+    the schedule has no row for D, and the executor then expires the row once the board's
+    day has passed D. The executor checks D-1's first tip again on the board it sends from.
     """
     prev = nba_date - timedelta(days=1)
     tip = first_tip(prev)
     if tip:
-        start, rule = et_at(prev, tip), "first_tip_prev"
+        start, rule = et_at(prev, tip) + TIP_MARGIN, "first_tip_prev"
     else:
         start, rule = rollover_at(prev), "rollover_into_prev"
     tip_d = first_tip(nba_date)
@@ -629,6 +632,15 @@ class ScheduledPickupService:
             if not seat_free:
                 return await settle(row, now, SKIPPED, "drop_missing", team_name=team_name)
             drop, note = None, "drop_missing"
+        if period < day and state.nba_date and state.first_game_time_et:
+            # The day before, the swap waits for today's first tip on the board's own schedule:
+            # the window was fixed when the pickup was stored, and games can land or move since.
+            # Sent before the tip it is same-day business on ESPN, and the player dropped loses
+            # his game tonight. A day without games keeps its 02:00 send.
+            tip = time.fromisoformat(state.first_game_time_et)
+            tip_at = et_at(date.fromisoformat(state.nba_date), tip) + TIP_MARGIN
+            if now < tip_at:
+                return await defer(row, now, "before_first_tip", at=tip_at, team_name=team_name)
         # The day before, a swap after the first tip is next-day business on ESPN: the player
         # dropped plays out today whatever his lock says, so locks are only checked on D itself.
         check_locks = period == day

@@ -52,11 +52,11 @@ def player(pid, name, slot=UT, *, team="DEN", game=False, started=False, locked=
 
 
 def state(players, *, period=2, current=2, final=167, nba_date="2026-10-21", can_write=True, reason=None,
-          version="v1", acq=None):
+          version="v1", acq=None, first_tip="19:00"):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
         scoring_period_id=period, scoring_period_source="provider", current_scoring_period_id=current,
-        final_scoring_period_id=final, first_game_time_et="19:00", slot_counts=COUNTS, slots=[],
+        final_scoring_period_id=final, first_game_time_et=first_tip, slot_counts=COUNTS, slots=[],
         lock_type="INDIVIDUAL_GAME", players=players, can_write=can_write, write_blocked_reason=reason,
         roster_version=version, fetched_at="now", acquisitions=acq,
     )
@@ -362,6 +362,38 @@ def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h
                                                                        game=True, started=True)])
     r = execute(h, now=ROLLOVER)
     assert r.outcome == "executed" and len(h.txn_calls) == 1
+
+
+@pytest.mark.unit
+def test_the_day_before_waits_for_tonights_first_tip_on_the_fresh_board(h):
+    # Scheduled while the schedule showed no games tonight (a 2:00 AM window); they have landed since.
+    # Sent now it would be same-day business on ESPN, and Edwards would lose his game tonight.
+    arrange_day_before(h, drop_game=True)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
+                            player(EDWARDS, "Anthony Edwards", BE, team="MIN", game=True)], first_tip="19:30")
+    early = svc.rollover_at(TODAY) + timedelta(minutes=1)
+    r = execute(h, row(not_before_at=svc.rollover_at(TODAY)), now=early)
+    tip = svc.et_at(TODAY, time(19, 30)) + svc.TIP_MARGIN
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "before_first_tip", tip)
+    assert h.txn_calls == [] and h.marked == [] and h.settled == []
+
+
+@pytest.mark.unit
+def test_the_day_before_waits_out_the_margin_after_the_first_tip(h):
+    arrange_day_before(h, drop_game=True)
+    at_tip = svc.et_at(TODAY, time(19, 0))
+    r = execute(h, now=at_tip)
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "before_first_tip", at_tip + svc.RETRY)
+    assert h.txn_calls == []
+
+
+@pytest.mark.unit
+def test_a_day_before_without_games_sends_at_its_rollover(h):
+    arrange_day_before(h)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN")],
+                           first_tip=None)
+    r = execute(h, row(not_before_at=svc.rollover_at(TODAY)), now=svc.rollover_at(TODAY) + timedelta(minutes=1))
+    assert r.outcome == "executed" and h.txn_calls[0]["drop_player_id"] == EDWARDS
 
 
 @pytest.mark.unit

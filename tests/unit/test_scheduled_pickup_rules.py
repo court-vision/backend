@@ -39,7 +39,7 @@ def window(*, tips=None):
 def test_first_attempt_is_the_previous_days_first_tip():
     w = window(tips={PREV: time(19, 0), D: time(19, 30)})
     assert w.rule == "first_tip_prev"
-    assert w.not_before_at == utc(2026, 11, 12, 0, 0)      # 7 PM EST Wed = 00:00 UTC Thu
+    assert w.not_before_at == utc(2026, 11, 12, 0, 2)      # 7 PM EST Wed = 00:00 UTC Thu, plus the margin
     assert w.deadline_at == utc(2026, 11, 13, 0, 30)       # 7:30 PM EST Thu
 
 
