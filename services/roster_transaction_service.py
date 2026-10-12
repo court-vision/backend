@@ -149,13 +149,18 @@ class RosterTransactionService:
 
     @staticmethod
     async def _validate(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
-                        *, for_future_day: bool = False) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
+                        *, for_future_day: bool = False, check_locks: bool = True,
+                        ) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
         """The board's answer for the drop and ESPN's pool answer for the add — or the
         first reason the request cannot go. Only the add needs the pool lookup.
 
-        `for_future_day` is the scheduled-pickup check: today's locks and a waiver
-        period say nothing about a later day, so those three refusals are skipped and
-        only the roster / pool facts (on the board, in the league, on another team) count."""
+        `for_future_day` is the scheduling check: today's locks and a waiver period say
+        nothing about a later day, so those three refusals are skipped and only the
+        roster / pool facts (on the board, in the league, on another team) count.
+        `check_locks=False` is the executor's attempt on the day before: ESPN takes a
+        swap made after the day's first tip as next-day business, so today's locks are
+        not consulted — ESPN's own answer is — while a waiver period still refuses."""
+        skip_locks = for_future_day or not check_locks
         if add is None and drop is None:
             raise _invalid("nothing_to_do", "Choose a player to add or a player to drop")
         if add is not None and add == drop:
@@ -167,7 +172,7 @@ class RosterTransactionService:
             holder = on_board.get(drop)
             if holder is None:
                 raise _invalid("drop_not_on_roster", "That player is not on your roster", drop)
-            if holder.locked and not for_future_day:
+            if holder.locked and not skip_locks:
                 raise _invalid("drop_locked", f"{holder.name} is locked for today and cannot be dropped", drop)
 
         pool_entry: Optional[PoolEntry] = None
@@ -186,7 +191,7 @@ class RosterTransactionService:
                 raise _invalid("add_on_waivers", f"{pool_entry.name} is on waivers{until} — place the claim on {label}", add)
             if pool_entry.status == "ONTEAM" or pool_entry.on_team_id:
                 raise _invalid("add_not_available", f"{pool_entry.name} is on another team's roster", add)
-            if pool_entry.roster_locked and not for_future_day:
+            if pool_entry.roster_locked and not skip_locks:
                 raise _invalid("add_locked", f"{pool_entry.name} is locked for today and cannot be added", add)
         return holder, pool_entry
 

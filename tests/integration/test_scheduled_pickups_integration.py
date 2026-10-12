@@ -270,9 +270,9 @@ def test_window_reads_the_schedule(user, team):
     Game.create(game_id="g1", game_date=DAY - timedelta(days=1), season="2026-27", home_team="MIN", away_team="LAL",
                 start_time_et=time(19, 30))
     Game.create(game_id="g2", game_date=DAY, season="2026-27", home_team="BOS", away_team="DEN", start_time_et=time(19, 0))
-    w = svc._window_for(DAY, "MIN")
-    assert w.rule == "rollover_into_day" and w.deadline_at == svc.et_at(DAY, time(19, 0))
-    assert svc._window_for(DAY, "BOS").rule == "first_tip_prev"
+    w = svc._window_for(DAY)
+    assert w.rule == "first_tip_prev" and w.not_before_at == svc.et_at(DAY - timedelta(days=1), time(19, 30))
+    assert w.deadline_at == svc.et_at(DAY, time(19, 0))
 
 
 # ---- rollback -----------------------------------------------------------------------------

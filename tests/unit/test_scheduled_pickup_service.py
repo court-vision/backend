@@ -325,39 +325,39 @@ def test_already_on_roster_by_hand_is_skipped(h):
 
 
 @pytest.mark.unit
-def test_a_drop_who_plays_tonight_waits_for_the_rollover(h):
+def test_a_drop_who_plays_tonight_is_still_swapped_at_the_tip(h):
+    # After D-1's first tip the swap is next-day business on ESPN: he plays out tonight on the roster.
     arrange_day_before(h, drop_game=True)
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "holder_plays_today", ROLLOVER)
-    assert h.deferred == [(1, ROLLOVER, "holder_plays_today", None)] and h.txn_calls == []
+    assert (r.outcome, r.seated_slot) == ("executed", "PG")
+    assert h.txn_calls[0]["drop_player_id"] == EDWARDS and h.deferred == []
 
 
 @pytest.mark.unit
-def test_a_locked_drop_the_day_before_waits_for_the_rollover(h):
+def test_a_locked_drop_the_day_before_is_still_sent(h):
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
                             player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "drop_locked", ROLLOVER)
+    assert r.outcome == "executed" and h.txn_calls[0]["drop_player_id"] == EDWARDS
 
 
 @pytest.mark.unit
-def test_a_locked_add_the_day_before_waits_for_the_rollover(h):
+def test_a_locked_add_the_day_before_is_still_sent(h):
     arrange_day_before(h)
     h.pool = {KAWHI: pool(locked=True)}
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "add_locked", ROLLOVER)
+    assert r.outcome == "executed" and h.txn_calls[0]["add_player_id"] == KAWHI
 
 
 @pytest.mark.unit
-def test_the_rollover_attempt_itself_retries_ten_minutes_later_while_espn_lags(h):
-    # 2:00 AM Thursday ET: the board still says day 2 and the drop is locked from last night
+def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h):
+    # 2:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN",
                                                                        game=True, started=True)])
-    at = ROLLOVER
-    r = execute(h, now=at)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "holder_plays_today", at + svc.RETRY)
+    r = execute(h, now=ROLLOVER)
+    assert r.outcome == "executed" and len(h.txn_calls) == 1
 
 
 @pytest.mark.unit
@@ -451,7 +451,7 @@ def test_the_deadline_is_checked_before_anything_is_sent(h):
 
 
 @pytest.mark.unit
-def test_roster_full_is_skipped_but_another_rejection_fails(h):
+def test_roster_full_is_skipped_and_a_position_limit_fails(h):
     arrange_day_before(h)
     h.txn = [FantasyWriterRejected("Roster is full.", espn_status=400, espn_error_code="TRAN_ROSTER_FULL")]
     r = execute(h)
@@ -464,6 +464,25 @@ def test_roster_full_is_skipped_but_another_rejection_fails(h):
     r = execute(h)
     assert (r.outcome, r.reason) == ("failed", "espn_rejected")
     assert r.detail == "Too many players with default position C (maximum 4)"
+
+
+@pytest.mark.unit
+def test_an_unknown_rejection_the_day_before_gets_one_more_try_at_the_rollover(h):
+    arrange_day_before(h)
+    h.txn = [FantasyWriterRejected("Player is locked.", espn_status=400, espn_error_code="TRAN_SOMETHING_LOCKED")]
+    rw = row()
+    r = execute(h, rw)
+    assert (r.outcome, r.reason, r.next_attempt_at, r.detail) == ("deferred", "espn_rejected", ROLLOVER, "Player is locked.")
+    assert rw.audit_id is None            # nothing landed: the retry may send
+    assert h.settled == []
+
+
+@pytest.mark.unit
+def test_an_unknown_rejection_on_the_day_itself_fails(h):
+    arrange_day_of(h)
+    h.txn = [FantasyWriterRejected("Player is locked.", espn_status=400, espn_error_code="TRAN_SOMETHING_LOCKED")]
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("failed", "espn_rejected")
 
 
 # ---- acquisition limits ------------------------------------------------------------------
@@ -735,8 +754,8 @@ def scheduling(h, monkeypatch):
     h.windows = []
     h.inserted = []
 
-    def window_for(nba_date, drop_team):
-        h.windows.append((nba_date, drop_team))
+    def window_for(nba_date):
+        h.windows.append(nba_date)
         return svc.AttemptWindow(not_before_at=NOW, deadline_at=DEADLINE, rule="first_tip_prev")
 
     def insert(**fields):
@@ -770,7 +789,7 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
     assert (f["team"], f["user"], f["add_player_id"], f["drop_player_id"]) == (21, 11, KAWHI, EDWARDS)
     assert (f["add_name"], f["add_team"], f["drop_name"], f["drop_team"]) == ("Kawhi Leonard", "LAC", "Anthony Edwards", "MIN")
     assert (f["scoring_period_id"], f["nba_date"], f["not_before_at"], f["deadline_at"]) == (3, DAY_D, NOW, DEADLINE)
-    assert h.windows == [(DAY_D, "MIN")]
+    assert h.windows == [DAY_D]
     assert resp.data.id == 7 and resp.data.status == "pending" and resp.data.add.name == "Kawhi Leonard"
     assert resp.data.drop.player_id == EDWARDS and "scheduled for ESPN day 3" in resp.message
 
@@ -780,7 +799,7 @@ def test_schedule_accepts_a_player_on_waivers_and_an_open_seat(scheduling):
     h = scheduling
     h.pool = {KAWHI: pool(status="WAIVERS")}
     resp = schedule(SchedulePickupReq(add_player_id=KAWHI, scoring_period_id=5))
-    assert resp.data.drop is None and h.windows == [(date(2026, 10, 24), None)]
+    assert resp.data.drop is None and h.windows == [date(2026, 10, 24)]
 
 
 @pytest.mark.unit

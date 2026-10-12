@@ -7,16 +7,18 @@ a later ESPN day, made by a job at the earliest moment the roster can take it.
     cancel         DELETE /teams/{id}/pickups/{pickup_id}  a pending row no attempt holds
     execute_due    POST   /jobs/pickups/execute            the pipeline route: claim the due rows, try each
 
-Timing. ESPN counts an acquisition for the day it is made only before that day's
-first game, so the first attempt for day D is the first tip-off of D-1 — unless
-the player to drop has a game on D-1 (dropping him before it loses that game;
-once it starts he is locked), when the first attempt waits for the ESPN day to
-roll into D (02:00 ET, `schedule_service.get_nba_today`'s rule). Every attempt
-re-reads the board and the pool through a manual transaction's checks
-(`RosterTransactionService._validate`) and sends through its chain (`_write`),
-audited under source 'scheduled'. A lock, a waiver period or a writer outage
-defers the row; a player who is gone settles it as `skipped` — the no-op; D's
-first tip-off is the deadline. After the add, the player is seated in day D's
+Timing. ESPN counts a transaction for the day it is made only before that day's
+first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
+(the player dropped plays out D-1) and takes effect for D. So the first attempt
+for day D is the first tip-off of D-1 (the rollover into D-1, 02:00 ET, when D-1
+has no games), and the add and the drop go out as one transaction. On that
+attempt today's locks are ESPN's business, not ours: the pre-checks skip them and
+an ESPN refusal other than a full roster or a position limit gets one more try
+at the rollover into D. Every attempt re-reads the board and the pool through a
+manual transaction's checks (`RosterTransactionService._validate`) and sends
+through its chain (`_write`), audited under source 'scheduled'. A waiver period
+or a writer outage defers the row; a player who is gone settles it as `skipped`
+— the no-op; D's first tip-off is the deadline. After the add, the player is seated in day D's
 lineup through the lineup-move chain (FUTURE_ROSTER while D is still ahead),
 best effort: a seat that cannot be given never undoes an executed pickup.
 
@@ -95,7 +97,7 @@ from services.lineup_read_service import LineupReadService
 from services.providers import get_provider_adapter, unavailable_message
 from services.providers.identity import nba_ids_by_espn_id
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService, _moves_json
-from utils.espn_helpers import POSITION_MAP, normalize_nba_abbrev
+from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("scheduled_pickup")
 
@@ -112,6 +114,7 @@ LEASE = timedelta(minutes=5)        # a claimed row is invisible to the next tic
 MAX_ATTEMPTS = 48                   # one more for a row whose write is out: a read-only attempt that confirms it
 RECENT_DAYS = 7
 ROSTER_FULL_CODE = "TRAN_ROSTER_FULL"
+POSITION_LIMIT_CODE = "TRAN_ROSTER_POSITION_LIMIT_EXCEEDED"   # waiting changes nothing
 
 
 # ------------------------------- errors ------------------------------- #
@@ -187,35 +190,27 @@ def _lease_from_now(now: datetime) -> datetime:
 class AttemptWindow:
     not_before_at: datetime
     deadline_at: Optional[datetime]
-    rule: str                        # first_tip_prev | rollover_into_day | rollover_into_prev
+    rule: str                        # first_tip_prev | rollover_into_prev
 
 
 def attempt_window(
     nba_date: date,
-    drop_team: Optional[str],
     *,
     first_tip: Callable[[date], Optional[time]],
-    teams_playing: Callable[[date], set[str]],
 ) -> AttemptWindow:
     """When the executor first tries a pickup for `nba_date` (day D), and when it gives up.
 
-    The first attempt is D-1's first tip-off, after which an ESPN acquisition counts for
-    D. When the player to drop plays on D-1 that would cost his game (or be refused once
-    he is locked), so the attempt waits for the rollover into D. A D-1 without games
-    means the rollover into D-1. The deadline is D's own first tip-off; None when the
-    schedule has no row for D, and the executor then expires the row once the board's
-    day has passed D.
+    The first attempt is D-1's first tip-off, after which an ESPN transaction counts for
+    D and the player dropped still plays out D-1. A D-1 without games means the rollover
+    into D-1. The deadline is D's own first tip-off; None when the schedule has no row
+    for D, and the executor then expires the row once the board's day has passed D.
     """
     prev = nba_date - timedelta(days=1)
-    playing = {normalize_nba_abbrev(t) for t in teams_playing(prev)} if drop_team else set()
-    if drop_team and normalize_nba_abbrev(drop_team) in playing:
-        start, rule = rollover_at(nba_date), "rollover_into_day"
+    tip = first_tip(prev)
+    if tip:
+        start, rule = et_at(prev, tip), "first_tip_prev"
     else:
-        tip = first_tip(prev)
-        if tip:
-            start, rule = et_at(prev, tip), "first_tip_prev"
-        else:
-            start, rule = rollover_at(prev), "rollover_into_prev"
+        start, rule = rollover_at(prev), "rollover_into_prev"
     tip_d = first_tip(nba_date)
     deadline = et_at(nba_date, tip_d) if tip_d else None
     return AttemptWindow(not_before_at=start, deadline_at=deadline, rule=rule)
@@ -403,11 +398,9 @@ def _cancel_pickup(team_id: int, pickup_id: int, now: datetime):
     return (IN_PROGRESS if row.status == PENDING else row.status), row
 
 
-def _window_for(nba_date: date, drop_team: Optional[str]) -> AttemptWindow:
+def _window_for(nba_date: date) -> AttemptWindow:
     from db.models.nba.games import Game
-    return attempt_window(nba_date, drop_team,
-                          first_tip=Game.get_earliest_game_time_on_date,
-                          teams_playing=Game.get_teams_playing_on_date)
+    return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
 
 
 def _nba_ids(rows) -> dict[int, int]:
@@ -492,7 +485,7 @@ class ScheduledPickupService:
         if blocked:
             raise _invalid("acquisition_limit", blocked)
 
-        window = await run_db("pickup.window", _window_for, nba_date, holder.team if holder else None)
+        window = await run_db("pickup.window", _window_for, nba_date)
         now = datetime.now(timezone.utc)
         row = await run_db(
             "pickup.insert", _insert_pickup,
@@ -634,9 +627,9 @@ class ScheduledPickupService:
             if not seat_free:
                 return await settle(row, now, SKIPPED, "drop_missing", team_name=team_name)
             drop, note = None, "drop_missing"
-        elif holder is not None and period < day and holder.has_game_today:
-            # Dropping him before his game tonight loses it; after it starts he is locked.
-            return await defer(row, now, "holder_plays_today", at=rollover_at(nba_date), team_name=team_name)
+        # The day before, a swap after the first tip is next-day business on ESPN: the player
+        # dropped plays out today whatever his lock says, so locks are only checked on D itself.
+        check_locks = period == day
 
         # The league's add limit: skip what it certainly leaves no room for. A per-day limit needs
         # the day's own adds; when they can't be read, ESPN refuses an over-limit add itself.
@@ -652,7 +645,8 @@ class ScheduledPickupService:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
 
         try:
-            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
+            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
+                                                                          check_locks=check_locks)
         except RosterTransactionInvalid as exc:
             decision = on_refusal(exc.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=seat_free)
             if decision.action == "defer":
@@ -662,7 +656,8 @@ class ScheduledPickupService:
                 return await settle(row, now, decision.status, decision.reason, detail=exc.message, team_name=team_name)
             drop, note = None, decision.reason                       # add_only
             try:
-                holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, None)
+                holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, None,
+                                                                              check_locks=check_locks)
             except RosterTransactionInvalid as exc2:
                 second = on_refusal(exc2.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=False)
                 if second.action == "defer":
@@ -708,8 +703,16 @@ class ScheduledPickupService:
                     return await defer(row, now, "acquisition_limit", at=decision.at, detail=exc.message,
                                        team_name=team_name)
                 return await settle(row, now, SKIPPED, "acquisition_limit", detail=exc.message, team_name=team_name)
-            log.info("scheduled_pickup_espn_rejected", pickup_id=row.id, team_id=row.team_id, code=code)
-            return await settle(row, now, FAILED, "espn_rejected", detail=exc.message, team_name=team_name)
+            if code == POSITION_LIMIT_CODE or period >= day:
+                log.info("scheduled_pickup_espn_rejected", pickup_id=row.id, team_id=row.team_id, code=code)
+                return await settle(row, now, FAILED, "espn_rejected", detail=exc.message, team_name=team_name)
+            # The day before: ESPN refused what the pre-checks let through (a lock it does apply to
+            # swaps, a code not met yet). Nothing landed, so the rollover into D gets one more try.
+            log.info("scheduled_pickup_espn_rejected_retry", pickup_id=row.id, team_id=row.team_id, code=code,
+                     message=exc.message)
+            row.audit_id = None
+            return await defer(row, now, "espn_rejected", at=rollover_at(nba_date), detail=exc.message,
+                               team_name=team_name)
         except ProviderAuthError:
             return await settle(row, now, FAILED, "auth_expired", team_name=team_name)
         except RosterWriteUnavailable as exc:
