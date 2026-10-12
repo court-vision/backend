@@ -165,7 +165,8 @@ class NotificationService:
 
         Args:
             notice: The backend's LaneNotice as a dict — `action` (paused | blocked),
-                `reason`, `detail`, `holder` ({name}), `nba_date` (ISO).
+                `reason`, `detail`, `holder` ({name}), `nba_date` (ISO), `ended` (the
+                lane ended with it).
         """
         email = self._recipient(user, prefs)
         subject, body = self._build_lane_notice_email(self._team_name(team), notice)
@@ -298,11 +299,15 @@ class NotificationService:
 
     @staticmethod
     def _lane_pickup_lines(lane: dict, outcome, add: str, drop) -> list[str]:
-        """What a stream lane's pickup adds: that the lane made it, and how it compares with the
-        projection shown before it (which can change as the market does)."""
+        """What a stream lane's pickup adds: that the lane made it (and ends with it, on the matchup's
+        last day), and how it compares with the projection shown before it (which can change as the
+        market does)."""
+        ends = "for the matchup's last day: the lane ends with the matchup." if lane.get("last_day") else None
         if outcome != "executed":
-            return ["", "This was your stream lane's pickup. The lane carries on and re-plans before the next day."]
-        lines = ["", "Your stream lane made this move: it re-plans the spot before each day."]
+            return ["", f"This was your stream lane's pickup {ends}" if ends
+                    else "This was your stream lane's pickup. The lane carries on and re-plans before the next day."]
+        lines = ["", f"Your stream lane made this move {ends}" if ends
+                 else "Your stream lane made this move: it re-plans the spot before each day."]
         projected = (lane.get("projected") or {}).get("name")
         why = lane.get("why")
         if projected:
@@ -341,7 +346,8 @@ class NotificationService:
             day = NotificationService._format_day(notice.get("nba_date"))
             subject = f"Stream lane missed a day for {team_name}"
             lines.append(f"No decision was made in time for {day}, so the spot stayed as it was.")
-            lines.append("The lane carries on with the next day.")
+            lines.append("The matchup has no day left, so the lane has ended." if notice.get("ended")
+                         else "The lane carries on with the next day.")
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)

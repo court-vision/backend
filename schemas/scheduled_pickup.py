@@ -95,6 +95,7 @@ class PickupLane(ApiModel):
     notify: LaneNotify                            # desk: no email
     projected: Optional[ScheduledPickupPlayer] = None   # who the projection had holding the spot that day
     why: Optional[str] = None                     # as_projected | projected_gone | replanned
+    last_day: bool = False                        # the matchup's last day: the lane ends with this pickup
 
 
 class PickupResult(ApiModel):
@@ -130,6 +131,7 @@ class LaneNotice(ApiModel):
     holder: ScheduledPickupPlayer                # who holds the lane's spot
     scoring_period_id: Optional[int] = None
     nba_date: Optional[date] = None
+    ended: bool = False                           # the lane ended with this notice (no matchup day left)
 
 
 class PickupExecuteData(ApiModel):

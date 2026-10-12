@@ -188,7 +188,8 @@ def test_a_settled_lane_pickup_moves_the_holder_or_records_the_day(user, team):
                            projected_name="Joel Embiid", reason="projected_gone")
     noted = svc._note_pickup_settled(lane.id, pickup.id, "executed", None, None, (FA, "Kawhi Leonard", "LAC"),
                                      (HOLDER, "Anthony Edwards"), 29, TUE, NOW)
-    assert noted == {"lane_id": lane.id, "notify": "email", "projected": (FA2, "Joel Embiid"), "why": "projected_gone"}
+    assert noted == {"lane_id": lane.id, "notify": "email", "projected": (FA2, "Joel Embiid"), "why": "projected_gone",
+                     "last_day": 29 >= lane.end_period}
     moved = StreamLane.get_by_id(lane.id)
     assert (moved.holder_player_id, moved.holder_name, moved.holder_team) == (FA, "Kawhi Leonard", "LAC")
     assert moved.original_player_id == HOLDER

@@ -353,7 +353,19 @@ def test_days_that_passed_without_a_decision_are_told_and_the_lane_carries_on(h)
     rec = h.recorded[0]
     assert rec.events[0]["action"] == "blocked" and rec.events[0]["reason"] == "missed"
     assert (notice.action, notice.reason, notice.scoring_period_id) == ("blocked", "missed", 29)
+    assert notice.ended is False
     assert rec.events[1]["scoring_period_id"] == 30 and rec.fields["next_period"] == 31
+
+
+@pytest.mark.unit
+def test_days_missed_up_to_the_matchups_end_end_the_lane_and_its_notice_says_so(h):
+    """The tick was down through the matchup's last day: the word about the missed day says the lane is over."""
+    tue = MON + timedelta(days=1)
+    h.board = board(period=29, nba_date=tue.isoformat())
+    notice = decide(h, lane(next_period=29, end_period=29), tip(tue) + timedelta(hours=1))
+    rec = h.recorded[0]
+    assert rec.fields["status"] == "ended" and rec.fields["reason"] == "matchup_over"
+    assert (notice.action, notice.reason, notice.ended) == ("blocked", "missed", True)
 
 
 @pytest.mark.unit
@@ -450,7 +462,8 @@ def test_pause_cancels_the_lanes_pickup_and_its_day_is_decided_again_on_resume(h
     _team_lane(h, monkeypatch, lane(reason=None, next_period=30))
     h.lane_pickups = [SimpleNamespace(id=501, scoring_period_id=29)]
     run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="paused")))
-    assert h.cancelled[0] == 501
+    # Before the pause lands, and once more after it, for a decision that landed in between.
+    assert h.cancelled == [501, 501]
     step = h.steps[0]
     assert step.fields["status"] == "paused" and step.fields["next_period"] == 29
     assert step.event["scoring_period_id"] == 29
@@ -519,13 +532,17 @@ def test_a_settled_pickup_tells_the_lane_and_its_email(h, monkeypatch):
 
     def noted(lane_id, pickup_id, status, reason, detail, add, drop, period, nba_date, now):
         seen.append((lane_id, pickup_id, status, add, drop))
-        return {"lane_id": lane_id, "notify": "email", "projected": (FA2, "Projected"), "why": "replanned"}
+        return {"lane_id": lane_id, "notify": "email", "projected": (FA2, "Projected"), "why": "replanned",
+                "last_day": period == 33}
     monkeypatch.setattr(svc, "_note_pickup_settled", noted)
     row = SimpleNamespace(id=501, lane_id=7, add_player_id=FA, add_name="Free Agent", add_team="LAL",
                           drop_player_id=HOLDER, drop_name="Holder", scoring_period_id=29, nba_date=MON)
     note = run(svc.StreamLaneService.note_pickup_settled(row, "executed", None, None, NOON))
     assert seen == [(7, 501, "executed", (FA, "Free Agent", "LAL"), (HOLDER, "Holder"))]
     assert (note.lane_id, note.notify, note.why, note.projected.name) == (7, "email", "replanned", "Projected")
+    assert note.last_day is False
+    row.scoring_period_id = 33
+    assert run(svc.StreamLaneService.note_pickup_settled(row, "executed", None, None, NOON)).last_day is True
 
     def broken(*args):
         raise RuntimeError("db down")

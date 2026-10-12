@@ -569,6 +569,9 @@ def _note_pickup_settled(lane_id: int, pickup_id: int, status: str, reason: Opti
         "projected": ((switch.projected_player_id, switch.projected_name)
                       if switch is not None and switch.projected_player_id else None),
         "why": switch.reason if switch is not None else None,
+        # The matchup's last day: the lane ends with this pickup, and its email says so. A lane the
+        # user stopped cancels its pickups, so a stop never reaches here as a last day.
+        "last_day": period >= lane.end_period,
     }
 
 
@@ -1076,7 +1079,8 @@ class StreamLaneService:
             log.warning("stream_lane_claim_lost", lane_id=lane.id, team_id=lane.team_id, step="end")
             return None
         log.info("stream_lane_ended", lane_id=lane.id, team_id=lane.team_id, reason=reason)
-        return notice
+        # A notice that comes with the end (days missed up to the matchup's last) says the lane is over.
+        return notice.model_copy(update={"ended": True}) if notice is not None else None
 
     # ---- the pickup executor's settle ----
 
@@ -1098,4 +1102,5 @@ class StreamLaneService:
         return PickupLane(
             lane_id=noted["lane_id"], notify=noted["notify"], why=noted["why"],
             projected=ScheduledPickupPlayer(player_id=projected[0], name=projected[1]) if projected else None,
+            last_day=noted.get("last_day", False),
         )
