@@ -121,6 +121,20 @@ def test_a_line_from_elsewhere_is_scored_in_its_players_place_in_the_pool():
 
 
 @pytest.mark.unit
+def test_lines_asked_for_together_are_each_scored_as_if_asked_for_alone():
+    """Several drop candidates' projections come in one call; each is z-scored against
+    the pool with only its own row swapped, never against the others' projections."""
+    star = _row(5, gp=60, fpts=50.0, pts=30, reb=10, ast=8, stl=1.5, blk=1, tov=4, fg3m=3, fgm=11, fga=20, ftm=5, fta=6)
+    big = _row(3, gp=60, fpts=45.0, pts=20, reb=14, ast=3, stl=1, blk=3, tov=2, fg3m=0, fgm=9, fga=15, ftm=2, fta=5)
+    newcomer = _row(9, gp=1, fpts=8.0, pts=4, reb=2, ast=1, stl=0.2, blk=0.1, tov=1.5, fg3m=0.5, fgm=1, fga=5, ftm=1, fta=2)
+
+    together = category_values_in_pool(POOL, [star, big, newcomer], NINE_CAT)
+    alone = {row.id: category_values_in_pool(POOL, [row], NINE_CAT)[row.id] for row in (star, big, newcomer)}
+    assert together == alone
+    assert together[5] == category_values(POOL[:4] + [star], NINE_CAT)[5][0]   # the pool as it is, his row swapped
+
+
+@pytest.mark.unit
 def test_rankable_categories_come_from_the_league_or_fall_back_to_nine_cat():
     eight = resolve_scoring(_league("categories", _cat_json("pts", "blk", "stl", "ast", "reb", "fg3m", "fg_pct", "ft_pct")))
     assert [c.key for c in rankable_categories(eight)] == ["pts", "blk", "stl", "ast", "reb", "fg3m", "fg_pct", "ft_pct"]

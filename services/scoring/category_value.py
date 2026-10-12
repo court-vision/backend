@@ -44,11 +44,15 @@ def category_values_in_pool(pool: list[PoolRow], rows: list[PoolRow],
                             cat_defs: list[CategoryDef]) -> dict[int, float]:
     """Player id -> category value for each of `rows`, scored with the row in its
     player's place in `pool` (or added to it): a line from elsewhere, such as a
-    projection, lands on the same scale as the pool's own values."""
-    replaced = {row.id for row in rows}
-    merged = [row for row in pool if row.id not in replaced] + list(rows)
-    values = category_values(merged, cat_defs)
-    return {row.id: values[row.id][0] for row in rows if row.id in values}
+    projection, lands on the same scale as the pool's own values. Each row is
+    scored on its own, the rest of `pool` as it is: z-scores depend on the whole
+    pool, so swapping in the other rows too would move this one's value."""
+    out: dict[int, float] = {}
+    for row in rows:
+        values = category_values([r for r in pool if r.id != row.id] + [row], cat_defs)
+        if row.id in values:
+            out[row.id] = values[row.id][0]
+    return out
 
 
 def default_category_defs() -> list[CategoryDef]:
