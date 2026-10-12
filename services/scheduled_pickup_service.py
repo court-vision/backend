@@ -42,7 +42,9 @@ Stream lanes. Each run first makes the lane decisions that are due
 (`StreamLaneService.decide_due`); a decision that switches inserts a pickup with the lane's
 id, which the same run then claims. Settling a lane's pickup tells the lane
 (`note_pickup_settled`: an executed one moves its holder), and its result carries the lane
-for the email. Scheduling refuses to drop the player an active lane holds its spot with.
+for the email. Scheduling refuses to drop the player an active lane holds its spot with. A
+lane's pickup is made only while the lane is active: pausing or stopping it cancels the
+pickup, and an attempt that finds the lane paused or ended cancels it instead of sending.
 
 Cancelling. Refused while an attempt holds the row — claimed (reason
 `in_progress`) and inside its lease, or with a write out — so a user told
@@ -423,6 +425,12 @@ def _lane_holder(team_id: int) -> Optional[int]:
     return active_lane_holder(team_id)
 
 
+def _lane_status(lane_id: int) -> Optional[str]:
+    from db.models.stream_lanes import StreamLane
+    lane = StreamLane.get_or_none(StreamLane.id == lane_id)
+    return lane.status if lane is not None else None
+
+
 def _nba_ids(rows) -> dict[int, int]:
     ids = {r.add_player_id for r in rows} | {r.drop_player_id for r in rows if r.drop_player_id}
     return nba_ids_by_espn_id(sorted(ids))
@@ -603,9 +611,22 @@ class ScheduledPickupService:
     @staticmethod
     async def _execute_one(row, now: datetime) -> Optional[PickupResult]:
         """One attempt at a claimed row. None when the row stopped being this attempt's under it
-        (cancelled, or claimed by a later run once the lease ran out): nothing is sent then."""
+        (cancelled, or claimed by a later run once the lease ran out), or when its stream lane is no
+        longer active and the row is cancelled here: nothing is sent then."""
         day, nba_date = row.scoring_period_id, row.nba_date
         settle, defer = ScheduledPickupService._settle, ScheduledPickupService._defer
+
+        lane_id = getattr(row, "lane_id", None)
+        if lane_id is not None and row.audit_id is None:
+            # A lane paused or stopped since it scheduled this: the pause / stop cancels it, and this
+            # catches one that slipped past them. Nothing is sent; a cancel is told to nobody.
+            lane_status = await run_db("pickup.lane_status", _lane_status, lane_id)
+            if lane_status != "active":
+                if await run_db("pickup.settle", _settle_row, row.id, row.attempts, now, status=CANCELLED,
+                                reason=f"lane_{lane_status or 'gone'}"):
+                    log.info("scheduled_pickup_cancelled", pickup_id=row.id, team_id=row.team_id, lane_id=lane_id,
+                             lane_status=lane_status)
+                return None
 
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)

@@ -39,7 +39,9 @@ turns that into what they add to the day's best lineup.
 
 Fencing. As for pickups: a claim bumps `attempts`, and a decision's writes (the
 pickup, the events, the lane's next step) land in one transaction, only while the
-lane is still active and still that claim's. A pause or stop in between wins.
+lane is still active and still that claim's. A pause or stop in between wins, and
+either one cancels the pickup the lane has scheduled (refused while it is being
+made); the executor makes a lane's pickup only while the lane is active.
 
 The rules (`first_open_period`, `rehold_after_for`, `lane_budget`, `active_slots`,
 `plan_lane`, `projection_of`, `compare_to_projection`) are pure and table-tested.
@@ -788,8 +790,12 @@ class StreamLaneService:
         if req.notify is not None and req.notify != lane.notify:
             changes["notify"] = req.notify
         if req.status == PAUSED and lane.status == ACTIVE:
-            changes.update(status=PAUSED, next_decision_at=None, reason="paused_by_user", detail=None)
-            event = dict(action="paused", reason="paused_by_user", scoring_period_id=lane.next_period)
+            # Nothing more changes on ESPN while it is paused: the pickup the lane scheduled goes (unless it
+            # is being made right now), and its day is decided again on resume.
+            cancelled = await StreamLaneService._cancel_pickups(team, lane, now)
+            nxt = min([lane.next_period, *cancelled])
+            changes.update(status=PAUSED, next_period=nxt, next_decision_at=None, reason="paused_by_user", detail=None)
+            event = dict(action="paused", reason="paused_by_user", scoring_period_id=nxt)
             message = "Stream lane paused"
         elif req.status == ACTIVE and lane.status == PAUSED:
             resumed = await StreamLaneService._resume_fields(team, league_info, lane, now)
@@ -804,6 +810,9 @@ class StreamLaneService:
         if changes:
             if not await run_db("lane.update", _lane_step, lane.id, None, now, changes, event):
                 raise StreamLaneEnded()
+            if changes.get("status") == PAUSED:
+                # As for a stop: a decision that landed after the loop above may have scheduled one since.
+                await StreamLaneService._cancel_pickups(team, lane, now, busy=False)
             log.info("stream_lane_updated", team_id=team.team_id, lane_id=lane.id, changes=sorted(changes))
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         return StreamLaneResp(status=ApiStatus.SUCCESS, message=message, data=lane_schema(lane))
@@ -811,13 +820,17 @@ class StreamLaneService:
     @staticmethod
     async def _resume_fields(team, league_info: LeagueInfo, lane, now: datetime) -> Optional[dict]:
         """The lane's next decision from now, or None when the matchup has no day left. The holder
-        must still be on the roster: a lane resumes on its spot, not on a new one."""
+        must still be on the roster: a lane resumes on its spot, not on a new one — and, as at the
+        start, no pickup the user scheduled while it was paused may drop them."""
         adapter = get_provider_adapter(league_info.provider)
         board = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
         holder = next((p for p in board.players if p.player_id == lane.holder_player_id), None)
         if holder is None:
             raise _invalid("holder_gone", f"{lane.holder_name} is no longer on your roster — start a new lane "
                                           "from a seat instead")
+        pending = await run_db("lane.pending", _pending_pickups, team.team_id)
+        if any(p.lane_id != lane.id and p.drop_player_id == holder.player_id for p in pending):
+            raise _invalid("scheduled_out", f"A pickup already scheduled drops {holder.name} — cancel it first")
         period, today_date = StreamLaneService._board_today(board)
         today = (await run_db("lane.days", _days, period, period, period, today_date))[0]
         nxt = max(lane.next_period, first_open_period(today, now))
@@ -835,21 +848,30 @@ class StreamLaneService:
             raise StreamLaneEnded()
         now = datetime.now(timezone.utc)
         # A pickup the lane scheduled goes with it — unless it is being made right now.
-        for pickup in await run_db("lane.pickups", _lane_pickups, lane.id):
-            found = await run_db("pickup.cancel", _cancel_pickup, team.team_id, pickup.id, now)
-            if found is not None and found[0] == IN_PROGRESS:
-                raise StreamLaneBusy()
+        await StreamLaneService._cancel_pickups(team, lane, now)
         if not await run_db("lane.stop", _lane_step, lane.id, None, now,
                             dict(status=ENDED, next_decision_at=None, reason="stopped", detail=None, ended_at=now),
                             dict(action="ended", reason="stopped")):
             raise StreamLaneEnded()
         # A decision that was mid-flight is fenced out by the stop; one that landed first may have
         # scheduled a pickup since the loop above.
-        for pickup in await run_db("lane.pickups", _lane_pickups, lane.id):
-            await run_db("pickup.cancel", _cancel_pickup, team.team_id, pickup.id, now)
+        await StreamLaneService._cancel_pickups(team, lane, now, busy=False)
         log.info("stream_lane_stopped", team_id=team.team_id, lane_id=lane.id)
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         return StreamLaneResp(status=ApiStatus.SUCCESS, message="Stream lane stopped", data=lane_schema(lane))
+
+    @staticmethod
+    async def _cancel_pickups(team, lane, now: datetime, *, busy: bool = True) -> list[int]:
+        """Cancel the lane's pending pickups; the ESPN days of those cancelled. With `busy`, one being
+        made right now refuses (StreamLaneBusy): the user's pause or stop must not land under it."""
+        cancelled: list[int] = []
+        for pickup in await run_db("lane.pickups", _lane_pickups, lane.id):
+            found = await run_db("pickup.cancel", _cancel_pickup, team.team_id, pickup.id, now)
+            if found is not None and found[0] == IN_PROGRESS and busy:
+                raise StreamLaneBusy()
+            if found is not None and found[0] == PENDING:
+                cancelled.append(pickup.scoring_period_id)
+        return cancelled
 
     # ---- the executor's tick ----
 

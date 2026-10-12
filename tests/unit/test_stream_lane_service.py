@@ -427,6 +427,28 @@ def test_pause_and_notify(h, monkeypatch):
 
 
 @pytest.mark.unit
+def test_pause_cancels_the_lanes_pickup_and_its_day_is_decided_again_on_resume(h, monkeypatch):
+    """Tuesday's switch is scheduled (the lane has moved on to Wednesday): pausing takes it back off ESPN's way."""
+    _team_lane(h, monkeypatch, lane(reason=None, next_period=30))
+    h.lane_pickups = [SimpleNamespace(id=501, scoring_period_id=29)]
+    run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="paused")))
+    assert h.cancelled[0] == 501
+    step = h.steps[0]
+    assert step.fields["status"] == "paused" and step.fields["next_period"] == 29
+    assert step.event["scoring_period_id"] == 29
+
+
+@pytest.mark.unit
+def test_pause_waits_while_the_lanes_pickup_is_being_made(h, monkeypatch):
+    _team_lane(h, monkeypatch, lane(reason=None, next_period=30))
+    h.lane_pickups = [SimpleNamespace(id=501, scoring_period_id=29)]
+    h.cancel_prior = "in_progress"
+    with pytest.raises(svc.StreamLaneBusy):
+        run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="paused")))
+    assert not h.steps
+
+
+@pytest.mark.unit
 def test_resume_needs_the_holder_and_picks_up_from_the_next_open_day(h, monkeypatch):
     monkeypatch.setattr(svc, "datetime", _clock(tip(MON) + timedelta(hours=2)))
     _team_lane(h, monkeypatch, lane(status="paused", next_period=28, next_decision_at=None))
@@ -440,9 +462,24 @@ def test_resume_needs_the_holder_and_picks_up_from_the_next_open_day(h, monkeypa
 
 
 @pytest.mark.unit
+def test_resume_refuses_while_a_pickup_scheduled_during_the_pause_drops_the_holder(h, monkeypatch):
+    """Paused, the lane's holder is the user's to drop; resuming over that pickup would have two plans for the spot."""
+    monkeypatch.setattr(svc, "datetime", _clock(NOON))
+    _team_lane(h, monkeypatch, lane(status="paused", next_period=28, next_decision_at=None))
+    h.pending.append(svc.PendingPickup(1, 30, MON + timedelta(days=2), 99, HOLDER))
+    with pytest.raises(svc.StreamLaneInvalid) as exc:
+        run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="active")))
+    assert exc.value.data["reason"] == "scheduled_out" and not h.steps
+    # The lane's own pickup (one a pause could not cancel) is not in its way.
+    h.pending[0] = svc.PendingPickup(1, 30, MON + timedelta(days=2), 99, HOLDER, lane_id=7)
+    run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="active")))
+    assert h.steps[0].fields["status"] == "active"
+
+
+@pytest.mark.unit
 def test_stop_cancels_the_lanes_pickup_unless_it_is_being_made(h, monkeypatch):
     _team_lane(h, monkeypatch, lane())
-    h.lane_pickups = [SimpleNamespace(id=501)]
+    h.lane_pickups = [SimpleNamespace(id=501, scoring_period_id=28)]
     run(svc.StreamLaneService.stop(TEAM, 7))
     assert h.cancelled[0] == 501 and h.steps[0].fields["status"] == "ended" and h.steps[0].fields["reason"] == "stopped"
     h.steps.clear()

@@ -9,6 +9,7 @@ change fencing out a running decision, a settled lane pickup moving the holder, 
 lookup, the listing, the schedule read — plus the rollback.
 """
 
+import asyncio
 import json
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,8 @@ from db.models.scheduled_pickups import ScheduledPickup
 from db.models.stream_lanes import StreamLane, StreamLaneEvent, active_lane_holder
 from db.models.teams import Team
 from db.models.users import User
+from schemas.stream_lane import StreamLaneUpdateReq
+from services import scheduled_pickup_service as pickups
 from services import stream_lane_service as svc
 
 pytestmark = [pytest.mark.integration]
@@ -209,6 +212,39 @@ def test_pending_and_adopted_pickups(user, team):
     ScheduledPickup.update(status="executed", executed_at=NOW).where(ScheduledPickup.id == pending.id).execute()
     assert svc._adopt_executed(lane.id, HOLDER, {FA}).id == pending.id
     assert svc._adopt_executed(lane.id, HOLDER, set()) is None      # the player isn't on the board either
+
+
+def test_a_pause_cancels_the_lanes_pickup_before_the_executor_can_claim_it(user, team):
+    lane = _lane(user, team, next_period=30)
+    pickup = ScheduledPickup.create(**_pickup_fields(user, team, lane.id))      # day 29's switch, due now
+    asyncio.run(svc.StreamLaneService.update(team, None, lane.id, StreamLaneUpdateReq(status="paused")))
+    paused = StreamLane.get_by_id(lane.id)
+    assert (paused.status, paused.next_period) == ("paused", 29)                # day 29 is decided again on resume
+    assert ScheduledPickup.get_by_id(pickup.id).status == "cancelled"
+    assert pickups._claim_due(NOW, 4) == []
+
+
+def test_a_pause_waits_while_the_lanes_pickup_is_being_made(user, team):
+    lane = _lane(user, team, next_period=30)
+    pickup = ScheduledPickup.create(**_pickup_fields(user, team, lane.id))
+    (claimed,) = pickups._claim_due(NOW, 4)                                     # an attempt holds it
+    with pytest.raises(svc.StreamLaneBusy):
+        asyncio.run(svc.StreamLaneService.update(team, None, lane.id, StreamLaneUpdateReq(status="paused")))
+    assert StreamLane.get_by_id(lane.id).status == "active"
+    assert ScheduledPickup.get_by_id(pickup.id).status == "pending" and claimed.id == pickup.id
+
+
+def test_an_attempt_on_a_paused_lanes_pickup_cancels_it_unsent(user, team, monkeypatch):
+    def no_further(team_id, user_id):
+        raise AssertionError("the attempt went on to read the team and its board")
+    monkeypatch.setattr(pickups, "_load_team_for_job", no_further)
+    lane = _lane(user, team, status="paused")
+    pickup = ScheduledPickup.create(**_pickup_fields(user, team, lane.id))
+    (claimed,) = pickups._claim_due(NOW, 4)
+    assert asyncio.run(pickups.ScheduledPickupService._execute_one(claimed, NOW)) is None
+    row = ScheduledPickup.get_by_id(pickup.id)
+    assert (row.status, row.reason, row.audit_id) == ("cancelled", "lane_paused", None)
+    assert StreamLane.get_by_id(lane.id).holder_player_id == HOLDER
 
 
 def test_the_guard_sees_only_an_active_lanes_holder(user, team):

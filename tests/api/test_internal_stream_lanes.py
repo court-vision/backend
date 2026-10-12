@@ -114,6 +114,7 @@ def test_list_update_and_stop(authed_client, owned, monkeypatch):
     ("start", "post", "", {"player_id": 1}, svc.StreamLaneExists(), 409, "STREAM_LANE_EXISTS"),
     ("plan", "post", "/plan", {"player_id": 1}, svc._invalid("on_ir", "On IR"), 422, "STREAM_LANE_INVALID"),
     ("update", "patch", "/3", {"status": "active"}, svc.StreamLaneEnded(), 409, "STREAM_LANE_ENDED"),
+    ("update", "patch", "/3", {"status": "paused"}, svc.StreamLaneBusy(), 409, "STREAM_LANE_BUSY"),
     ("stop", "delete", "/3", None, svc.StreamLaneBusy(), 409, "STREAM_LANE_BUSY"),
     ("stop", "delete", "/9", None, NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found"), 404,
      "STREAM_LANE_NOT_FOUND"),

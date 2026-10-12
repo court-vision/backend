@@ -103,7 +103,7 @@ def h(monkeypatch):
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
                         claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
-                        lane_runs=[], lane_notices=[], lanes_released=[])
+                        lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
         h.reads.append(scoring_period_id)
@@ -175,6 +175,7 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
     monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
 
     async def no_lanes_due(now, limit):
         h.lane_runs.append((now, limit))
@@ -738,6 +739,25 @@ def test_a_lane_pickups_result_carries_the_lane(h, monkeypatch):
     seen.clear()
     arrange_day_before(h)
     assert execute(h, row(lane_id=None)).lane is None and seen == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lane_status", ["paused", "ended"])
+def test_a_lane_pickup_whose_lane_is_no_longer_active_is_cancelled_unsent(h, monkeypatch, lane_status):
+    arrange_day_before(h)
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled", staticmethod(lambda *args: _none()))
+    h.lane_status = lane_status
+    assert execute(h, row(lane_id=7)) is None
+    assert h.settled == [(1, {"status": "cancelled", "reason": f"lane_{lane_status}"})]
+    assert h.txn_calls == [] and h.reads == []
+    # A write already out is still confirmed from the board, whatever the lane did since.
+    h.settled.clear()
+    r = execute(h, row(lane_id=7, audit_id=41))
+    assert (r.outcome, r.reason) == ("failed", "interrupted")
+
+
+async def _none():
+    return None
 
 
 @pytest.mark.unit

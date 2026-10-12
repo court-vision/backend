@@ -66,9 +66,11 @@ async def list_stream_lanes(team: OwnedTeamContext = Depends(get_owned_team)):
 async def update_stream_lane(lane_id: int, req: StreamLaneUpdateReq, team: OwnedTeamContext = Depends(get_owned_team)):
     """
     Pause (`status: paused`) or resume (`status: active`) a lane, or change `notify`.
-    Resuming needs the spot's player still on the roster (422 STREAM_LANE_INVALID
-    `holder_gone`); a lane resumed after its matchup's last open day ends instead.
-    404 STREAM_LANE_NOT_FOUND; 409 STREAM_LANE_ENDED.
+    Pausing cancels a pickup the lane scheduled that hasn't run, and that day is decided
+    again on resume; 409 STREAM_LANE_BUSY while the pickup is being made. Resuming needs
+    the spot's player still on the roster (422 STREAM_LANE_INVALID `holder_gone`) and no
+    pickup scheduled that drops them (`scheduled_out`); a lane resumed after its matchup's
+    last open day ends instead. 404 STREAM_LANE_NOT_FOUND; 409 STREAM_LANE_ENDED.
     """
     league_info = await load_owned_league_info(team)
     return respond(await StreamLaneService.update(team, league_info, lane_id, req))
