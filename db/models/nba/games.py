@@ -209,7 +209,8 @@ class Game(BaseModel):
         if seasons:
             query = query.where(cls.season.in_(list(seasons)))
         if season_types:
-            query = query.where(cls.season_type.in_(list(season_types)))
+            # A game not yet labelled is kept, as PlayerGameStats.for_fantasy() does
+            query = query.where(cls.season_type.in_(list(season_types)) | cls.season_type.is_null())
         if start_date:
             query = query.where(cls.game_date >= start_date)
         if end_date:

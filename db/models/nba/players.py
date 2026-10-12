@@ -111,15 +111,18 @@ class Player(BaseModel):
     def in_play(cls):
         """Where-clause: players of today's game.
 
-        That is a PlayerIndex profile (nba.player_profiles: this season's
-        players, rookies included) or season stats from last season on.
+        That is a PlayerIndex profile whose career reaches last season
+        (nba.player_profiles.to_year, rookies included; profiles are never
+        deleted, so an old one ages out) or season stats from last season on.
         nba.players also holds everyone the game-history load brings in
         (2012-13 onward, migration 0031) and the All-Star celebrity game's
         rows; a lookup by name that means a current player uses this, so a
         retired namesake can never take his place.
         """
         since = previous_season(settings.nba_season)
-        return cls.id.in_(SQL("(SELECT player_id FROM nba.player_profiles)")) | cls.id.in_(
+        return cls.id.in_(
+            SQL("(SELECT player_id FROM nba.player_profiles WHERE to_year IS NULL OR to_year >= %s)", (int(since[:4]),))
+        ) | cls.id.in_(
             SQL("(SELECT player_id FROM nba.player_season_stats WHERE season >= %s)", (since,))
         )
 

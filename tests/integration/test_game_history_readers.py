@@ -88,3 +88,15 @@ def test_in_play_is_a_profile_or_recent_season_stats():
     Player.create(id=3, name="Long Gone", name_normalized="long gone")
     in_play = {p.id for p in Player.select(Player.id).where(Player.in_play())}
     assert in_play == {SGA, 2}
+
+
+def test_stats_by_name_never_guess_between_current_namesakes():
+    from core.errors import NotFoundError
+
+    lookup = PlayerService.get_player_stats.__wrapped__
+    assert lookup(name="Shai Gilgeous-Alexander").data.id == SGA
+    Player.create(id=1, name="Shai Gilgeous-Alexander", name_normalized="shai gilgeous-alexander")
+    assert lookup(name="Shai Gilgeous-Alexander").data.id == SGA       # a retired namesake: ignored
+    PlayerProfile.create(player=1)
+    with pytest.raises(NotFoundError):
+        lookup(name="Shai Gilgeous-Alexander")                          # two current players: no guess

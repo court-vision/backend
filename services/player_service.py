@@ -209,9 +209,13 @@ class PlayerService:
             player = Player.get_or_none(Player.id == player_id)
         elif name is not None:
             normalized_name = _normalize_name(name)
-            player = Player.get_or_none(
-                (fn.unaccent(Player.name_normalized) == normalized_name) & Player.in_play()
+            # One player in play with the name, or none: never a guess between namesakes
+            matches = list(
+                Player.select()
+                .where((fn.unaccent(Player.name_normalized) == normalized_name) & Player.in_play())
+                .limit(2)
             )
+            player = matches[0] if len(matches) == 1 else None
         else:
             raise BadRequestError("PLAYER_LOOKUP_REQUIRED", "Provide espn_id, player_id, or name")
 
