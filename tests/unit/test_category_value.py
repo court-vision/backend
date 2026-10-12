@@ -12,6 +12,7 @@ from services.scoring.category_value import (
     CATEGORY_VALUE_SCALE,
     category_value,
     category_values,
+    category_values_in_pool,
     rankable_categories,
 )
 from services.scoring.models import CategoryDef, StatLine
@@ -104,6 +105,19 @@ def test_empty_pool_and_single_player_pool():
     assert category_values([], NINE_CAT) == {}
     lone = category_values(POOL[:1], NINE_CAT)
     assert lone == {1: (CATEGORY_VALUE_OFFSET, 0.0)}                     # a degenerate pool z-scores to 0
+
+
+@pytest.mark.unit
+def test_a_line_from_elsewhere_is_scored_in_its_players_place_in_the_pool():
+    """A projection for player 5 (a thin, bad sample in POOL) replaces his row, so it
+    lands on the scale the rest of the pool is valued on; a player new to the pool joins it."""
+    star = _row(5, gp=60, fpts=50.0, pts=30, reb=10, ast=8, stl=1.5, blk=1, tov=4, fg3m=3, fgm=11, fga=20, ftm=5, fta=6)
+    replaced = category_values(POOL[:4] + [star], NINE_CAT)      # his own row is gone, not counted twice
+    assert category_values_in_pool(POOL, [star], NINE_CAT) == {5: replaced[5][0]}
+    assert replaced[5][0] == replaced[1][0] > category_values(POOL, NINE_CAT)[5][0]
+    newcomer = _row(9, gp=1, fpts=8.0, pts=4, reb=2, ast=1, stl=0.2, blk=0.1, tov=1.5, fg3m=0.5, fgm=1, fga=5, ftm=1, fta=2)
+    assert category_values_in_pool(POOL, [newcomer], NINE_CAT) == {9: category_values(POOL + [newcomer], NINE_CAT)[9][0]}
+    assert category_values_in_pool(POOL, [], NINE_CAT) == {}
 
 
 @pytest.mark.unit

@@ -40,6 +40,17 @@ def category_values(pool: list[PoolRow], cat_defs: list[CategoryDef],
     return {s.row.id: (category_value(s.score), s.score) for s in compute_category_scores(eligible, cat_defs)}
 
 
+def category_values_in_pool(pool: list[PoolRow], rows: list[PoolRow],
+                            cat_defs: list[CategoryDef]) -> dict[int, float]:
+    """Player id -> category value for each of `rows`, scored with the row in its
+    player's place in `pool` (or added to it): a line from elsewhere, such as a
+    projection, lands on the same scale as the pool's own values."""
+    replaced = {row.id for row in rows}
+    merged = [row for row in pool if row.id not in replaced] + list(rows)
+    values = category_values(merged, cat_defs)
+    return {row.id: values[row.id][0] for row in rows if row.id in values}
+
+
 def default_category_defs() -> list[CategoryDef]:
     return [CategoryDef.for_key(k) for k in DEFAULT_CATEGORIES]
 

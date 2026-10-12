@@ -15,6 +15,11 @@ the lowest-value roster player with no game today, the pickup is the day's best
 free agent, and the value comparison only checks that the two are comparable.
 Two clocks say "today" — ESPN's scoring period for the board, the 2 AM ET rule
 for the streamer pool — so the swap is offered only when both agree on the date.
+
+A drop candidate's value is the board's recent average only when that average
+rests on a real sample; a player with no games behind it (back from a lost
+season, a rookie before his debut) or only a couple is weighed at his season
+projection instead (`drop_value`), and one we know nothing about is never the drop.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Mapping, Optional, Sequence
+from typing import Mapping, NamedTuple, Optional, Sequence
 
 from core.logging import get_logger
 from db.base import run_db
@@ -38,6 +43,7 @@ from schemas.daily_actions import (
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
 from services import schedule_service
+from services.espn_service import EspnService
 from services.lineup_editor_service import (
     _clock,
     _roster_slots,
@@ -50,6 +56,7 @@ from services.lineup_editor_service import (
 from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_fill, plan_ir
 from services.lineup_read_service import LineupReadService, _games_on  # noqa: F401  (tests stand in for its read here)
 from services.matchup_days import index_games
+from services.player_value_service import PlayerValueService
 from services.providers import get_provider_adapter, unavailable_message
 from services.streamer_service import StreamerService
 
@@ -57,14 +64,31 @@ log = get_logger("daily_actions")
 # The drop candidate is "streamable" only when the day's pool holds a comparable player.
 STREAMABLE_RATIO = 0.85
 DEFAULT_FA_COUNT = 100
+# A recent average on fewer games than this is no reason to drop a player.
+MIN_SAMPLE_GAMES = 3
+# The rolling window the board's values come from (`PlayerValueService.avg_points_for`'s default).
+BOARD_WINDOW_DAYS = 14
 KIND_ORDER = {"ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3, "add": 3}
 ROSTER_FULL_DETAIL = "Roster full — drop a player first"
+
+
+@dataclass(frozen=True)
+class DropEvidence:
+    """What stands behind the drop candidates' board values, by ESPN id."""
+    games: Mapping[int, int]              # games in the board's rolling window (absent = none)
+    projected: Mapping[int, float]        # season projection, on the board's value scale
+
+
+class DropValue(NamedTuple):
+    value: float
+    projected: bool                       # the season projection, not the board's average
 
 
 @dataclass(frozen=True)
 class TransactionSuggestion:
     pickup: StreamerPlayerResp
     drop: Optional[LineupPlayer]          # None when a roster seat is open
+    drop_value: Optional[DropValue] = None
 
 
 # ------------------------------- pure ------------------------------- #
@@ -93,26 +117,57 @@ def has_open_seat(state: LineupState) -> bool:
     return off_ir < seats
 
 
+def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool]) -> list[LineupPlayer]:
+    """Who the swap may drop: idle today, unlocked, off IR and not headed there."""
+    return [p for p in state.players
+            if not p.locked and p.lineup_slot_id != IR_SLOT_ID
+            and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
+
+
+def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[DropValue]:
+    """What the swap weighs a drop candidate at; None = unknown, so never the drop.
+
+    Last season's line (`baseline`) already rests on a real sample. A recent
+    average on fewer than MIN_SAMPLE_GAMES games counts at the higher of itself
+    and the season projection: a drop is the move that cannot be taken back, so a
+    couple of quiet games never make a player look worse than projected. No value
+    at all (0.0 on the board) is the projection, and without one a thin or empty
+    sample is unknown. If the lookup failed (`evidence` None) the board's averages
+    stand, but an empty one still never makes a player the weakest."""
+    if p.value_source == "baseline":
+        return DropValue(p.avg_points, False)
+    if p.value_source is not None and (evidence is None or evidence.games.get(p.player_id, 0) >= MIN_SAMPLE_GAMES):
+        return DropValue(p.avg_points, False)
+    prior = evidence.projected.get(p.player_id) if evidence is not None else None
+    if prior is None:
+        return None
+    if p.value_source is not None and p.avg_points >= prior:
+        return DropValue(p.avg_points, False)
+    return DropValue(prior, True)
+
+
 def suggest_transaction(
     state: LineupState,
     streamers: Sequence[StreamerPlayerResp],
     *,
     ir_eligible: Mapping[int, bool],
     ratio: float = STREAMABLE_RATIO,
+    evidence: Optional[DropEvidence] = None,
 ) -> Optional[TransactionSuggestion]:
     """The day's streamer swap, or None. `streamers` is the daily search in its own
-    order (free agents with a game today, best first). Pickups ESPN would refuse under
+    order (free agents with a game today, best first). The drop is the candidate
+    with the lowest `drop_value`. Pickups ESPN would refuse under
     `rosterSettings.positionLimits` are skipped — a swap that drops a player of the
     same default position frees that seat and still counts."""
     roster_ids = {p.player_id for p in state.players}
     drop: Optional[LineupPlayer] = None
+    weighed: Optional[DropValue] = None
     if not has_open_seat(state):
-        droppable = [p for p in state.players
-                     if not p.locked and p.lineup_slot_id != IR_SLOT_ID
-                     and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
-        if not droppable:
+        valued = [(v, p) for p in drop_candidates(state, ir_eligible)
+                  if (v := drop_value(p, evidence)) is not None]
+        if not valued:
             return None
-        drop = min(droppable, key=lambda p: (p.avg_points, p.name))
+        weighed, drop = min(valued, key=lambda vp: (vp[0].value, vp[1].name))
 
     limits = {int(k): int(v) for k, v in state.position_limits.items() if int(v) > 0}
     held = Counter(p.default_position_id for p in state.players if p.default_position_id is not None)
@@ -129,11 +184,11 @@ def suggest_transaction(
                    and s.player_id not in roster_ids and not capped(s)), None)
     if pickup is None:
         return None
-    if drop is None:
+    if drop is None or weighed is None:
         return TransactionSuggestion(pickup, None)
-    if pickup.avg_points_last_n < drop.avg_points * ratio:
+    if pickup.avg_points_last_n < weighed.value * ratio:
         return None
-    return TransactionSuggestion(pickup, drop)
+    return TransactionSuggestion(pickup, drop, weighed)
 
 
 def _of_roster(p: LineupPlayer) -> DailyActionPlayer:
@@ -214,10 +269,12 @@ def build_actions(
         else:
             drop = suggestion.drop
             idle = f"{drop.name} has no game today" + (f" ({drop_next})" if drop_next else "")
+            weighed = suggestion.drop_value or DropValue(drop.avg_points, False)
+            dropped = f"{weighed.value:.1f}" + (" projected" if weighed.projected else "")
             out.append(DailyAction(
                 id=f"add_drop:{pick.player_id}:{drop.player_id}", kind="add_drop",
                 title=f"Drop {drop.name}, pick up {pick.name}",
-                detail=f"{idle} · {plays} · {drop.avg_points:.1f} vs {value}",
+                detail=f"{idle} · {plays} · {dropped} vs {value}",
                 player=_of_pickup(pick), counterpart=_of_roster(drop),
                 transaction=DailyActionTransaction(pickup=pick, drop_player_id=drop.player_id), game_time_et=tip,
             ))
@@ -227,6 +284,25 @@ def build_actions(
 
 
 # ------------------------------- lookups (failure-tolerant) ------------------------------- #
+
+
+def _drop_evidence(league_info: LeagueInfo, espn_ids: list[int]) -> DropEvidence:
+    # The scoring the board's values were computed under (`lineup_read_service._values_for`).
+    scoring = EspnService._scoring_for(league_info)
+    return DropEvidence(
+        games=PlayerValueService.rolling_games_by_espn_id(espn_ids, BOARD_WINDOW_DAYS),
+        projected=PlayerValueService.projected_value_by_espn_id(scoring, espn_ids, days=BOARD_WINDOW_DAYS),
+    )
+
+
+async def _drop_evidence_for(league_info: LeagueInfo, candidates: Sequence[LineupPlayer]) -> Optional[DropEvidence]:
+    """The candidates' samples and projections; None when the lookup fails, never a failure."""
+    try:
+        return await run_db("daily_actions.drop_evidence", _drop_evidence, league_info,
+                            [p.player_id for p in candidates])
+    except Exception as exc:
+        log.warning("daily_actions_drop_evidence_failed", error=str(exc))
+        return None
 
 
 async def _pickup_game(pick: StreamerPlayerResp, nba_date: date) -> Optional[tuple[str, Optional[str]]]:
@@ -313,9 +389,11 @@ class DailyActionsService:
             elif pool_data.value_kind != value_kind:
                 streamers_error = "value_kind_mismatch"
             else:
+                ir_eligible = {p.player_id: p.ir_eligible for p in players}
+                candidates = [] if has_open_seat(state) else drop_candidates(state, ir_eligible)
+                evidence = await _drop_evidence_for(league_info, candidates) if candidates else None
                 suggestion = suggest_transaction(
-                    state, pool_data.streamers,
-                    ir_eligible={p.player_id: p.ir_eligible for p in players}, ratio=ratio,
+                    state, pool_data.streamers, ir_eligible=ir_eligible, ratio=ratio, evidence=evidence,
                 )
             if suggestion is not None and board_day is not None:
                 pickup_game = await _pickup_game(suggestion.pickup, board_day)
