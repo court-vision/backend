@@ -368,14 +368,25 @@ def _pickup_model():
 
 
 def _days(start_period: int, end_period: int, base_period: int, base_date: date) -> list[LaneDay]:
-    """ESPN days start..end with who plays and the first tip-off, dated from the board's day."""
+    """ESPN days start..end with who plays and the first tip-off, dated from the board's day: one
+    read of the schedule for the whole range."""
     from db.models.nba.games import Game
+    first = base_date + timedelta(days=start_period - base_period)
+    last = base_date + timedelta(days=end_period - base_period)
+    teams: dict[date, set[str]] = {}
+    tips: dict[date, Any] = {}
+    games = (Game.select(Game.game_date, Game.home_team_id, Game.away_team_id, Game.start_time_et)
+             .where(Game.game_date.between(first, last)))
+    for g in games:
+        teams.setdefault(g.game_date, set()).update((g.home_team_id, g.away_team_id))
+        if g.start_time_et is not None and (g.game_date not in tips or g.start_time_et < tips[g.game_date]):
+            tips[g.game_date] = g.start_time_et
     out: list[LaneDay] = []
     for period in range(start_period, end_period + 1):
         day = base_date + timedelta(days=period - base_period)
-        teams = frozenset(normalize_nba_abbrev(t) for t in Game.get_teams_playing_on_date(day))
-        tip = Game.get_earliest_game_time_on_date(day)
-        out.append(LaneDay(period, day, teams, et_at(day, tip) if tip else None))
+        tip = tips.get(day)
+        out.append(LaneDay(period, day, frozenset(normalize_nba_abbrev(t) for t in teams.get(day, ())),
+                           et_at(day, tip) if tip else None))
     return out
 
 
