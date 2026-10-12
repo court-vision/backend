@@ -120,7 +120,7 @@ class PlayerValueService:
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.espn_id)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
-            .where((Player.espn_id.in_(espn_ids)) & (PlayerGameStats.game_date >= cutoff))
+            .where((Player.espn_id.in_(espn_ids)) & (PlayerGameStats.game_date >= cutoff) & PlayerGameStats.for_fantasy())
         )
         games: dict[int, list[StatLine]] = {eid: [] for eid in espn_ids}
         for g in query:
@@ -166,7 +166,7 @@ class PlayerValueService:
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
-            .where((Player.name_normalized.in_(names)) & (PlayerGameStats.game_date >= cutoff))
+            .where((Player.name_normalized.in_(names)) & (PlayerGameStats.game_date >= cutoff) & PlayerGameStats.for_fantasy())
         )
         games: dict[str, list[StatLine]] = {n: [] for n in names}
         for g in query:
@@ -218,7 +218,7 @@ class PlayerValueService:
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.espn_id)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
-            .where((Player.espn_id.in_(espn_ids)) & (PlayerGameStats.game_date >= cutoff))
+            .where((Player.espn_id.in_(espn_ids)) & (PlayerGameStats.game_date >= cutoff) & PlayerGameStats.for_fantasy())
         )
         acc: dict[int, list[tuple[float, float]]] = {eid: [] for eid in espn_ids}
         for g in query:
@@ -242,7 +242,7 @@ class PlayerValueService:
         query = (
             PlayerGameStats.select(PlayerGameStats, Player.name_normalized)
             .join(Player, on=(PlayerGameStats.player_id == Player.id))
-            .where((Player.name_normalized.in_(names)) & (PlayerGameStats.game_date >= cutoff))
+            .where((Player.name_normalized.in_(names)) & (PlayerGameStats.game_date >= cutoff) & PlayerGameStats.for_fantasy())
         )
         acc: dict[str, list[tuple[float, float]]] = {n: [] for n in names}
         for g in query:

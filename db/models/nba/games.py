@@ -20,6 +20,45 @@ from db.base import BaseModel
 from db.models.nba.teams import NBATeam
 
 
+# A game id opens with its season type and season: 0022500123 is game 123 of
+# the 2025-26 regular season. Every writer gets both from the id alone, so a
+# row can never disagree with the game it stores.
+SEASON_TYPES = {
+    "001": "preseason",
+    "002": "regular",
+    "003": "all_star",
+    "004": "playoffs",
+    "005": "play_in",
+    "006": "cup_final",
+}
+
+# What fantasy readers count: the regular season and the NBA Cup final, which is
+# exactly what the box-score table held before history and the playoffs joined
+# it (migration 0031). Not the play-in, playoffs, preseason or All-Star game.
+FANTASY_SEASON_TYPES = ("regular", "cup_final")
+
+# A game only moves forward through these. The schedule feed can be older than
+# what the game log already recorded (a stale static copy reset 411 finished
+# 2025-26 games to "scheduled" on 2026-09-28), so a write never moves it back.
+STATUS_ORDER = {"scheduled": 0, "in_progress": 1, "final": 2}
+
+
+def season_type_for(game_id: str | None) -> str | None:
+    """The season type a game id belongs to, or None for an id outside the NBA's scheme."""
+    if not game_id:
+        return None
+    return SEASON_TYPES.get(str(game_id)[:3])
+
+
+def season_for(game_id: str | None) -> str | None:
+    """The season a game id belongs to ("0022500123" -> "2025-26"), or None if unreadable."""
+    yy = str(game_id or "")[3:5]
+    if len(yy) != 2 or not yy.isdigit() or season_type_for(game_id) is None:
+        return None
+    start = (1900 if int(yy) >= 46 else 2000) + int(yy)
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
 class Game(BaseModel):
     """
     NBA game schedule and results.
@@ -36,6 +75,7 @@ class Game(BaseModel):
         home_score: Home team final score (null if not yet played)
         away_score: Away team final score (null if not yet played)
         status: Game status (scheduled, in_progress, final)
+        season_type: From the game id: regular, playoffs, play_in, cup_final, preseason, all_star
         arena: Arena name
         attendance: Attendance count
         updated_at: When this record was last modified
@@ -62,6 +102,8 @@ class Game(BaseModel):
     start_time_et = TimeField(null=True)  # e.g., 19:30 for 7:30 PM ET
     arena = CharField(max_length=100, null=True)
     attendance = IntegerField(null=True)
+    # Derived from game_id on every save; see SEASON_TYPES.
+    season_type = CharField(max_length=12, null=True)
     updated_at = DateTimeField(default=datetime.utcnow)
 
     class Meta:
@@ -82,7 +124,8 @@ class Game(BaseModel):
         )
 
     def save(self, *args, **kwargs):
-        """Override save to auto-update updated_at timestamp."""
+        """Override save to auto-update updated_at and derive season_type from the id."""
+        self.season_type = season_type_for(self.game_id)
         self.updated_at = datetime.utcnow()
         return super().save(*args, **kwargs)
 
@@ -107,6 +150,9 @@ class Game(BaseModel):
         """
         Insert or update a game record.
 
+        A status never moves backwards (see STATUS_ORDER): a finished game stays
+        final whatever an older schedule copy says.
+
         Args:
             game_id: NBA game ID
             game_data: Dict with game fields
@@ -121,8 +167,11 @@ class Game(BaseModel):
 
         if not created:
             for key, value in game_data.items():
-                if value is not None:
-                    setattr(game, key, value)
+                if value is None:
+                    continue
+                if key == "status" and STATUS_ORDER.get(value, 0) < STATUS_ORDER.get(game.status, 0):
+                    continue
+                setattr(game, key, value)
             game.save()
 
         return game
@@ -134,6 +183,8 @@ class Game(BaseModel):
         start_date: date | None = None,
         end_date: date | None = None,
         season: str | None = None,
+        seasons: tuple[str, ...] | list[str] | None = None,
+        season_types: tuple[str, ...] | list[str] | None = None,
     ) -> list["Game"]:
         """
         Get games for a specific team within a date range.
@@ -143,6 +194,8 @@ class Game(BaseModel):
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
             season: Season identifier (e.g., '2025-26') to filter by
+            seasons: Any of these seasons (the table holds every season since 2012-13)
+            season_types: Any of these season types (FANTASY_SEASON_TYPES for a fantasy schedule)
 
         Returns:
             List of Game records
@@ -153,6 +206,10 @@ class Game(BaseModel):
 
         if season:
             query = query.where(cls.season == season)
+        if seasons:
+            query = query.where(cls.season.in_(list(seasons)))
+        if season_types:
+            query = query.where(cls.season_type.in_(list(season_types)))
         if start_date:
             query = query.where(cls.game_date >= start_date)
         if end_date:

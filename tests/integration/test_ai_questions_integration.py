@@ -18,6 +18,7 @@ from peewee import IntegrityError
 
 from db.base import db
 from db.models.ai_questions import AiQuestion
+from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
 from db.models.teams import Team
@@ -186,6 +187,13 @@ class TestTargetLookup:
         assert team == "Sacramento Kings"
 
 
+def _current(player_id: int, name: str) -> Player:
+    """A player of today's game: the PlayerIndex profile is what `Player.in_play` looks for."""
+    player = Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+    PlayerProfile.create(player=player_id)
+    return player
+
+
 class TestFindPlayers:
     """The router names players; this is where a name becomes an ID (migration-backed: needs `unaccent`)."""
 
@@ -196,7 +204,7 @@ class TestFindPlayers:
                 (1631119, "Jaylin Williams"), (1629627, "Zion Williamson"), (201939, "Stephen Curry"),
                 (203552, "Seth Curry")]
         for player_id, name in rows:
-            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+            _current(player_id, name)
 
     def find(self, *names):
         return asyncio.run(routing._find_players(list(names)))
@@ -222,7 +230,7 @@ class TestFindPlayers:
         rows = [(1642259, "Alex Sarr"), (1629651, "Nic Claxton"), (1629004, "Svi Mykhailiuk"),
                 (1642365, "Nikola Đurišić"), (1628420, "Monte Morris"), (1629652, "Luguentz Dort")]
         for player_id, name in rows:
-            Player.create(id=player_id, name=name, name_normalized=name.lower().strip())
+            _current(player_id, name)
 
         found = self.find("Alexandre Sarr", "Nicolas Claxton", "Sviatoslav Mykhailiuk", "Nikola Durisic",
                           "Marcus Morris", "Lu Dort")
@@ -238,7 +246,7 @@ class TestFindPlayers:
         monkeypatch.setattr(routing, "_CANDIDATES", 3)
         names = ["Jalen Green", "Jalen Suggs", "Jalen Duren", "Jalen Brunson", "Alex Len"]
         for player_id, name in enumerate(names, start=1):
-            Player.create(id=player_id, name=name, name_normalized=name.lower())
+            _current(player_id, name)
 
         assert self.find("Alex Len") == {"Alex Len": [(5, "Alex Len")]}
         assert len(self.find("Jalen")["Jalen"]) == 3   # the limit itself still holds: three of the four are read
@@ -246,10 +254,19 @@ class TestFindPlayers:
     def test_a_shorter_listing_is_not_taken_from_a_list_the_limit_cut(self, integration_db, monkeypatch):
         """The only Cam among some of the Thomases is not known to be the only one."""
         for player_id, name in enumerate(["Cam Thomas", "Tim Thomas", "Isaiah Thomas"], start=1):
-            Player.create(id=player_id, name=name, name_normalized=name.lower())
+            _current(player_id, name)
         assert self.find("Cameron Thomas") == {"Cameron Thomas": [(1, "Cam Thomas")]}
 
         monkeypatch.setattr(routing, "_CANDIDATES", 3)   # as many as were read: there may be more
 
         assert self.find("Cameron Thomas") == {"Cameron Thomas": []}
         assert self.find("Cam Thomas") == {"Cam Thomas": [(1, "Cam Thomas")]}   # his whole name is read first
+
+    def test_a_retired_player_is_never_found(self, integration_db):
+        """nba.players holds every player since 2012-13 (the game-history load); only
+        today's players have a view to open."""
+        _current(1630173, "Precious Achiuwa")
+        Player.create(id=203183, name="Tony Mitchell", name_normalized="tony mitchell")   # no profile: retired
+
+        assert self.find("Tony Mitchell") == {"Tony Mitchell": []}
+        assert self.find("Achiuwa") == {"Achiuwa": [(1630173, "Precious Achiuwa")]}

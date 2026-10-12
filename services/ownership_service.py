@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import pytz
 
 from core.logging import get_logger
+from core.season import previous_season
+from core.settings import settings
 from db.models.nba.players import Player
 from db.models.nba.player_ownership import PlayerOwnership
 from db.models.nba.player_season_stats import PlayerSeasonStats
@@ -174,6 +176,11 @@ class OwnershipService:
                             .where(
                                 (PlayerGameStats.player_id == pid)
                                 & (PlayerGameStats.team.is_null(False))
+                                # Not a team from his history (migration 0031)
+                                & (
+                                    (PlayerGameStats.season >= previous_season(settings.nba_season))
+                                    | PlayerGameStats.season.is_null()
+                                )
                             )
                             .order_by(PlayerGameStats.game_date.desc())
                             .first()

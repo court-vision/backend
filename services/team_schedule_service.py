@@ -7,7 +7,7 @@ from datetime import date
 from core.logging import get_logger
 from core.nba_calendar import nba_date_et
 from core.settings import get_settings
-from db.models.nba.games import Game
+from db.models.nba.games import FANTASY_SEASON_TYPES, Game
 from db.models.nba.teams import NBATeam
 from db.models.nba.team_stats import TeamStats
 from db.base import DB_RUNTIME_ERRORS, db_operation
@@ -63,6 +63,8 @@ class TeamScheduleService:
                 team_id=team_id,
                 start_date=start_date,
                 season=settings.nba_season,
+                # The fantasy schedule: no play-in or playoff games (migration 0031).
+                season_types=FANTASY_SEASON_TYPES,
             )
 
             # Limit results

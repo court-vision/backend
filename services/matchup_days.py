@@ -97,7 +97,11 @@ def make_nba_id_resolver(all_roster: Iterable[Any]) -> Callable[[Any], Optional[
     unresolved = [p.name.lower().strip() for p in roster if p.player_id not in espn_to_nba]
     name_to_nba: dict[str, int] = {}
     if unresolved:
-        name_to_nba = {p.name_normalized: p.id for p in Player.select().where(Player.name_normalized.in_(unresolved))}
+        # Current players only: nba.players also holds retired namesakes (migration 0031)
+        name_to_nba = {
+            p.name_normalized: p.id
+            for p in Player.select().where(Player.name_normalized.in_(unresolved) & Player.in_play())
+        }
 
     def resolve(roster_player: Any) -> Optional[int]:
         nba_id = espn_to_nba.get(roster_player.player_id)

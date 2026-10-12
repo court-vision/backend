@@ -32,9 +32,10 @@ def nba_ids_by_espn_id(espn_ids: list[int]) -> dict[int, int]:
 def nba_ids_by_name(names: list[str]) -> dict[str, int]:
     """Map normalized player name -> NBA player ID.
 
-    Names shared by more than one player in `nba.players` are dropped rather
-    than guessed: an absent id costs the caller navigation, while a wrong one
-    silently points at another player's stat line.
+    Only players in play count (`Player.in_play`): nba.players also holds
+    retired players from the game-history load. Names shared by more than one
+    of them are dropped rather than guessed: an absent id costs the caller
+    navigation, while a wrong one silently points at another player's stat line.
 
     Callers must key lookups with `normalize`, the same normalization the
     stored-stat lookups use.
@@ -44,7 +45,7 @@ def nba_ids_by_name(names: list[str]) -> dict[str, int]:
     resolved: dict[str, Optional[int]] = {}
     for row in (
         PlayerModel.select(PlayerModel.id, PlayerModel.name_normalized)
-        .where(PlayerModel.name_normalized.in_(names))
+        .where(PlayerModel.name_normalized.in_(names) & PlayerModel.in_play())
     ):
         # A second sighting of a name makes it ambiguous; blank it out.
         resolved[row.name_normalized] = (
