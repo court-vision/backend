@@ -90,6 +90,15 @@ def test_in_play_is_a_profile_or_recent_season_stats():
     assert in_play == {SGA, 2}
 
 
+def test_a_profile_whose_career_ended_before_last_season_has_aged_out():
+    # Profiles are never deleted. Last season is 2024-25, whose PlayerIndex year is 2024.
+    for pid, to_year in ((4, 2023), (5, 2024)):
+        Player.create(id=pid, name=f"Player {pid}", name_normalized=f"player {pid}")
+        PlayerProfile.create(player=pid, to_year=to_year)
+    in_play = {p.id for p in Player.select(Player.id).where(Player.in_play())}
+    assert in_play == {SGA, 5}
+
+
 def test_stats_by_name_never_guess_between_current_namesakes():
     from core.errors import NotFoundError
 
