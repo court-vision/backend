@@ -347,3 +347,24 @@ def test_a_board_without_a_period_cannot_be_written(harness):
     harness.reads = [state(board(), period=None, nba_date=None)]
     with pytest.raises(svc.RosterStale):                                # the request names period 1; the board has none
         apply(req(drop=EDWARDS, period=1))
+
+
+# ---- the executor's day-before check ---------------------------------------------------
+
+
+@pytest.mark.unit
+def test_check_locks_false_skips_the_locks_but_not_waivers(harness):
+    board_state = state([player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
+    harness.pool = {KAWHI: pool(locked=True)}
+    holder, entry = asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS, check_locks=False))
+    assert holder.player_id == EDWARDS and entry.player_id == KAWHI
+
+    harness.pool = {KAWHI: pool(status="WAIVERS")}
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS, check_locks=False))
+    assert exc.value.data["reason"] == "add_on_waivers"
+
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS))
+    assert exc.value.data["reason"] == "drop_locked"
+
