@@ -357,6 +357,24 @@ def test_days_that_passed_without_a_decision_are_told_and_the_lane_carries_on(h)
 
 
 @pytest.mark.unit
+def test_after_missed_days_the_next_decision_still_waits_for_its_window(h):
+    """As above, but the holder played Tuesday: Wednesday's pickup can't go before the rollover, so the decision
+    (and the word about Tuesday) waits for it rather than choosing from Tuesday night's pool."""
+    h.schedule[TUE] = {"LAL", "MIA"}
+    wed = TUE + timedelta(days=1)
+    h.board = board(period=29, nba_date=TUE.isoformat())
+    assert decide(h, lane(next_period=29), tip(TUE) + timedelta(hours=1)) is None
+    assert not h.recorded and h.steps[0].fields["reason"] == "window_not_open"
+    assert h.steps[0].fields["next_decision_at"] == svc.rollover_at(wed)
+    h.board = board(period=30, nba_date=wed.isoformat())
+    notice = decide(h, lane(next_period=29), svc.rollover_at(wed))
+    rec = h.recorded[0]
+    assert (rec.events[0]["action"], rec.events[0]["reason"], notice.reason) == ("blocked", "missed", "missed")
+    assert rec.events[1]["scoring_period_id"] == 30 and rec.fields["next_period"] == 31
+    assert rec.pickup is None or rec.pickup["not_before_at"] <= svc.rollover_at(wed)
+
+
+@pytest.mark.unit
 def test_the_last_days_decision_ends_the_lane_at_its_tip(h):
     sat = MON + timedelta(days=5)
     h.board = board(period=32, nba_date=(sat - timedelta(days=1)).isoformat())

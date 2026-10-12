@@ -965,10 +965,10 @@ class StreamLaneService:
 
         day_date = today_date + timedelta(days=period - today_period)
         window = await run_db("lane.window", _window_for, day_date, holder.team)
-        if not events and window.not_before_at > now:
+        if window.not_before_at > now:
             # Too early for this holder: a pickup for the day can't be made before the window
             # opens (the holder plays the day before), so the decision waits to be made with the
-            # pool as it is then.
+            # pool as it is then — after missed days too, which the run at the window tells.
             return await StreamLaneService._wait(lane, now, "window_not_open", at=window.not_before_at)
         try:
             prepared = await StreamLaneService._prepare(lane.team_id, league_info, adapter, board, holder, period,
