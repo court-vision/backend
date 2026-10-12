@@ -12,7 +12,9 @@ expired), expired (D's games started first) or cancelled.
 `PickupExecuteReq` / `PickupResult` are the pipeline route's: one result per
 row attempted this run, `deferred` meaning it stays pending and waits. A row
 that stopped being the run's under it (cancelled, or claimed by a later run)
-has no result.
+has no result. A stream lane's pickup carries `lane` (what its email adds), and
+the run's `lanes` are the lane decisions a user hears about: a lane that paused,
+a day it missed (schemas.stream_lane).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from schemas.common import ApiModel, BaseResponse
 
 PickupStatus = Literal["pending", "executed", "skipped", "failed", "cancelled", "expired"]
 PickupOutcome = Literal["executed", "skipped", "failed", "expired", "deferred"]
+LaneNotify = Literal["email", "desk"]
 
 
 class SchedulePickupReq(ApiModel):
@@ -61,6 +64,7 @@ class ScheduledPickup(ApiModel):
     seated_slot: Optional[str] = None            # "UT", "PG", ...; None = bench
     created_at: datetime
     executed_at: Optional[datetime] = None
+    lane_id: Optional[int] = None                # a stream lane's pickup (the lane decides and cancels it)
 
 
 class ScheduledPickupResp(BaseResponse):
@@ -84,6 +88,16 @@ class PickupExecuteReq(ApiModel):
     now: Optional[AwareDatetime] = None          # clock override for dogfooding, with its offset; omit in production
 
 
+class PickupLane(ApiModel):
+    """A stream lane's pickup, for its email: the lane, whether it emails at all, and how the
+    move compares with the projection shown before it."""
+    lane_id: int
+    notify: LaneNotify                            # desk: no email
+    projected: Optional[ScheduledPickupPlayer] = None   # who the projection had holding the spot that day
+    why: Optional[str] = None                     # as_projected | projected_gone | replanned
+    last_day: bool = False                        # the matchup's last day: the lane ends with this pickup
+
+
 class PickupResult(ApiModel):
     pickup_id: int
     team_id: int
@@ -100,11 +114,30 @@ class PickupResult(ApiModel):
     verified: Optional[bool] = None              # executed: the re-read showed the add (and the drop gone)
     audit_id: Optional[int] = None
     next_attempt_at: Optional[datetime] = None   # deferred: when it is tried again
+    lane: Optional[PickupLane] = None            # a stream lane's pickup
+
+
+class LaneNotice(ApiModel):
+    """A stream lane decision the user hears about (unless the lane is desk-only): it paused
+    (`reason`: holder_gone, auth_expired, ...), or a day passed without a decision (blocked, missed)."""
+    lane_id: int
+    team_id: int
+    user_id: int
+    team_name: str = ""
+    notify: LaneNotify
+    action: Literal["paused", "blocked"]
+    reason: str
+    detail: Optional[str] = None
+    holder: ScheduledPickupPlayer                # who holds the lane's spot
+    scoring_period_id: Optional[int] = None
+    nba_date: Optional[date] = None
+    ended: bool = False                           # the lane ended with this notice (no matchup day left)
 
 
 class PickupExecuteData(ApiModel):
     due: int                                     # due rows this run took (results may hold fewer)
     results: list[PickupResult] = []
+    lanes: list[LaneNotice] = []                 # stream lane decisions to tell (switches come as results)
 
 
 class PickupExecuteResp(BaseResponse):

@@ -21,7 +21,7 @@ import pytest
 from core.errors import BadRequestError
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupState
-from schemas.scheduled_pickup import PickupExecuteReq, SchedulePickupReq
+from schemas.scheduled_pickup import LaneNotice, PickupExecuteReq, PickupLane, SchedulePickupReq
 from services import fantasy_writer_client
 from services import lineup_editor_service as editor
 from services import roster_transaction_service as txn
@@ -29,6 +29,7 @@ from services import scheduled_pickup_service as svc
 from services.espn_service import PoolEntry
 from services.fantasy_writer_client import FantasyWriterAuthRejected, FantasyWriterRejected, FantasyWriterUnavailable, WriterResult
 from services.lineup_read_service import LineupReadService
+from services.stream_lane_service import StreamLaneService
 
 PG, UT, BE, IR = 0, 11, 12, 13
 COUNTS = {"0": 1, "11": 1, "12": 2, "13": 1}          # 4 non-IR seats
@@ -52,11 +53,11 @@ def player(pid, name, slot=UT, *, team="DEN", game=False, started=False, locked=
 
 
 def state(players, *, period=2, current=2, final=167, nba_date="2026-10-21", can_write=True, reason=None,
-          version="v1", acq=None):
+          version="v1", acq=None, first_tip="19:00"):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
         scoring_period_id=period, scoring_period_source="provider", current_scoring_period_id=current,
-        final_scoring_period_id=final, first_game_time_et="19:00", slot_counts=COUNTS, slots=[],
+        final_scoring_period_id=final, first_game_time_et=first_tip, slot_counts=COUNTS, slots=[],
         lock_type="INDIVIDUAL_GAME", players=players, can_write=can_write, write_blocked_reason=reason,
         roster_version=version, fetched_at="now", acquisitions=acq,
     )
@@ -101,7 +102,8 @@ def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
-                        claimed=[], released=[], held=True, settle_crashes=False)
+                        claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
+                        lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
         h.reads.append(scoring_period_id)
@@ -172,6 +174,19 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
+    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
+
+    async def no_lanes_due(now, limit):
+        h.lane_runs.append((now, limit))
+        return list(h.lane_notices)
+
+    async def release_lanes(now, until):
+        h.lanes_released.append((now, until))
+        return 0
+
+    monkeypatch.setattr(StreamLaneService, "decide_due", staticmethod(no_lanes_due))
+    monkeypatch.setattr(StreamLaneService, "release_due", staticmethod(release_lanes))
     monkeypatch.setattr(svc, "_lease_from_now", lambda now: now + svc.LEASE)   # the wall clock stays out of it
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
     return h
@@ -179,7 +194,9 @@ def h(monkeypatch):
 
 def arrange_day_before(h, *, drop_game=False, drop_started=False):
     """Wednesday evening (ESPN day 2), pickup for Thursday (day 3): Jokic plays tonight,
-    Edwards (the drop) sits at BE today and at PG on Thursday's board."""
+    Edwards (the drop) sits at BE today and at PG on Thursday's board. A swap after
+    tonight's first tip is next-day business: today's board stays as it was, and only
+    Thursday's shows it."""
     jokic = player(JOKIC, "Nikola Jokic", UT, game=True, started=True)
     edwards = player(EDWARDS, "Anthony Edwards", BE, team="MIN", game=drop_game, started=drop_started)
     h.boards = {None: state([jokic, edwards]),
@@ -187,7 +204,7 @@ def arrange_day_before(h, *, drop_game=False, drop_started=False):
                          period=3, nba_date="2026-10-22", version="d3")}
     h.pool = {KAWHI: pool()}
     kawhi = player(KAWHI, "Kawhi Leonard", BE, team="LAC")
-    h.after_txn = {None: state([jokic, kawhi], version="v2"),
+    h.after_txn = {None: h.boards[None],
                    3: state([player(JOKIC, "Nikola Jokic", UT), kawhi], period=3, nba_date="2026-10-22", version="d3b")}
     h.after_lineup = {3: state([player(JOKIC, "Nikola Jokic", UT), player(KAWHI, "Kawhi Leonard", PG, team="LAC")],
                                period=3, nba_date="2026-10-22", version="d3c")}
@@ -238,8 +255,9 @@ def test_executed_the_day_before_sends_todays_transaction_and_a_future_roster_se
     assert (s["scoring_period_id"], s["current_scoring_period_id"]) == (3, 2)
     assert s["moves"] == [{"player_id": KAWHI, "from_slot_id": BE, "to_slot_id": PG}]
     assert [(a["source"], a["kind"]) for a in h.audits] == [("scheduled", "transaction"), ("scheduled", "lineup")]
+    assert h.updates == [(1, "applied", 200, None), (2, "applied", 200, None)]
     assert h.pool_calls == [([KAWHI], 2)]
-    assert h.reads == [None, 3, None, 3, 3]     # today, D for the seat, verify, D after the add, D verify
+    assert h.reads == [None, 3, 3, 3, 3]        # today, D for the seat, D verify, D after the add, D verify
 
 
 @pytest.mark.unit
@@ -316,7 +334,8 @@ def test_already_rostered_after_an_earlier_landed_write_is_executed_and_seated(h
 @pytest.mark.unit
 def test_already_on_roster_by_hand_is_skipped(h):
     arrange_day_before(h)
-    h.boards[None] = h.after_txn[None]
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True, started=True),
+                            player(KAWHI, "Kawhi Leonard", BE, team="LAC")])
     r = execute(h)
     assert (r.outcome, r.reason) == ("skipped", "already_on_roster") and h.txn_calls == []
 
@@ -325,39 +344,71 @@ def test_already_on_roster_by_hand_is_skipped(h):
 
 
 @pytest.mark.unit
-def test_a_drop_who_plays_tonight_waits_for_the_rollover(h):
+def test_a_drop_who_plays_tonight_is_still_swapped_at_the_tip(h):
+    # After D-1's first tip the swap is next-day business on ESPN: he plays out tonight on the roster.
     arrange_day_before(h, drop_game=True)
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "holder_plays_today", ROLLOVER)
-    assert h.deferred == [(1, ROLLOVER, "holder_plays_today", None)] and h.txn_calls == []
+    assert (r.outcome, r.seated_slot) == ("executed", "PG")
+    assert h.txn_calls[0]["drop_player_id"] == EDWARDS and h.deferred == []
 
 
 @pytest.mark.unit
-def test_a_locked_drop_the_day_before_waits_for_the_rollover(h):
+def test_a_locked_drop_the_day_before_is_still_sent(h):
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
                             player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "drop_locked", ROLLOVER)
+    assert r.outcome == "executed" and h.txn_calls[0]["drop_player_id"] == EDWARDS
 
 
 @pytest.mark.unit
-def test_a_locked_add_the_day_before_waits_for_the_rollover(h):
+def test_a_locked_add_the_day_before_is_still_sent(h):
     arrange_day_before(h)
     h.pool = {KAWHI: pool(locked=True)}
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "add_locked", ROLLOVER)
+    assert r.outcome == "executed" and h.txn_calls[0]["add_player_id"] == KAWHI
 
 
 @pytest.mark.unit
-def test_the_rollover_attempt_itself_retries_ten_minutes_later_while_espn_lags(h):
-    # 2:00 AM Thursday ET: the board still says day 2 and the drop is locked from last night
+def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h):
+    # 2:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN",
                                                                        game=True, started=True)])
-    at = ROLLOVER
-    r = execute(h, now=at)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "holder_plays_today", at + svc.RETRY)
+    r = execute(h, now=ROLLOVER)
+    assert r.outcome == "executed" and len(h.txn_calls) == 1
+
+
+@pytest.mark.unit
+def test_the_day_before_waits_for_tonights_first_tip_on_the_fresh_board(h):
+    # Scheduled while the schedule showed no games tonight (a 2:00 AM window); they have landed since.
+    # Sent now it would be same-day business on ESPN, and Edwards would lose his game tonight.
+    arrange_day_before(h, drop_game=True)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
+                            player(EDWARDS, "Anthony Edwards", BE, team="MIN", game=True)], first_tip="19:30")
+    early = svc.rollover_at(TODAY) + timedelta(minutes=1)
+    r = execute(h, row(not_before_at=svc.rollover_at(TODAY)), now=early)
+    tip = svc.et_at(TODAY, time(19, 30)) + svc.TIP_MARGIN
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "before_first_tip", tip)
+    assert h.txn_calls == [] and h.marked == [] and h.settled == []
+
+
+@pytest.mark.unit
+def test_the_day_before_waits_out_the_margin_after_the_first_tip(h):
+    arrange_day_before(h, drop_game=True)
+    at_tip = svc.et_at(TODAY, time(19, 0))
+    r = execute(h, now=at_tip)
+    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "before_first_tip", at_tip + svc.RETRY)
+    assert h.txn_calls == []
+
+
+@pytest.mark.unit
+def test_a_day_before_without_games_sends_at_its_rollover(h):
+    arrange_day_before(h)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN")],
+                           first_tip=None)
+    r = execute(h, row(not_before_at=svc.rollover_at(TODAY)), now=svc.rollover_at(TODAY) + timedelta(minutes=1))
+    assert r.outcome == "executed" and h.txn_calls[0]["drop_player_id"] == EDWARDS
 
 
 @pytest.mark.unit
@@ -451,7 +502,7 @@ def test_the_deadline_is_checked_before_anything_is_sent(h):
 
 
 @pytest.mark.unit
-def test_roster_full_is_skipped_but_another_rejection_fails(h):
+def test_roster_full_is_skipped_and_a_position_limit_fails(h):
     arrange_day_before(h)
     h.txn = [FantasyWriterRejected("Roster is full.", espn_status=400, espn_error_code="TRAN_ROSTER_FULL")]
     r = execute(h)
@@ -464,6 +515,25 @@ def test_roster_full_is_skipped_but_another_rejection_fails(h):
     r = execute(h)
     assert (r.outcome, r.reason) == ("failed", "espn_rejected")
     assert r.detail == "Too many players with default position C (maximum 4)"
+
+
+@pytest.mark.unit
+def test_an_unknown_rejection_the_day_before_gets_one_more_try_at_the_rollover(h):
+    arrange_day_before(h)
+    h.txn = [FantasyWriterRejected("Player is locked.", espn_status=400, espn_error_code="TRAN_SOMETHING_LOCKED")]
+    rw = row()
+    r = execute(h, rw)
+    assert (r.outcome, r.reason, r.next_attempt_at, r.detail) == ("deferred", "espn_rejected", ROLLOVER, "Player is locked.")
+    assert rw.audit_id is None            # nothing landed: the retry may send
+    assert h.settled == []
+
+
+@pytest.mark.unit
+def test_an_unknown_rejection_on_the_day_itself_fails(h):
+    arrange_day_of(h)
+    h.txn = [FantasyWriterRejected("Player is locked.", espn_status=400, espn_error_code="TRAN_SOMETHING_LOCKED")]
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("failed", "espn_rejected")
 
 
 # ---- acquisition limits ------------------------------------------------------------------
@@ -611,10 +681,32 @@ def test_a_write_that_landed_before_the_worker_died_is_executed_by_the_next_atte
 
 @pytest.mark.unit
 def test_a_write_the_board_does_not_show_fails_and_is_never_sent_again(h):
-    arrange_day_before(h)                        # no Kawhi on the board: the write that went out never landed
+    arrange_day_before(h)                        # no Kawhi on today's or D's board: the write never landed
     r = execute(h, row(audit_id=41))
     assert (r.outcome, r.reason, r.audit_id) == ("failed", "interrupted", 41)
     assert h.txn_calls == [] and h.pool_calls == [] and h.lineup_calls == []
+    assert h.reads == [None, 3]
+
+
+@pytest.mark.unit
+def test_a_timed_out_write_the_day_before_that_shows_only_on_ds_board_is_executed_and_seated(h):
+    arrange_day_before(h, drop_game=True)
+    h.txn = [FantasyWriterUnavailable("timed out", espn_status=None)]
+    assert execute(h).outcome == "deferred" and h.deferred_audit_ids == [1]
+
+    h.boards[3] = h.after_txn[3]                 # ESPN took it as next-day business; today's roster is unchanged
+    r = execute(h, row(attempts=2, audit_id=1), now=NOW + svc.WRITER_RETRY)
+    assert (r.outcome, r.reason, r.audit_id, r.verified, r.seated_slot) == ("executed", "already_rostered", 1, True, "PG")
+    assert len(h.txn_calls) == 1 and h.lineup_calls[0]["scoring_period_id"] == 3
+
+
+@pytest.mark.unit
+def test_an_unreadable_ds_board_keeps_the_write_in_flight_instead_of_failing_it(h):
+    arrange_day_before(h)
+    h.boards[3] = RuntimeError("espn 503")
+    r = execute(h, row(audit_id=41))
+    assert (r.outcome, r.reason, r.detail) == ("deferred", "provider_error", "espn 503")
+    assert h.deferred_audit_ids == [41] and h.settled == [] and h.txn_calls == []
 
 
 @pytest.mark.unit
@@ -662,8 +754,11 @@ def test_a_write_out_near_the_deadline_waits_for_the_board_instead_of_expiring(h
 def test_a_confirmed_write_is_not_seated_after_its_day_or_on_a_read_only_board(h, board):
     arrange_day_of(h)
     h.boards[None] = board
+    h.boards[3] = state([player(KAWHI, "Kawhi Leonard", BE, team="LAC")], period=3, nba_date="2026-10-22")
     r = execute(h, row(audit_id=41))
-    assert (r.outcome, r.seated_slot) == ("executed", None) and h.lineup_calls == [] and h.reads == [None]
+    assert (r.outcome, r.seated_slot) == ("executed", None) and h.lineup_calls == []
+    # the day before, the confirm reads D's board too; nothing reads it to seat him
+    assert h.reads == ([None, 3] if board.scoring_period_id < 3 else [None])
 
 
 # ---- execute_due ------------------------------------------------------------------------
@@ -687,6 +782,62 @@ def test_execute_due_with_writes_off_pushes_rows_back_without_claiming(h, monkey
     resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(now=NOW)))
     assert h.released == [(NOW, NOW + svc.RETRY)]
     assert resp.data.due == 3 and resp.data.results == [] and "switched off" in resp.message
+    assert h.lanes_released == [(NOW, NOW + svc.RETRY)] and h.lane_runs == []
+
+
+@pytest.mark.unit
+def test_the_run_makes_the_lane_decisions_first_and_reports_their_notices(h, monkeypatch):
+    order = []
+    notice = LaneNotice(lane_id=7, team_id=21, user_id=11, notify="email", action="paused", reason="holder_gone",
+                        holder=svc.ScheduledPickupPlayer(player_id=EDWARDS, name="Anthony Edwards"))
+    h.lane_notices = [notice]
+    monkeypatch.setattr(svc, "_claim_due", lambda now, limit: order.append("claim") or [])
+    real = StreamLaneService.decide_due
+
+    async def decide(now, limit):
+        order.append("lanes")
+        return await real(now, limit)
+    monkeypatch.setattr(StreamLaneService, "decide_due", staticmethod(decide))
+    resp = run(svc.ScheduledPickupService.execute_due(PickupExecuteReq(limit=4, now=NOW)))
+    assert order == ["lanes", "claim"] and h.lane_runs == [(NOW, 4)]
+    assert resp.data.lanes == [notice]
+
+
+@pytest.mark.unit
+def test_a_lane_pickups_result_carries_the_lane(h, monkeypatch):
+    arrange_day_before(h)
+    seen = []
+
+    async def noted(r, status, reason, detail, now):
+        seen.append((r.id, status))
+        return PickupLane(lane_id=7, notify="desk", why="as_projected")
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled", staticmethod(noted))
+    result = execute(h, row(lane_id=7))
+    assert result.outcome == "executed" and seen == [(1, "executed")]
+    assert (result.lane.lane_id, result.lane.notify) == (7, "desk")
+    # A user's own pickup tells no lane.
+    seen.clear()
+    arrange_day_before(h)
+    assert execute(h, row(lane_id=None)).lane is None and seen == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lane_status", ["paused", "ended"])
+def test_a_lane_pickup_whose_lane_is_no_longer_active_is_cancelled_unsent(h, monkeypatch, lane_status):
+    arrange_day_before(h)
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled", staticmethod(lambda *args: _none()))
+    h.lane_status = lane_status
+    assert execute(h, row(lane_id=7)) is None
+    assert h.settled == [(1, {"status": "cancelled", "reason": f"lane_{lane_status}"})]
+    assert h.txn_calls == [] and h.reads == []
+    # A write already out is still confirmed from the board, whatever the lane did since.
+    h.settled.clear()
+    r = execute(h, row(lane_id=7, audit_id=41))
+    assert (r.outcome, r.reason) == ("failed", "interrupted")
+
+
+async def _none():
+    return None
 
 
 @pytest.mark.unit
@@ -735,8 +886,8 @@ def scheduling(h, monkeypatch):
     h.windows = []
     h.inserted = []
 
-    def window_for(nba_date, drop_team):
-        h.windows.append((nba_date, drop_team))
+    def window_for(nba_date):
+        h.windows.append(nba_date)
         return svc.AttemptWindow(not_before_at=NOW, deadline_at=DEADLINE, rule="first_tip_prev")
 
     def insert(**fields):
@@ -770,9 +921,17 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
     assert (f["team"], f["user"], f["add_player_id"], f["drop_player_id"]) == (21, 11, KAWHI, EDWARDS)
     assert (f["add_name"], f["add_team"], f["drop_name"], f["drop_team"]) == ("Kawhi Leonard", "LAC", "Anthony Edwards", "MIN")
     assert (f["scoring_period_id"], f["nba_date"], f["not_before_at"], f["deadline_at"]) == (3, DAY_D, NOW, DEADLINE)
-    assert h.windows == [(DAY_D, "MIN")]
+    assert h.windows == [DAY_D]
     assert resp.data.id == 7 and resp.data.status == "pending" and resp.data.add.name == "Kawhi Leonard"
     assert resp.data.drop.player_id == EDWARDS and "scheduled for ESPN day 3" in resp.message
+
+
+@pytest.mark.unit
+def test_schedule_refuses_to_drop_a_stream_lanes_holder(scheduling):
+    scheduling.lane_holder = EDWARDS
+    with pytest.raises(svc.ScheduledPickupInvalid) as exc:
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert exc.value.data["reason"] == "drop_is_lane_holder" and scheduling.inserted == []
 
 
 @pytest.mark.unit
@@ -780,7 +939,7 @@ def test_schedule_accepts_a_player_on_waivers_and_an_open_seat(scheduling):
     h = scheduling
     h.pool = {KAWHI: pool(status="WAIVERS")}
     resp = schedule(SchedulePickupReq(add_player_id=KAWHI, scoring_period_id=5))
-    assert resp.data.drop is None and h.windows == [(date(2026, 10, 24), None)]
+    assert resp.data.drop is None and h.windows == [date(2026, 10, 24)]
 
 
 @pytest.mark.unit
@@ -867,7 +1026,7 @@ def test_schedule_gates(scheduling, monkeypatch):
 
 @pytest.mark.unit
 def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
-    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25)),
+    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25), lane_id=7),
             row(id=2, status="pending", nba_date=date(2026, 10, 23)),
             row(id=3, status="executed", updated_at=NOW - timedelta(days=1), seated_slot_id=UT, audit_id=9)]
     monkeypatch.setattr(svc, "_list_pickups", lambda team_id, since: rows)
@@ -876,6 +1035,7 @@ def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
     assert [p.id for p in resp.data.pending] == [2, 1]
     assert [p.id for p in resp.data.recent] == [3]
     assert resp.data.recent[0].seated_slot == "UT" and resp.data.recent[0].add.nba_player_id == 1627
+    assert [p.lane_id for p in resp.data.pending] == [None, 7]       # a stream lane's pickup says so
 
 
 @pytest.mark.unit

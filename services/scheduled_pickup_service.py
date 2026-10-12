@@ -7,16 +7,20 @@ a later ESPN day, made by a job at the earliest moment the roster can take it.
     cancel         DELETE /teams/{id}/pickups/{pickup_id}  a pending row no attempt holds
     execute_due    POST   /jobs/pickups/execute            the pipeline route: claim the due rows, try each
 
-Timing. ESPN counts an acquisition for the day it is made only before that day's
-first game, so the first attempt for day D is the first tip-off of D-1 — unless
-the player to drop has a game on D-1 (dropping him before it loses that game;
-once it starts he is locked), when the first attempt waits for the ESPN day to
-roll into D (02:00 ET, `schedule_service.get_nba_today`'s rule). Every attempt
-re-reads the board and the pool through a manual transaction's checks
-(`RosterTransactionService._validate`) and sends through its chain (`_write`),
-audited under source 'scheduled'. A lock, a waiver period or a writer outage
-defers the row; a player who is gone settles it as `skipped` — the no-op; D's
-first tip-off is the deadline. After the add, the player is seated in day D's
+Timing. ESPN counts a transaction for the day it is made only before that day's
+first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
+(the player dropped plays out D-1) and takes effect for D. So the first attempt
+for day D is the first tip-off of D-1, TIP_MARGIN after it and checked again on
+the board it is sent from (the rollover into D-1, 02:00 ET, when D-1 has no
+games), and the add and the drop go out as one transaction. On that attempt
+today's locks are ESPN's business, not ours: the pre-checks skip them and
+an ESPN refusal other than a full roster or a position limit gets one more try
+at the rollover into D. Every attempt re-reads the board and the pool through a
+manual transaction's checks (`RosterTransactionService._validate`) and sends
+through its chain (`_write`, verified against D's board when sent the day
+before), audited under source 'scheduled'. A waiver period
+or a writer outage defers the row; a player who is gone settles it as `skipped`
+— the no-op; D's first tip-off is the deadline. After the add, the player is seated in day D's
 lineup through the lineup-move chain (FUTURE_ROSTER while D is still ahead),
 best effort: a seat that cannot be given never undoes an executed pickup.
 
@@ -27,8 +31,9 @@ The mark is the write's audit id on the pending row, and the lease is renewed fr
 the send. Every settle and deferral is fenced the same way, so an attempt that lost
 its row changes nothing and reports nothing. A write that got no answer — the
 worker died, the writer timed out — keeps its mark, and the next attempt only reads
-the board: the player on it settles the row executed (and seats him), his absence
-settles it failed `interrupted`. Only a writer that was provably never reached (no
+the board (the day before, D's board too, where a next-day swap shows): the player
+on it settles the row executed (and seats him), his absence settles it failed
+`interrupted`. Only a writer that was provably never reached (no
 free slot, no connection) clears the mark, so that retry may send.
 
 Acquisition limits. Scheduling refuses, and an attempt skips, an add the league's limit
@@ -37,6 +42,14 @@ per-matchup limit used up for a day in the current matchup, or a per-day limit u
 the day itself. ESPN refusing an add as over the limit waits for the rollover into the day
 when that brings a fresh allowance (a per-day limit, or a day that opens a new matchup),
 and is skipped otherwise (`on_limit_refusal`).
+
+Stream lanes. Each run first makes the lane decisions that are due
+(`StreamLaneService.decide_due`); a decision that switches inserts a pickup with the lane's
+id, which the same run then claims. Settling a lane's pickup tells the lane
+(`note_pickup_settled`: an executed one moves its holder), and its result carries the lane
+for the email. Scheduling refuses to drop the player an active lane holds its spot with. A
+lane's pickup is made only while the lane is active: pausing or stopping it cancels the
+pickup, and an attempt that finds the lane paused or ended cancels it instead of sending.
 
 Cancelling. Refused while an attempt holds the row — claimed (reason
 `in_progress`) and inside its lease, or with a write out — so a user told
@@ -68,6 +81,7 @@ from schemas.scheduled_pickup import (
     PickupExecuteData,
     PickupExecuteReq,
     PickupExecuteResp,
+    PickupLane,
     PickupResult,
     SchedulePickupReq,
     ScheduledPickup,
@@ -95,7 +109,7 @@ from services.lineup_read_service import LineupReadService
 from services.providers import get_provider_adapter, unavailable_message
 from services.providers.identity import nba_ids_by_espn_id
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService, _moves_json
-from utils.espn_helpers import POSITION_MAP, normalize_nba_abbrev
+from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("scheduled_pickup")
 
@@ -106,12 +120,14 @@ IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt r
 EASTERN = pytz.timezone("US/Eastern")
 ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
 RETRY = timedelta(minutes=10)
+TIP_MARGIN = timedelta(minutes=2)   # the day-before swap waits this long past the first tip, clear of ESPN's cutoff
 WAIVER_RETRY = timedelta(minutes=60)
 WRITER_RETRY = timedelta(minutes=5)
 LEASE = timedelta(minutes=5)        # a claimed row is invisible to the next tick this long
 MAX_ATTEMPTS = 48                   # one more for a row whose write is out: a read-only attempt that confirms it
 RECENT_DAYS = 7
 ROSTER_FULL_CODE = "TRAN_ROSTER_FULL"
+POSITION_LIMIT_CODE = "TRAN_ROSTER_POSITION_LIMIT_EXCEEDED"   # waiting changes nothing
 
 
 # ------------------------------- errors ------------------------------- #
@@ -120,7 +136,7 @@ ROSTER_FULL_CODE = "TRAN_ROSTER_FULL"
 class ScheduledPickupInvalid(AppError):
     """The board or the pool refuses the pickup before it is stored. `data.reason` is one
     of: not_future, no_scoring_period, same_player, add_already_on_roster, add_not_found,
-    add_not_available, drop_not_on_roster, acquisition_limit."""
+    add_not_available, drop_not_on_roster, acquisition_limit, drop_is_lane_holder."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -187,35 +203,28 @@ def _lease_from_now(now: datetime) -> datetime:
 class AttemptWindow:
     not_before_at: datetime
     deadline_at: Optional[datetime]
-    rule: str                        # first_tip_prev | rollover_into_day | rollover_into_prev
+    rule: str                        # first_tip_prev | rollover_into_prev
 
 
 def attempt_window(
     nba_date: date,
-    drop_team: Optional[str],
     *,
     first_tip: Callable[[date], Optional[time]],
-    teams_playing: Callable[[date], set[str]],
 ) -> AttemptWindow:
     """When the executor first tries a pickup for `nba_date` (day D), and when it gives up.
 
-    The first attempt is D-1's first tip-off, after which an ESPN acquisition counts for
-    D. When the player to drop plays on D-1 that would cost his game (or be refused once
-    he is locked), so the attempt waits for the rollover into D. A D-1 without games
-    means the rollover into D-1. The deadline is D's own first tip-off; None when the
-    schedule has no row for D, and the executor then expires the row once the board's
-    day has passed D.
+    The first attempt is D-1's first tip-off (TIP_MARGIN after it), after which an ESPN
+    transaction counts for D and the player dropped still plays out D-1. A D-1 without
+    games means the rollover into D-1. The deadline is D's own first tip-off; None when
+    the schedule has no row for D, and the executor then expires the row once the board's
+    day has passed D. The executor checks D-1's first tip again on the board it sends from.
     """
     prev = nba_date - timedelta(days=1)
-    playing = {normalize_nba_abbrev(t) for t in teams_playing(prev)} if drop_team else set()
-    if drop_team and normalize_nba_abbrev(drop_team) in playing:
-        start, rule = rollover_at(nba_date), "rollover_into_day"
+    tip = first_tip(prev)
+    if tip:
+        start, rule = et_at(prev, tip) + TIP_MARGIN, "first_tip_prev"
     else:
-        tip = first_tip(prev)
-        if tip:
-            start, rule = et_at(prev, tip), "first_tip_prev"
-        else:
-            start, rule = rollover_at(prev), "rollover_into_prev"
+        start, rule = rollover_at(prev), "rollover_into_prev"
     tip_d = first_tip(nba_date)
     deadline = et_at(nba_date, tip_d) if tip_d else None
     return AttemptWindow(not_before_at=start, deadline_at=deadline, rule=rule)
@@ -403,11 +412,21 @@ def _cancel_pickup(team_id: int, pickup_id: int, now: datetime):
     return (IN_PROGRESS if row.status == PENDING else row.status), row
 
 
-def _window_for(nba_date: date, drop_team: Optional[str]) -> AttemptWindow:
+def _window_for(nba_date: date) -> AttemptWindow:
     from db.models.nba.games import Game
-    return attempt_window(nba_date, drop_team,
-                          first_tip=Game.get_earliest_game_time_on_date,
-                          teams_playing=Game.get_teams_playing_on_date)
+    return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
+
+
+def _lane_holder(team_id: int) -> Optional[int]:
+    """The player an active stream lane holds its spot with, whom no pickup may drop."""
+    from db.models.stream_lanes import active_lane_holder
+    return active_lane_holder(team_id)
+
+
+def _lane_status(lane_id: int) -> Optional[str]:
+    from db.models.stream_lanes import StreamLane
+    lane = StreamLane.get_or_none(StreamLane.id == lane_id)
+    return lane.status if lane is not None else None
 
 
 def _nba_ids(rows) -> dict[int, int]:
@@ -439,7 +458,7 @@ def to_schema(row, nba_ids: Optional[dict[int, int]] = None) -> ScheduledPickup:
         not_before_at=row.not_before_at, deadline_at=row.deadline_at, next_attempt_at=row.next_attempt_at,
         attempts=row.attempts, audit_id=row.audit_id, lineup_audit_id=row.lineup_audit_id,
         seated_slot_id=row.seated_slot_id, seated_slot=_slot_name(row.seated_slot_id),
-        created_at=row.created_at, executed_at=row.executed_at,
+        created_at=row.created_at, executed_at=row.executed_at, lane_id=getattr(row, "lane_id", None),
     )
 
 
@@ -488,11 +507,15 @@ class ScheduledPickupService:
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
+        if drop is not None and holder is not None and await run_db("pickup.lane_holder", _lane_holder,
+                                                                    team.team_id) == drop:
+            raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
+                                                  "stop the lane to drop them", drop)
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             raise _invalid("acquisition_limit", blocked)
 
-        window = await run_db("pickup.window", _window_for, nba_date, holder.team if holder else None)
+        window = await run_db("pickup.window", _window_for, nba_date)
         now = datetime.now(timezone.utc)
         row = await run_db(
             "pickup.insert", _insert_pickup,
@@ -544,15 +567,21 @@ class ScheduledPickupService:
 
     @staticmethod
     async def execute_due(req: PickupExecuteReq) -> PickupExecuteResp:
+        from services.stream_lane_service import StreamLaneService
+
         now = (req.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         if not settings.roster_writes_enabled:
             pushed = await run_db("pickup.release", _release_due, now, now + RETRY)
-            log.info("scheduled_pickups_writes_disabled", due=pushed)
+            lanes_pushed = await StreamLaneService.release_due(now, now + RETRY)
+            log.info("scheduled_pickups_writes_disabled", due=pushed, lanes_due=lanes_pushed)
             return PickupExecuteResp(
                 status=ApiStatus.SUCCESS,
-                message=f"Roster writes are switched off — {pushed} due pickup(s) pushed back {RETRY.seconds // 60} min",
+                message=f"Roster writes are switched off — {pushed} due pickup(s) and {lanes_pushed} lane "
+                        f"decision(s) pushed back {RETRY.seconds // 60} min",
                 data=PickupExecuteData(due=pushed, results=[]),
             )
+        # Lane decisions first: a switch inserts a pickup that is due now, and this run makes it.
+        lanes = await StreamLaneService.decide_due(now, req.limit)
         rows = await run_db("pickup.claim", _claim_due, now, req.limit)
         results: list[PickupResult] = []
         for row in rows:
@@ -560,8 +589,10 @@ class ScheduledPickupService:
                 # Over its attempt budget: the claim settled it, and nothing is read or sent.
                 log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=row.status,
                          reason=row.reason, attempts=row.attempts)
+                lane = (await StreamLaneService.note_pickup_settled(row, row.status, row.reason, row.detail, now)
+                        if getattr(row, "lane_id", None) else None)
                 results.append(ScheduledPickupService._result(row, row.status, row.reason, detail=row.detail,
-                                                              audit_id=row.audit_id))
+                                                              audit_id=row.audit_id, lane=lane))
                 continue
             try:
                 result = await ScheduledPickupService._execute_one(row, now)
@@ -571,16 +602,29 @@ class ScheduledPickupService:
             if result is not None:    # None: the row stopped being this run's, and its holder reports it
                 results.append(result)
         log.info("scheduled_pickups_run", due=len(rows),
-                 outcomes=dict(Counter(r.outcome for r in results)))
+                 outcomes=dict(Counter(r.outcome for r in results)), lane_notices=len(lanes))
         return PickupExecuteResp(status=ApiStatus.SUCCESS, message=f"{len(rows)} pickup(s) attempted",
-                                 data=PickupExecuteData(due=len(rows), results=results))
+                                 data=PickupExecuteData(due=len(rows), results=results, lanes=lanes))
 
     @staticmethod
     async def _execute_one(row, now: datetime) -> Optional[PickupResult]:
         """One attempt at a claimed row. None when the row stopped being this attempt's under it
-        (cancelled, or claimed by a later run once the lease ran out): nothing is sent then."""
+        (cancelled, or claimed by a later run once the lease ran out), or when its stream lane is no
+        longer active and the row is cancelled here: nothing is sent then."""
         day, nba_date = row.scoring_period_id, row.nba_date
         settle, defer = ScheduledPickupService._settle, ScheduledPickupService._defer
+
+        lane_id = getattr(row, "lane_id", None)
+        if lane_id is not None and row.audit_id is None:
+            # A lane paused or stopped since it scheduled this: the pause / stop cancels it, and this
+            # catches one that slipped past them. Nothing is sent; a cancel is told to nobody.
+            lane_status = await run_db("pickup.lane_status", _lane_status, lane_id)
+            if lane_status != "active":
+                if await run_db("pickup.settle", _settle_row, row.id, row.attempts, now, status=CANCELLED,
+                                reason=f"lane_{lane_status or 'gone'}"):
+                    log.info("scheduled_pickup_cancelled", pickup_id=row.id, team_id=row.team_id, lane_id=lane_id,
+                             lane_status=lane_status)
+                return None
 
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)
@@ -634,9 +678,18 @@ class ScheduledPickupService:
             if not seat_free:
                 return await settle(row, now, SKIPPED, "drop_missing", team_name=team_name)
             drop, note = None, "drop_missing"
-        elif holder is not None and period < day and holder.has_game_today:
-            # Dropping him before his game tonight loses it; after it starts he is locked.
-            return await defer(row, now, "holder_plays_today", at=rollover_at(nba_date), team_name=team_name)
+        if period < day and state.nba_date and state.first_game_time_et:
+            # The day before, the swap waits for today's first tip on the board's own schedule:
+            # the window was fixed when the pickup was stored, and games can land or move since.
+            # Sent before the tip it is same-day business on ESPN, and the player dropped loses
+            # his game tonight. A day without games keeps its 02:00 send.
+            tip = time.fromisoformat(state.first_game_time_et)
+            tip_at = et_at(date.fromisoformat(state.nba_date), tip) + TIP_MARGIN
+            if now < tip_at:
+                return await defer(row, now, "before_first_tip", at=tip_at, team_name=team_name)
+        # The day before, a swap after the first tip is next-day business on ESPN: the player
+        # dropped plays out today whatever his lock says, so locks are only checked on D itself.
+        check_locks = period == day
 
         # The league's add limit: skip what it certainly leaves no room for. A per-day limit needs
         # the day's own adds; when they can't be read, ESPN refuses an over-limit add itself.
@@ -652,7 +705,8 @@ class ScheduledPickupService:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
 
         try:
-            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
+            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
+                                                                          check_locks=check_locks)
         except RosterTransactionInvalid as exc:
             decision = on_refusal(exc.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=seat_free)
             if decision.action == "defer":
@@ -662,7 +716,8 @@ class ScheduledPickupService:
                 return await settle(row, now, decision.status, decision.reason, detail=exc.message, team_name=team_name)
             drop, note = None, decision.reason                       # add_only
             try:
-                holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, None)
+                holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, None,
+                                                                              check_locks=check_locks)
             except RosterTransactionInvalid as exc2:
                 second = on_refusal(exc2.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=False)
                 if second.action == "defer":
@@ -689,7 +744,7 @@ class ScheduledPickupService:
             fresh, verified, audit_id = await RosterTransactionService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=state,
                 add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-                source="scheduled", before_send=last_check,
+                source="scheduled", before_send=last_check, verify_scoring_period_id=day if period < day else None,
             )
         except ClaimLost:
             log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
@@ -708,8 +763,16 @@ class ScheduledPickupService:
                     return await defer(row, now, "acquisition_limit", at=decision.at, detail=exc.message,
                                        team_name=team_name)
                 return await settle(row, now, SKIPPED, "acquisition_limit", detail=exc.message, team_name=team_name)
-            log.info("scheduled_pickup_espn_rejected", pickup_id=row.id, team_id=row.team_id, code=code)
-            return await settle(row, now, FAILED, "espn_rejected", detail=exc.message, team_name=team_name)
+            if code == POSITION_LIMIT_CODE or period >= day:
+                log.info("scheduled_pickup_espn_rejected", pickup_id=row.id, team_id=row.team_id, code=code)
+                return await settle(row, now, FAILED, "espn_rejected", detail=exc.message, team_name=team_name)
+            # The day before: ESPN refused what the pre-checks let through (a lock it does apply to
+            # swaps, a code not met yet). Nothing landed, so the rollover into D gets one more try.
+            log.info("scheduled_pickup_espn_rejected_retry", pickup_id=row.id, team_id=row.team_id, code=code,
+                     message=exc.message)
+            row.audit_id = None
+            return await defer(row, now, "espn_rejected", at=rollover_at(nba_date), detail=exc.message,
+                               team_name=team_name)
         except ProviderAuthError:
             return await settle(row, now, FAILED, "auth_expired", team_name=team_name)
         except RosterWriteUnavailable as exc:
@@ -744,22 +807,33 @@ class ScheduledPickupService:
     @staticmethod
     async def _confirm_sent(row, now: datetime, state: LineupState, league_info, slots, adapter, *,
                             team_name: str) -> Optional[PickupResult]:
-        """Settle a row whose write went out on an earlier attempt, from today's board alone — never
-        by sending again, since a write that got no answer may still have reached ESPN. The player on
-        the board: executed, and seated on day D unless D has passed (or the board is read-only). Not
-        on it: the write never landed — failed `interrupted`, and the user makes the move by hand."""
-        on_board = {p.player_id for p in state.players}
-        if row.add_player_id not in on_board:
+        """Settle a row whose write went out on an earlier attempt, from the boards alone — never by
+        sending again, since a write that got no answer may still have reached ESPN. Before day D that
+        is D's board as well as today's: a swap ESPN took after today's first tip leaves today's roster
+        as it was and shows only on D's. The player on either: executed, and seated on day D unless D
+        has passed (or the board is read-only). On neither: the write never landed — failed
+        `interrupted`, and the user makes the move by hand. D's board unreadable: the mark stays, and
+        the next attempt reads again."""
+        period = state.scoring_period_id
+        on_board = on_day = {p.player_id for p in state.players}
+        if period is not None and period < row.scoring_period_id:
+            try:
+                board = await adapter.read_lineup(row.team_id, league_info, fallback_slot_counts=slots,
+                                                  scoring_period_id=row.scoring_period_id)
+            except Exception as exc:
+                return await ScheduledPickupService._defer(row, now, "provider_error", detail=str(exc)[:300],
+                                                           team_name=team_name)
+            on_day = {p.player_id for p in board.players}
+        if row.add_player_id not in on_board | on_day:
             return await ScheduledPickupService._settle(
                 row, now, FAILED, "interrupted", team_name=team_name,
                 detail="A write for this pickup went out with no answer recorded, and the roster does not "
                        "show it; it is not sent again")
-        period = state.scoring_period_id
         seated = Seated()
         if state.can_write and period is not None and period <= row.scoring_period_id:
             seated = await ScheduledPickupService._seat_on_day(row, league_info, slots, adapter,
                                                                period=period, preferred=None)
-        dropped = row.drop_player_id is None or row.drop_player_id not in on_board
+        dropped = row.drop_player_id is None or row.drop_player_id not in on_day
         return await ScheduledPickupService._settle(row, now, EXECUTED, "already_rostered", seated=seated,
                                                     verified=dropped, team_name=team_name)
 
@@ -803,7 +877,7 @@ class ScheduledPickupService:
     def _result(row, outcome: str, reason: Optional[str], *, detail: Optional[str] = None,
                 audit_id: Optional[int] = None, seated_slot: Optional[str] = None,
                 verified: Optional[bool] = None, next_attempt_at: Optional[datetime] = None,
-                team_name: str = "") -> PickupResult:
+                team_name: str = "", lane: Optional[PickupLane] = None) -> PickupResult:
         return PickupResult(
             pickup_id=row.id, team_id=row.team_id, user_id=row.user_id, team_name=team_name,
             outcome=outcome, reason=reason, detail=detail,
@@ -811,6 +885,7 @@ class ScheduledPickupService:
             drop=_player(row.drop_player_id, row.drop_name, row.drop_team),
             nba_date=row.nba_date, scoring_period_id=row.scoring_period_id,
             seated_slot=seated_slot, verified=verified, audit_id=audit_id, next_attempt_at=next_attempt_at,
+            lane=lane,
         )
 
     @staticmethod
@@ -831,9 +906,13 @@ class ScheduledPickupService:
             return None
         log.info("scheduled_pickup_settled", pickup_id=row.id, team_id=row.team_id, status=status, reason=reason,
                  seated_slot=seated.slot_id, attempts=row.attempts)
+        lane = None
+        if getattr(row, "lane_id", None):
+            from services.stream_lane_service import StreamLaneService
+            lane = await StreamLaneService.note_pickup_settled(row, status, reason, detail, now)
         return ScheduledPickupService._result(row, status, reason, detail=detail, audit_id=audit_id,
                                               seated_slot=_slot_name(seated.slot_id), verified=verified,
-                                              team_name=team_name)
+                                              team_name=team_name, lane=lane)
 
     @staticmethod
     async def _defer(row, now: datetime, reason: str, *, after: Optional[timedelta] = None,

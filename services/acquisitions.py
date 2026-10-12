@@ -6,6 +6,7 @@ The rules are in mSettings `settings.acquisitionSettings`:
     matchupAcquisitionLimit       adds per matchup, or per scoring period (day) when
     matchupLimitPerScoringPeriod  is true; -1 = no limit
     acquisitionLimit              adds per season; -1 = no limit
+    waiverHours                   how long a dropped player sits on waivers
 
 The counts are in mTeam `teams[].transactionCounter`: `acquisitions` (the season)
 and `matchupAcquisitionTotals` ({matchupPeriodId: adds}). A day's own adds, which
@@ -48,6 +49,14 @@ def _limit(value: Any) -> Optional[int]:
     return n if n >= 0 else None
 
 
+def _hours(value: Any) -> Optional[int]:
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
 def parse_acquisitions(payload: Mapping[str, Any], team: Mapping[str, Any]) -> Optional[AcquisitionState]:
     """The league's add limits and `team`'s counts from one mSettings + mTeam read; None when
     the league sends no acquisition settings."""
@@ -64,6 +73,7 @@ def parse_acquisitions(payload: Mapping[str, Any], team: Mapping[str, Any]) -> O
         matchup_used=int(totals.get(str(matchup), 0) or 0) if matchup else 0,
         season_limit=_limit(rules.get("acquisitionLimit", -1)),
         season_used=int(counter.get("acquisitions") or 0),
+        waiver_hours=_hours(rules.get("waiverHours")),
     )
 
 

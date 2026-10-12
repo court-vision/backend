@@ -78,7 +78,7 @@ def test_pickups_right_bearer_reaches_the_service_with_defaults(client, token, m
 
     monkeypatch.setattr(pickups.ScheduledPickupService, "execute_due", staticmethod(fake))
     r = client.post(PICKUPS, json={}, headers={"Authorization": "Bearer pipe-token"})
-    assert r.status_code == 200 and r.json()["data"] == {"due": 0, "results": []}
+    assert r.status_code == 200 and r.json()["data"] == {"due": 0, "results": [], "lanes": []}
     assert seen[0].limit == 4 and seen[0].now is None
 
     r = client.post(PICKUPS, json={"limit": 2, "now": "2026-10-22T00:05:00Z"}, headers={"Authorization": "Bearer pipe-token"})

@@ -66,7 +66,8 @@ def pool(pid=KAWHI, status="FREEAGENT", on_team=0, locked=False, name="Kawhi Leo
 
 @pytest.fixture
 def harness(monkeypatch):
-    h = SimpleNamespace(reads=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[], updates=[])
+    h = SimpleNamespace(reads=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[], updates=[],
+                        lane_holder=None)
 
     async def fake_read(team_id, league_info, **kwargs):
         nxt = h.reads.pop(0)
@@ -100,6 +101,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(svc.EspnService, "get_player_pool_entries", staticmethod(fake_pool))
     monkeypatch.setattr(fantasy_writer_client, "apply_transaction", fake_apply)
     monkeypatch.setattr(svc, "run_db", direct_run_db)
+    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
     monkeypatch.setattr(svc, "_audit_insert", audit_insert)
     monkeypatch.setattr(svc, "_audit_update", audit_update)
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
@@ -178,6 +180,18 @@ def test_drop_must_be_on_the_board_and_unlocked(harness):
     exc = _invalid(harness, req(add=KAWHI, drop=JOKIC), "drop_locked", JOKIC)
     assert "Nikola Jokic" in exc.message
     assert harness.pool_calls == []                                   # the board refuses before the pool is asked
+
+
+@pytest.mark.unit
+def test_the_player_a_stream_lane_holds_its_spot_with_cannot_be_dropped(harness):
+    harness.lane_holder = EDWARDS
+    harness.pool = {KAWHI: pool()}
+    exc = _invalid(harness, req(add=KAWHI, drop=EDWARDS), "drop_is_lane_holder", EDWARDS)
+    assert "stream lane" in exc.message
+    harness.lane_holder = JOKIC          # another player's spot: this drop goes through
+    after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(after, version="v2")]
+    assert apply(req(add=KAWHI, drop=EDWARDS)).data.verified is True
 
 
 @pytest.mark.unit
@@ -333,3 +347,24 @@ def test_a_board_without_a_period_cannot_be_written(harness):
     harness.reads = [state(board(), period=None, nba_date=None)]
     with pytest.raises(svc.RosterStale):                                # the request names period 1; the board has none
         apply(req(drop=EDWARDS, period=1))
+
+
+# ---- the executor's day-before check ---------------------------------------------------
+
+
+@pytest.mark.unit
+def test_check_locks_false_skips_the_locks_but_not_waivers(harness):
+    board_state = state([player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
+    harness.pool = {KAWHI: pool(locked=True)}
+    holder, entry = asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS, check_locks=False))
+    assert holder.player_id == EDWARDS and entry.player_id == KAWHI
+
+    harness.pool = {KAWHI: pool(status="WAIVERS")}
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS, check_locks=False))
+    assert exc.value.data["reason"] == "add_on_waivers"
+
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS))
+    assert exc.value.data["reason"] == "drop_locked"
+

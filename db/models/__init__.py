@@ -7,6 +7,7 @@ from .lineups import Lineup
 from .drafts import DraftPick, DraftSession
 from .roster_moves import RosterMove
 from .scheduled_pickups import ScheduledPickup
+from .stream_lanes import StreamLane, StreamLaneEvent
 from .lineup_snapshots import LineupSnapshot, LineupSnapshotPlayer
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     'DraftPick',
     'RosterMove',
     'ScheduledPickup',
+    'StreamLane',
+    'StreamLaneEvent',
     'LineupSnapshot',
     'LineupSnapshotPlayer',
 ]

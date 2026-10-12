@@ -5,7 +5,9 @@ exception), the games lookup and the calendar plain fakes.
 
 Covers the non-ESPN answer, the fill plan grouped into chains, the IR rows, the
 daily streamer swap and every guard around it (day, value kind, ratio, who may
-be dropped), row order, copy and ids.
+be dropped, what a drop candidate is worth when his average rests on no games),
+row order, copy and ids. The drop candidates' samples and projections are a fake
+too (`harness.sample` / `harness.projected`).
 """
 
 import asyncio
@@ -31,15 +33,21 @@ OPENING = date(2026, 10, 20)   # a Tuesday
 
 
 def player(pid, name, slot, *, eligible=(PG, SG, UT, BE, IR), game=True, status=None, injured=False,
-           locked=False, value=20.0, team="DEN", tip="19:30", pos=None):
+           locked=False, value=20.0, team="DEN", tip="19:30", pos=None, source="rolling"):
     return LineupPlayer(
         player_id=pid, nba_player_id=pid * 10, name=name, team=team, lineup_slot_id=slot, lineup_slot=_slot_name(slot),
         eligible_slot_ids=list(eligible), eligible_slots=[_slot_name(s) for s in eligible], injured=injured,
         injury_status=status, lineup_locked=locked, has_game_today=game, opponent="vs LAL" if game else None,
         game_time_et=tip if game else None, game_started=False, locked=locked,
         playable=game and (status or "ACTIVE").upper() != "OUT", avg_points=value, value_kind="fpts",
-        value_source="rolling", default_position_id=pos,
+        value_source=source, default_position_id=pos,
     )
+
+
+def returning(pid, name, slot=BE, *, team="IND"):
+    """A player we know nothing about yet, as the board shows him: back from a lost
+    season (no rolling games, no qualifying baseline), so 0.0 and no source."""
+    return player(pid, name, slot, game=False, value=0.0, team=team, source=None)
 
 
 def full_board(overrides=None):
@@ -85,7 +93,8 @@ LAL_HOME = SimpleNamespace(home_team_id="LAL", away_team_id="BOS", start_time_et
 
 @pytest.fixture
 def harness(monkeypatch):
-    h = SimpleNamespace(board=None, pool=NO_POOL, find_calls=[], games=[], game_days={})
+    h = SimpleNamespace(board=None, pool=NO_POOL, find_calls=[], games=[], game_days={},
+                        sample={}, projected={}, evidence_calls=[], evidence_error=None)
 
     async def fake_read(team_id, league_info, **kwargs):
         if isinstance(h.board, Exception):
@@ -101,10 +110,18 @@ def harness(monkeypatch):
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
+    def fake_evidence(league_info, espn_ids):
+        h.evidence_calls.append(list(espn_ids))
+        if h.evidence_error is not None:
+            raise h.evidence_error
+        return svc.DropEvidence(games={i: h.sample.get(i, 7) for i in espn_ids},     # a full window unless told
+                                projected={i: v for i, v in h.projected.items() if i in espn_ids})
+
     monkeypatch.setattr(svc.LineupReadService, "read", staticmethod(fake_read))
     monkeypatch.setattr(svc.StreamerService, "find_streamers", staticmethod(fake_find))
     monkeypatch.setattr(svc, "run_db", direct_run_db)
     monkeypatch.setattr(svc, "_games_on", lambda nba_date: h.games)
+    monkeypatch.setattr(svc, "_drop_evidence", fake_evidence)
     monkeypatch.setattr(svc.schedule_service, "get_remaining_game_days",
                         lambda team, current_date=None: h.game_days.get(team, []))
     return h
@@ -250,6 +267,7 @@ def test_an_open_seat_means_a_pickup_with_nobody_to_drop(harness):
     row = resp.data.actions[0]
     assert row.id == "add:99" and row.title == "Pick up Kawhi" and row.detail == "Open roster seat · Kawhi plays tonight · 5.0 avg"
     assert row.transaction.drop_player_id is None
+    assert harness.evidence_calls == []                     # nobody to drop, nothing to look up
 
 
 @pytest.mark.unit
@@ -292,11 +310,116 @@ def test_the_swap_needs_one_value_scale(harness):
     assert rows(resp) == [] and resp.data.streamers_error == "value_kind_mismatch"
 
 
+# ---- a drop candidate with no games behind his average ---------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_returning_star_at_0_avg_is_weighed_at_his_projection_and_kept(harness):
+    """2026-10-12, dev DB, Lvl. 3 Goblins: "Drop Tyrese Haliburton, pick up Isaiah
+    Hartenstein · ... · 0.0 vs 30.0". Haliburton missed all of 2025-26, so before his
+    first game this season the board has nothing to average and shows 0.0."""
+    harness.board = state(full_board({11: returning(11, "Tyrese Haliburton"),
+                                      12: player(12, "P12", BE, game=False, value=18.0, team="MIA")}))
+    harness.pool = pool(pick(99, "Isaiah Hartenstein", value=30.0))
+    harness.projected = {11: 41.0}
+    harness.game_days = {"MIA": [0, 3]}
+    resp = read()
+    assert rows(resp) == [("add_drop", 99, 12)]
+    assert resp.data.actions[0].detail.endswith(" · 18.0 vs 30.0")
+    assert harness.evidence_calls == [[11, 12]]             # the idle candidates, nobody else
+
+
+@pytest.mark.unit
+def test_a_returning_player_with_no_projection_either_is_never_the_drop(harness):
+    harness.board = state(full_board({11: returning(11, "Tyrese Haliburton")}))
+    harness.pool = pool(pick(99, "Isaiah Hartenstein", value=30.0))
+    assert rows(read()) == []                               # the only idle player is unknown: no swap
+
+    harness.board = state(full_board({11: returning(11, "Tyrese Haliburton"),
+                                      12: player(12, "P12", BE, game=False, value=18.0)}))
+    assert rows(read()) == [("add_drop", 99, 12)]
+
+
+@pytest.mark.unit
+def test_a_failed_lookup_keeps_the_board_values_but_never_drops_a_player_at_0_avg(harness):
+    harness.board = state(full_board({11: returning(11, "Tyrese Haliburton"),
+                                      12: player(12, "P12", BE, game=False, value=18.0)}))
+    harness.pool = pool(pick(99, "Isaiah Hartenstein", value=30.0))
+    harness.projected = {11: 41.0}
+    harness.evidence_error = RuntimeError("db down")
+    resp = read()
+    assert rows(resp) == [("add_drop", 99, 12)] and resp.data.streamers_error is None
+
+
+@pytest.mark.unit
+def test_a_projected_drop_says_so_and_the_ratio_holds_against_the_projection(harness):
+    harness.board = state(full_board({11: returning(11, "Rookie"),
+                                      12: player(12, "P12", BE, game=False, value=25.0)}))
+    harness.projected = {11: 20.0}
+    harness.pool = pool(pick(99, "Kawhi", value=17.0))
+    harness.game_days = {"IND": [0, 2]}
+    resp = read()
+    assert rows(resp) == [("add_drop", 99, 11)]
+    assert resp.data.actions[0].detail == ("Rookie has no game today (next plays Thu) · Kawhi plays tonight · "
+                                           "20.0 projected vs 17.0")
+    harness.pool = pool(pick(99, "Kawhi", value=16.9))     # 0.0 on the board would have let this through
+    assert rows(read()) == []
+
+
+@pytest.mark.unit
+def test_two_games_are_too_few_to_call_a_player_the_weakest(harness):
+    harness.board = state(full_board({11: player(11, "Slow Start", BE, game=False, value=8.0),
+                                      12: player(12, "P12", BE, game=False, value=18.0)}))
+    harness.pool = pool(pick(99, "Kawhi", value=30.0))
+    harness.sample = {11: 2}
+    harness.projected = {11: 35.0}
+    assert rows(read()) == [("add_drop", 99, 12)]
+    harness.sample = {11: svc.MIN_SAMPLE_GAMES}             # enough games: his own average stands
+    assert rows(read()) == [("add_drop", 99, 11)]
+
+
 # ---- suggest_transaction (pure) ---------------------------------------------------------------------------
 
 
 def suggest(players, streamers, limits=None, **kw):
     return svc.suggest_transaction(state(players, limits=limits), streamers, ir_eligible=eligible(players), **kw)
+
+
+def evidence(games=None, projected=None):
+    return svc.DropEvidence(games=games or {}, projected=projected or {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value, source, games, projected, expected", [
+    (15.0, "baseline", None, None, (15.0, False)),          # last season, >= 10 games: a real sample
+    (18.0, "rolling", 7, 40.0, (18.0, False)),              # a full window: the board's average
+    (18.0, "rolling", 3, None, (18.0, False)),              # MIN_SAMPLE_GAMES is enough
+    (6.0, "rolling", 1, 35.0, (35.0, True)),                # one quiet game: the projection
+    (30.0, "rolling", 2, 25.0, (30.0, False)),              # two hot games: the higher of the two
+    (6.0, "rolling", 2, None, None),                        # too few games and no projection: unknown
+    (0.0, None, None, 41.0, (41.0, True)),                  # no games at all: the projection
+    (0.0, None, None, None, None),                          # nothing at all: unknown
+])
+def test_a_drop_candidate_is_worth_his_average_only_on_a_real_sample(value, source, games, projected, expected):
+    p = player(11, "P11", BE, game=False, value=value, source=source)
+    ev = evidence({11: games} if games is not None else {}, {11: projected} if projected is not None else {})
+    assert svc.drop_value(p, ev) == (svc.DropValue(*expected) if expected else None)
+
+
+@pytest.mark.unit
+def test_without_evidence_the_board_stands_except_for_an_empty_average():
+    assert svc.drop_value(player(11, "P11", BE, game=False, value=6.0), None) == svc.DropValue(6.0, False)
+    assert svc.drop_value(returning(11, "Tyrese Haliburton"), None) is None
+
+
+@pytest.mark.unit
+def test_a_returning_player_with_avg_0_and_no_games_is_not_the_weakest():
+    players = full_board({11: returning(11, "Tyrese Haliburton"), 12: player(12, "P12", BE, game=False, value=18.0)})
+    s = suggest(players, [pick(99, value=30.0)], evidence=evidence(games={12: 7}, projected={11: 41.0}))
+    assert s.drop.player_id == 12 and s.drop_value == svc.DropValue(18.0, False)
+    assert suggest(players, [pick(99, value=30.0)]).drop.player_id == 12             # no evidence at all
+    alone = full_board({11: returning(11, "Tyrese Haliburton")})
+    assert suggest(alone, [pick(99, value=30.0)], evidence=evidence()) is None
 
 
 @pytest.mark.unit

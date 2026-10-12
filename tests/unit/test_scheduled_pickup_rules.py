@@ -27,10 +27,9 @@ def utc(y, m, d, hh, mm=0):
     return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
 
 
-def window(drop_team=None, *, tips=None, playing=None):
+def window(*, tips=None):
     tips = tips or {}
-    playing = playing or {}
-    return svc.attempt_window(D, drop_team, first_tip=lambda d: tips.get(d), teams_playing=lambda d: playing.get(d, set()))
+    return svc.attempt_window(D, first_tip=lambda d: tips.get(d))
 
 
 # ---- attempt_window -----------------------------------------------------------------
@@ -40,28 +39,8 @@ def window(drop_team=None, *, tips=None, playing=None):
 def test_first_attempt_is_the_previous_days_first_tip():
     w = window(tips={PREV: time(19, 0), D: time(19, 30)})
     assert w.rule == "first_tip_prev"
-    assert w.not_before_at == utc(2026, 11, 12, 0, 0)      # 7 PM EST Wed = 00:00 UTC Thu
+    assert w.not_before_at == utc(2026, 11, 12, 0, 2)      # 7 PM EST Wed = 00:00 UTC Thu, plus the margin
     assert w.deadline_at == utc(2026, 11, 13, 0, 30)       # 7:30 PM EST Thu
-
-
-@pytest.mark.unit
-def test_a_drop_who_plays_the_day_before_waits_for_the_rollover():
-    w = window("MIN", tips={PREV: time(19, 0), D: time(19, 30)}, playing={PREV: {"MIN", "LAL"}})
-    assert w.rule == "rollover_into_day"
-    assert w.not_before_at == utc(2026, 11, 12, 7, 0)      # 2 AM EST Thu
-    assert w.deadline_at == utc(2026, 11, 13, 0, 30)
-
-
-@pytest.mark.unit
-def test_the_drop_teams_abbreviation_is_normalised_before_the_lookup():
-    w = window("PHO", tips={PREV: time(19, 0)}, playing={PREV: {"PHX"}})
-    assert w.rule == "rollover_into_day"
-
-
-@pytest.mark.unit
-def test_a_drop_who_does_not_play_keeps_the_first_tip_rule():
-    w = window("MIN", tips={PREV: time(19, 0)}, playing={PREV: {"LAL", "BOS"}})
-    assert w.rule == "first_tip_prev" and w.not_before_at == utc(2026, 11, 12, 0, 0)
 
 
 @pytest.mark.unit

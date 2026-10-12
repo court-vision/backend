@@ -4,7 +4,9 @@ Per-player scalar values under a league's scoring.
 One helper for every place that produces `avg_points`: rolling-window averages
 (nba.player_rolling_stats), decay-weighted recent averages (nba.player_game_stats),
 raw StatLines for category projections, and -- for H2H-category leagues -- the
-fpts-scale category value (services.scoring.category_value). When the point
+fpts-scale category value (services.scoring.category_value). The season
+projection (nba.player_projections) is valued on the same scales, as a prior for
+players whose recent average rests on too few games. When the point
 weights are the global default, values are read straight from the stored `fpts`
 columns (exact parity with the pre-league behavior); otherwise they are
 recomputed from raw stats.
@@ -19,13 +21,16 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
+from peewee import fn
+
 from core.nba_calendar import nba_date_et
 from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.player_rolling_stats import PlayerRollingStats
 from db.models.nba.players import Player
 from schemas.common import LeagueInfo
 from services.scoring.category_rank import PoolRow
-from services.scoring.category_value import category_values, rankable_categories
+from services.scoring.category_value import category_values, category_values_in_pool, rankable_categories
 from services.scoring.models import CategoryDef, StatLine
 from services.scoring.points import PointsScoring
 from services.scoring.pool import BASELINE_MIN_GP, baseline_records, baseline_season, load_baseline_pool, load_pool
@@ -413,6 +418,84 @@ class PlayerValueService:
             match = next((r for r in candidates if team and r.team == team), None) or (candidates[0] if candidates else None)
             out[n] = ValueResult(values[match.id], source) if match is not None else ValueResult(None, None)
         return out
+
+    # ---- sample sizes and the season projection (a prior for thin samples) ------
+
+    @staticmethod
+    def rolling_games_by_espn_id(espn_ids: list[int], days: int = 14) -> dict[int, int]:
+        """Games behind each player's rolling-window value, keyed by ESPN id. A player
+        with no row (no game in the window, or no fresh snapshot) is absent."""
+        if days not in ROLLING_WINDOWS:
+            raise ValueError(f"no stored rolling window of {days} days; have {ROLLING_WINDOWS}")
+        if not espn_ids:
+            return {}
+        latest = PlayerValueService._latest_rolling_date(days)
+        if not latest:
+            return {}
+        records = (
+            PlayerRollingStats.select(PlayerRollingStats.gp, Player.espn_id)
+            .join(Player)
+            .where((Player.espn_id.in_(espn_ids))
+                   & (PlayerRollingStats.window_days == days)
+                   & (PlayerRollingStats.as_of_date == latest))
+        )
+        return {rec.player.espn_id: int(rec.gp or 0) for rec in records}
+
+    @staticmethod
+    def projections_by_espn_id(espn_ids: list[int], season: Optional[str] = None) -> dict[int, PlayerProjection]:
+        """Each player's row in the season's latest projection snapshot, Player joined:
+        Court Vision's once the cv-projection chain has published one, ESPN's until
+        then. One snapshot, one source (as on the draft board) — a player CV does not
+        project gets nothing rather than ESPN's line."""
+        if not espn_ids:
+            return {}
+        from core.settings import settings
+
+        season = season or settings.nba_season
+        for source in ("cv", "espn"):
+            in_source = (PlayerProjection.season == season) & (PlayerProjection.source == source)
+            latest = PlayerProjection.select(fn.MAX(PlayerProjection.as_of_date)).where(in_source).scalar()
+            if latest is None:
+                continue
+            records = (
+                PlayerProjection.select(PlayerProjection, Player)
+                .join(Player)
+                .where(in_source & (PlayerProjection.as_of_date == latest) & (Player.espn_id.in_(espn_ids)))
+            )
+            return {rec.player.espn_id: rec for rec in records}
+        return {}
+
+    @staticmethod
+    def projected_value_by_espn_id(scoring: "ResolvedScoring", espn_ids: list[int], *,
+                                   season: Optional[str] = None, days: int = 14) -> dict[int, float]:
+        """Each player's per-game value from the season projection, on the scale
+        `avg_points_for` gives the same league: fantasy points under its weights, or
+        the category value of the projected line z-scored against the pool the
+        rolling values come from (`days` picks it, as there), the player's own row
+        swapped for his projection. Players without a projection are absent."""
+        records = PlayerValueService.projections_by_espn_id(espn_ids, season)
+        if not records:
+            return {}
+        lines = {eid: StatLine.from_row(rec) for eid, rec in records.items()}
+        if not scoring.is_categories:
+            scorer = PlayerValueService._scorer(scoring.point_weights)
+            return {eid: round(scorer.score(line), 1) for eid, line in lines.items()}
+
+        _, pool = PlayerValueService._category_pool(days)
+        if not pool:
+            return {}
+        default = PlayerValueService._scorer(None)
+        rows = []
+        for eid, rec in records.items():
+            fpts = round(default.score(lines[eid]), 1)
+            gp = max(int(rec.projected_gp or 0), 1)    # a projected line counts even with no games projected
+            rows.append(PoolRow(
+                id=rec.player_id, name=rec.player.name, team=None, gp=gp, line=lines[eid],
+                fpts_avg=fpts, fpts_total=round(fpts * gp, 1),
+                espn_id=eid, name_normalized=rec.player.name_normalized,
+            ))
+        values = category_values_in_pool(pool, rows, rankable_categories(scoring))
+        return {row.espn_id: values[row.id] for row in rows if row.id in values}
 
     # ---- the one dispatcher every provider uses --------------------------------
 

@@ -64,7 +64,8 @@ log = get_logger("roster_transaction")
 class RosterTransactionInvalid(AppError):
     """The board or ESPN's pool refuses the request before it is sent. `data.reason` is
     one of: nothing_to_do, same_player, drop_not_on_roster, drop_locked,
-    add_already_on_roster, add_not_found, add_on_waivers, add_not_available, add_locked."""
+    add_already_on_roster, add_not_found, add_on_waivers, add_not_available, add_locked,
+    drop_is_lane_holder (an active stream lane holds its spot with that player)."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -78,6 +79,12 @@ def _invalid(reason: str, message: str, player_id: Optional[int] = None) -> Rost
 
 
 # ------------------------------- shapes ------------------------------- #
+
+
+def _lane_holder(team_id: int) -> Optional[int]:
+    """The player an active stream lane holds its spot with, whom the desk may not drop."""
+    from db.models.stream_lanes import active_lane_holder
+    return active_lane_holder(team_id)
 
 
 def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: Optional[int]) -> str:
@@ -124,6 +131,10 @@ class RosterTransactionService:
 
         add, drop = req.add_player_id, req.drop_player_id
         holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
+        if drop is not None and holder is not None and await run_db("txn.lane_holder", _lane_holder,
+                                                                    team.team_id) == drop:
+            raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
+                                                  "stop the lane to drop them", drop)
 
         names = {p.player_id: p.name for p in state.players}
         if pool_entry is not None:
@@ -149,13 +160,18 @@ class RosterTransactionService:
 
     @staticmethod
     async def _validate(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
-                        *, for_future_day: bool = False) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
+                        *, for_future_day: bool = False, check_locks: bool = True,
+                        ) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
         """The board's answer for the drop and ESPN's pool answer for the add — or the
         first reason the request cannot go. Only the add needs the pool lookup.
 
-        `for_future_day` is the scheduled-pickup check: today's locks and a waiver
-        period say nothing about a later day, so those three refusals are skipped and
-        only the roster / pool facts (on the board, in the league, on another team) count."""
+        `for_future_day` is the scheduling check: today's locks and a waiver period say
+        nothing about a later day, so those three refusals are skipped and only the
+        roster / pool facts (on the board, in the league, on another team) count.
+        `check_locks=False` is the executor's attempt on the day before: ESPN takes a
+        swap made after the day's first tip as next-day business, so today's locks are
+        not consulted — ESPN's own answer is — while a waiver period still refuses."""
+        skip_locks = for_future_day or not check_locks
         if add is None and drop is None:
             raise _invalid("nothing_to_do", "Choose a player to add or a player to drop")
         if add is not None and add == drop:
@@ -167,7 +183,7 @@ class RosterTransactionService:
             holder = on_board.get(drop)
             if holder is None:
                 raise _invalid("drop_not_on_roster", "That player is not on your roster", drop)
-            if holder.locked and not for_future_day:
+            if holder.locked and not skip_locks:
                 raise _invalid("drop_locked", f"{holder.name} is locked for today and cannot be dropped", drop)
 
         pool_entry: Optional[PoolEntry] = None
@@ -186,7 +202,7 @@ class RosterTransactionService:
                 raise _invalid("add_on_waivers", f"{pool_entry.name} is on waivers{until} — place the claim on {label}", add)
             if pool_entry.status == "ONTEAM" or pool_entry.on_team_id:
                 raise _invalid("add_not_available", f"{pool_entry.name} is on another team's roster", add)
-            if pool_entry.roster_locked and not for_future_day:
+            if pool_entry.roster_locked and not skip_locks:
                 raise _invalid("add_locked", f"{pool_entry.name} is locked for today and cannot be added", add)
         return holder, pool_entry
 
@@ -196,10 +212,14 @@ class RosterTransactionService:
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
                      add: Optional[int], drop: Optional[int], moves: list[dict[str, Any]],
                      fallback_slot_counts, source: str = "manual",
-                     before_send: Optional[Callable[[int], Awaitable[None]]] = None) -> tuple[LineupState, bool, int]:
+                     before_send: Optional[Callable[[int], Awaitable[None]]] = None,
+                     verify_scoring_period_id: Optional[int] = None) -> tuple[LineupState, bool, int]:
         """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor.
         `before_send(audit_id)` runs once the audit row exists, right before the writer is called
-        (the pickup executor's last check); when it raises, nothing is sent and the audit row says so."""
+        (the pickup executor's last check); when it raises, nothing is sent and the audit row says so.
+        `verify_scoring_period_id` is the day whose board the write is checked against (today's when
+        None): the executor's swap the day before is next-day business on ESPN, so today's board
+        still shows the player dropped and only day D's shows the swap."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
@@ -230,7 +250,8 @@ class RosterTransactionService:
 
         try:
             fresh = await get_provider_adapter(league_info.provider).read_lineup(
-                team_id, league_info, fallback_slot_counts=fallback_slot_counts
+                team_id, league_info, fallback_slot_counts=fallback_slot_counts,
+                scoring_period_id=verify_scoring_period_id,
             )
         except Exception as exc:
             # ESPN took the transaction and only the read-back failed: settle the row as applied,

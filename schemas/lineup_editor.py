@@ -81,6 +81,7 @@ class AcquisitionState(ApiModel):
     matchup_used: int = 0                        # adds counted this matchup
     season_limit: Optional[int] = None           # None = no season cap
     season_used: int = 0
+    waiver_hours: Optional[int] = None           # how long a dropped player sits on waivers; None = not sent
 
 
 class LineupState(ApiModel):

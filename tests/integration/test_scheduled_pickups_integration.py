@@ -270,9 +270,10 @@ def test_window_reads_the_schedule(user, team):
     Game.create(game_id="g1", game_date=DAY - timedelta(days=1), season="2026-27", home_team="MIN", away_team="LAL",
                 start_time_et=time(19, 30))
     Game.create(game_id="g2", game_date=DAY, season="2026-27", home_team="BOS", away_team="DEN", start_time_et=time(19, 0))
-    w = svc._window_for(DAY, "MIN")
-    assert w.rule == "rollover_into_day" and w.deadline_at == svc.et_at(DAY, time(19, 0))
-    assert svc._window_for(DAY, "BOS").rule == "first_tip_prev"
+    w = svc._window_for(DAY)
+    assert w.rule == "first_tip_prev"
+    assert w.not_before_at == svc.et_at(DAY - timedelta(days=1), time(19, 30)) + svc.TIP_MARGIN
+    assert w.deadline_at == svc.et_at(DAY, time(19, 0))
 
 
 # ---- rollback -----------------------------------------------------------------------------
@@ -281,6 +282,9 @@ def test_window_reads_the_schedule(user, team):
 def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_restores_it(user, team):
     forward = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.rollback.sql").read_text()
+    # 0030 (stream lanes) references the table: yoyo rolls it back first, and applies it again after.
+    lanes_forward = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.sql").read_text()
+    lanes_rollback = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.rollback.sql").read_text()
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
@@ -288,11 +292,13 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
     ran = _audit(user, team, "applied")                      # the feature ran before it was rolled back
     _pickup(user, team, status="executed", audit_id=ran.id, executed_at=NOW)
     assert table_exists() and "'scheduled'" in _source_check_values()
+    db.execute_sql(lanes_rollback)
     db.execute_sql(rollback)
     assert not table_exists() and "'scheduled'" not in _source_check_values()
     assert RosterMove.get_by_id(ran.id).source == "scheduled"                # the audit history stays
     with pytest.raises(IntegrityError), db.atomic():
         _audit(user, team)                                                    # but a new 'scheduled' write is refused
     db.execute_sql(forward)
+    db.execute_sql(lanes_forward)
     assert table_exists() and "'scheduled'" in _source_check_values()
     assert "NOT VALID" not in _source_check_values()
