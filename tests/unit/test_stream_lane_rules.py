@@ -173,6 +173,24 @@ def test_who_the_plan_may_not_take():
 
 
 @pytest.mark.unit
+def test_a_scheduled_pickup_that_fills_a_capped_position_closes_it_to_the_plan():
+    """One C on the roster under a cap of two, and a pickup for day 2 adds a C (for the guard): a free-agent C
+    taken before then would still hold the spot on day 2, as a third C ESPN refuses."""
+    pool = [fa(11, "LAL", pos=5, positions=("C",)), fa(14, "PHX", pos=5, positions=("C",))]
+    lp = plan(pool, pending_=[pending(30, add=14, drop=GUARD)], limits={"5": 2}, roster=ROSTER[:3], adds=1)
+    assert lp.considered == frozenset() and lp.plan.holders == (HOLDER,) * 3
+
+
+@pytest.mark.unit
+def test_a_scheduled_pickup_that_drops_a_capped_position_opens_it_from_its_day():
+    """At the cap of two Cs (the big and the hurt one on IR), a pickup for day 1 drops the big: a free-agent C
+    may take the spot from day 1, not before."""
+    pool = [fa(11, "LAL", pos=5, positions=("C",)), fa(15, "OKC")]
+    lp = plan(pool, pending_=[pending(29, add=15, drop=BIG)], limits={"5": 2}, adds=1)
+    assert lp.considered == {11} and lp.plan.holders == (HOLDER, 11, 11)
+
+
+@pytest.mark.unit
 def test_an_out_player_and_ir_are_worth_nothing():
     roster = [p if p.player_id != HOLDER else p.model_copy(update={"injury_status": "OUT"}) for p in ROSTER]
     lp = plan([], roster=roster)

@@ -271,8 +271,10 @@ def _is_out(injury_status: Optional[str]) -> bool:
 def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
               pending: Sequence[PendingPickup], budget: Budget, rehold_after: int) -> LanePlan:
     """The plan for the spot `holder_id` holds over `days`. The rest of the roster is the board's
-    (IR aside) with the pending pickups made on their days; a free agent ESPN would refuse under
-    its position limits, or on the roster or already scheduled, is not a candidate."""
+    (IR aside) with the pending pickups made on their days; a free agent on the roster or already
+    scheduled is not a candidate, nor one ESPN would refuse under its position limits. Those are
+    counted each day with the pending pickups made: a free agent may take the spot only from a
+    day from which his position has room through the last day."""
     slots = slot_counts_of(board)
     holder = next(p for p in board.players if p.player_id == holder_id)
     by_id = {f.player_id: f for f in pool}
@@ -305,16 +307,28 @@ def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], da
     holder_values = values_of([roster_day(holder, d) for d in days])
     taken = {p.player_id for p in board.players} | {pk.add_player_id for pk in pending}
     limits = {int(k): int(v) for k, v in board.position_limits.items() if int(v) > 0}
-    held = Counter(p.default_position_id for p in board.players
-                   if p.player_id != holder_id and p.default_position_id is not None)
+    # Each day's roster (IR included, the spot left out) by position, the pending pickups made on their days.
+    position = {f.player_id: f.default_position_id for f in pool}
+    position.update({p.player_id: p.default_position_id for p in board.players})
+    full: dict[int, list[bool]] = {pos: [] for pos in limits}
+    for day in days:
+        ids = {p.player_id for p in board.players if p.player_id != holder_id}
+        for pk in sorted(pending, key=lambda pk: (pk.period, pk.pickup_id)):
+            if pk.period <= day.period:
+                ids.discard(pk.drop_player_id)
+                ids.add(pk.add_player_id)
+        held = Counter(position.get(pid) for pid in ids)
+        for pos, limit in limits.items():
+            full[pos].append(held[pos] >= limit)
     values: dict[int, tuple[float, ...]] = {holder_id: holder_values}
     candidates: list[Candidate] = []
     for f in pool:
         if f.player_id in taken:
             continue
-        if f.default_position_id in limits and held[f.default_position_id] >= limits[f.default_position_id]:
-            continue
         start = 0 if f.available_on is None else max(0, (f.available_on - days[0].nba_date).days)
+        if f.default_position_id in limits:
+            # Only from a day from which his position has room through the last day: a switch holds the spot on.
+            start = max([start, *(i + 1 for i, closed in enumerate(full[f.default_position_id]) if closed)])
         if start >= len(days):
             continue
         vals = values_of([pool_day(f, d) for d in days])
