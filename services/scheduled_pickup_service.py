@@ -452,7 +452,7 @@ def to_schema(row, nba_ids: Optional[dict[int, int]] = None) -> ScheduledPickup:
         not_before_at=row.not_before_at, deadline_at=row.deadline_at, next_attempt_at=row.next_attempt_at,
         attempts=row.attempts, audit_id=row.audit_id, lineup_audit_id=row.lineup_audit_id,
         seated_slot_id=row.seated_slot_id, seated_slot=_slot_name(row.seated_slot_id),
-        created_at=row.created_at, executed_at=row.executed_at,
+        created_at=row.created_at, executed_at=row.executed_at, lane_id=getattr(row, "lane_id", None),
     )
 
 

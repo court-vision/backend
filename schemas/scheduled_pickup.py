@@ -64,6 +64,7 @@ class ScheduledPickup(ApiModel):
     seated_slot: Optional[str] = None            # "UT", "PG", ...; None = bench
     created_at: datetime
     executed_at: Optional[datetime] = None
+    lane_id: Optional[int] = None                # a stream lane's pickup (the lane decides and cancels it)
 
 
 class ScheduledPickupResp(BaseResponse):

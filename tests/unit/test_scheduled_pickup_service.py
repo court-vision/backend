@@ -926,7 +926,7 @@ def test_schedule_gates(scheduling, monkeypatch):
 
 @pytest.mark.unit
 def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
-    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25)),
+    rows = [row(id=1, status="pending", nba_date=date(2026, 10, 25), lane_id=7),
             row(id=2, status="pending", nba_date=date(2026, 10, 23)),
             row(id=3, status="executed", updated_at=NOW - timedelta(days=1), seated_slot_id=UT, audit_id=9)]
     monkeypatch.setattr(svc, "_list_pickups", lambda team_id, since: rows)
@@ -935,6 +935,7 @@ def test_list_splits_pending_from_recent_and_resolves_nba_ids(h, monkeypatch):
     assert [p.id for p in resp.data.pending] == [2, 1]
     assert [p.id for p in resp.data.recent] == [3]
     assert resp.data.recent[0].seated_slot == "UT" and resp.data.recent[0].add.nba_player_id == 1627
+    assert [p.lane_id for p in resp.data.pending] == [None, 7]       # a stream lane's pickup says so
 
 
 @pytest.mark.unit
