@@ -32,10 +32,18 @@ def test_startup_opens_a_few_pooled_connections_by_default():
 
 
 @pytest.mark.unit
+def test_connections_idle_half_a_minute_are_pinged_before_use():
+    """An hour's lifetime means a Postgres restart leaves dead connections in
+    the pool, which Peewee's checkout cannot tell from live ones."""
+    assert Settings.model_fields["db_pool_ping_after_idle_seconds"].default == 30.0
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("field,value", [
-    ("db_pool_stale_timeout_seconds", 0),    # Peewee would never recycle, and it does not ping on checkout
+    ("db_pool_stale_timeout_seconds", 0),    # Peewee would never recycle a connection
     ("db_pool_stale_timeout_seconds", -1),
     ("db_pool_warm_connections", -1),
+    ("db_pool_ping_after_idle_seconds", -1),
 ])
 def test_pool_settings_refuse_nonsense(field, value):
     with pytest.raises(ValidationError, match=field):

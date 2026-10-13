@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Any, Callable, TypeVar
@@ -117,6 +118,7 @@ async def warm_db_pool(count: int) -> None:
         try:
             barrier.wait(timeout=WARM_POOL_WAIT_S)
         finally:
+            _mark_released()
             db.close()  # back into the pool
 
     started = time.perf_counter()
@@ -161,6 +163,59 @@ async def warm_db_pool(count: int) -> None:
     # of `count` parallel requests would otherwise have queued behind.
     log.info("db_pool_warmed", connections=count, connect_ms=connect_ms,
              per_connection_ms=round(connect_ms / count))
+
+
+# When run_db last handed each pooled connection back, to tell how long it has
+# sat idle (Peewee's pool keeps only its creation time). Weak keys: an entry
+# goes with the connection once the pool has dropped it.
+_released_at: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
+
+
+def _mark_released() -> None:
+    if not db.is_closed():
+        _released_at[db.connection()] = time.monotonic()
+
+
+def _use_live_connection(operation_name: str) -> None:
+    """Swap this thread's pooled connection for a live one if it died while idle.
+
+    Peewee's pool checks only libpq's local state at checkout, so a connection
+    whose server went away (a Postgres restart or failover) looks healthy until
+    a query on it fails, and its request with it (a 503). Pooled connections
+    live an hour (see db_pool_stale_timeout_seconds), so after a restart each
+    idle one would fail a request that way. A connection idle for
+    db_pool_ping_after_idle_seconds or more, or one run_db has not handed out
+    before, is pinged first, and a dead one is dropped and another checked out.
+    A connection used moments ago is trusted, which keeps the ping off the
+    queries of a page open's burst. The ping runs after checkout, outside
+    Peewee's locks, so a slow one holds up only this operation.
+    """
+    if db.is_closed():  # no pooled connection to check (unit tests replace connection_context)
+        return
+    # Each dead connection found is discarded, so this ends within one pool's worth.
+    for _ in range(settings.db_pool_max_connections + 1):
+        conn = db.connection()
+        released = _released_at.pop(conn, None)
+        idle_s = None if released is None else time.monotonic() - released
+        if idle_s is not None and idle_s < settings.db_pool_ping_after_idle_seconds:
+            return
+        try:
+            db.execute_sql("SELECT 1").close()
+            return
+        except (OperationalError, InterfaceError) as exc:
+            log.warning(
+                "db_connection_dead",
+                operation=operation_name,
+                idle_s=None if idle_s is None else round(idle_s),
+                error=type(exc).__name__,
+            )
+            # Not db.manual_close(): it takes the pool lock before the database
+            # lock, the reverse of connect() and close(), and can deadlock with
+            # another worker's checkout. A closed connection handed back is
+            # dropped by the pool (libpq reports its transaction status unknown).
+            conn.close()
+            db.close()
+            db.connect()
 
 
 def _ensure_db_runtime() -> tuple[ThreadPoolExecutor, asyncio.Semaphore]:
@@ -229,7 +284,11 @@ async def run_db(operation_name: str, fn: Callable[..., T], *args: Any, **kwargs
             span.set_data("db.queue_ms", queue_ms)
             try:
                 with db.connection_context():
-                    return fn(*args, **kwargs)
+                    _use_live_connection(operation_name)
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        _mark_released()
             finally:
                 elapsed_ms = round((time.perf_counter() - started) * 1000)
                 span.set_data("db.execution_ms", elapsed_ms)
