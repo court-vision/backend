@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 from freezegun import freeze_time
+from structlog.testing import capture_logs
 
 from core.errors import BadRequestError, ProviderTimeout
 from schemas.common import FantasyProvider, LeagueInfo
@@ -148,12 +149,18 @@ def apply(period, version, moves=SWAP):
     return asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, req))
 
 
+def written_days(logs, event="lineup_write_applied"):
+    """(scoring_period_id, current_scoring_period_id) on each write's log line."""
+    return [(e["scoring_period_id"], e["current_scoring_period_id"]) for e in logs if e["event"] == event]
+
+
 # ---- writes that go through ------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_todays_write_reads_espn_twice_and_values_only_the_board_it_returns(world):
-    resp = apply(TODAY, reference(world)["roster_version"])
+    with capture_logs() as logs:
+        resp = apply(TODAY, reference(world)["roster_version"])
 
     assert world.espn.calls == [TODAY, None]          # today by number, then the plain re-read
     assert len(world.valuations) == 1                 # the re-read's: it is the board handed back
@@ -162,11 +169,13 @@ def test_todays_write_reads_espn_twice_and_values_only_the_board_it_returns(worl
     assert resp.data.verified is True and world.updates == [(1, "applied")]
     assert resp.data.lineup.model_dump(mode="json") == reference(world)
     assert resp.data.lineup.players[0].value_kind == "cat_value"
+    assert written_days(logs) == [(TODAY, TODAY)]     # the log line shows it went out as today's
 
 
 @pytest.mark.unit
 def test_a_later_days_write_never_reads_today(world):
-    resp = apply(LATER, reference(world, LATER)["roster_version"])
+    with capture_logs() as logs:
+        resp = apply(LATER, reference(world, LATER)["roster_version"])
 
     assert world.espn.calls == [LATER, LATER]         # that day, then its re-read
     assert len(world.valuations) == 1
@@ -177,17 +186,20 @@ def test_a_later_days_write_never_reads_today(world):
     assert resp.data.verified is True
     assert resp.data.lineup.model_dump(mode="json") == reference(world, LATER)
     assert world.espn.roster(TODAY) == START          # today's board was never written
+    assert written_days(logs) == [(LATER, TODAY)]
 
 
 @pytest.mark.unit
 def test_a_failed_reread_hands_back_the_pre_write_board_with_its_values(world):
     before = reference(world)
     world.espn.fail_on_call = 2
-    resp = apply(TODAY, before["roster_version"])
+    with capture_logs() as logs:
+        resp = apply(TODAY, before["roster_version"])
 
     assert world.espn.calls == [TODAY, None] and len(world.valuations) == 1
     assert resp.data.verified is False and world.updates == [(1, "applied_unverified")]
     assert resp.data.lineup.model_dump(mode="json") == before
+    assert written_days(logs, "lineup_write_unverified") == [(TODAY, TODAY)]
 
 
 # ---- writes that stop before ESPN ------------------------------------------------------
@@ -265,3 +277,43 @@ def test_without_espns_today_a_later_day_is_read_once(world):
     assert world.espn.calls == [LATER, None, LATER]   # the day, today's plain board, the re-read
     assert (world.writes[0]["scoring_period_id"], world.writes[0]["current_scoring_period_id"]) == (LATER, TODAY)
 
+
+# ---- when ESPN's two todays disagree ------------------------------------------------------
+# The client's today board comes from the plain read, so its day is the plain read's top-level
+# scoringPeriodId; the write now places that day against status.latestScoringPeriod instead.
+# The two have only been seen equal (preseason, 2026-10-13); docs PENDING_PROD_CHECKS.md item 6
+# compares them on opening night and across the 2 AM ET rollover.
+
+
+@pytest.mark.unit
+def test_a_plain_day_behind_espns_today_writes_todays_plain_board_as_before(world):
+    world.espn.latest = TODAY + 1
+    loaded = reference(world)                         # the board the client loaded as today
+    assert (loaded["scoring_period_id"], loaded["current_scoring_period_id"]) == (TODAY, TODAY)
+    with capture_logs() as logs:
+        resp = apply(TODAY, loaded["roster_version"])
+
+    assert world.espn.calls == [TODAY, None, None]    # refused as passed, today's plain board, the re-read
+    assert "current_scoring_period_id" not in world.writes[0]          # ROSTER, as the old path sent it
+    assert world.audits[0][:2] == (date(2026, 10, 31), TODAY)
+    assert resp.data.verified is True and len(world.valuations) == 1
+    assert resp.data.lineup.model_dump(mode="json") == reference(world)
+    assert written_days(logs) == [(TODAY, TODAY)]
+
+
+@pytest.mark.unit
+def test_a_plain_day_ahead_of_espns_today_would_send_todays_edit_as_a_later_day(world):
+    # The one case where this write differs from the old path, which read the plain board and
+    # sent ROSTER for its day. Pinned so the difference is a decision: if opening night ever
+    # shows the plain day ahead of latestScoringPeriod, this is the test that changes.
+    world.espn.latest = TODAY - 1
+    loaded = reference(world)
+    assert (loaded["scoring_period_id"], loaded["current_scoring_period_id"]) == (TODAY, TODAY)
+    with capture_logs() as logs:
+        resp = apply(TODAY, loaded["roster_version"])
+
+    assert world.espn.calls == [TODAY, TODAY]         # the day by number is ESPN's tomorrow, re-read the same way
+    payload = world.writes[0]
+    assert (payload["scoring_period_id"], payload["current_scoring_period_id"]) == (TODAY, TODAY - 1)
+    assert resp.data.verified is True
+    assert written_days(logs) == [(TODAY, TODAY - 1)]  # and the log line says so

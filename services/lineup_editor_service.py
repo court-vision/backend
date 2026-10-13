@@ -301,6 +301,16 @@ class LineupEditorService:
         - a day ESPN did not place against its own today (no latestScoringPeriod, so our
           calendar did) is placed by the plain read's day: today's edit is written over
           today's plain board, so a calendar that lags ESPN never sends it as FUTURE_ROSTER.
+
+        This trusts status.latestScoringPeriod as today where the old path trusted the plain
+        read's top-level scoringPeriodId (the day the client's today board carries). The two
+        have only been seen equal, and only in preseason. Were the plain day behind ESPN's
+        today, the read above is refused as a passed day and the plain board decides, as
+        before. Were it ahead (around the 2 AM ET rollover, say), an edit the client loaded
+        as today would go out as FUTURE_ROSTER where the old path sent ROSTER; the later-day
+        read and FUTURE_ROSTER already rest on latestScoringPeriod the same way. Opening
+        night checks it (docs PENDING_PROD_CHECKS.md item 6); the write's log line carries
+        both days, so a write shows which one it went out as.
         """
         direct: Optional[LineupState] = None
         out_of_range: Optional[BadRequestError] = None
@@ -424,6 +434,8 @@ class LineupEditorService:
             await run_db("lineup.audit_update", _audit_update, audit_id, "applied_unverified",
                          provider_status=result.espn_status, error=f"verify_read_failed: {exc}")
             log.warning("lineup_write_unverified", team_id=team_id, source=source, move_count=len(moves),
+                        scoring_period_id=state.scoring_period_id,
+                        current_scoring_period_id=state.current_scoring_period_id,
                         espn_status=result.espn_status, error=str(exc))
             return state, False, audit_id
 
@@ -431,7 +443,10 @@ class LineupEditorService:
         verified = all(after.get(m.player_id) == m.to_slot_id for m in moves)
         await run_db("lineup.audit_update", _audit_update, audit_id,
                      "applied" if verified else "applied_unverified", provider_status=result.espn_status)
+        # Both days, so a write shows whether it went out as today's (ROSTER: the two are equal)
+        # or a later day's (FUTURE_ROSTER); see _board_to_write on ESPN's two todays.
         log.info("lineup_write_applied", team_id=team_id, source=source, move_count=len(moves), verified=verified,
+                 scoring_period_id=state.scoring_period_id, current_scoring_period_id=state.current_scoring_period_id,
                  espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
         return fresh, verified, audit_id
 
