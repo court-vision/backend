@@ -16,8 +16,9 @@ class FakeClock:
         return self.now
 
 
-def _cache(ttl=60.0, max_entries=4, clock=None) -> SyncTTLCache:
-    return SyncTTLCache("test", ttl_seconds=ttl, max_entries=max_entries, clock=clock or FakeClock())
+def _cache(ttl=60.0, max_entries=4, clock=None, wait_timeout=5.0) -> SyncTTLCache:
+    return SyncTTLCache("test", ttl_seconds=ttl, max_entries=max_entries, clock=clock or FakeClock(),
+                        wait_timeout_seconds=wait_timeout)
 
 
 def _counting(value):
@@ -40,7 +41,7 @@ def test_second_call_is_a_hit_and_does_not_build():
 
     assert calls == [1]
     assert first is second                       # the stored object itself, not a rebuild
-    assert cache.stats() == {"name": "test", "entries": 1, "hits": 1, "misses": 1, "coalesced": 0}
+    assert cache.stats() == {"name": "test", "entries": 1, "hits": 1, "misses": 1, "coalesced": 0, "wait_timeouts": 0}
 
 
 @pytest.mark.unit
@@ -179,7 +180,7 @@ def test_concurrent_misses_build_once_and_share_the_result():
     assert len(calls) == 1
     assert errors == [None] * 10
     assert all(r is results[0] for r in results)
-    assert cache.stats() == {"name": "test", "entries": 1, "hits": 0, "misses": 1, "coalesced": 9}
+    assert cache.stats() == {"name": "test", "entries": 1, "hits": 0, "misses": 1, "coalesced": 9, "wait_timeouts": 0}
 
 
 @pytest.mark.unit
@@ -203,3 +204,67 @@ def test_when_the_leaders_build_fails_each_follower_builds_for_itself():
     assert sorted(r for r in results if r is not None) == ["ok"] * 4
     assert len(calls) == 5                                            # in parallel, as without the cache
     assert cache.stats()["entries"] == 0                              # and none of them stored
+
+
+@pytest.mark.unit
+def test_a_follower_stops_waiting_on_a_stuck_build_and_builds_for_itself():
+    cache = _cache(wait_timeout=0.05)
+    started, release = threading.Event(), threading.Event()
+    got = {}
+
+    def stuck_build():
+        started.set()
+        release.wait(5)                          # e.g. a half-open socket the keepalives have not noticed yet
+        return "stuck"
+
+    leader = threading.Thread(target=lambda: got.setdefault("leader", cache.get_or_build("k", stuck_build)))
+    leader.start()
+    assert started.wait(5)
+
+    began = time.monotonic()
+    assert cache.get_or_build("k", lambda: "own") == "own"            # gave up on the leader and built alone
+    assert time.monotonic() - began < 2
+    assert cache.stats()["coalesced"] == 1 and cache.stats()["wait_timeouts"] == 1
+
+    assert cache.get_or_build("k", lambda: "fresh") == "fresh"        # a later caller leads a fresh build...
+    assert cache.stats()["wait_timeouts"] == 1                        # ...rather than queueing behind the stuck one
+    release.set()
+    leader.join(5)
+    assert got["leader"] == "stuck"              # the stuck build still reaches its own caller
+    assert cache.get_or_build("k", lambda: "unused") == "fresh"       # ...but its late result is never stored
+
+
+@pytest.mark.unit
+def test_followers_of_a_stuck_build_each_build_for_themselves():
+    cache = _cache(wait_timeout=0.25)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    lock = threading.Lock()
+
+    def stuck_build():
+        started.set()
+        release.wait(5)
+        return "stuck"
+
+    def own_build():
+        with lock:
+            calls.append(1)
+        return "own"
+
+    got = {}
+    leader = threading.Thread(target=lambda: got.setdefault("leader", cache.get_or_build("k", stuck_build)))
+    leader.start()
+    assert started.wait(5)
+    results, errors = _burst(cache, 4, own_build)  # all four join the stuck build, then give up on it
+    release.set()
+    leader.join(5)
+
+    assert errors == [None] * 4 and results == ["own"] * 4 and len(calls) == 4   # one build each, as uncached
+    assert got["leader"] == "stuck"
+    assert cache.stats()["coalesced"] == 4 and cache.stats()["wait_timeouts"] == 4
+    assert cache.stats()["entries"] == 0                              # neither the stuck build nor theirs stored
+
+
+@pytest.mark.unit
+def test_the_default_wait_outlasts_any_healthy_build():
+    assert SyncTTLCache("t", ttl_seconds=60, max_entries=1).wait_timeout_seconds == 30.0
