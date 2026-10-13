@@ -22,6 +22,19 @@ os.environ.setdefault("PIPELINE_API_TOKEN", "test-token")
 os.environ.setdefault("NBA_SEASON", "2025-26")
 
 
+# ---- Module-level read caches ----
+
+@pytest.fixture(autouse=True)
+def empty_percentile_pool():
+    """The percentile pool lives at module level; a pool left by one test would
+    answer for the next test's rows."""
+    from services.player_service import reset_percentile_pool_cache
+
+    reset_percentile_pool_cache()
+    yield
+    reset_percentile_pool_cache()
+
+
 # ---- The captured draft ----
 
 @pytest.fixture(scope="session")
