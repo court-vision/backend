@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
+from core.inflight import provider_write
 from core.logging import get_correlation_id, get_logger
 from core.settings import settings
 
@@ -169,6 +170,17 @@ async def apply_transaction(payload: dict[str, Any]) -> WriterResult:
 
 async def _post(path: str, payload: dict[str, Any], *, item_count: int, rejected_default: str,
                 refused_default: str) -> WriterResult:
+    # Every ESPN write passes here, so this is where provider reads are fenced
+    # (core/inflight.py): from the moment the write is attempted until it has
+    # answered or failed, no read may join one that began on the other side of
+    # it -- the verify re-read always sees a response that started afterwards.
+    with provider_write():
+        return await _send_write(path, payload, item_count=item_count, rejected_default=rejected_default,
+                                 refused_default=refused_default)
+
+
+async def _send_write(path: str, payload: dict[str, Any], *, item_count: int, rejected_default: str,
+                      refused_default: str) -> WriterResult:
     client, capacity = _ensure_runtime()
     try:
         await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
