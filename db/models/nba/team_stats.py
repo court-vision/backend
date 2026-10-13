@@ -206,6 +206,24 @@ class TeamStats(BaseModel):
         )
 
     @classmethod
+    def latest_def_ratings(cls) -> dict[str, float]:
+        """{team: def_rating} on the latest stats date, in one query.
+
+        The rows get_all_latest() returns (one per team on that date, by the
+        team/date unique index), with the MAX folded in as a subquery and only
+        the two columns a schedule reads. Teams without a rating are left out.
+        """
+        from peewee import fn
+
+        stats_dates = cls.alias()
+        latest = stats_dates.select(fn.MAX(stats_dates.as_of_date))
+        return {
+            row.team_id: float(row.def_rating)
+            for row in cls.select(cls.team, cls.def_rating)
+            .where((cls.as_of_date == latest) & cls.def_rating.is_null(False))
+        }
+
+    @classmethod
     def get_all_latest(cls) -> list["TeamStats"]:
         """Get the most recent stats record for all 30 teams."""
         from peewee import fn
