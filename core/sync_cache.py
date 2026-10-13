@@ -99,8 +99,9 @@ class SyncTTLCache:
                 self.coalesced += 1
 
         if not leader:
-            # No timeout: the leader always finishes, because its build is bounded
-            # by the database's statement_timeout and is otherwise pure Python.
+            # No timeout: a leader always finishes its build (the category pool's
+            # queries are bounded by the database's statement_timeout), and a
+            # follower that gave up would only start the same build again.
             flight.done.wait()
             if flight.failed:
                 return build()
@@ -124,9 +125,14 @@ class SyncTTLCache:
             flight.done.set()
 
     def clear(self) -> None:
-        """Drop every entry (tests, and a future explicit-invalidation route)."""
+        """Drop every entry (tests, and a future explicit-invalidation route).
+
+        Nothing built before a clear is served after it: builds in flight finish
+        for the callers already waiting on them, but are not stored, and a new
+        caller starts a build of its own rather than joining one of them."""
         with self._lock:
             self._entries.clear()
+            self._inflight.clear()
             self._generation += 1
 
     def stats(self) -> dict[str, Any]:

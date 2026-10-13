@@ -110,6 +110,29 @@ def test_clear_drops_entries_and_a_build_that_straddles_it_is_not_stored():
     assert cache.get_or_build("k", lambda: "fresh") == "fresh"        # ...but it was never stored
 
 
+@pytest.mark.unit
+def test_a_caller_after_a_clear_does_not_join_a_build_from_before_it():
+    cache = _cache()
+    started, release = threading.Event(), threading.Event()
+    got = {}
+
+    def old_build():
+        started.set()
+        release.wait(5)
+        return "old"
+
+    leader = threading.Thread(target=lambda: got.setdefault("leader", cache.get_or_build("k", old_build)))
+    leader.start()
+    assert started.wait(5)
+    cache.clear()                                # e.g. a new snapshot announced mid-build
+
+    assert cache.get_or_build("k", lambda: "new") == "new"            # its own build, not a wait on "old"
+    release.set()
+    leader.join(5)
+    assert got["leader"] == "old"                # the caller that asked before the clear still gets it
+    assert cache.get_or_build("k", lambda: "unused") == "new"         # ...but "old" never replaced "new"
+
+
 def _burst(cache, n, build):
     """n threads released together, each asking for the same key."""
     barrier = threading.Barrier(n)
