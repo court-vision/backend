@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import pytest
 from freezegun import freeze_time
+from peewee import OperationalError
 
 from core.nba_calendar import nba_date_et
 from core.settings import get_settings, settings as app_settings
@@ -244,3 +245,26 @@ def test_latest_def_ratings_without_any_stats_is_empty():
     db.execute_sql("TRUNCATE nba.team_stats RESTART IDENTITY")
 
     assert TeamStats.latest_def_ratings() == {}
+
+
+def test_a_database_error_in_the_rating_lookup_fails_the_request(monkeypatch):
+    """The route caches a success for five minutes, so a dropped connection on
+    the last query must not come back as a schedule with every rating blanked."""
+    def dropped():
+        raise OperationalError("server closed the connection unexpectedly")
+    monkeypatch.setattr(TeamStats, "latest_def_ratings", staticmethod(dropped))
+
+    with pytest.raises(OperationalError):
+        TeamScheduleService.get_team_schedule.__wrapped__("DEN", upcoming=False, limit=20)
+
+
+def test_any_other_rating_failure_still_renders_the_schedule(monkeypatch):
+    def broken():
+        raise ValueError("not a number")
+    monkeypatch.setattr(TeamStats, "latest_def_ratings", staticmethod(broken))
+
+    resp = TeamScheduleService.get_team_schedule.__wrapped__("DEN", upcoming=False, limit=20)
+
+    assert resp.status == ApiStatus.SUCCESS
+    assert len(resp.data.schedule) == 9
+    assert all(g.opponent_def_rating is None for g in resp.data.schedule)

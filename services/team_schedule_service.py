@@ -85,6 +85,12 @@ class TeamScheduleService:
             def_rating_map: dict[str, float] = {}
             try:
                 def_rating_map = TeamStats.latest_def_ratings()
+            except DB_RUNTIME_ERRORS:
+                # Not swallowed: the route caches a success for five minutes,
+                # so a dropped connection here would blank every opponent's
+                # rating that long, on this replica and in every browser that
+                # kept the copy. Failing the request (a 503) caches nothing.
+                raise
             except Exception:
                 pass  # Non-fatal; games still render without def_rating
 

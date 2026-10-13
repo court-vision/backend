@@ -15,6 +15,7 @@ from importlib import import_module
 from unittest.mock import AsyncMock
 
 import pytest
+from peewee import OperationalError
 
 from core import public_read_cache as caches
 from core.errors import NotFoundError
@@ -240,6 +241,27 @@ def test_a_raised_not_found_is_never_cached(client, monkeypatch, url, module, cl
     assert first.json()["error_code"] == "PLAYER_NOT_FOUND"
     assert service.await_count == 2
     assert "cache-control" not in first.headers
+
+
+@pytest.mark.parametrize("url,module,cls,method,response,cache", ROUTES, ids=ROUTE_IDS)
+def test_a_database_error_is_a_503_and_caches_nothing(
+    client, monkeypatch, frozen_nba_date, url, module, cls, method, response, cache,
+):
+    """A service that re-raises a dropped connection (the team schedule's rating
+    lookup does, rather than render blank ratings) leaves the cache empty, so
+    the next request renders afresh."""
+    service = AsyncMock(side_effect=[OperationalError("server closed the connection unexpectedly"), response])
+    monkeypatch.setattr(getattr(import_module(f"services.{module}"), cls), method, service)
+
+    failed = client.get(url)
+    assert failed.status_code == 503
+    assert failed.json()["error_code"] == "DATABASE_UNAVAILABLE"
+    assert "cache-control" not in failed.headers
+    assert getattr(caches, cache).stats()["entries"] == 0
+
+    recovered = client.get(url)
+    assert (recovered.status_code, recovered.headers["x-cache"]) == (200, "MISS")
+    assert service.await_count == 2
 
 
 @pytest.mark.parametrize("url,module,cls,method,response,cache", ROUTES, ids=ROUTE_IDS)
