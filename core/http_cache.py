@@ -5,11 +5,14 @@ rule that only successes are cached.
 This is the other half — the ETag/304/Cache-Control dance every cached endpoint
 would otherwise reimplement — kept in one place because the second caller
 (the league-scored rankings route) arrived in the same change as the first.
+`serve_cached_envelope` is the shape the public read routes share: a service
+envelope, cached when it is a success, answered exactly as before when the
+cache is switched off.
 """
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional, Union
 
 from fastapi import Request, Response
 from pydantic import BaseModel
@@ -61,12 +64,16 @@ async def serve_cached(
     render: Callable[[], Awaitable[bytes]],
     *,
     private: bool = False,
+    max_age: Optional[int] = None,
 ) -> Response:
     """Answer from `cache`, rendering once on a miss.
 
     `private=True` for anything resolved from the caller's identity — a shared
     cache must never be told it may hold it. A non-success envelope raised as
     `Uncacheable` comes back as its proper error response, uncached.
+    `max_age` caps how long a client may hold its copy below the entry's own
+    remaining life — for a body that goes stale at a known moment (a day
+    rollover) sooner than the TTL would say.
     """
     entry = cache.get(key)
     hit = entry is not None
@@ -78,6 +85,8 @@ async def serve_cached(
 
     # A client is never told to hold a copy longer than this replica's own entry.
     fresh_for = max(1, int(cache.ttl_seconds - entry.age_seconds()))
+    if max_age is not None:
+        fresh_for = max(1, min(fresh_for, int(max_age)))
     headers = {
         "Cache-Control": f"{'private' if private else 'public'}, max-age={fresh_for}",
         "ETag": entry.etag,
@@ -86,3 +95,35 @@ async def serve_cached(
     if etag_matches(request.headers.get("if-none-match"), entry.etag):
         return Response(status_code=304, headers=headers)
     return Response(content=entry.body, media_type="application/json", headers=headers)
+
+
+async def serve_cached_envelope(
+    request: Request,
+    cache: ResponseCache,
+    key: CacheKey,
+    produce: Callable[[], Awaitable[BaseResponse]],
+    *,
+    max_age: Optional[int] = None,
+) -> Union[Response, BaseResponse]:
+    """A public read route's whole body: the service's envelope, cached on success.
+
+    With the cache switched off this is exactly the uncached route —
+    `respond(await produce())`, rendered by FastAPI's `response_model`.
+
+    The envelope is serialised on the event loop rather than through `run_cpu`
+    as rankings does. These bodies are 0.2-17 KB, tens of microseconds in
+    pydantic-core, the same work the `response_model` pass already did on the
+    loop before they were cached; the CPU pool is two workers shared with
+    category z-scoring, and queueing a player profile behind a Week-open burst
+    would add latency and a new way for it to be shed with a 503.
+    """
+    if not cache.enabled:
+        return respond(await produce())
+
+    async def render() -> bytes:
+        resp = await produce()
+        if resp.status != ApiStatus.SUCCESS:
+            raise Uncacheable(resp)
+        return serialize_model(resp)
+
+    return await serve_cached(request, cache, key, render, max_age=max_age)

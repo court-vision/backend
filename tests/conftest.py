@@ -25,13 +25,16 @@ os.environ.setdefault("NBA_SEASON", "2025-26")
 # ---- Module-level read caches ----
 
 @pytest.fixture(autouse=True)
-def empty_percentile_pool():
-    """The percentile pool lives at module level; a pool left by one test would
-    answer for the next test's rows."""
+def empty_public_read_caches():
+    """The public read caches and the percentile pool live at module level; an
+    entry left by one test would answer for the next test's stubs or rows."""
+    from core import public_read_cache
     from services.player_service import reset_percentile_pool_cache
 
+    public_read_cache.clear_all()
     reset_percentile_pool_cache()
     yield
+    public_read_cache.clear_all()
     reset_percentile_pool_cache()
 
 
