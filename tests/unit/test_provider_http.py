@@ -274,7 +274,7 @@ async def test_concurrent_credentials_never_cross_requests(http):
             headers={"Authorization": "Bearer user-b"}, expect_key="teams",
         )),
     ]
-    await started.wait()
+    await asyncio.wait_for(started.wait(), 1)   # coalescing the two would leave it unset
     release.set()
     await asyncio.gather(*tasks)
     assert set(seen) == {
@@ -302,8 +302,10 @@ async def test_provider_capacity_is_enforced(http):
     await provider_http.stop_provider_runtime()
     provider_http._clients["espn"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider_http._capacity["espn"] = asyncio.Semaphore(2)
+    # Ten different reads: ten identical ones would now share one request.
     await asyncio.gather(*(
-        provider_http.provider_get("espn", URL, expect_key="teams") for _ in range(10)
+        provider_http.provider_get("espn", URL, params={"scoringPeriodId": n}, expect_key="teams")
+        for n in range(10)
     ))
     assert maximum == 2
 
@@ -359,3 +361,333 @@ async def test_provider_clients_have_explicit_lifecycle(monkeypatch):
 def test_policy_and_labels():
     assert provider_http.RETRY_MAX_ATTEMPTS == 2
     assert provider_http.provider_label("espn") == "ESPN"
+
+
+# ---- Coalescing identical in-flight GETs (core/inflight.py) ----
+
+COOKIES = {"espn_s2": "s2-a", "SWID": "{A}"}
+VIEWS = {"view": ["mTeam", "mRoster", "mMatchup", "mSettings", "mSchedule"]}
+
+
+@pytest_asyncio.fixture
+async def gated(monkeypatch):
+    """Every request blocks until `release` is set, so reads overlap the way a
+    Week open's do; each answer says which upstream request produced it."""
+    state = SimpleNamespace(calls=[], release=asyncio.Event(), status=200, text=None, cancelled=0)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        state.calls.append(request)
+        call = len(state.calls)
+        try:
+            await state.release.wait()
+        except asyncio.CancelledError:
+            state.cancelled += 1
+            raise
+        if state.status != 200 or state.text is not None:
+            return httpx.Response(state.status, text=state.text or "")
+        return httpx.Response(200, json={"teams": [{"id": 1, "roster": {"entries": []}}], "call": call})
+
+    await provider_http.stop_provider_runtime()
+    monkeypatch.setattr(provider_http, "RETRY_BASE_DELAY", 0)
+    monkeypatch.setattr(provider_http.settings, "provider_read_coalescing", True)
+    for provider in ("espn", "yahoo", "nba"):
+        provider_http._clients[provider] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider_http._capacity[provider] = asyncio.Semaphore(provider_http._limit_for(provider))
+    yield state
+    # A test that failed mid-way leaves requests parked on the gate; let them
+    # finish so the failure is reported instead of hanging the run.
+    state.release.set()
+    await _settle()
+    await provider_http.stop_provider_runtime()
+
+
+async def _until(predicate, timeout=1.0):
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
+async def _settle():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+def _league_read(**overrides):
+    kwargs = {"params": VIEWS, "cookies": COOKIES, "expect_key": "teams", **overrides}
+    return asyncio.create_task(provider_http.provider_get("espn", URL, **kwargs))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_concurrent_identical_reads_share_one_request(gated):
+    """The Week open's three matchup routes read the same league at once."""
+    tasks = [_league_read() for _ in range(3)]
+    await _until(lambda: len(gated.calls) == 1)
+    await _settle()
+    gated.release.set()
+    bodies = await asyncio.gather(*tasks)
+    assert len(gated.calls) == 1
+    assert bodies[0] == bodies[1] == bodies[2] == {"teams": [{"id": 1, "roster": {"entries": []}}], "call": 1}
+    assert provider_http._reads.stats()["in_flight"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_each_caller_gets_its_own_copy_of_the_payload(gated):
+    """Callers build objects from the dict (the league sync reuses the
+    validation payload); one caller's edits must never reach another's."""
+    tasks = [_league_read() for _ in range(3)]
+    await _until(lambda: len(gated.calls) == 1)
+    gated.release.set()
+    first, second, third = await asyncio.gather(*tasks)
+    assert first is not second and first["teams"] is not second["teams"]
+    first["teams"][0]["roster"]["entries"].append({"playerId": 99})
+    del second["call"]
+    assert third == {"teams": [{"id": 1, "roster": {"entries": []}}], "call": 1}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_param_order_does_not_split_a_read(gated):
+    tasks = [
+        _league_read(params={"view": ["mTeam", "mRoster"], "scoringPeriodId": 4}),
+        _league_read(params={"scoringPeriodId": 4, "view": ["mTeam", "mRoster"]}),
+    ]
+    await _until(lambda: len(gated.calls) == 1)
+    await _settle()
+    gated.release.set()
+    await asyncio.gather(*tasks)
+    assert len(gated.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", [
+    {"cookies": {"espn_s2": "s2-b", "SWID": "{B}"}},                  # another user's cookies
+    {"cookies": {"espn_s2": "s2-a", "SWID": "{B}"}},                  # same s2, other SWID
+    {"cookies": None},                                                 # no credentials at all
+    {"params": {"view": ["mTeam", "mRoster", "mSettings"]}},           # other views
+    {"params": {**VIEWS, "scoringPeriodId": 5}},                       # another day
+    {"params": {"view": list(reversed(VIEWS["view"]))}},               # a repeated key's order is kept
+    {"headers": {"x-fantasy-filter": '{"players":{"limit":50}}'}},     # a header that shapes the answer
+    {"timeout": 3.0},
+])
+async def test_reads_that_differ_in_anything_sent_do_not_share(gated, other):
+    tasks = [_league_read(), _league_read(**other)]
+    await _until(lambda: len(gated.calls) == 2)
+    gated.release.set()
+    first, second = await asyncio.gather(*tasks)
+    assert {first["call"], second["call"]} == {1, 2}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_each_request_carries_only_its_own_credentials(gated):
+    tasks = [_league_read(), _league_read(cookies={"espn_s2": "s2-b", "SWID": "{B}"}), _league_read()]
+    await _until(lambda: len(gated.calls) == 2)
+    await _settle()
+    gated.release.set()
+    await asyncio.gather(*tasks)
+    assert sorted(call.headers["cookie"] for call in gated.calls) == ["espn_s2=s2-a; SWID={A}", "espn_s2=s2-b; SWID={B}"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sequential_identical_reads_are_not_cached(gated):
+    gated.release.set()
+    first = await _league_read()
+    second = await _league_read()
+    assert (first["call"], second["call"]) == (1, 2)
+    assert len(gated.calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_failure_reaches_every_joiner_through_its_own_mapping(gated):
+    """One upstream 404; each caller maps it with its own `not_found`."""
+    gated.status = 404
+    account_missing = BadRequestError("ESPN_ACCOUNT_NOT_FOUND", "no such account")
+    tasks = [_league_read(), _league_read(not_found=account_missing), _league_read()]
+    await _until(lambda: len(gated.calls) == 1)
+    await _settle()
+    gated.release.set()
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(gated.calls) == 1
+    assert [o.error_code for o in outcomes] == ["LEAGUE_NOT_FOUND", "ESPN_ACCOUNT_NOT_FOUND", "LEAGUE_NOT_FOUND"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_outage_is_retried_once_for_everyone_not_once_each(gated):
+    gated.status = 503
+    tasks = [_league_read() for _ in range(3)]
+    await _until(lambda: len(gated.calls) == 1)
+    await _settle()
+    gated.release.set()
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(gated.calls) == 2           # one request and its one retry, shared
+    assert all(isinstance(o, ProviderError) and o.status_code == 502 for o in outcomes)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_unreadable_body_is_a_bad_response_for_every_joiner(gated):
+    gated.text = "<html>maintenance</html>"
+    tasks = [_league_read() for _ in range(2)]
+    await _until(lambda: len(gated.calls) == 1)
+    await _settle()
+    gated.release.set()
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    assert [o.error_code for o in outcomes] == ["PROVIDER_BAD_RESPONSE"] * 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_first_caller_giving_up_does_not_fail_the_others(gated):
+    leader = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    joiners = [_league_read() for _ in range(2)]
+    await _settle()
+    leader.cancel()
+    await _settle()
+    gated.release.set()
+    bodies = await asyncio.gather(*joiners)
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    assert [body["call"] for body in bodies] == [1, 1]
+    assert len(gated.calls) == 1 and gated.cancelled == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_lone_caller_giving_up_still_cancels_its_request(gated):
+    """As before coalescing: the request stops and its ESPN slot comes back."""
+    capacity = provider_http._capacity["espn"]
+    free = capacity._value
+    task = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _until(lambda: gated.cancelled == 1)
+    await _until(lambda: capacity._value == free)
+    assert provider_http._reads.stats()["in_flight"] == 0
+
+
+def _fake_writer(monkeypatch, answer):
+    """services.fantasy_writer_client over a MockTransport that answers at once,
+    with a fresh runtime so its semaphore belongs to this test's loop."""
+    from services import fantasy_writer_client as fw
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return answer(request)
+
+    monkeypatch.setattr(fw, "_client", None)
+    monkeypatch.setattr(fw, "_capacity", None)
+    monkeypatch.setattr(fw, "client_factory",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://writer.test"))
+    return fw, requests
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_read_after_a_write_never_joins_one_from_before_it(gated, monkeypatch):
+    """The verify re-read after a lineup move, and the board the client then
+    refetches, must not be answered by a read that began before ESPN took the
+    write -- even though that read is still in flight."""
+    fw, writes = _fake_writer(monkeypatch, lambda request: httpx.Response(200, json={"ok": True, "http_status": 200}))
+    before = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    await fw.apply_lineup({"moves": [{"player_id": 1, "from_slot_id": 12, "to_slot_id": 0}]})
+    after = [_league_read() for _ in range(2)]
+    await _until(lambda: len(gated.calls) == 2)
+    await _settle()
+    gated.release.set()
+    stale, *fresh = await asyncio.gather(before, *after)
+    assert len(writes) == 1
+    assert stale["call"] == 1
+    assert [body["call"] for body in fresh] == [2, 2]     # they still share with each other
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_failed_write_fences_reads_too(gated, monkeypatch):
+    def timeout(request):
+        raise httpx.ReadTimeout("writer slow")       # ambiguous: ESPN may have taken it
+
+    fw, _ = _fake_writer(monkeypatch, timeout)
+    before = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    with pytest.raises(fw.FantasyWriterUnavailable):
+        await fw.apply_transaction({"add_player_id": 7})
+    after = _league_read()
+    await _until(lambda: len(gated.calls) == 2)
+    gated.release.set()
+    stale, fresh = await asyncio.gather(before, after)
+    assert (stale["call"], fresh["call"]) == (1, 2)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_reads_during_a_write_join_neither_side_of_it(gated):
+    from core.inflight import provider_write
+
+    before = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    with provider_write():
+        during = [_league_read() for _ in range(2)]
+        await _until(lambda: len(gated.calls) == 2)
+        await _settle()
+    after = _league_read()
+    await _until(lambda: len(gated.calls) == 3)
+    gated.release.set()
+    results = await asyncio.gather(before, *during, after)
+    assert [body["call"] for body in results] == [1, 2, 2, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_provider_post_fences_reads(gated):
+    """Yahoo's token exchange is the only POST today; it is fenced like a write."""
+    provider_http._clients["yahoo"] = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"access_token": "unused"})
+    ))
+    before = _league_read()
+    await _until(lambda: len(gated.calls) == 1)
+    await provider_http.provider_post("yahoo", TOKEN_URL, data={})
+    after = _league_read()                            # `before` is still in flight
+    await _until(lambda: len(gated.calls) == 2)
+    gated.release.set()
+    stale, fresh = await asyncio.gather(before, after)
+    assert (stale["call"], fresh["call"]) == (1, 2)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_kill_switch_sends_every_read_on_its_own(gated, monkeypatch):
+    monkeypatch.setattr(provider_http.settings, "provider_read_coalescing", False)
+    tasks = [_league_read() for _ in range(3)]
+    await _until(lambda: len(gated.calls) == 3)
+    gated.release.set()
+    bodies = await asyncio.gather(*tasks)
+    assert sorted(body["call"] for body in bodies) == [1, 2, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_coalesced_read_is_logged_without_query_or_credentials(gated):
+    with capture_logs() as logs:
+        tasks = [_league_read(params={**VIEWS, "scoringPeriodId": 3}) for _ in range(4)]
+        await _until(lambda: len(gated.calls) == 1)
+        await _settle()
+        gated.release.set()
+        await asyncio.gather(*tasks)
+        gated.calls.clear()
+        await _league_read()                          # alone: nothing to report
+    (event,) = [e for e in logs if e["event"] == "provider_get_coalesced"]
+    assert event["joined"] == 3 and event["provider"] == "espn"
+    assert event["url"] == URL                        # no query string
+    assert "s2-a" not in repr(event) and "{A}" not in repr(event)
