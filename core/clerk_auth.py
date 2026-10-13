@@ -22,6 +22,7 @@ from http.cookiejar import DefaultCookiePolicy
 
 import jwt
 import requests
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -49,10 +50,11 @@ security = HTTPBearer(auto_error=False)
 _clerk_http = requests.Session()
 _clerk_http.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 
-# The JWKS, fetched once and shared by every thread. A plain lru_cache let each
-# of the 9 parallel requests in the first Week open after a deploy make its own
-# fetch (about 330 ms each in prod); the lock makes them wait for one.
-_jwks: Optional[dict] = None
+# Clerk's signing keys by kid, built from the JWKS once and shared by every
+# thread. A plain lru_cache let each of the 9 parallel requests in the first
+# Week open after a deploy make its own fetch (about 330 ms each in prod); the
+# lock makes them wait for one.
+_jwks: Optional[dict[str, rsa.RSAPublicKey]] = None
 _jwks_lock = threading.Lock()
 # Fetches finished so far, and whether the last one failed. Callers that queued
 # on the lock behind a fetch share its failure too. Otherwise, with the cache
@@ -63,7 +65,39 @@ _jwks_fetches = 0
 _jwks_last_fetch_failed = False
 
 
-def _fetch_jwks() -> dict:
+def _usable_keys(entries: list[dict]) -> dict[str, rsa.RSAPublicKey]:
+    """The entries that build into an RSA public key, by kid; the rest are dropped.
+
+    Each key is built here, once per fetch, not on every request. An entry that
+    could not be built (a partial `{"kid": ...}` with no `n`/`e`, say) used to
+    be cached as it came, and every token naming its kid then failed to build
+    it: 401 INVALID_TOKEN on every request until a restart, even after Clerk
+    recovered, because only an unknown kid refetches. Dropped, its kid is
+    unknown, so a token naming it refetches the keys like after a rotation.
+    """
+    keys: dict[str, rsa.RSAPublicKey] = {}
+    for entry in entries:
+        kid = entry.get("kid")
+        if not isinstance(kid, str) or not kid:
+            # No token can name it: a token without a kid is refused before the lookup
+            log.warning("clerk_jwks_key_unusable", kid=None, reason="no kid")
+            continue
+        try:
+            key = jwt.algorithms.RSAAlgorithm.from_jwk(entry)
+        except Exception as e:
+            # PyJWT and cryptography raise InvalidKeyError, ValueError or TypeError
+            # depending on what is missing or wrong; any of them means unusable.
+            log.warning("clerk_jwks_key_unusable", kid=kid, reason=type(e).__name__)
+            continue
+        if not isinstance(key, rsa.RSAPublicKey):
+            # A private key (an entry with `d`) builds, but cannot verify a signature
+            log.warning("clerk_jwks_key_unusable", kid=kid, reason=type(key).__name__)
+            continue
+        keys.setdefault(kid, key)   # the first entry for a kid wins, as the lookup always did
+    return keys
+
+
+def _fetch_jwks() -> dict[str, rsa.RSAPublicKey]:
     if not CLERK_JWKS_URL:
         log.error("clerk_jwks_url_missing")
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
@@ -76,18 +110,25 @@ def _fetch_jwks() -> dict:
         log.error("clerk_jwks_fetch_failed", error=type(e).__name__, detail=str(e))
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
 
-    # A 200 whose JSON is not a key set (null, a list, an error object) must not
-    # be cached as one: every token would then fail on it until the next deploy.
-    keys = jwks.get("keys") if isinstance(jwks, dict) else None
-    if not isinstance(keys, list) or not all(isinstance(key, dict) for key in keys):
+    # A 200 whose JSON is not a key set (null, a list, an error object), or whose
+    # keys cannot verify anything, must not be cached as one: every token would
+    # then fail on it until the next deploy. Refused, it is a failed fetch: the
+    # keys already cached stay, and the next caller fetches again.
+    entries = jwks.get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
         log.error("clerk_jwks_malformed", body_type=type(jwks).__name__)
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
-    return jwks
+    keys = _usable_keys(entries)
+    if not keys:
+        log.error("clerk_jwks_malformed", body_type=type(jwks).__name__, entries=len(entries), usable=0)
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+    return keys
 
 
-def get_clerk_jwks(replacing: Optional[dict] = None) -> dict:
+def get_clerk_jwks(replacing: Optional[dict] = None) -> dict[str, rsa.RSAPublicKey]:
     """
-    Clerk's JWKS public keys, fetched once and cached for the process.
+    Clerk's JWKS public keys by kid, fetched once and cached for the process.
+    Only keys that built are cached (see `_usable_keys`).
 
     `replacing` is a key set the caller found no key in for its token (Clerk
     rotated its keys). The keys are fetched again only while the cache still
@@ -128,18 +169,11 @@ def warm_clerk_jwks() -> None:
     itself, as it always has.
     """
     try:
-        keys = len(get_clerk_jwks()["keys"])
+        keys = len(get_clerk_jwks())
     except Exception as e:
         log.warning("clerk_jwks_warm_failed", error=type(e).__name__)
         return
     log.info("clerk_jwks_warmed", keys=keys)
-
-
-def _key_for(jwks: dict, kid: str):
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
-    return None
 
 
 def get_public_key_for_token(token: str):
@@ -158,12 +192,13 @@ def get_public_key_for_token(token: str):
 
     # Only well-formed tokens get as far as the (cached) JWKS fetch
     jwks = get_clerk_jwks()
-    key = _key_for(jwks, kid)
+    key = jwks.get(kid)
     if key is not None:
         return key
 
-    # If key not found, refresh the keys and retry once (key rotation)
-    key = _key_for(get_clerk_jwks(replacing=jwks), kid)
+    # If key not found, refresh the keys and retry once (key rotation). A key
+    # that was dropped because it could not be built lands here too.
+    key = get_clerk_jwks(replacing=jwks).get(kid)
     if key is not None:
         return key
 

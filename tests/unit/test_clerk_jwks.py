@@ -4,9 +4,9 @@ Clerk's JWKS cache (core/clerk_auth.py).
 The keys used to sit behind a bare lru_cache, so after every deploy each of the
 first Week open's 9 parallel requests fetched them itself (about 330 ms each in
 prod). Now concurrent callers wait for one fetch and share its outcome, failure
-included, a key rotation refetches once however many callers notice it, and a
-failed fetch never throws away keys that work. No network: the HTTP session's
-`get` is replaced.
+included, a key rotation refetches once however many callers notice it, a
+failed fetch never throws away keys that work, and only keys that build are
+cached. No network: the HTTP session's `get` is replaced.
 """
 
 import json
@@ -16,17 +16,32 @@ import time
 import jwt
 import pytest
 import requests
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.security import HTTPAuthorizationCredentials
 
 from core import clerk_auth
 from core.errors import AuthenticationError, ServiceUnavailableError
+from core.settings import settings
 
 
-def _jwk(kid: str) -> dict:
+def _jwk(kid: str, private: bool = False) -> dict:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key if private else key.public_key()))
     jwk["kid"] = kid
     return jwk
+
+
+# Key sets that parse as JSON and have the right shape, but hold no key a token
+# can be verified with: entries PyJWT cannot build, or that are not RSA public keys.
+UNUSABLE_KEY_SETS = {
+    "empty": {"keys": []},
+    "kid only": {"keys": [{"kid": "kid-1"}]},
+    "no n or e": {"keys": [{"kid": "kid-1", "kty": "RSA"}]},
+    "bad numbers": {"keys": [{"kid": "kid-1", "kty": "RSA", "n": "AQAB", "e": "AQAB"}]},
+    "not RSA": {"keys": [{"kid": "kid-1", "kty": "EC", "crv": "P-256"}]},
+    "private key": {"keys": [_jwk("kid-1", private=True)]},
+}
 
 
 @pytest.fixture(scope="module")
@@ -243,3 +258,122 @@ def test_startup_warm_up_failure_is_not_fatal(endpoint, jwks_v1):
     clerk_auth.warm_clerk_jwks()  # logs, does not raise
     clerk_auth.get_public_key_for_token(_token("kid-1"))  # the first request fetches, as before
     assert fake.fetches == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", UNUSABLE_KEY_SETS.values(), ids=UNUSABLE_KEY_SETS.keys())
+def test_a_key_set_with_no_usable_key_is_503_and_is_not_cached(endpoint, jwks_v1, body):
+    fake = endpoint(body, jwks_v1)
+    with pytest.raises(ServiceUnavailableError) as exc:
+        clerk_auth.get_public_key_for_token(_token("kid-1"))
+    assert exc.value.error_code == "AUTH_UNAVAILABLE"
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+    assert fake.fetches == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", UNUSABLE_KEY_SETS.values(), ids=UNUSABLE_KEY_SETS.keys())
+def test_startup_warm_up_does_not_cache_a_key_set_with_no_usable_key(endpoint, jwks_v1, body):
+    """A partial answer at startup such as {"keys": [{"kid": ...}]} used to be
+    cached, and every token naming that kid then failed to build its key: 401
+    INVALID_TOKEN on every request until a restart, even once Clerk recovered."""
+    fake = endpoint(body, jwks_v1)
+    clerk_auth.warm_clerk_jwks()   # logs, does not raise
+    assert clerk_auth._jwks is None
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))   # the first request fetches
+    assert fake.fetches == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", UNUSABLE_KEY_SETS.values(), ids=UNUSABLE_KEY_SETS.keys())
+def test_a_rotation_refetch_with_no_usable_key_is_503_and_keeps_the_keys(endpoint, jwks_v1, jwks_v2, body):
+    fake = endpoint(jwks_v1, body, jwks_v2)
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+
+    with pytest.raises(ServiceUnavailableError):
+        clerk_auth.get_public_key_for_token(_token("kid-2"))
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))   # still served from the cache
+    assert fake.fetches == 2
+
+    clerk_auth.get_public_key_for_token(_token("kid-2"))   # Clerk recovered: the next caller refetches
+    assert fake.fetches == 3
+
+
+@pytest.mark.unit
+def test_an_unusable_key_beside_good_ones_is_dropped_and_its_kid_refetches(endpoint, jwks_v1, jwks_v2):
+    """The good keys are cached without the partial entry, so a token naming it
+    takes the rotation path (one refetch) instead of failing until a restart."""
+    partial = {"keys": [*jwks_v1["keys"], {"kid": "kid-2"}]}
+    fake = endpoint(partial, jwks_v2)
+    clerk_auth.warm_clerk_jwks()
+    assert set(clerk_auth._jwks) == {"kid-1"}
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+    assert fake.fetches == 1
+
+    clerk_auth.get_public_key_for_token(_token("kid-2"))
+    assert fake.fetches == 2
+
+
+@pytest.mark.unit
+def test_an_unusable_key_beside_good_ones_at_refresh_is_401_then_recovers(endpoint, jwks_v1, jwks_v2):
+    """Clerk mid-rotation serving the new key partially: the caller that refetched
+    gets a 401 for its kid, the old keys keep working, and the next caller with
+    the new kid refetches again rather than finding a key that cannot be built."""
+    partial = {"keys": [*jwks_v1["keys"], {"kid": "kid-2"}]}
+    fake = endpoint(jwks_v1, partial, jwks_v2)
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+
+    with pytest.raises(AuthenticationError) as exc:
+        clerk_auth.get_public_key_for_token(_token("kid-2"))
+    assert exc.value.error_code == "INVALID_TOKEN"
+    assert fake.fetches == 2
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+    assert fake.fetches == 2
+
+    clerk_auth.get_public_key_for_token(_token("kid-2"))
+    assert fake.fetches == 3
+
+
+@pytest.mark.unit
+def test_a_refetch_with_no_usable_key_is_shared_like_a_failed_fetch(endpoint, jwks_v1):
+    """A key set refused for having no usable key is a failed fetch: callers
+    queued behind it share its 503 instead of fetching one after another."""
+    fake = endpoint(jwks_v1, UNUSABLE_KEY_SETS["kid only"], delay=0.1)
+    clerk_auth.get_public_key_for_token(_token("kid-1"))
+
+    outcomes = _outcomes(lambda: clerk_auth.get_public_key_for_token(_token("kid-new")), n=6)
+    assert all(isinstance(outcome, ServiceUnavailableError) for outcome, _ in outcomes)
+    assert fake.fetches == 2   # the first load, then one shared refetch
+
+    clerk_auth.get_public_key_for_token(_token("kid-1"))   # still served from the cache
+    assert fake.fetches == 2
+
+
+@pytest.mark.unit
+def test_a_signed_token_verifies_once_clerk_recovers_from_a_partial_key_set(endpoint):
+    """The reported failure end to end: Clerk answers the startup warm-up with a
+    partial key set, then recovers. The first request fetches the real key and
+    the token verifies; before, every request was 401 with no refetch."""
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+    jwk["kid"] = "current-key"
+    fake = endpoint({"keys": [{"kid": "current-key"}]}, {"keys": [jwk]})
+    clerk_auth.warm_clerk_jwks()
+
+    pem = private_key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+    )
+    now = int(time.time())
+    token = jwt.encode(
+        {"sub": "user_abc", "iss": settings.clerk_issuer, "iat": now, "exp": now + 300},
+        pem, algorithm="RS256", headers={"kid": "current-key"},
+    )
+    for _ in range(3):
+        user = clerk_auth.verify_clerk_token(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
+        assert user["clerk_user_id"] == "user_abc"
+    assert fake.fetches == 2   # the refused warm-up, then one fetch that worked
