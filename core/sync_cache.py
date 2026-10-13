@@ -94,7 +94,8 @@ class SyncTTLCache:
         return self.ttl_seconds > 0 and self.max_entries > 0
 
     def get_or_build(self, key: Hashable, build: Callable[[], T], *,
-                     valid: Optional[Callable[[T], bool]] = None) -> T:
+                     valid: Optional[Callable[[T], bool]] = None,
+                     keep: Optional[Callable[[T], bool]] = None) -> T:
         """Return the live value for `key`, building it once if needed.
 
         `build` runs on the calling thread, outside the lock, and must not ask
@@ -105,6 +106,11 @@ class SyncTTLCache:
         the caller builds — the way a value derived from another cached value
         follows that value to its next version rather than outliving it. It may
         run under the lock, so it must be cheap and must not use the cache.
+
+        `keep`, when given, is asked of each freshly built value: False serves it
+        to this caller and those waiting on its build but does not store it, so
+        the next caller builds again (a value read while its source was still
+        being written, say).
         """
         if not self.enabled:
             return build()
@@ -136,9 +142,10 @@ class SyncTTLCache:
             raise
         else:
             flight.value = value
-            with self._lock:
-                if not flight.detached:
-                    self._put(key, value)
+            if keep is None or keep(value):
+                with self._lock:
+                    if not flight.detached:
+                        self._put(key, value)
             return value
         finally:
             with self._lock:

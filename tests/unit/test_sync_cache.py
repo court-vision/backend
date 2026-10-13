@@ -317,3 +317,34 @@ def test_a_follower_the_leaders_build_does_not_serve_builds_for_itself():
 
     assert got == {"leader": "v1", "follower": "v2"}
     assert cache.stats()["coalesced"] == 1 and cache.stats()["entries"] == 1   # the leader's build is the one stored
+
+
+@pytest.mark.unit
+def test_a_build_the_caller_will_not_keep_is_served_but_never_stored():
+    cache = _cache()
+    started, release = threading.Event(), threading.Event()
+
+    def keep(value):
+        return value != "partial"                # e.g. a snapshot read mid-write
+
+    got = {}
+
+    def partial_build():
+        started.set()
+        release.wait(5)
+        return "partial"
+
+    leader = threading.Thread(target=lambda: got.setdefault("leader", cache.get_or_build("k", partial_build, keep=keep)))
+    leader.start()
+    assert started.wait(5)
+    follower = threading.Thread(target=lambda: got.setdefault("follower", cache.get_or_build("k", lambda: "own", keep=keep)))
+    follower.start()
+    _wait_for_followers(cache, 1)
+    release.set()
+    leader.join(5)
+    follower.join(5)
+
+    assert got == {"leader": "partial", "follower": "partial"}        # shared with the caller waiting on it...
+    assert cache.stats()["entries"] == 0                              # ...but not kept
+    assert cache.get_or_build("k", lambda: "whole", keep=keep) == "whole"
+    assert cache.get_or_build("k", lambda: "unused", keep=keep) == "whole"

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
@@ -73,6 +73,9 @@ class _LoadedPool:
     and a scored pool is only served alongside the load it was scored from."""
     source: Optional[ValueSource]
     rows: tuple[PoolRow, ...]
+    # False when the rolling snapshot may still have been mid-write: served to
+    # the callers that asked, never kept (see ROLLING_SNAPSHOT_SETTLE).
+    settled: bool = True
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,11 @@ class _ScoredPool:
     by_name: Mapping[str, tuple[PoolRow, ...]]      # normalized name -> valued rows, in pool order
 
 
+# How old a rolling snapshot's newest row must be before a load of it is kept.
+# Prod writes each window's rows back to back in 8-14 s; a minute past the
+# newest row the write is over (or has stalled, and the TTL bounds that too).
+ROLLING_SNAPSHOT_SETTLE = timedelta(seconds=60)
+
 # Category leagues value every player against the whole pool: ~506 rows loaded,
 # hydrated and z-scored per valuation. A category Week open makes 10-13 of them
 # (/lineup for each day shown, the matchup trio, /actions, streamers), and in
@@ -102,7 +110,18 @@ class _ScoredPool:
 # prod, around 00:30 ET), so a date-keyed entry would rebuild on the first row
 # of a new snapshot and then keep that partial pool for the whole TTL. The pool's
 # TTL bounds how long a process lags a new snapshot, as it does for the rankings
-# cache. A scored entry is also tied to the load it was scored from rather than
+# cache.
+#
+# Keying on the window alone does not remove the partial-pool risk, though: a
+# load whose expiry falls inside the write (~3% a window, per process, per night)
+# still reads only the rows written so far, and a category player not yet written
+# has no value at all (the category path has no per-player baseline fallback). So a
+# rolling load whose newest row is under ROLLING_SNAPSHOT_SETTLE old is served
+# but not kept, and the next valuation loads again: within the write, the
+# uncached behaviour. The real fix is data-platform writing each window in one
+# transaction; until then this narrows the exposure to that write itself.
+#
+# A scored entry is also tied to the load it was scored from rather than
 # to its own TTL alone: one scored late in a load's life would otherwise keep
 # that load's values for most of another TTL after the pool moved on, and a
 # league's board values (scored) and its projections (scored against the loaded
@@ -425,12 +444,34 @@ class PlayerValueService:
         return min(ROLLING_WINDOWS, key=lambda w: (abs(w - days), w))
 
     @staticmethod
+    def _rolling_snapshot_written_at(window: int, as_of: date) -> Optional[datetime]:
+        """When the newest row of `window`'s `as_of` snapshot was written (naive UTC,
+        as data-platform stores it). One index scan of ~500 rows: 0.3 ms in prod."""
+        return (
+            PlayerRollingStats.select(fn.MAX(PlayerRollingStats.updated_at))
+            .where((PlayerRollingStats.window_days == window) & (PlayerRollingStats.as_of_date == as_of))
+            .scalar()
+        )
+
+    @staticmethod
+    def _rolling_snapshot_settled(window: int, as_of: date) -> bool:
+        """False while the snapshot may still be mid-write: its newest row is under
+        ROLLING_SNAPSHOT_SETTLE old (or gone since the pool was read)."""
+        written = PlayerValueService._rolling_snapshot_written_at(window, as_of)
+        if written is None:
+            return False
+        if written.tzinfo is None:
+            written = written.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - written >= ROLLING_SNAPSHOT_SETTLE
+
+    @staticmethod
     def _load_category_pool(window: int) -> _LoadedPool:
         """The rolling pool for `window`, or last season's baseline pool when the
         current season has no fresh snapshot yet. Uncached: see `_category_pool`."""
-        _, pool = load_pool(window)
+        as_of, pool = load_pool(window)
         if pool:
-            return _LoadedPool("rolling", tuple(pool))
+            return _LoadedPool("rolling", tuple(pool),
+                               settled=PlayerValueService._rolling_snapshot_settled(window, as_of))
         pool = load_baseline_pool()
         return _LoadedPool("baseline", tuple(pool)) if pool else _LoadedPool(None, ())
 
@@ -439,6 +480,7 @@ class PlayerValueService:
         return _POOL_CACHE.get_or_build(
             (window, settings.nba_season),
             lambda: PlayerValueService._load_category_pool(window),
+            keep=lambda loaded: loaded.settled,
         )
 
     @staticmethod

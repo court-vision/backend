@@ -71,6 +71,7 @@ def pools(monkeypatch):
 
     monkeypatch.setattr(pvs, "load_pool", fake_load_pool)
     monkeypatch.setattr(pvs, "load_baseline_pool", fake_baseline)
+    monkeypatch.setattr(PlayerValueService, "_rolling_snapshot_settled", staticmethod(lambda window, as_of: True))
     return SimpleNamespace(calls=calls, state=state)
 
 

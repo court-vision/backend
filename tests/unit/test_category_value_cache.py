@@ -7,7 +7,7 @@ valuation is a lookup. No DB: the pool loaders are stubbed and counted.
 
 import threading
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -60,11 +60,17 @@ def _league_scoring(cats=NINE_CAT):
     return resolve_scoring(league)
 
 
+def _written_ago(seconds: float) -> datetime:
+    """A row's updated_at as data-platform stores it: naive UTC."""
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=seconds)
+
+
 @pytest.fixture
 def pools(monkeypatch):
-    """Stub the loaders and count loads and z-scorings."""
+    """Stub the loaders and count loads and z-scorings. The rolling snapshot's
+    newest row was written an hour ago unless a test says otherwise."""
     calls = {"rolling": 0, "baseline": 0, "scored": 0}
-    state = {"rolling": list(ROLLING), "baseline": list(BASELINE), "hold": None}
+    state = {"rolling": list(ROLLING), "baseline": list(BASELINE), "hold": None, "written_at": _written_ago(3600)}
 
     def fake_load_pool(window, season=None):
         calls["rolling"] += 1
@@ -83,6 +89,8 @@ def pools(monkeypatch):
     monkeypatch.setattr(pvs, "load_pool", fake_load_pool)
     monkeypatch.setattr(pvs, "load_baseline_pool", fake_baseline)
     monkeypatch.setattr(pvs, "category_values", counted_category_values)
+    monkeypatch.setattr(PlayerValueService, "_rolling_snapshot_written_at",
+                        staticmethod(lambda window, as_of: state["written_at"]))
     return type("Pools", (), {"calls": calls, "state": state})
 
 
@@ -232,6 +240,55 @@ def test_values_scored_late_in_a_loads_life_refresh_with_the_load(pools, monkeyp
     _disable_cache(monkeypatch)                                      # board values and projection: one snapshot
     assert PlayerValueService.category_value_by_espn_id(ESPN_IDS, EIGHT_CAT) == eight_after
     assert PlayerValueService.projected_value_by_espn_id(eight_league, [50003]) == projected_after != projected_before
+
+
+# ---- a snapshot still being written: served, never kept -------------------------------------
+
+
+@pytest.mark.unit
+def test_a_snapshot_written_under_a_minute_ago_is_served_but_not_kept(pools):
+    """data-platform upserts a snapshot row by row outside a transaction, so a load
+    taken within a minute of its newest row may hold only part of it. That load is
+    served (as it would be uncached) but the next valuation loads again."""
+    partial = ROLLING[:10]                       # the write so far: players not yet written have no value
+    pools.state.update(rolling=list(partial), written_at=_written_ago(5))
+    during = PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT)
+    assert during == _expected(partial, NINE_CAT)
+    assert during[50012] == ValueResult(None, None)
+
+    pools.state.update(rolling=list(ROLLING), written_at=_written_ago(1))   # the write goes on, then finishes
+    done = PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT)
+    assert done == _expected(ROLLING, NINE_CAT)                            # not the partial pool, kept for a TTL
+    assert pools.calls["rolling"] == 2
+
+    pools.state["written_at"] = _written_ago(61)                           # a minute later: settled
+    for _ in range(3):
+        assert PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT) == done
+    assert pools.calls["rolling"] == 3                                     # loaded once more, then kept
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("seconds_ago, aware, settled", [
+    (59, False, False),
+    (61, False, True),
+    (30, True, False),                           # an aware timestamp compares the same way
+    (90, True, True),
+    (None, False, False),                        # the snapshot's rows vanished after the read
+])
+def test_a_rolling_snapshot_settles_a_minute_after_its_newest_row(pools, seconds_ago, aware, settled):
+    written_at = None if seconds_ago is None else _written_ago(seconds_ago)
+    pools.state["written_at"] = written_at.replace(tzinfo=timezone.utc) if aware else written_at
+    assert PlayerValueService._rolling_snapshot_settled(14, date(2026, 11, 10)) is settled
+
+
+@pytest.mark.unit
+def test_the_baseline_pool_is_kept_without_asking_when_it_was_written(pools, monkeypatch):
+    pools.state["rolling"] = []                  # pre-season: last season's baseline pool
+    monkeypatch.setattr(PlayerValueService, "_rolling_snapshot_written_at",
+                        staticmethod(lambda window, as_of: pytest.fail("baseline pools are not being written")))
+    for _ in range(3):
+        PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT)
+    assert pools.calls == {"rolling": 1, "baseline": 1, "scored": 1}
 
 
 @pytest.mark.unit

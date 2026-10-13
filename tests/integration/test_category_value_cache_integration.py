@@ -10,7 +10,7 @@ get one build between them.
 """
 
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -29,18 +29,30 @@ BASELINE_SEASON = previous_season(settings.nba_season)
 ESPN_IDS = [9000 + pid for pid in range(1, 13)] + [9999]
 
 
-def _seed(players: int = 12, rolling: bool = True) -> None:
+def _write_rolling(pid: int) -> None:
+    pts = 6 + 2 * pid
+    for window in (7, 14, 30):
+        PlayerRollingStats.create(
+            player=pid, as_of_date=TODAY, window_days=window, gp=2 + pid % 4, fpts=pts * 1.5,
+            pts=pts, reb=pts / 4 + window / 30, ast=(pid % 5) + 1, stl=0.5 + pid % 3 / 2, blk=pid % 4 / 3,
+            tov=1 + pid % 3, min=30.0, fgm=pts / 2.5, fga=pts / 1.2, fg_pct=0.48,
+            fg3m=pid % 4, fg3a=3.0 + pid % 3, fg3_pct=0.33, ftm=1 + pid % 3, fta=2 + pid % 4, ft_pct=0.75,
+        )
+
+
+def _settle() -> None:
+    """Date the snapshot's rows an hour back: written last night, not still being written.
+    (An UPDATE query, because the model's save() stamps updated_at with now.)"""
+    an_hour_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+    PlayerRollingStats.update(updated_at=an_hour_ago).execute()
+
+
+def _seed(players: int = 12, rolling: bool = True, settled: bool = True) -> None:
     for pid in range(1, players + 1):
         Player.create(id=pid, name=f"P{pid}", name_normalized=f"p{pid}", espn_id=9000 + pid)
         pts = 6 + 2 * pid
         if rolling and pid <= players - 2:          # the last two have no game in the window yet
-            for window in (7, 14, 30):
-                PlayerRollingStats.create(
-                    player=pid, as_of_date=TODAY, window_days=window, gp=2 + pid % 4, fpts=pts * 1.5,
-                    pts=pts, reb=pts / 4 + window / 30, ast=(pid % 5) + 1, stl=0.5 + pid % 3 / 2, blk=pid % 4 / 3,
-                    tov=1 + pid % 3, min=30.0, fgm=pts / 2.5, fga=pts / 1.2, fg_pct=0.48,
-                    fg3m=pid % 4, fg3a=3.0 + pid % 3, fg3_pct=0.33, ftm=1 + pid % 3, fta=2 + pid % 4, ft_pct=0.75,
-                )
+            _write_rolling(pid)
         gp = 40 + pid
         PlayerSeasonStats.create(
             player=pid, team=None, season=BASELINE_SEASON, as_of_date=date(2026, 4, 12), gp=gp,
@@ -48,6 +60,8 @@ def _seed(players: int = 12, rolling: bool = True) -> None:
             tov=gp * 2, min=gp * 30, fgm=gp * 5, fga=gp * (9 + pid % 5), fg3m=gp * (pid % 4), fg3a=gp * 4,
             ftm=gp * 2, fta=gp * 3,
         )
+    if settled:
+        _settle()
 
 
 def _uncached(monkeypatch):
@@ -138,3 +152,30 @@ def test_a_stale_rolling_snapshot_still_falls_back_to_the_baseline(integration_d
     cats = resolve_scoring(None, "categories")
     out = PlayerValueService.avg_points_for(cats, espn_ids=ESPN_IDS)
     assert out[9001].source == "baseline" and out[9012].source == "baseline"
+
+
+@pytest.mark.integration
+def test_a_snapshot_still_being_written_is_served_but_not_kept(integration_db):
+    """data-platform upserts a snapshot row by row outside a transaction. A pool read
+    within a minute of its newest row is served but not kept, so the rest of the
+    write shows up on the next valuation rather than a TTL later."""
+    _seed(settled=False)
+    PlayerRollingStats.delete().where(PlayerRollingStats.player > 5).execute()   # the write so far: players 1-5
+    cats = resolve_scoring(None, "categories")
+
+    during = PlayerValueService.avg_points_for(cats, espn_ids=ESPN_IDS)
+    assert during[9001].source == "rolling" and during[9006] == ValueResult(None, None)
+
+    for pid in range(6, 11):                                           # the write goes on and finishes
+        _write_rolling(pid)
+    done = PlayerValueService.avg_points_for(cats, espn_ids=ESPN_IDS)
+    assert done[9006].source == "rolling" and done[9006].value is not None
+    first_five = range(9001, 9006)
+    assert [done[e] for e in first_five] != [during[e] for e in first_five]   # rescored against the whole pool
+
+    _settle()                                                          # a minute on, the next load is kept
+    misses = pvs._POOL_CACHE.stats()["misses"]
+    assert PlayerValueService.avg_points_for(cats, espn_ids=ESPN_IDS) == done
+    PlayerRollingStats.delete().execute()
+    assert PlayerValueService.avg_points_for(cats, espn_ids=ESPN_IDS) == done     # no longer reads the tables
+    assert pvs._POOL_CACHE.stats()["misses"] - misses == 1
