@@ -163,6 +163,18 @@ def test_cache_control_never_outlives_the_servers_own_entry(client, service_call
 
 
 @pytest.mark.api
+def test_every_answer_varies_on_the_origin(client, service_calls):
+    """Without an Origin, CORSMiddleware adds no Vary; the cached answer must
+    say it itself, or a tab's copy would answer the app's CORS fetch."""
+    first = client.get("/v1/rankings/")
+    conditional = client.get("/v1/rankings/", headers={"If-None-Match": first.headers["etag"]})
+
+    assert conditional.status_code == 304
+    assert first.headers["vary"] == conditional.headers["vary"] == "Origin"
+    assert "access-control-allow-origin" not in first.headers
+
+
+@pytest.mark.api
 def test_a_cleared_cache_falls_back_to_the_service(client, service_calls):
     from api.v1.public import rankings
 

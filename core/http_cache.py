@@ -87,9 +87,19 @@ async def serve_cached(
     fresh_for = max(1, int(cache.ttl_seconds - entry.age_seconds()))
     if max_age is not None:
         fresh_for = max(1, min(fresh_for, int(max_age)))
+    # Vary: Origin on every answer, not only the cross-origin ones. CORSMiddleware
+    # adds it (with the allow-origin header) only when the request carries an
+    # Origin; it returns early without one, and a same-origin GET sends none —
+    # a Swagger "Try it out" from /docs, the URL opened in a tab. That copy has
+    # no allow-origin header, and the browser shares its HTTP cache across
+    # api. and www.courtvision.dev (one site), so without Vary the app's CORS
+    # fetch of the same URL would be answered from it and fail until max-age
+    # ran out. With an Origin present the middleware appends its own, giving
+    # `Vary: Origin, Origin`: a repeated field name, which caches treat as one.
     headers = {
         "Cache-Control": f"{'private' if private else 'public'}, max-age={fresh_for}",
         "ETag": entry.etag,
+        "Vary": "Origin",
         "X-Cache": "HIT" if hit else "MISS",
     }
     if etag_matches(request.headers.get("if-none-match"), entry.etag):

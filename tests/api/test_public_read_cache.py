@@ -256,6 +256,10 @@ def test_the_kill_switch_restores_the_uncached_route(
     assert not {"cache-control", "etag", "x-cache"} & set(first.headers)
 
 
+def vary(res) -> set[str]:
+    return {field.strip().lower() for field in res.headers.get("vary", "").split(",") if field.strip()}
+
+
 def test_a_cross_origin_copy_varies_on_the_origin(client, monkeypatch):
     """Cache-Control is public, and CORS echoes the caller's origin: a shared
     cache must key on Origin, which Starlette's CORSMiddleware says with Vary."""
@@ -264,9 +268,34 @@ def test_a_cross_origin_copy_varies_on_the_origin(client, monkeypatch):
     res = client.get("/v1/players/203999/profile", headers={"Origin": "https://www.courtvision.dev"})
 
     assert res.headers["access-control-allow-origin"] == "https://www.courtvision.dev"
-    assert "origin" in res.headers["vary"].lower()
+    assert vary(res) == {"origin"}
     assert "etag" in res.headers["access-control-expose-headers"].lower()
     assert max_age(res) > 0
+
+
+@pytest.mark.parametrize("url,module,cls,method,response,cache", ROUTES, ids=ROUTE_IDS)
+def test_a_copy_fetched_without_an_origin_varies_on_it_too(
+    client, monkeypatch, frozen_nba_date, url, module, cls, method, response, cache,
+):
+    """A same-origin GET (Swagger's "Try it out", the URL opened in a tab) sends
+    no Origin, so CORSMiddleware adds neither allow-origin nor Vary. Without a
+    Vary of its own, that copy would answer the app's CORS fetch of the same URL
+    from the browser cache, with no allow-origin header, and fail it."""
+    stub(monkeypatch, module, cls, method, response)
+
+    miss = client.get(url)
+    hit = client.get(url)
+    not_modified = client.get(url, headers={"If-None-Match": hit.headers["etag"]})
+    cross_origin = client.get(url, headers={"Origin": "https://www.courtvision.dev"})
+
+    assert [r.headers["x-cache"] for r in (miss, hit, not_modified)] == ["MISS", "HIT", "HIT"]
+    assert not_modified.status_code == 304
+    for res in (miss, hit, not_modified):
+        assert "access-control-allow-origin" not in res.headers
+        assert vary(res) == {"origin"}
+    # The middleware's own Vary is appended to this one, not lost or replacing it.
+    assert cross_origin.headers["access-control-allow-origin"] == "https://www.courtvision.dev"
+    assert vary(cross_origin) == {"origin"}
 
 
 # ---- keys: every input that changes a body ----------------------------------
