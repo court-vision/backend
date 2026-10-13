@@ -138,6 +138,7 @@ def test_category_value_falls_back_to_last_seasons_baseline_pool(pools):
     assert pools.calls["baseline"] == 1
 
     pools.state["baseline"] = []
+    PlayerValueService.clear_category_cache()                            # a new pool is seen once the cached one goes
     assert PlayerValueService.avg_points_for(scoring, espn_ids=[3112335]) == {3112335: ValueResult(None, None)}
 
 
@@ -163,8 +164,10 @@ def test_category_value_by_name_normalizes_and_disambiguates_by_team(pools):
 def test_arbitrary_day_counts_snap_to_a_stored_window_and_recent_means_the_shortest(pools):
     scoring = resolve_scoring(_league("categories", NINE_CAT_JSON))
     for days, window in ((3, 7), (7, 7), (10, 7), (14, 14), (22, 14), (30, 30)):
+        PlayerValueService.clear_category_cache()                        # load every time, so the window shows
         PlayerValueService.avg_points_for(scoring, espn_ids=[3112335], days=days)
         assert pools.calls["rolling"][-1] == window, days
+    PlayerValueService.clear_category_cache()
     PlayerValueService.avg_points_for(scoring, espn_ids=[3112335], days=14, recent=True)
     assert pools.calls["rolling"][-1] == 7
 

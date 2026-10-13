@@ -22,6 +22,25 @@ os.environ.setdefault("PIPELINE_API_TOKEN", "test-token")
 os.environ.setdefault("NBA_SEASON", "2025-26")
 
 
+# ---- Per-process caches ----
+
+@pytest.fixture(autouse=True)
+def empty_category_value_cache():
+    """Category pools and scores are cached per process (services.player_value_service);
+    one test's stubbed or seeded pool must never be served to the next. Looked up in
+    sys.modules so a test that never imports the service does not import it here."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.player_value_service")
+        if module is not None:
+            module.PlayerValueService.clear_category_cache()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- The captured draft ----
 
 @pytest.fixture(scope="session")

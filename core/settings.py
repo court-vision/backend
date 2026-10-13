@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     # League-scored rankings are cached per league scoring configuration, not per
     # user, so this bounds distinct league setups rather than sign-ups.
     league_rankings_cache_max_entries: int = 64
+    # Category leagues value players against a z-scored pool of every player
+    # (services.player_value_service). The pool comes from the once-a-day
+    # rolling snapshot, so each process keeps it for this long instead of
+    # rebuilding it 10-13 times per Week open. 0 disables the cache (kill switch).
+    category_value_cache_ttl_seconds: float = 300.0
+    # Per cache: the loaded pools (~0.55 MB each, one per window) and the scored
+    # pools (~0.1 MB each, one per window per league category set), so the bound
+    # is on distinct league setups.
+    category_value_cache_max_entries: int = 64
 
     # Shared fixed-window counters for SlowAPI. Railway injects REDIS_URL when
     # a Redis service is linked; RATE_LIMIT_STORAGE_URI is the explicit alias.
@@ -253,6 +262,8 @@ class Settings(BaseSettings):
             raise ValueError("concurrency queue timeouts must be positive")
         if self.rankings_cache_ttl_seconds < 0 or self.rankings_cache_max_entries < 0:
             raise ValueError("rankings cache settings must not be negative")
+        if self.category_value_cache_ttl_seconds < 0 or self.category_value_cache_max_entries < 0:
+            raise ValueError("category value cache settings must not be negative")
         return self
 
     @model_validator(mode="after")
