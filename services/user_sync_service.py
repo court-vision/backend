@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 from db.models import User
 
+from core import clerk_auth
 from core.errors import ServiceUnavailableError
 from core.logging import get_logger
 
@@ -36,13 +37,15 @@ class UserSyncService:
 
         Args:
             clerk_user_id: The user's Clerk ID (from the 'sub' claim in the JWT)
-            email: The user's email address (optional, fetched from Clerk API if needed)
+            email: The user's email address, from the session token's claim
+                (optional: fetched from Clerk's Backend API if a user has to be
+                created or linked without it)
 
         Returns:
             User: The local database user record
 
         Raises:
-            HTTPException: If user cannot be created (e.g., no email available)
+            ServiceUnavailableError: If user cannot be created (no email available)
         """
         # Try to find by Clerk ID first (most common case)
         user = User.select().where(User.clerk_user_id == clerk_user_id).first()
@@ -53,6 +56,15 @@ class UserSyncService:
                 user.email = email
                 user.save()
             return user
+
+        # Only a sign-in with no row yet needs the email, so when the token did
+        # not carry it this is the one place that asks Clerk: once per new user,
+        # not once per request. The call blocks while this DB operation holds
+        # its connection, which is fine for a first sign-in and is why it does
+        # not belong in token verification (core/clerk_auth.py).
+        if not email:
+            clerk_user = clerk_auth.fetch_clerk_user(clerk_user_id)
+            email = (clerk_user or {}).get("email")
 
         # If we have an email, try to find by email (for users who existed before Clerk migration)
         if email:

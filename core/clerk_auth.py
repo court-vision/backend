@@ -7,7 +7,17 @@ It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
 Failures raise `core.errors` exceptions, rendered as the standard envelope:
 missing/invalid/expired tokens are 401 (`AUTH_REQUIRED`, `INVALID_TOKEN`,
 `TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`.
+
+Verifying a token makes no network call once the JWKS is cached. The user's
+email comes from the session token's `email` claim (Clerk dashboard → Sessions
+→ Customize session token, live since 2026-10-13). Without the claim the email
+is None: it is fetched from Clerk's Backend API only where it is needed, when
+`UserSyncService.get_or_create_user` has to create or link a user. Fetching it
+here on every request cost about 100 ms alone and 300-480 ms in a desk-open
+burst (docs/PERF_AUDIT_2026-10.md, A1).
 """
+
+from http.cookiejar import DefaultCookiePolicy
 
 import jwt
 import requests
@@ -31,6 +41,14 @@ CLERK_SECRET_KEY = settings.clerk_secret_key.get_secret_value()
 # auto_error=False: a missing header is our 401 AUTH_REQUIRED, not FastAPI's 403
 security = HTTPBearer(auto_error=False)
 
+# One HTTP session for Clerk, so the rare calls that remain reuse a kept-alive
+# connection instead of paying DNS + TCP + TLS each time (the audit measured a
+# new connection to api.clerk.com per request). Callers are threadpool threads:
+# urllib3's pool is thread-safe, and the cookie policy keeps the shared jar
+# empty, since nothing here needs cookies (Cloudflare in front of Clerk sets them).
+_clerk_http = requests.Session()
+_clerk_http.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+
 
 @lru_cache(maxsize=1)
 def get_clerk_jwks() -> dict:
@@ -43,7 +61,7 @@ def get_clerk_jwks() -> dict:
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
-        response = requests.get(CLERK_JWKS_URL, timeout=10)
+        response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
@@ -87,8 +105,10 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
     """
     Fetch user details from Clerk's Backend API.
 
-    This is used to get user information (like email) that isn't included
-    in the JWT by default.
+    This is used to get user information (like email) that the session token
+    does not carry. Request verification never calls it: only
+    `UserSyncService.get_or_create_user` does, when it has to create or link
+    a user and the token had no email.
 
     Args:
         clerk_user_id: The Clerk user ID (e.g., 'user_xxx')
@@ -101,7 +121,7 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         return None
 
     try:
-        response = requests.get(
+        response = _clerk_http.get(
             f"https://api.clerk.com/v1/users/{clerk_user_id}",
             headers={
                 "Authorization": f"Bearer {CLERK_SECRET_KEY}",
@@ -157,7 +177,8 @@ def verify_clerk_token(
             ...
 
     Returns:
-        dict with 'clerk_user_id' (sub claim), 'email', and other token claims
+        dict with 'clerk_user_id' (sub claim), 'email' (the token's claim, or
+        None), and other token claims
     """
     token = _require_token(credentials)
 
@@ -180,18 +201,11 @@ def verify_clerk_token(
         if settings.clerk_authorized_parties and azp and azp not in settings.clerk_authorized_parties:
             raise AuthenticationError("INVALID_TOKEN", "Invalid authorized party")
 
-        clerk_user_id = payload.get("sub")
-        email = payload.get("email")  # May be None if not in JWT claims
-
-        # If email not in JWT, fetch from Clerk's API
-        if not email and clerk_user_id:
-            clerk_user = fetch_clerk_user(clerk_user_id)
-            if clerk_user:
-                email = clerk_user.get("email")
-
         return {
-            "clerk_user_id": clerk_user_id,
-            "email": email,
+            "clerk_user_id": payload.get("sub"),
+            # None when the session token has no email claim. Nothing is fetched
+            # here: get_or_create_user fetches it when it creates or links a user.
+            "email": payload.get("email") or None,
             "exp": payload.get("exp"),
             "iat": payload.get("iat"),
         }
