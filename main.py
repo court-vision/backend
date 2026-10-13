@@ -15,6 +15,7 @@ from core.logging import setup_logging, get_logger
 from core.settings import settings
 from core.telemetry import init_sentry
 from core.watchdog import start_loop_watchdog
+from core.warmup import warm_request_path
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
 from services.ai import questions as ai_questions
@@ -67,6 +68,11 @@ async def lifespan(app: FastAPI):
 
         # The season's fantasy calendar must ship with the image (static/schedule{yy}-{yy}.json)
         assert_calendar_available()
+
+        # The first requests after a deploy no longer pay for the JWKS, an empty
+        # DB pool and the OpenAPI schema between them (core/warmup.py). The
+        # routers are all included by now, at import. Never fails startup.
+        await warm_request_path(app)
 
         # A blocked event loop hangs every request with nothing logged; exit so Railway restarts us.
         watchdog = start_loop_watchdog(asyncio.get_running_loop(), settings.loop_watchdog_stall_s)
