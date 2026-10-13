@@ -17,11 +17,11 @@ here on every request cost about 100 ms alone and 300-480 ms in a desk-open
 burst (docs/PERF_AUDIT_2026-10.md, A1).
 """
 
+import threading
 from http.cookiejar import DefaultCookiePolicy
 
 import jwt
 import requests
-from functools import lru_cache
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -49,13 +49,14 @@ security = HTTPBearer(auto_error=False)
 _clerk_http = requests.Session()
 _clerk_http.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 
+# The JWKS, fetched once and shared by every thread. A plain lru_cache let each
+# of the 9 parallel requests in the first Week open after a deploy make its own
+# fetch (about 330 ms each in prod); the lock makes them wait for one.
+_jwks: Optional[dict] = None
+_jwks_lock = threading.Lock()
 
-@lru_cache(maxsize=1)
-def get_clerk_jwks() -> dict:
-    """
-    Fetch and cache Clerk's JWKS public keys.
-    Uses lru_cache to avoid repeated network calls.
-    """
+
+def _fetch_jwks() -> dict:
     if not CLERK_JWKS_URL:
         log.error("clerk_jwks_url_missing")
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
@@ -67,6 +68,49 @@ def get_clerk_jwks() -> dict:
     except requests.RequestException as e:
         log.error("clerk_jwks_fetch_failed", error=type(e).__name__, detail=str(e))
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+
+
+def get_clerk_jwks(replacing: Optional[dict] = None) -> dict:
+    """
+    Clerk's JWKS public keys, fetched once and cached for the process.
+
+    `replacing` is a key set the caller found no key in for its token (Clerk
+    rotated its keys). The keys are fetched again only while the cache still
+    holds that set: a caller that finds another thread has already replaced
+    it uses the new set. Either way, concurrent callers make one fetch between
+    them, and a failed fetch keeps the keys already cached.
+    """
+    global _jwks
+    jwks = _jwks
+    if jwks is not None and jwks is not replacing:
+        return jwks
+    with _jwks_lock:
+        jwks = _jwks
+        if jwks is not None and jwks is not replacing:
+            return jwks
+        _jwks = _fetch_jwks()
+        return _jwks
+
+
+def warm_clerk_jwks() -> None:
+    """Fetch the JWKS before the first request (application startup).
+
+    Best effort: a failure is logged and the first request fetches the keys
+    itself, as it always has.
+    """
+    try:
+        jwks = get_clerk_jwks()
+    except Exception as e:
+        log.warning("clerk_jwks_warm_failed", error=type(e).__name__)
+        return
+    log.info("clerk_jwks_warmed", keys=len(jwks.get("keys", [])))
+
+
+def _key_for(jwks: dict, kid: str):
+    for key in jwks.get('keys', []):
+        if key.get('kid') == kid:
+            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
+    return None
 
 
 def get_public_key_for_token(token: str):
@@ -85,18 +129,14 @@ def get_public_key_for_token(token: str):
 
     # Only well-formed tokens get as far as the (cached) JWKS fetch
     jwks = get_clerk_jwks()
+    key = _key_for(jwks, kid)
+    if key is not None:
+        return key
 
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
-
-    # If key not found, clear cache and retry once (key rotation)
-    get_clerk_jwks.cache_clear()
-    jwks = get_clerk_jwks()
-
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
+    # If key not found, refresh the keys and retry once (key rotation)
+    key = _key_for(get_clerk_jwks(replacing=jwks), kid)
+    if key is not None:
+        return key
 
     raise AuthenticationError("INVALID_TOKEN", "Unable to find appropriate signing key")
 
@@ -242,4 +282,6 @@ def clear_jwks_cache():
     Clear the JWKS cache. Call this if you need to force a refresh
     of Clerk's public keys (e.g., after key rotation).
     """
-    get_clerk_jwks.cache_clear()
+    global _jwks
+    with _jwks_lock:
+        _jwks = None
