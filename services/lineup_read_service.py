@@ -16,6 +16,12 @@ A caller may ask for a later ESPN day (`scoring_period_id`): ESPN returns the
 roster as set for that day, and edits to it go out as FUTURE_ROSTER
 (`services.providers.writers`). ESPN carries an edit forward to later days until
 the next day that has its own edit.
+
+A caller that needs only the slots, the version and the locks (the write proxy's
+read before a write) passes `with_values=False` and skips our values, which for a
+category league re-score the whole player pool (~250-400 ms, PERF_AUDIT_2026-10).
+`add_values` gives such a board the values a full read would have carried, for
+when it is handed back to the client after all.
 """
 
 from __future__ import annotations
@@ -221,6 +227,28 @@ def _values_for(league_info: LeagueInfo, espn_ids: list[int]) -> tuple[str, dict
     return value_kind, values, nba_ids_by_espn_id(espn_ids)
 
 
+async def _lookup_values(team_id: int, league_info: LeagueInfo,
+                         espn_ids: list[int]) -> tuple[str, dict[int, Any], dict[int, int]]:
+    """(value_kind, values, nba_ids) for a board's players; no values when the lookup fails."""
+    try:
+        return await run_db("lineup.values", _values_for, league_info, espn_ids)
+    except Exception as exc:  # values are a tie-break, never a reason to fail the read
+        log.warning("lineup_values_lookup_failed", team_id=team_id, error=str(exc))
+        return "fpts", {}, {}
+
+
+def _value_fields(player_id: int, value_kind: str, values: Mapping[int, Any],
+                  nba_ids: Mapping[int, int]) -> dict[str, Any]:
+    """The LineupPlayer fields that come from our stored stats, not from ESPN."""
+    valued = values.get(player_id)
+    return {
+        "nba_player_id": nba_ids.get(player_id),
+        "avg_points": float(valued.value) if valued is not None and valued.value is not None else 0.0,
+        "value_kind": value_kind,
+        "value_source": valued.source if valued is not None else None,
+    }
+
+
 def _persist_espn_team_id(team_id: int, espn_team_id: int) -> bool:
     """Record the provider's team id on the STORED json (never the hydrated copy)."""
     from db.models.teams import Team
@@ -249,9 +277,11 @@ class LineupReadService:
         fallback_slot_counts: Optional[Mapping[str, int]] = None,
         now: Optional[datetime] = None,
         scoring_period_id: Optional[int] = None,
+        with_values: bool = True,
     ) -> LineupState:
         """The board for ESPN's current day, or for `scoring_period_id` (today or a
-        later day of the season; anything else is 400 SCORING_PERIOD_OUT_OF_RANGE)."""
+        later day of the season; anything else is 400 SCORING_PERIOD_OUT_OF_RANGE).
+        `with_values=False` leaves every player at no value (see `add_values`)."""
         # This is ESPN's reader; every consumer reaches it through the adapter's
         # `read_lineup`, which is where another provider's board will come from.
         if league_info.provider != FantasyProvider.ESPN:
@@ -286,12 +316,10 @@ class LineupReadService:
             tips = [g.start_time_et for g in games if g.start_time_et]
             first_tip = min(tips) if tips else None
 
-        espn_ids = [e.player_id for e in parsed.entries]
         value_kind, values, nba_ids = "fpts", {}, {}
-        try:
-            value_kind, values, nba_ids = await run_db("lineup.values", _values_for, league_info, espn_ids)
-        except Exception as exc:  # values are a tie-break, never a reason to fail the read
-            log.warning("lineup_values_lookup_failed", team_id=team_id, error=str(exc))
+        if with_values:
+            value_kind, values, nba_ids = await _lookup_values(team_id, league_info,
+                                                               [e.player_id for e in parsed.entries])
 
         players: list[LineupPlayer] = []
         for e in parsed.entries:
@@ -304,11 +332,9 @@ class LineupReadService:
                     game_time = game.start_time_et.strftime("%H:%M")
                     tip = EASTERN.localize(datetime.combine(nba_date, game.start_time_et))
                     started = tip <= now_et
-            valued = values.get(e.player_id)
             is_out = (e.injury_status or "ACTIVE").upper() in OUT_STATUSES
             players.append(LineupPlayer(
                 player_id=e.player_id,
-                nba_player_id=nba_ids.get(e.player_id),
                 name=e.name,
                 team=e.pro_team,
                 lineup_slot_id=e.lineup_slot_id,
@@ -325,9 +351,7 @@ class LineupReadService:
                 game_started=started,
                 locked=e.lineup_locked or started,
                 playable=game is not None and not is_out,
-                avg_points=float(valued.value) if valued is not None and valued.value is not None else 0.0,
-                value_kind=value_kind,
-                value_source=valued.source if valued is not None else None,
+                **_value_fields(e.player_id, value_kind, values, nba_ids),
             ))
 
         can_write, reason = LineupReadService._write_gate(league_info, period, parsed)
@@ -360,6 +384,14 @@ class LineupReadService:
             except Exception as exc:
                 log.warning("lineup_espn_team_id_persist_failed", team_id=team_id, error=str(exc))
         return state
+
+    @staticmethod
+    async def add_values(team_id: int, league_info: LeagueInfo, state: LineupState) -> LineupState:
+        """A board read `with_values=False`, with the values a full read gives it: the
+        same lookup and the same fields; everything ESPN said is left as it was."""
+        value_kind, values, nba_ids = await _lookup_values(team_id, league_info, [p.player_id for p in state.players])
+        players = [p.model_copy(update=_value_fields(p.player_id, value_kind, values, nba_ids)) for p in state.players]
+        return state.model_copy(update={"players": players})
 
     @staticmethod
     def _resolve_period(provider_period: Optional[int], now_et: datetime):

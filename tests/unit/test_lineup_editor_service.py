@@ -5,8 +5,10 @@ client with a queue of results/exceptions, and the audit/dedup repository
 functions with in-memory fakes.
 
 Covers the manual chain (disabled, blocked, stale, invalid, rejected, auth
-expired, unavailable, applied, applied-but-unverified) and every `evaluate`
-outcome the alerts pipeline branches on.
+expired, unavailable, applied, applied-but-unverified), which reads it makes
+before the write (the edited day once, without values; today's board only when
+that read can't place the day), and every `evaluate` outcome the alerts pipeline
+branches on.
 """
 
 import asyncio
@@ -15,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.errors import ProviderAuthError, ProviderTimeout
+from core.errors import BadRequestError, ProviderAuthError, ProviderTimeout
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import ApplyLineupMovesReq, LineupEvaluateReq, LineupMoveReq, LineupPlayer, LineupState
 from services import fantasy_writer_client, lineup_editor_service as svc
@@ -44,10 +46,11 @@ def player(pid, slot, eligible, *, game=True, status=None, locked=False, value=1
     )
 
 
-def state(players, *, can_write=True, reason=None, version="v1", period=12, nba_date="2026-10-20", current=None):
+def state(players, *, can_write=True, reason=None, version="v1", period=12, nba_date="2026-10-20", current=None,
+          source="provider"):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="Lvl. 3 Goblins", espn_team_id=4, nba_date=nba_date,
-        scoring_period_id=period, scoring_period_source="provider", current_scoring_period_id=current,
+        scoring_period_id=period, scoring_period_source=source, current_scoring_period_id=current,
         first_game_time_et="19:00",
         slot_counts=COUNTS, slots=[], lock_type="INDIVIDUAL_GAME", players=players,
         can_write=can_write, write_blocked_reason=reason, roster_version=version, fetched_at="now",
@@ -65,16 +68,23 @@ def after_swap():
 
 @pytest.fixture
 def harness(monkeypatch):
-    """Stub the read (a queue of states), the writer (a queue of results) and the audit repo."""
-    h = SimpleNamespace(reads=[], read_periods=[], writer=[], writer_calls=[], audits=[], updates=[], counted=False,
-                        noops=[])
+    """Stub the read (a queue of states), the writer (a queue of results) and the audit repo.
+    `add_values` marks the board it returns (fetched_at "valued") so a test can see which
+    board went back to the client with values."""
+    h = SimpleNamespace(reads=[], read_periods=[], read_values=[], valued=[], writer=[], writer_calls=[], audits=[],
+                        updates=[], counted=False, noops=[])
 
     async def fake_read(team_id, league_info, **kwargs):
         h.read_periods.append(kwargs.get("scoring_period_id"))
+        h.read_values.append(kwargs.get("with_values", True))
         nxt = h.reads.pop(0)
         if isinstance(nxt, Exception):
             raise nxt
         return nxt
+
+    async def fake_add_values(team_id, league_info, board):
+        h.valued.append(board.roster_version)
+        return board.model_copy(update={"fetched_at": "valued"})
 
     async def fake_apply(payload):
         h.writer_calls.append(payload)
@@ -95,6 +105,7 @@ def harness(monkeypatch):
         h.updates.append((audit_id, status, provider_status, error))
 
     monkeypatch.setattr(svc.LineupReadService, "read", staticmethod(fake_read))
+    monkeypatch.setattr(svc.LineupReadService, "add_values", staticmethod(fake_add_values))
     monkeypatch.setattr(fantasy_writer_client, "apply_lineup", fake_apply)
     monkeypatch.setattr(svc, "run_db", direct_run_db)
     monkeypatch.setattr(svc, "_audit_insert", audit_insert)
@@ -133,17 +144,19 @@ def test_manual_apply_writes_verifies_and_audits(harness):
     assert "current_scoring_period_id" not in payload           # today's write goes out as ROSTER
     assert harness.audits[0]["source"] == "manual" and harness.audits[0]["nba_date"] == date(2026, 10, 20)
     assert harness.updates == [(1, "applied", 200, None)]
-    assert harness.read_periods == [None, None]                 # today's board, today's re-read
+    assert harness.read_periods == [12, None]                   # today by number, then today's re-read
+    assert harness.read_values == [False, True]                 # only the board handed back is valued
+    assert harness.valued == [] and resp.data.lineup.fetched_at == "now"
 
 
 @pytest.mark.unit
 def test_a_later_day_is_read_written_and_verified_as_that_day(harness):
-    today = state(board(), period=12, current=12)
     friday = state(board(), period=15, current=12, nba_date="2026-10-23")
-    harness.reads = [today, friday, state(after_swap(), period=15, current=12, nba_date="2026-10-23", version="v2")]
+    harness.reads = [friday, state(after_swap(), period=15, current=12, nba_date="2026-10-23", version="v2")]
     resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=15)))
 
-    assert harness.read_periods == [None, 15, 15]
+    assert harness.read_periods == [15, 15]                     # that day, then its re-read: no read of today
+    assert harness.read_values == [False, True]
     payload = harness.writer_calls[0]
     assert (payload["scoring_period_id"], payload["current_scoring_period_id"]) == (15, 12)
     assert payload["idempotency_key"].startswith("21:15:v1:")
@@ -174,6 +187,7 @@ def test_a_failed_verify_read_still_settles_the_audit_as_applied(harness):
 
     assert resp.data.verified is False and "not yet confirmed" in resp.message
     assert resp.data.lineup.roster_version == "v1"  # the pre-write board, since the re-read failed
+    assert resp.data.lineup.fetched_at == "valued" and harness.valued == ["v1"]   # ...with its values
     audit_id, status, provider_status, error = harness.updates[-1]
     assert (audit_id, status, provider_status) == (1, "applied_unverified", 200)
     assert error.startswith("verify_read_failed:")
@@ -202,15 +216,65 @@ def test_stale_version_returns_the_fresh_board(harness):
     with pytest.raises(svc.RosterStale) as exc:
         asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, version="v1")))
     assert exc.value.data["lineup"]["roster_version"] == "v9" and harness.writer_calls == []
+    assert exc.value.data["lineup"]["fetched_at"] == "valued" and harness.valued == ["v9"]
+    assert harness.read_periods == [12] and harness.read_values == [False]
+
+
+def out_of_range(message="ESPN day 12 has passed; today is day 13"):
+    return BadRequestError("SCORING_PERIOD_OUT_OF_RANGE", message)
 
 
 @pytest.mark.unit
 def test_stale_period_is_stale_too(harness):
-    # The day rolled over under the client: today's board comes back, never a past day's.
-    harness.reads = [state(board(), period=13)]
+    # The day rolled over under the client: the read of day 12 is refused, and today's
+    # board comes back, never a past day's.
+    harness.reads = [out_of_range(), state(board(), period=13)]
     with pytest.raises(svc.RosterStale) as exc:
         asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=12)))
-    assert exc.value.data["lineup"]["scoring_period_id"] == 13 and harness.read_periods == [None]
+    assert exc.value.data["lineup"]["scoring_period_id"] == 13 and harness.read_periods == [12, None]
+    assert exc.value.data["lineup"]["fetched_at"] == "valued" and harness.writer_calls == []
+
+
+@pytest.mark.unit
+def test_a_later_day_out_of_range_keeps_its_400(harness):
+    """Past the season's last day: the same 400 the second read gave when today was read first."""
+    refused = out_of_range("ESPN day 200 is after the season's last day (167)")
+    harness.reads = [refused, state(board(), period=12)]
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=200)))
+    assert exc.value is refused and harness.read_periods == [200, None]
+    assert harness.writer_calls == [] and harness.audits == [] and harness.valued == []
+
+
+@pytest.mark.unit
+def test_another_bad_request_from_the_read_is_not_a_reason_to_read_today(harness):
+    harness.reads = [BadRequestError("TEAM_NAME_NOT_IN_LEAGUE", "Team 'x' not found in league")]
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+    assert exc.value.error_code == "TEAM_NAME_NOT_IN_LEAGUE" and harness.read_periods == [12]
+
+
+@pytest.mark.unit
+def test_a_day_our_calendar_placed_is_placed_by_todays_plain_board(harness):
+    # No latestScoringPeriod from ESPN and a calendar a day behind it: read alone, day 12
+    # would look like a later day and go out as FUTURE_ROSTER. ESPN's plain read says day
+    # 12 is today, so today's board is the one written, as ROSTER.
+    harness.reads = [state(board(), period=12, current=11, source="calendar"), state(board(), period=12, current=12),
+                     state(after_swap(), version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+    assert harness.read_periods == [12, None, None] and harness.read_values == [False, False, True]
+    assert "current_scoring_period_id" not in harness.writer_calls[0] and resp.data.verified is True
+
+
+@pytest.mark.unit
+def test_a_later_day_our_calendar_placed_is_not_read_twice(harness):
+    friday = state(board(), period=15, current=12, nba_date="2026-10-23", source="calendar")
+    harness.reads = [friday, state(board(), period=12, current=12),
+                     state(after_swap(), period=15, current=12, nba_date="2026-10-23", version="v2")]
+    asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, period=15)))
+    assert harness.read_periods == [15, None, 15]               # the day, today's plain board, the re-read
+    payload = harness.writer_calls[0]
+    assert (payload["scoring_period_id"], payload["current_scoring_period_id"]) == (15, 12)
 
 
 @pytest.mark.unit
@@ -219,7 +283,7 @@ def test_invalid_moves_are_422_with_codes(harness):
     with pytest.raises(svc.RosterMoveInvalid) as exc:
         asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual([(11, BE, SF)])))
     assert [e["code"] for e in exc.value.data["errors"]] == ["INELIGIBLE"]
-    assert harness.writer_calls == [] and harness.audits == []
+    assert harness.writer_calls == [] and harness.audits == [] and harness.valued == []
 
 
 @pytest.mark.unit
@@ -283,6 +347,7 @@ def test_evaluate_applies_for_auto_users(harness):
     d = evaluate(apply=True).data
     assert d.outcome == "applied" and d.verified is True and d.audit_id == 1
     assert harness.audits[0]["source"] == "auto" and harness.updates == [(1, "applied", 200, None)]
+    assert harness.read_values == [True, True] and harness.valued == []   # the plan ranks by value
 
 
 @pytest.mark.unit

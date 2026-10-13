@@ -76,6 +76,11 @@ class FantasyProviderAdapter(Protocol):
         fallback_slot_counts: Optional[Mapping[str, int]] = None,
         now: Optional[datetime] = None,
         scoring_period_id: Optional[int] = None,
+        with_values: bool = True,
+    ) -> LineupState: ...
+
+    async def add_lineup_values(
+        self, team_id: int, league_info: LeagueInfo, state: LineupState
     ) -> LineupState: ...
 
     async def player_pool_entries(
@@ -146,13 +151,19 @@ class EspnAdapter:
             parsed.season = int(league_info.year)
         return parsed
 
-    async def read_lineup(self, team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
+    async def read_lineup(self, team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None,
+                          with_values=True):
         from services.lineup_read_service import LineupReadService
 
         return await LineupReadService.read(
             team_id, league_info, fallback_slot_counts=fallback_slot_counts, now=now,
-            scoring_period_id=scoring_period_id,
+            scoring_period_id=scoring_period_id, with_values=with_values,
         )
+
+    async def add_lineup_values(self, team_id, league_info, state):
+        from services.lineup_read_service import LineupReadService
+
+        return await LineupReadService.add_values(team_id, league_info, state)
 
     async def player_pool_entries(self, league_info, player_ids, *, scoring_period_id=None):
         from services.espn_service import EspnService
@@ -220,7 +231,11 @@ class YahooAdapter:
         league_key = league_info.yahoo_team_key.rsplit(".t.", 1)[0]
         return parse_yahoo_settings(await fetch_yahoo_league_settings(token, league_key), season=int(league_info.year))
 
-    async def read_lineup(self, team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
+    async def read_lineup(self, team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None,
+                          with_values=True):
+        raise ProviderCapabilityMissing(self.provider, "lineup_editing")
+
+    async def add_lineup_values(self, team_id, league_info, state):
         raise ProviderCapabilityMissing(self.provider, "lineup_editing")
 
     async def player_pool_entries(self, league_info, player_ids, *, scoring_period_id=None):
