@@ -26,6 +26,7 @@ from typing import Any, Optional
 from core.errors import (
     AppError,
     AuthorizationError,
+    BadRequestError,
     ConflictError,
     NotFoundError,
     ProviderAuthError,
@@ -251,16 +252,13 @@ class LineupEditorService:
                                      data={"reason": "provider_not_supported"})
 
         slots = _roster_slots(team)
-        state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
-        if state.scoring_period_id and req.expected_scoring_period_id > state.scoring_period_id:
-            # The client is editing a later day. An earlier day than today falls through to
-            # ROSTER_STALE below with today's board, as it always has when the day rolls over.
-            state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots,
-                                              scoring_period_id=req.expected_scoring_period_id)
+        state = await LineupEditorService._board_to_write(adapter, team.team_id, league_info,
+                                                          req.expected_scoring_period_id, slots)
         if not state.can_write:
             raise RosterWriteBlocked(data={"reason": state.write_blocked_reason})
         if state.roster_version != req.roster_version or state.scoring_period_id != req.expected_scoring_period_id:
-            raise RosterStale(data={"lineup": state.model_dump(mode="json")})
+            fresh = await adapter.add_lineup_values(team.team_id, league_info, state)
+            raise RosterStale(data={"lineup": fresh.model_dump(mode="json")})
 
         moves = [Move(m.player_id, m.from_slot_id, m.to_slot_id) for m in req.moves]
         errors = validate_moves(planner_players(state), slot_counts_of(state), moves)
@@ -272,6 +270,10 @@ class LineupEditorService:
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
             moves=moves, source="manual", fallback_slot_counts=slots,
         )
+        if fresh is state:
+            # The verify read failed, so the board handed back is the one read before the
+            # write, without values; it goes out as a full read would have returned it.
+            fresh = await adapter.add_lineup_values(team.team_id, league_info, state)
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,
@@ -279,6 +281,47 @@ class LineupEditorService:
                     + ("" if verified else " — not yet confirmed"),
             data=ApplyLineupMovesData(lineup=fresh, applied_moves=applied, verified=verified, audit_id=audit_id),
         )
+
+    @staticmethod
+    async def _board_to_write(adapter, team_id: int, league_info: LeagueInfo, expected: int,
+                              slots: dict[str, int]) -> LineupState:
+        """The board `apply_manual` checks the moves against and writes over, read without
+        our values: the checks need only the slots, the version and the locks, and the
+        values are paid for only when a board is handed back (`add_lineup_values`).
+
+        One provider read, of the day the client is editing. ESPN's answer for a requested
+        day carries its today (status.latestScoringPeriod), so a later day no longer needs
+        today's board read first, and today asked for by number is today's board (a public
+        league's plain read and its read of today by number were byte-identical in a
+        2026-10-13 preseason probe). Where that read cannot settle it alone, today's board
+        decides exactly as it did before:
+        - a day that has passed (400 from the read: the day rolled over under the client)
+          gets ROSTER_STALE with today's board, never a past day's;
+        - a day beyond the season's reach keeps the read's 400;
+        - a day ESPN did not place against its own today (no latestScoringPeriod, so our
+          calendar did) is placed by the plain read's day: today's edit is written over
+          today's plain board, so a calendar that lags ESPN never sends it as FUTURE_ROSTER.
+        """
+        direct: Optional[LineupState] = None
+        out_of_range: Optional[BadRequestError] = None
+        try:
+            direct = await adapter.read_lineup(team_id, league_info, fallback_slot_counts=slots,
+                                               scoring_period_id=expected, with_values=False)
+        except BadRequestError as exc:
+            if exc.error_code != "SCORING_PERIOD_OUT_OF_RANGE":
+                raise
+            out_of_range = exc
+        if direct is not None and direct.scoring_period_source == "provider":
+            return direct
+
+        today = await adapter.read_lineup(team_id, league_info, fallback_slot_counts=slots, with_values=False)
+        if today.scoring_period_id and expected > today.scoring_period_id:
+            # A later day after all, and the read of it is the one already made. An earlier
+            # day (or today) falls through to the caller's checks with today's board.
+            if out_of_range is not None:
+                raise out_of_range
+            return direct
+        return today
 
     # ---- pipeline route ----
 
