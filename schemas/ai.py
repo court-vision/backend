@@ -7,6 +7,7 @@ block makes each request's token spend visible to the caller as well as to
 the `ai_request` log line.
 """
 
+from datetime import datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import Field
@@ -172,3 +173,105 @@ class AiFeedbackResp(BaseResponse):
     """Response for POST /v1/internal/ai/questions/{question_id}/feedback."""
 
     data: Optional[AiFeedbackData] = None
+
+
+# ---- The agent: the AI desk's conversations (docs/AI_AGENT_PLAN.md) ----
+
+AGENT_MESSAGE_MAX = 2000
+
+
+class AiConversationCreateReq(ApiModel):
+    """Body for POST /v1/internal/ai/conversations."""
+
+    team_id: Optional[int] = Field(None, gt=0, le=INT4_MAX,
+                                   description="One of the caller's teams: what 'my team' means in this conversation")
+
+
+class AiTurnReq(ApiModel):
+    """Body for POST /v1/internal/ai/conversations/{conversation_id}/turns."""
+
+    message: str = Field(..., min_length=1, max_length=AGENT_MESSAGE_MAX, pattern=NO_NUL)
+
+
+class AiTableColumn(ApiModel):
+    key: str
+    label: str
+
+
+class AiTable(ApiModel):
+    """A table the server built from the agent's tool results; the model never types its values."""
+
+    type: Literal["table"] = "table"
+    id: str = Field(..., description="Unique within its turn, e.g. 't1'")
+    title: str
+    result_ids: list[str] = Field(..., description="The tool results the rows were copied from")
+    tools: list[str] = Field(..., description="The lookups behind those results")
+    columns: list[AiTableColumn]
+    rows: list[list[Any]] = Field(..., description="One list of cells per row, in column order")
+    total_rows: int = Field(..., description="Rows before the table's limit")
+
+
+class AiTextPart(ApiModel):
+    kind: Literal["text"] = "text"
+    text: str
+
+
+class AiBlockPart(ApiModel):
+    kind: Literal["block"] = "block"
+    block: AiTable
+
+
+AiPart = Annotated[Union[AiTextPart, AiBlockPart], Field(discriminator="kind")]
+
+
+class AiTurnView(ApiModel):
+    id: int
+    created_at: datetime
+    message: str
+    parts: list[AiPart] = Field(..., description="The answer as the user saw it: text and blocks, in order")
+    outcome: str = Field(..., description="'ok', or the error code the turn ended with")
+    feedback: Optional[Literal["up", "down"]] = None
+    cost_usd: float
+
+
+class AiConversationSummary(ApiModel):
+    id: int
+    title: Optional[str] = Field(None, description="The first message, shortened; null until one is sent")
+    team_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    turns: int
+
+
+class AiConversationDetail(AiConversationSummary):
+    full: bool = Field(..., description="True when the conversation takes no more turns: start a new one")
+    history: list[AiTurnView] = Field(..., description="Every turn, oldest first, failed ones included")
+
+
+class AiConversationResp(BaseResponse):
+    data: Optional[AiConversationDetail] = None
+
+
+class AiConversationListResp(BaseResponse):
+    data: Optional[list[AiConversationSummary]] = None
+
+
+class AiUsageData(ApiModel):
+    access: bool = Field(..., description="Whether the caller may use the agent (it is invite-only)")
+    month_usd: float = Field(..., description="The caller's agent spend this calendar month (UTC)")
+    cap_usd: float = Field(..., description="The caller's monthly cap")
+    model: str
+    effort: str
+
+
+class AiUsageResp(BaseResponse):
+    data: Optional[AiUsageData] = None
+
+
+class AiTurnFeedbackData(ApiModel):
+    turn_id: int
+    feedback: Optional[Literal["up", "down"]] = None
+
+
+class AiTurnFeedbackResp(BaseResponse):
+    data: Optional[AiTurnFeedbackData] = None

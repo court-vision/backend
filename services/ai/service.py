@@ -129,27 +129,32 @@ def _served_content(content: list[Any]) -> list[Any]:
     ]
 
 
-async def _create(**kwargs: Any) -> Any:
-    """One Messages API call, with the SDK's errors mapped onto the app's taxonomy.
+def map_sdk_error(exc: anthropic.AnthropicError) -> AppError:
+    """The SDK's errors on the app's taxonomy.
 
     Most specific first: every status error subclasses APIStatusError, and
     APITimeoutError subclasses APIConnectionError.
     """
+    if isinstance(exc, anthropic.APITimeoutError):
+        return ProviderTimeout("anthropic", "The assistant timed out; try again", error_code="AI_TIMEOUT")
+    if isinstance(exc, anthropic.APIConnectionError):
+        return ProviderError("anthropic", "The assistant is unreachable; try again", error_code="AI_UNAVAILABLE")
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return ServiceUnavailableError("AI_MISCONFIGURED", "The assistant is unavailable")
+    if isinstance(exc, anthropic.RateLimitError):
+        return ProviderError("anthropic", "The assistant is busy; try again in a minute", error_code="AI_BUSY")
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code >= 500:
+        return ProviderError("anthropic", "The assistant is unavailable; try again", error_code="AI_UNAVAILABLE")
+    # 400/404/413, or a malformed stream: a request we built wrong is a bug on our side, not an outage
+    return AppError("AI_REQUEST_REJECTED", "The assistant couldn't process that question", status_code=500)
+
+
+async def _create(**kwargs: Any) -> Any:
+    """One Messages API call, with the SDK's errors mapped onto the app's taxonomy."""
     try:
         return await get_client().beta.messages.create(**kwargs)
-    except anthropic.APITimeoutError as exc:
-        raise ProviderTimeout("anthropic", "The assistant timed out; try again", error_code="AI_TIMEOUT") from exc
-    except anthropic.APIConnectionError as exc:
-        raise ProviderError("anthropic", "The assistant is unreachable; try again", error_code="AI_UNAVAILABLE") from exc
-    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
-        raise ServiceUnavailableError("AI_MISCONFIGURED", "The assistant is unavailable") from exc
-    except anthropic.RateLimitError as exc:
-        raise ProviderError("anthropic", "The assistant is busy; try again in a minute", error_code="AI_BUSY") from exc
-    except anthropic.APIStatusError as exc:
-        if exc.status_code >= 500:
-            raise ProviderError("anthropic", "The assistant is unavailable; try again", error_code="AI_UNAVAILABLE") from exc
-        # 400/404/413: a request we built wrong is a bug on our side, not an outage
-        raise AppError("AI_REQUEST_REJECTED", "The assistant couldn't process that question", status_code=500) from exc
+    except anthropic.AnthropicError as exc:
+        raise map_sdk_error(exc) from exc
 
 
 async def _run_tools(
