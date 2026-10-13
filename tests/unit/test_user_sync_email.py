@@ -5,11 +5,16 @@ Token verification used to fetch the email from Clerk's Backend API on every
 request whose token had no email claim, about 100 ms each (300-480 ms in a
 desk-open burst). Only creating or linking a user needs it, so that is now the
 one place it is fetched: a user who already has a row costs no Clerk call,
-claim or not. The real-database version of these is
+claim or not. A new user's parallel first requests, which all miss the lookup,
+share the one row that wins the insert. The real-database version of these is
 tests/integration/test_user_sync_integration.py.
 """
 
+import contextlib
+from types import SimpleNamespace
+
 import pytest
+from peewee import IntegrityError
 
 from core.errors import ServiceUnavailableError
 from services import user_sync_service
@@ -57,6 +62,9 @@ class FakeUser:
     @classmethod
     def create(cls, **kwargs):
         row = cls(**kwargs)
+        # The two unique indexes on usr.users
+        if any(r.clerk_user_id == row.clerk_user_id or r.email == row.email for r in cls.rows):
+            raise IntegrityError("duplicate key value violates unique constraint")
         cls.rows.append(row)
         return row
 
@@ -69,7 +77,15 @@ def users(monkeypatch):
     class Users(FakeUser):
         rows = []
         saves = 0
+        before_insert = None   # runs as the insert's savepoint opens: another request's insert
+
+    @contextlib.contextmanager
+    def atomic():
+        if Users.before_insert:
+            Users.before_insert()
+        yield
     monkeypatch.setattr(user_sync_service, "User", Users)
+    monkeypatch.setattr(user_sync_service, "db", SimpleNamespace(atomic=atomic))
     return Users
 
 
@@ -136,3 +152,25 @@ def test_new_user_whose_email_cannot_be_fetched_is_503(users, clerk):
         UserSyncService.get_or_create_user("user_new", None)
     assert exc.value.error_code == "USER_EMAIL_UNAVAILABLE"
     assert users.rows == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("claim", ["fetched@example.com", None])
+def test_a_request_that_loses_the_insert_race_takes_the_winners_row(users, clerk, claim):
+    """A new user's parallel first requests all miss the lookup; only one insert wins."""
+    winner = users(clerk_user_id="user_new", email="fetched@example.com")
+    users.before_insert = lambda: users.rows.append(winner)
+
+    user = UserSyncService.get_or_create_user("user_new", claim)
+    assert user is winner
+    assert users.rows == [winner]
+
+
+@pytest.mark.unit
+def test_an_email_another_clerk_user_took_meanwhile_still_fails(users, clerk):
+    other = users(clerk_user_id="user_other", email="fetched@example.com")
+    users.before_insert = lambda: users.rows.append(other)
+
+    with pytest.raises(IntegrityError):
+        UserSyncService.get_or_create_user("user_new", "fetched@example.com")
+    assert users.rows == [other]

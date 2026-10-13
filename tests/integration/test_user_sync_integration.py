@@ -1,10 +1,16 @@
 """
 UserSyncService against Postgres: the email is fetched from Clerk only when a
-user has to be created or linked (see tests/unit/test_user_sync_email.py).
+user has to be created or linked (see tests/unit/test_user_sync_email.py), and
+a new user's parallel first requests end up with one row between them.
 """
+
+import asyncio
+import threading
+from types import SimpleNamespace
 
 import pytest
 
+from db import base as db_base
 from db.models.users import User
 from services import user_sync_service
 from services.user_sync_service import UserSyncService
@@ -52,3 +58,27 @@ def test_email_claim_still_updates_a_changed_email(integration_db, clerk):
     UserSyncService.get_or_create_user("user_moved", "new@courtvision.dev")
     assert User.get(User.clerk_user_id == "user_moved").email == "new@courtvision.dev"
     assert clerk == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["fresh@courtvision.dev", None])
+async def test_a_new_users_parallel_first_requests_share_one_row(integration_db, clerk, monkeypatch, claim):
+    """The first page open sends several requests at once; none of them may 500."""
+    n = 8   # under db_max_in_flight, so every request has a worker
+    at_insert = threading.Barrier(n, timeout=5)
+    real_atomic = integration_db.atomic
+
+    def atomic():
+        at_insert.wait()   # every request has missed the lookups before any of them inserts
+        return real_atomic()
+    monkeypatch.setattr(user_sync_service, "db", SimpleNamespace(atomic=atomic))
+
+    def first_request():
+        return UserSyncService.get_or_create_user("user_fresh", claim).user_id
+
+    db_base.start_db_runtime()
+    user_ids = await asyncio.gather(*(db_base.run_db("test.first_sign_in", first_request) for _ in range(n)))
+
+    assert len(set(user_ids)) == 1
+    assert User.select().where(User.clerk_user_id == "user_fresh").count() == 1

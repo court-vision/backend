@@ -7,6 +7,10 @@ Creates local user records on first API call if they don't exist.
 
 from datetime import datetime
 from typing import Optional
+
+from peewee import IntegrityError
+
+from db.base import db
 from db.models import User
 
 from core import clerk_auth
@@ -86,15 +90,27 @@ class UserSyncService:
                 "Unable to fetch user email. Please try again or contact support.",
             )
 
-        # Create new user
-        user = User.create(
-            clerk_user_id=clerk_user_id,
-            email=email,
-            password=None,  # Clerk handles authentication, no local password needed
-            created_at=datetime.now()
-        )
-
-        return user
+        # Create new user. A new user's first page open sends several requests
+        # at once and each of them misses the lookups above, so all but one lose
+        # the insert to the unique indexes: they take the winner's row instead
+        # of failing with a 500 (seen locally: 9 parallel first requests, 2 of
+        # them 500). atomic() is a savepoint when the caller is in a transaction,
+        # so the failed insert does not abort it.
+        try:
+            with db.atomic():
+                return User.create(
+                    clerk_user_id=clerk_user_id,
+                    email=email,
+                    password=None,  # Clerk handles authentication, no local password needed
+                    created_at=datetime.now()
+                )
+        except IntegrityError:
+            user = User.select().where(User.clerk_user_id == clerk_user_id).first()
+            if user is None:
+                # Not a race with this user's own requests: the email belongs to
+                # another Clerk user, which is not this function's to settle.
+                raise
+            return user
 
     @staticmethod
     def get_user_by_clerk_id(clerk_user_id: str) -> Optional[User]:
