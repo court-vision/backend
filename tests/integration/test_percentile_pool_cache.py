@@ -170,6 +170,34 @@ def test_within_the_ttl_new_box_scores_wait_for_the_next_aggregate():
     assert percentiles(50, min_games=1).data is not None
 
 
+def test_the_kill_switch_aggregates_on_every_call_as_before_the_cache(pool_queries, monkeypatch):
+    """PUBLIC_READ_CACHE_ENABLED=false restores the uncached route exactly: no
+    pool is held, so a pipeline write shows on the very next call."""
+    monkeypatch.setattr(settings, "public_read_cache_enabled", False)
+    for pid in range(1, 9):
+        assert percentiles(pid, min_games=1).model_dump_json() == _percentiles_before_the_cache(pid, min_games=1).model_dump_json()
+    Player.create(id=50, espn_id=7050, name="Late Signing", name_normalized="late signing", position="C")
+    PlayerGameStats.upsert_game_stats(50, date(2025, 11, 20), {"pts": 0, "fpts": 0, "min": 1})
+
+    late = percentiles(50, min_games=1)
+
+    assert late.data is not None
+    assert late.model_dump_json() == _percentiles_before_the_cache(50, min_games=1).model_dump_json()
+    assert len(pool_queries()) == 2 * 9   # nine calls, each aggregating once, and so did the reference
+
+
+def test_switching_the_cache_off_drops_the_pool_held_until_then(monkeypatch):
+    """Nothing aggregated before the switch is kept for when it is turned back on."""
+    percentiles(1, min_games=1)   # a pool is held
+    Player.create(id=50, espn_id=7050, name="Late Signing", name_normalized="late signing", position="C")
+    PlayerGameStats.upsert_game_stats(50, date(2025, 11, 20), {"pts": 0, "fpts": 0, "min": 1})
+
+    monkeypatch.setattr(settings, "public_read_cache_enabled", False)
+    assert percentiles(50, min_games=1).data is not None
+    monkeypatch.setattr(settings, "public_read_cache_enabled", True)
+    assert percentiles(50, min_games=1).data is not None
+
+
 def test_another_season_is_another_pool(pool_queries, monkeypatch):
     percentiles(1, min_games=1)
     monkeypatch.setattr(settings, "nba_season", "2026-27")

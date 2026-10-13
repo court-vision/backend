@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     # The same rendered-response cache for the public reads Scout and Week make
     # (player and team sheets, games, schedule weeks); TTLs and memory budgets
     # live with the caches in core/public_read_cache.py. False is the kill
-    # switch: every route answers exactly as it did before it was cached.
+    # switch: every route answers exactly as it did before it was cached,
+    # percentiles included (their league pool is aggregated per call again).
     public_read_cache_enabled: bool = True
 
     # Shared fixed-window counters for SlowAPI. Railway injects REDIS_URL when

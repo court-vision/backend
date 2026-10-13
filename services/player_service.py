@@ -215,6 +215,13 @@ def _cached_percentile_pool(compute) -> list[dict]:
     The fallback to last season's pool turns on the data (no box scores yet),
     so a fallback pool also lasts at most ten minutes once the first ones land.
     """
+    if not settings.public_read_cache_enabled:
+        # The kill switch (PUBLIC_READ_CACHE_ENABLED=false) restores the
+        # uncached route exactly: the aggregate on every call, so a pipeline
+        # write shows at once. Anything held from before is dropped, so it
+        # cannot answer later calls if caching comes back on.
+        reset_percentile_pool_cache()
+        return compute()
     key = (settings.nba_season, _season_opening_night())
     with _percentile_pools_lock:
         hit = _percentile_pools.get(key)
