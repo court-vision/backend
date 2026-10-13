@@ -73,7 +73,8 @@ class Settings(BaseSettings):
     # Concurrent identical provider GETs share one upstream request (core/inflight.py):
     # a Week open fired 11 ESPN reads at once, and 3 of them repeated one in flight.
     # In flight only (nothing is cached), never across credentials, and never across
-    # a roster write. False sends every read on its own again (kill switch).
+    # a roster write. False sends every read on its own again (kill switch). The
+    # write fence is per process: read core/inflight.py before adding a replica.
     provider_read_coalescing: bool = True
     features_max_in_flight: int = 4
     # SQLMate is reached only over Railway private networking in deployed

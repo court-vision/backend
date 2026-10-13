@@ -19,7 +19,7 @@ Rules:
   included. Callers put `write_epoch()` in the key, so a read joins only an
   execution that started in the same epoch: the verify re-read after a lineup
   move, and the board the client refetches after it, never receive a response
-  that began before the write finished.
+  that began before the write finished (within one process: see Per process).
 - **Shielded.** The shared execution runs in its own task. A caller that gives
   up (cancelled, timed out) leaves the others waiting on it; only when the last
   waiter has gone is the execution itself cancelled, which is what a lone
@@ -30,7 +30,15 @@ Rules:
   its own request with its own two attempts instead of inheriting the last one.
 - **Per process.** Each replica coalesces its own reads, and the fence covers
   the writes made by this process. Today that is every write: the API is the
-  fantasy-writer's only client and runs as one process on one replica.
+  fantasy-writer's only client and runs as one process on one replica. With a
+  second replica (the audit's S7, `numReplicas=2`) the server's own verify
+  re-read stays fenced, because it runs in the process that wrote; but the
+  client's refetch after a lineup move can land on the other replica and join
+  an identical read there (same cookies: another tab, the 30 s live poll) that
+  began before the write, and show the board from before the move for that one
+  read (the window is one ESPN read, a few hundred milliseconds). Before adding
+  replicas, set PROVIDER_READ_COALESCING=false for the rollout or accept that
+  window.
 """
 
 from __future__ import annotations
