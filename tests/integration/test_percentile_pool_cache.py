@@ -6,6 +6,7 @@ in-memory lookup returns exactly what the per-call GROUP BY did.
 """
 
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from peewee import Case, fn
@@ -149,15 +150,38 @@ def test_the_pool_is_aggregated_once_for_every_player_and_floor(pool_queries):
     assert len(pool_queries()) == 1
 
 
-def test_the_pool_is_aggregated_again_once_the_ttl_has_passed(pool_queries, monkeypatch):
+@pytest.fixture
+def pool_clock(monkeypatch):
+    """The pool's monotonic clock, at the start of a ten-minute window and moved by hand."""
+    clock = SimpleNamespace(now=6000.0)
+    monkeypatch.setattr(player_service, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
+
+
+def test_the_pool_is_aggregated_again_in_the_next_window(pool_queries, pool_clock):
     percentiles(1, min_games=1)
-    monkeypatch.setattr(player_service, "PERCENTILE_POOL_TTL_SECONDS", 0.0)
+    pool_clock.now += 599
     percentiles(2, min_games=1)
+    assert len(pool_queries()) == 1
+
+    pool_clock.now += 1
+    percentiles(3, min_games=1)
+    assert len(pool_queries()) == 2
+
+
+def test_a_pool_built_late_in_a_window_ends_with_it(pool_queries, pool_clock):
+    """Fixed windows, not ten minutes from each build: a pool built ten seconds
+    before a window's end is replaced at that end, the moment the percentile
+    route stops serving bodies derived from it (api/v1/public/players.py)."""
+    pool_clock.now += 590
+    percentiles(1, min_games=1)
+    pool_clock.now += 10
+    percentiles(1, min_games=1)
 
     assert len(pool_queries()) == 2
 
 
-def test_within_the_ttl_new_box_scores_wait_for_the_next_aggregate():
+def test_within_a_window_new_box_scores_wait_for_the_next_aggregate():
     """The documented staleness: a pipeline write shows within ten minutes, not at once."""
     before = percentiles(1, min_games=1).data
     Player.create(id=50, espn_id=7050, name="Late Signing", name_normalized="late signing", position="C")

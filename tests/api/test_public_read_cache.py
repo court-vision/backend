@@ -12,6 +12,7 @@ The contracts that matter:
 
 from datetime import date, datetime, timezone
 from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -155,6 +156,19 @@ def frozen_nba_date(monkeypatch):
         monkeypatch.setattr(teams, "nba_date_et", lambda: day)
     pin(date(2026, 10, 13))
     return pin
+
+
+@pytest.fixture(autouse=True)
+def pool_clock(monkeypatch):
+    """The percentile pool's monotonic clock, moved only by hand. The percentile
+    route keys its entries by the pool's ten-minute window, so on the real clock
+    a MISS-then-HIT pair could straddle a window's end; this one starts at the
+    beginning of a window and stays there."""
+    from services import player_service
+
+    clock = SimpleNamespace(now=6000.0)
+    monkeypatch.setattr(player_service, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
 
 
 # ---- the contract, route by route -------------------------------------------
@@ -373,6 +387,36 @@ def test_percentile_keys_separate_players_and_floors(client, monkeypatch):
     assert misses(client, urls) == ["MISS"] * 3
     assert client.get("/v1/players/1/percentiles?min_games=20").headers["x-cache"] == "HIT"   # the default
     assert service.await_count == 3
+
+
+def test_a_percentile_body_never_outlives_the_pool_it_was_built_from(client, monkeypatch, pool_clock):
+    """Percentiles are read off the league pool, held for one ten-minute window.
+    A body built from a pool with ten seconds left is advertised for those ten
+    seconds at most and is not served once that pool is replaced, so percentiles
+    trail a pipeline write by the pool's ten minutes, never ten plus the TTL's five."""
+    from services import player_service
+
+    pools: list[float] = []
+
+    async def service(player_id: int, min_games: int = 20) -> PlayerPercentilesResp:
+        # The real service's pool cache, over a stand-in aggregate that counts its builds.
+        (built,) = player_service._cached_percentile_pool(lambda: pools.append(pool_clock.now) or [len(pools)])
+        return PERCENTILES.model_copy(update={"message": f"pool {built}"})
+
+    monkeypatch.setattr(player_service.PlayerService, "get_player_percentiles", service)
+
+    assert client.get("/v1/players/1/percentiles").json()["message"] == "pool 1"
+    pool_clock.now += 590
+    late = client.get("/v1/players/2/percentiles")
+    assert (late.headers["x-cache"], late.json()["message"]) == ("MISS", "pool 1")
+    assert max_age(late) == 10
+
+    pool_clock.now += 20   # pool 1 was replaced at the window's end, ten seconds ago
+    for url in ("/v1/players/1/percentiles", "/v1/players/2/percentiles"):
+        again = client.get(url)
+        assert (again.headers["x-cache"], again.json()["message"]) == ("MISS", "pool 2")
+        assert 295 < max_age(again) <= 300   # the entry's own five minutes: the new window has 580 s left
+    assert pools == [6000.0, 6610.0]
 
 
 def test_team_schedule_keys_separate_upcoming_limit_and_the_nba_date(client, monkeypatch, frozen_nba_date):

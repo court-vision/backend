@@ -2,6 +2,7 @@
 fantasy-day rollover that bounds how long a client keeps schedule weeks."""
 
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from freezegun import freeze_time
@@ -39,6 +40,21 @@ def test_the_kill_switch_builds_disabled_caches(monkeypatch):
     monkeypatch.setattr(settings, "public_read_cache_enabled", False)
 
     assert caches._cache("x", 300.0, 10, 100).enabled is False
+
+
+def test_the_percentile_pool_window_and_the_seconds_left_in_it(monkeypatch):
+    from services import player_service
+
+    clock = SimpleNamespace(now=6000.0)
+    monkeypatch.setattr(player_service, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    assert player_service.percentile_pool_window() == (10, 600)
+    clock.now = 6590.5
+    assert player_service.percentile_pool_window() == (10, 9)    # whole seconds, rounded down
+    clock.now = 6599.9
+    assert player_service.percentile_pool_window() == (10, 1)    # never 0, as serve_cached's own floor
+    clock.now = 6600.0
+    assert player_service.percentile_pool_window() == (11, 600)
 
 
 def test_a_key_carries_the_active_season(monkeypatch):

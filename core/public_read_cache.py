@@ -12,7 +12,10 @@ TTL follows how often the data behind a route can change:
 - **300 s** for player and team data. The pipelines rewrite it once a day after
   the post-game run (team schedules also move as games go final), so a replica
   lags a pipeline write by at most five minutes. A client is never told to hold
-  its copy longer than the replica's own entry has left.
+  its copy longer than the replica's own entry has left. Percentiles lag by up
+  to ten: they are read off a league pool aggregated once per ten-minute
+  window (services/player_service.py), and their entries are keyed by that
+  window and never held by a client past its end.
 - **3600 s** for games two or more NBA nights old: final, and only a pipeline
   re-run or a correction would ever change them. Last night's slate stays on
   300 s: the post-game run that writes its final scores can still be retrying

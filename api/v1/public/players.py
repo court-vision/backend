@@ -9,7 +9,7 @@ from schemas.market import PlayerProjectionResp, PlayerProjectionsResp, SeasonKe
 from schemas.player_profiles import PlayerProfileResp, PlayerSearchResp
 from services.public_market_service import PublicMarketService
 from services.player_profile_service import PlayerProfileService
-from services.player_service import PlayerService
+from services.player_service import PlayerService, percentile_pool_window
 from services.players_list_service import PlayersListService
 from services.player_games_service import PlayerGamesService
 from services.trends_service import TrendsService
@@ -296,9 +296,17 @@ async def get_player_percentiles(
     min_games: int = Query(20, ge=1, description="Minimum games played to qualify"),
 ) -> PlayerPercentilesResp:
     """Get percentile ranks for a player's stats vs the league."""
+    # The body is read off the league pool, held for one ten-minute window.
+    # Keyed by that window and never held by a client past its end, an entry
+    # dies with its pool: otherwise one built from a pool about to be replaced
+    # would live the full five-minute TTL after it, fifteen minutes behind a
+    # pipeline write instead of ten. The service reads the window after this,
+    # so its pool is this window's or a later, fresher one.
+    window, seconds_left = percentile_pool_window()
     return await serve_cached_envelope(
-        request, caches.PLAYER_PERCENTILES, caches.key(player_id, min_games),
+        request, caches.PLAYER_PERCENTILES, caches.key(player_id, min_games, window),
         lambda: PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games),
+        max_age=seconds_left,
     )
 
 

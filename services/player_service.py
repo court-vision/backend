@@ -186,12 +186,18 @@ def _season_scoped_logs(all_logs: list) -> tuple[list, Optional[str]]:
 # The league pool behind percentiles: one GROUP BY over every fantasy box score
 # in the season scope (20.8-27.8 ms mean in production's pg_stat_statements,
 # 2026-10-13). It is the same for every player and only the post-game pipeline
-# changes it, so it is computed once per scope per ten minutes and each call
-# looks its player up in memory. No single-flight: concurrent misses each run
-# the query, exactly as every call did before, and nobody holds a database
+# changes it, so it is computed once per scope per ten-minute window and each
+# call looks its player up in memory. No single-flight: concurrent misses each
+# run the query, exactly as every call did before, and nobody holds a database
 # permit waiting on another thread's query.
-PERCENTILE_POOL_TTL_SECONDS = 600.0
-_percentile_pools: dict[tuple, tuple[float, list[dict]]] = {}
+#
+# Windows are fixed slices of the monotonic clock rather than ten minutes from
+# each build, so anything derived from a pool knows when it expires without
+# being told which pool it came from: the percentile route keys its cached
+# bodies by the window and caps the client's max-age at the window's end
+# (api/v1/public/players.py), so a body never outlives its pool.
+PERCENTILE_POOL_WINDOW_SECONDS = 600.0
+_percentile_pools: dict[tuple, tuple[int, list[dict]]] = {}
 _percentile_pools_lock = threading.Lock()
 
 
@@ -208,12 +214,20 @@ def scaled_min_games(requested: int, max_games: int) -> int:
     return max(1, min(requested, math.ceil(0.5 * max_games)))
 
 
+def percentile_pool_window() -> tuple[int, int]:
+    """The percentile pool's current window, and whole seconds left in it (at least 1)."""
+    now = time.monotonic()
+    window = int(now // PERCENTILE_POOL_WINDOW_SECONDS)
+    left = (window + 1) * PERCENTILE_POOL_WINDOW_SECONDS - now
+    return window, max(1, int(left))
+
+
 def _cached_percentile_pool(compute) -> list[dict]:
-    """The scoped percentile pool, from the cache when it is under ten minutes old.
+    """The scoped percentile pool, from the cache when it was built in this window.
 
     Keyed by what picks the scope: the active season and its opening night.
     The fallback to last season's pool turns on the data (no box scores yet),
-    so a fallback pool also lasts at most ten minutes once the first ones land.
+    so a fallback pool also lasts at most one window once the first ones land.
     """
     if not settings.public_read_cache_enabled:
         # The kill switch (PUBLIC_READ_CACHE_ENABLED=false) restores the
@@ -223,13 +237,16 @@ def _cached_percentile_pool(compute) -> list[dict]:
         reset_percentile_pool_cache()
         return compute()
     key = (settings.nba_season, _season_opening_night())
+    # Taken before the query: a pool whose query straddles a window's end is
+    # filed under the earlier window and rebuilt in the next, never the reverse.
+    window, _ = percentile_pool_window()
     with _percentile_pools_lock:
         hit = _percentile_pools.get(key)
-    if hit is not None and time.monotonic() - hit[0] < PERCENTILE_POOL_TTL_SECONDS:
+    if hit is not None and hit[0] == window:
         return hit[1]
     rows = compute()
     with _percentile_pools_lock:
-        _percentile_pools[key] = (time.monotonic(), rows)
+        _percentile_pools[key] = (window, rows)
     return rows
 
 
