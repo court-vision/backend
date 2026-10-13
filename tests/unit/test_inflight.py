@@ -26,15 +26,18 @@ async def _settle():
 
 
 class _Upstream:
-    """A call that blocks until released, counting how often it actually ran."""
+    """A call that blocks until released, counting how often it actually ran.
+    It keeps the `seal` it was handed, so a test can close it to new callers."""
 
     def __init__(self):
         self.runs = 0
         self.cancelled = 0
         self.release = asyncio.Event()
         self.error = None
+        self.seal = None
 
-    async def __call__(self):
+    async def __call__(self, seal):
+        self.seal = seal
         self.runs += 1
         run = self.runs
         try:
@@ -190,6 +193,62 @@ def test_a_call_cancelled_before_it_ever_ran_leaves_nothing_behind():
 
     upstream, after = asyncio.run(scenario())
     assert upstream.runs == 1 and after == {"run": 1}
+
+
+@pytest.mark.unit
+def test_a_sealed_call_answers_its_waiters_but_takes_no_new_ones():
+    """The provider layer seals a read before retrying it: callers already
+    waiting share the retry, a caller arriving after the seal starts a call of
+    its own, and the sealed call landing leaves the new one in place."""
+    flights = InFlight("test")
+
+    async def scenario():
+        first, second = _Upstream(), _Upstream()
+        early = [asyncio.create_task(flights.run("k", first)) for _ in range(2)]
+        await _until(lambda: first.runs == 1)
+        await _settle()
+        first.seal()
+        assert flights.stats()["in_flight"] == 0
+        late = [asyncio.create_task(flights.run("k", second)) for _ in range(2)]
+        await _until(lambda: second.runs == 1)
+        await _settle()
+        first.release.set()
+        early_results = await asyncio.gather(*early)
+        assert flights.stats()["in_flight"] == 1      # the sealed call landing did not evict the new one
+        latest = asyncio.create_task(flights.run("k", second))
+        await _settle()
+        second.release.set()
+        return first, second, early_results, await asyncio.gather(*late, latest)
+
+    first, second, early_results, late_results = asyncio.run(scenario())
+    assert early_results == [{"run": 1}] * 2
+    assert late_results == [{"run": 1}] * 3
+    assert first.runs == second.runs == 1
+    assert (flights.started, flights.coalesced) == (2, 3)
+    assert flights.stats()["in_flight"] == 0
+
+
+@pytest.mark.unit
+def test_cancelling_a_sealed_call_leaves_the_new_one_alone():
+    """The last waiter of a sealed call giving up cancels that call only."""
+    flights = InFlight("test")
+
+    async def scenario():
+        first, second = _Upstream(), _Upstream()
+        old = asyncio.create_task(flights.run("k", first))
+        await _until(lambda: first.runs == 1)
+        first.seal()
+        new = asyncio.create_task(flights.run("k", second))
+        await _until(lambda: second.runs == 1)
+        old.cancel()
+        await asyncio.gather(old, return_exceptions=True)
+        await _until(lambda: first.cancelled == 1)
+        assert flights.stats()["in_flight"] == 1
+        second.release.set()
+        return second, await new
+
+    second, result = asyncio.run(scenario())
+    assert result == {"run": 1} and second.cancelled == 0
 
 
 @pytest.mark.unit

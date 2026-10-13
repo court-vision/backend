@@ -531,6 +531,43 @@ async def test_an_outage_is_retried_once_for_everyone_not_once_each(gated):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a_caller_arriving_after_a_failed_attempt_sends_its_own_request(gated):
+    """The read is sealed before its retry: the callers that joined before the
+    first attempt failed share the retry, but one arriving afterwards gets its
+    own request and its own two attempts, as before coalescing, rather than a
+    seat on the leader's last one."""
+    calls, statuses = [], [503, 200, 200]
+    gates = [asyncio.Event() for _ in statuses]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        n = len(calls)
+        calls.append(request)
+        await gates[n].wait()
+        if statuses[n] != 200:
+            return httpx.Response(statuses[n], text="")
+        return httpx.Response(200, json={"teams": [], "call": n + 1})
+
+    provider_http._clients["espn"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        early = [_league_read() for _ in range(2)]
+        await _until(lambda: len(calls) == 1)
+        await _settle()
+        gates[0].set()                                    # the first attempt fails ...
+        await _until(lambda: len(calls) == 2)             # ... and its retry is on the wire
+        assert provider_http._reads.stats()["in_flight"] == 0
+        late = _league_read()
+        await _until(lambda: len(calls) == 3)             # a request of its own
+        gates[1].set()
+        gates[2].set()
+        bodies = await asyncio.gather(*early, late)
+    finally:
+        for gate in gates:
+            gate.set()
+    assert [body["call"] for body in bodies] == [2, 2, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_an_unreadable_body_is_a_bad_response_for_every_joiner(gated):
     gated.text = "<html>maintenance</html>"
     tasks = [_league_read() for _ in range(2)]

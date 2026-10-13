@@ -24,6 +24,10 @@ Rules:
   up (cancelled, timed out) leaves the others waiting on it; only when the last
   waiter has gone is the execution itself cancelled, which is what a lone
   caller's cancellation did before coalescing.
+- **Sealable.** An execution can close itself to new callers (`seal`, handed to
+  the call) and still answer the ones already waiting. The provider layer seals
+  a read before retrying it, so a caller arriving after a failed attempt sends
+  its own request with its own two attempts instead of inheriting the last one.
 - **Per process.** Each replica coalesces its own reads, and the fence covers
   the writes made by this process. Today that is every write: the API is the
   fantasy-writer's only client and runs as one process on one replica.
@@ -43,6 +47,8 @@ from core.logging import get_logger
 log = get_logger("inflight")
 
 T = TypeVar("T")
+# Handed to the shared call: closes the execution to new callers (InFlight).
+Seal = Callable[[], None]
 
 _write_epoch = 0
 
@@ -87,6 +93,10 @@ class InFlight:
     Every waiter receives the execution's own return value (callers that might
     mutate it must share something immutable, as the provider layer shares the
     httpx.Response and parses it per caller) or the same exception.
+
+    `call` is handed `seal`: calling it takes the execution out of the map, so
+    later callers with the key start a new one while the current waiters keep
+    waiting on this one.
     """
 
     def __init__(self, name: str):
@@ -99,7 +109,7 @@ class InFlight:
     async def run(
         self,
         key: Hashable,
-        call: Callable[[], Awaitable[T]],
+        call: Callable[[Seal], Awaitable[T]],
         *,
         log_fields: Optional[dict[str, Any]] = None,
     ) -> T:
@@ -131,10 +141,10 @@ class InFlight:
                 self._forget(key, flight)
                 task.cancel()
 
-    async def _fly(self, key: Hashable, flight: _Flight, call: Callable[[], Awaitable[T]],
+    async def _fly(self, key: Hashable, flight: _Flight, call: Callable[[Seal], Awaitable[T]],
                    log_fields: dict[str, Any]) -> T:
         try:
-            return await call()
+            return await call(partial(self._forget, key, flight))
         finally:
             # Out of the map before the result is published: a caller arriving
             # after this point starts a new call rather than reading a finished one.
@@ -152,6 +162,8 @@ class InFlight:
             task.exception()
 
     def _forget(self, key: Hashable, flight: _Flight) -> None:
+        # By identity: once a flight is sealed, a newer one may hold its key, and
+        # the sealed one landing must not take that one out of the map.
         if self._flights.get(key) is flight:
             del self._flights[key]
 

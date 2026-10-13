@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -200,6 +200,7 @@ async def _send(
     url: str,
     *,
     timeout: Optional[float],
+    before_retry: Optional[Callable[[], None]] = None,
     **kwargs: Any,
 ) -> httpx.Response:
     client, capacity = _ensure_provider_runtime(provider)
@@ -233,6 +234,8 @@ async def _send(
                     get_logger("retry").warning(
                         "retry_attempt", function="provider_get", provider=provider, attempt=attempt
                     )
+                    if before_retry is not None:
+                        before_retry()
                     await asyncio.sleep(RETRY_BASE_DELAY)
             raise AssertionError("unreachable")
         finally:
@@ -278,6 +281,21 @@ async def _dispatch(
     payload or keep it (the league sync reuses the validation payload) never
     hold the same dict. A failure reaches every waiter as the same exception,
     and each maps it to its own error (`not_found`, `expect_key`).
+
+    A joiner shares the request's budgets, not just its answer:
+
+    - Retries: the read is sealed before its retry backoff, so only the callers
+      that joined before the first attempt failed share the second; one that
+      arrives after the failure sends its own request with its own two attempts,
+      exactly as it did before coalescing.
+    - Queue: a joiner gives up with the request when the request's own wait for
+      a provider slot runs out (PROVIDER_QUEUE_TIMEOUT_SECONDS, 5 s), so one
+      that joined t seconds into that wait gets `provider_capacity_timeout` t
+      seconds sooner than its own wait would have. Accepted: in the bursts this
+      exists for (one page load's routes fired together) joins come within
+      milliseconds of the start, and a read that has waited seconds for a slot
+      means the cap has been full all that time -- a request of its own would
+      have queued behind it, in the backlog that coalescing drains.
     """
     if method != "GET" or not settings.provider_read_coalescing:
         return await _send(method, provider, url, timeout=timeout, **kwargs)
@@ -285,7 +303,7 @@ async def _dispatch(
                     timeout=timeout)
     return await _reads.run(
         key,
-        lambda: _send(method, provider, url, timeout=timeout, **kwargs),
+        lambda seal: _send(method, provider, url, timeout=timeout, before_retry=seal, **kwargs),
         log_fields={"provider": provider, "url": _redacted_url(url)},
     )
 
