@@ -150,9 +150,13 @@ def test_the_pool_is_aggregated_once_for_every_player_and_floor(pool_queries):
     assert len(pool_queries()) == 1
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def pool_clock(monkeypatch):
-    """The pool's monotonic clock, at the start of a ten-minute window and moved by hand."""
+    """The pool's monotonic clock, at the start of a ten-minute window and moved by hand.
+
+    Autouse: pools live per fixed ten-minute window, so on the real clock a test
+    that builds a pool and reads it back could straddle a window's end and see a
+    second aggregate. Tests that move the clock still move it by hand."""
     clock = SimpleNamespace(now=6000.0)
     monkeypatch.setattr(player_service, "time", SimpleNamespace(monotonic=lambda: clock.now))
     return clock

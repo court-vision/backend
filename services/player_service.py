@@ -202,7 +202,7 @@ _percentile_pools_lock = threading.Lock()
 
 
 def reset_percentile_pool_cache() -> None:
-    """Drop the cached percentile pools (tests)."""
+    """Drop the cached percentile pools: the cache kill switch does it on every request, and tests between cases."""
     with _percentile_pools_lock:
         _percentile_pools.clear()
 
