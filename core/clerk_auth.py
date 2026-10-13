@@ -54,6 +54,13 @@ _clerk_http.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 # fetch (about 330 ms each in prod); the lock makes them wait for one.
 _jwks: Optional[dict] = None
 _jwks_lock = threading.Lock()
+# Fetches finished so far, and whether the last one failed. Callers that queued
+# on the lock behind a fetch share its failure too. Otherwise, with the cache
+# cold and Clerk down, they fetched one after another: the k-th caller waited k
+# fetch timeouts (up to 20 s each) for its 503 while holding a threadpool thread
+# that pipeline auth also needs, where each used to wait for one.
+_jwks_fetches = 0
+_jwks_last_fetch_failed = False
 
 
 def _fetch_jwks() -> dict:
@@ -64,10 +71,18 @@ def _fetch_jwks() -> dict:
     try:
         response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
+        jwks = response.json()
+    except requests.RequestException as e:  # includes a body that is not JSON
         log.error("clerk_jwks_fetch_failed", error=type(e).__name__, detail=str(e))
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+
+    # A 200 whose JSON is not a key set (null, a list, an error object) must not
+    # be cached as one: every token would then fail on it until the next deploy.
+    keys = jwks.get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(keys, list) or not all(isinstance(key, dict) for key in keys):
+        log.error("clerk_jwks_malformed", body_type=type(jwks).__name__)
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+    return jwks
 
 
 def get_clerk_jwks(replacing: Optional[dict] = None) -> dict:
@@ -77,18 +92,32 @@ def get_clerk_jwks(replacing: Optional[dict] = None) -> dict:
     `replacing` is a key set the caller found no key in for its token (Clerk
     rotated its keys). The keys are fetched again only while the cache still
     holds that set: a caller that finds another thread has already replaced
-    it uses the new set. Either way, concurrent callers make one fetch between
-    them, and a failed fetch keeps the keys already cached.
+    it uses the new set.
+
+    Concurrent callers make one fetch between them and share its outcome: the
+    keys, or a 503 when it fails. A caller that arrives after a failed fetch
+    tries again, so the keys are still fetched lazily once Clerk answers. A
+    failed fetch keeps the keys already cached.
     """
-    global _jwks
+    global _jwks, _jwks_fetches, _jwks_last_fetch_failed
     jwks = _jwks
     if jwks is not None and jwks is not replacing:
         return jwks
+    fetches_seen = _jwks_fetches
     with _jwks_lock:
         jwks = _jwks
         if jwks is not None and jwks is not replacing:
             return jwks
-        _jwks = _fetch_jwks()
+        if _jwks_fetches != fetches_seen and _jwks_last_fetch_failed:
+            # A fetch failed while this caller waited for the lock; that was its fetch too.
+            raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+        failed = True
+        try:
+            _jwks = _fetch_jwks()
+            failed = False
+        finally:
+            _jwks_fetches += 1
+            _jwks_last_fetch_failed = failed
         return _jwks
 
 
@@ -99,11 +128,11 @@ def warm_clerk_jwks() -> None:
     itself, as it always has.
     """
     try:
-        jwks = get_clerk_jwks()
+        keys = len(get_clerk_jwks()["keys"])
     except Exception as e:
         log.warning("clerk_jwks_warm_failed", error=type(e).__name__)
         return
-    log.info("clerk_jwks_warmed", keys=len(jwks.get("keys", [])))
+    log.info("clerk_jwks_warmed", keys=keys)
 
 
 def _key_for(jwks: dict, kid: str):

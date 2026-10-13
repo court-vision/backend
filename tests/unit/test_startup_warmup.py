@@ -14,10 +14,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
+import requests
 from fastapi import FastAPI
 
 import main
-from core import warmup
+from core import clerk_auth, warmup
 
 
 @pytest.fixture
@@ -105,6 +106,36 @@ def test_failures_do_not_fail_startup(parts, monkeypatch):
 
     asyncio.run(warmup.warm_request_path(app))   # does not raise
     assert parts.jwks == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", [b"null", b"[]", b'"keys"'])
+def test_a_jwks_answer_that_is_not_a_key_set_does_not_fail_startup(parts, monkeypatch, body):
+    """Clerk answering 200 with JSON that is not a key set once stopped the API starting at all."""
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body
+    monkeypatch.setattr(clerk_auth._clerk_http, "get", lambda url, timeout=None: response)
+    monkeypatch.setattr(warmup, "warm_clerk_jwks", clerk_auth.warm_clerk_jwks)   # the real one
+    clerk_auth.clear_jwks_cache()
+    app = _small_app()
+    try:
+        asyncio.run(warmup.warm_request_path(app))   # does not raise
+        assert clerk_auth._jwks is None   # nothing malformed was cached
+    finally:
+        clerk_auth.clear_jwks_cache()
+    assert app.openapi_schema is not None
+
+
+@pytest.mark.unit
+def test_a_jwks_warm_up_that_raises_does_not_fail_startup(parts, monkeypatch):
+    def broken():
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+    monkeypatch.setattr(warmup, "warm_clerk_jwks", broken)
+    app = _small_app()
+
+    asyncio.run(warmup.warm_request_path(app))   # does not raise
+    assert app.openapi_schema is not None
 
 
 @pytest.mark.unit

@@ -69,3 +69,5 @@ async def warm_request_path(app: FastAPI) -> None:
         await asyncio.wait_for(asyncio.shield(jwks), JWKS_WAIT_S)
     except asyncio.TimeoutError:
         log.warning("clerk_jwks_warm_slow", waited_s=JWKS_WAIT_S)
+    except Exception as exc:  # warm_clerk_jwks logs its own failures; this is the backstop
+        log.warning("clerk_jwks_warm_failed", error=type(exc).__name__)
