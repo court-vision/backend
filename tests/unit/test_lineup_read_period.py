@@ -1,6 +1,7 @@
 """
 LineupReadService.read for a requested ESPN day: what it asks ESPN for, which
-period it treats as today, and the bounds it enforces.
+period it treats as today, and the bounds it enforces. Also a read without our
+values (`with_values=False`) and `add_values`, which completes such a board.
 
 The payloads follow a 2026-10-05 probe of a public league (426893737): with
 `scoringPeriodId=N` ESPN echoes N as the top-level `scoringPeriodId`, keeps
@@ -18,6 +19,7 @@ import pytz
 from core.errors import BadRequestError
 from schemas.common import FantasyProvider, LeagueInfo
 from services import lineup_read_service as svc
+from services.player_value_service import ValueResult
 from utils.espn_helpers import PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
 SWID = "{ABCDEF01-2345-6789-ABCD-EF0123456789}"
@@ -153,3 +155,39 @@ def test_a_calendar_failure_dates_the_board_by_its_offset_from_today(espn, monke
 
     monkeypatch.setattr(svc.schedule_service, "date_for_espn_scoring_period", flaky)
     assert read(TODAY + 2).nba_date == "2026-11-02"
+
+
+def bare_read(period=None):
+    return asyncio.run(svc.LineupReadService.read(1, LEAGUE, now=NOW, scoring_period_id=period, with_values=False))
+
+
+@pytest.mark.unit
+def test_a_read_without_values_is_the_same_board_and_add_values_completes_it(espn, monkeypatch):
+    lookups = []
+
+    def values_for(league_info, espn_ids):
+        lookups.append(list(espn_ids))
+        return "cat_value", {1: ValueResult(1.75, "rolling")}, {1: 203999}
+
+    monkeypatch.setattr(svc, "_values_for", values_for)
+    full, bare = read(TODAY + 3), bare_read(TODAY + 3)
+
+    assert lookups == [[1]]                                          # the bare read asked for none
+    p = bare.players[0]
+    assert (p.avg_points, p.value_kind, p.value_source, p.nba_player_id) == (0.0, "fpts", None, None)
+    assert bare.model_dump(exclude={"players"}) == full.model_dump(exclude={"players"})
+    valued = asyncio.run(svc.LineupReadService.add_values(1, LEAGUE, bare))
+    assert lookups == [[1], [1]] and valued.model_dump() == full.model_dump()
+    p = valued.players[0]
+    assert (p.avg_points, p.value_kind, p.value_source, p.nba_player_id) == (1.75, "cat_value", "rolling", 203999)
+
+
+@pytest.mark.unit
+def test_a_failed_value_lookup_fails_neither_the_read_nor_add_values(espn, monkeypatch):
+    def down(league_info, espn_ids):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(svc, "_values_for", down)
+    full, bare = read(), bare_read()
+    valued = asyncio.run(svc.LineupReadService.add_values(1, LEAGUE, bare))
+    assert valued.model_dump() == full.model_dump() == bare.model_dump()

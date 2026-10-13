@@ -105,7 +105,8 @@ def h(monkeypatch):
                         claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
                         lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
-    async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
+    async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None,
+                        with_values=True):
         h.reads.append(scoring_period_id)
         board = h.boards.get(scoring_period_id)
         if board is None:
