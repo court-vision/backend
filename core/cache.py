@@ -17,10 +17,14 @@ Design notes:
   request to the database at once — exactly the stampede the cache exists to
   prevent. Followers wait on the leader's render and share its result (or its
   exception).
-- **Bounded by entry count.** Part of the key space (`categories`, `min_games`)
-  is caller-controlled, so an unbounded dict is a memory-growth surface. A
-  rankings body is ~120 KB (points) to ~350 KB (categories), which is what the
-  default entry ceiling is sized against.
+- **Bounded by entry count, and optionally by bytes.** Part of the key space
+  (`categories`, `min_games`, a player id) is caller-controlled, so an
+  unbounded dict is a memory-growth surface. A rankings body is ~120 KB
+  (points) to ~350 KB (categories), which is what its entry ceiling is sized
+  against. The public read caches (core/public_read_cache.py) hold bodies whose
+  size varies with the player or team -- 0.2 KB of trends, ~17 KB of a full
+  game log -- so they also carry a byte budget, which bounds memory no matter
+  which entries a caller manages to fill them with.
 - **Per process.** Each replica keeps its own copy; entries do not survive a
   restart. That is fine for a read-through cache and is the same trade-off the
   rate limiter and OAuth state already make (see PRODUCTION_READINESS item 7).
@@ -64,11 +68,20 @@ class CachedResponse:
 class ResponseCache:
     """TTL + LRU cache of rendered bodies, with single-flight on misses."""
 
-    def __init__(self, name: str, ttl_seconds: float, max_entries: int):
+    def __init__(
+        self,
+        name: str,
+        ttl_seconds: float,
+        max_entries: int,
+        max_bytes: Optional[int] = None,
+    ):
         self.name = name
         self.ttl_seconds = float(ttl_seconds)
         self.max_entries = int(max_entries)
+        # None: bounded by entry count alone (the rankings caches, sized by count).
+        self.max_bytes = None if max_bytes is None else int(max_bytes)
         self._entries: "OrderedDict[CacheKey, CachedResponse]" = OrderedDict()
+        self._bytes = 0
         self._inflight: dict[CacheKey, asyncio.Future] = {}
         self.hits = 0
         self.misses = 0
@@ -85,7 +98,7 @@ class ResponseCache:
         if entry is None:
             return None
         if entry.age_seconds() >= self.ttl_seconds:
-            self._entries.pop(key, None)
+            self._drop(key)
             return None
         self._entries.move_to_end(key)
         return entry
@@ -143,22 +156,45 @@ class ResponseCache:
     def clear(self) -> None:
         """Drop every entry (tests, and a future explicit-invalidation route)."""
         self._entries.clear()
+        self._bytes = 0
+
+    @property
+    def size_bytes(self) -> int:
+        """Total body bytes held (what `max_bytes` bounds)."""
+        return self._bytes
 
     def stats(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "entries": len(self._entries),
+            "bytes": self._bytes,
             "hits": self.hits,
             "misses": self.misses,
             "coalesced": self.coalesced,
         }
 
     def _put(self, key: CacheKey, entry: CachedResponse) -> None:
+        size = len(entry.body)
+        if self.max_bytes is not None and size > self.max_bytes:
+            # Storing it would evict everything else and then itself; the
+            # caller still gets the rendered entry, just not a cached one.
+            log.warning("cache_entry_too_large", cache=self.name, bytes=size, max_bytes=self.max_bytes)
+            self._drop(key)
+            return
+        self._drop(key)
         self._entries[key] = entry
-        self._entries.move_to_end(key)
-        while len(self._entries) > self.max_entries:
-            evicted, _ = self._entries.popitem(last=False)
+        self._bytes += size
+        while len(self._entries) > self.max_entries or (
+            self.max_bytes is not None and self._bytes > self.max_bytes
+        ):
+            evicted, old = self._entries.popitem(last=False)
+            self._bytes -= len(old.body)
             log.debug("cache_evicted", cache=self.name, key=str(evicted))
+
+    def _drop(self, key: CacheKey) -> None:
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self._bytes -= len(old.body)
 
 
 def _swallow_exception(future: asyncio.Future) -> None:
