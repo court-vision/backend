@@ -66,12 +66,22 @@ def _normalize(name: str) -> str:
     return _normalize_name(name)
 
 
+@dataclass(frozen=True, eq=False)
+class _LoadedPool:
+    """One window's category pool as loaded, shared through `_POOL_CACHE`, so
+    read-only. Compared by identity: each load is its own version of the pool,
+    and a scored pool is only served alongside the load it was scored from."""
+    source: Optional[ValueSource]
+    rows: tuple[PoolRow, ...]
+
+
 @dataclass(frozen=True)
 class _ScoredPool:
     """One window's category pool z-scored over one league's categories: all a
     category valuation reads. It is shared by every request (and DB thread)
     through `_SCORED_CACHE`, so it is read-only — the mappings are proxies, the
     candidate lists tuples, and nothing mutates a PoolRow."""
+    pool: _LoadedPool                               # the load these values were scored from
     source: Optional[ValueSource]
     values: Mapping[int, float]                     # player id -> category value
     by_espn: Mapping[int, float]                    # ESPN id -> category value
@@ -90,9 +100,13 @@ class _ScoredPool:
 # The key is the window and the configured season, not the snapshot's date: the
 # rolling pipeline upserts row by row outside a transaction (8-14 s per window in
 # prod, around 00:30 ET), so a date-keyed entry would rebuild on the first row
-# of a new snapshot and then keep that partial pool for the whole TTL. The TTL
-# alone bounds how long a process lags a new snapshot, as it does for the
-# rankings cache.
+# of a new snapshot and then keep that partial pool for the whole TTL. The pool's
+# TTL bounds how long a process lags a new snapshot, as it does for the rankings
+# cache. A scored entry is also tied to the load it was scored from rather than
+# to its own TTL alone: one scored late in a load's life would otherwise keep
+# that load's values for most of another TTL after the pool moved on, and a
+# league's board values (scored) and its projections (scored against the loaded
+# pool directly) could come from different snapshots.
 _POOL_CACHE = SyncTTLCache(
     "category_pool",
     ttl_seconds=settings.category_value_cache_ttl_seconds,
@@ -411,17 +425,17 @@ class PlayerValueService:
         return min(ROLLING_WINDOWS, key=lambda w: (abs(w - days), w))
 
     @staticmethod
-    def _load_category_pool(window: int) -> tuple[Optional[ValueSource], tuple[PoolRow, ...]]:
+    def _load_category_pool(window: int) -> _LoadedPool:
         """The rolling pool for `window`, or last season's baseline pool when the
         current season has no fresh snapshot yet. Uncached: see `_category_pool`."""
         _, pool = load_pool(window)
         if pool:
-            return "rolling", tuple(pool)
+            return _LoadedPool("rolling", tuple(pool))
         pool = load_baseline_pool()
-        return ("baseline", tuple(pool)) if pool else (None, ())
+        return _LoadedPool("baseline", tuple(pool)) if pool else _LoadedPool(None, ())
 
     @staticmethod
-    def _cached_category_pool(window: int) -> tuple[Optional[ValueSource], tuple[PoolRow, ...]]:
+    def _cached_category_pool(window: int) -> _LoadedPool:
         return _POOL_CACHE.get_or_build(
             (window, settings.nba_season),
             lambda: PlayerValueService._load_category_pool(window),
@@ -435,12 +449,12 @@ class PlayerValueService:
         Served from the per-process cache (`_POOL_CACHE`); the list is the
         caller's own, but its rows are shared with every other caller and must
         not be mutated (use dataclasses.replace for a changed copy)."""
-        source, pool = PlayerValueService._cached_category_pool(PlayerValueService._category_window(days))
-        return source, list(pool)
+        loaded = PlayerValueService._cached_category_pool(PlayerValueService._category_window(days))
+        return loaded.source, list(loaded.rows)
 
     @staticmethod
-    def _score_category_pool(cat_defs: tuple[CategoryDef, ...], window: int) -> _ScoredPool:
-        source, pool = PlayerValueService._cached_category_pool(window)
+    def _score_category_pool(cat_defs: tuple[CategoryDef, ...], loaded: _LoadedPool) -> _ScoredPool:
+        pool = loaded.rows
         values = {pid: value for pid, (value, _z) in category_values(list(pool), list(cat_defs)).items()} if pool else {}
         by_espn = {row.espn_id: values[row.id] for row in pool if row.espn_id is not None and row.id in values}
         by_name: dict[str, list[PoolRow]] = {}
@@ -451,7 +465,8 @@ class PlayerValueService:
                 if key:
                     by_name.setdefault(key, []).append(row)
         return _ScoredPool(
-            source=source,
+            pool=loaded,
+            source=loaded.source,
             values=MappingProxyType(values),
             by_espn=MappingProxyType(by_espn),
             by_name=MappingProxyType({key: tuple(rows) for key, rows in by_name.items()}),
@@ -465,13 +480,20 @@ class PlayerValueService:
         pool is the one before it), and each category's key and direction in
         order — order included, because the z-sum adds categories in that order
         and floating-point addition is not associative. Labels are left out:
-        the same categories named differently by two providers score the same."""
+        the same categories named differently by two providers score the same.
+
+        The current load comes first (a lookup on a hit), and a scored entry
+        serves only while it was scored from that very load: once the pool is
+        reloaded, the next valuation rescores it, so values never outlive the
+        load they came from."""
         window = PlayerValueService._category_window(days)
+        loaded = PlayerValueService._cached_category_pool(window)
         fingerprint = tuple((c.key, c.higher_is_better) for c in cat_defs)
         cats = tuple(cat_defs)
         return _SCORED_CACHE.get_or_build(
             (window, settings.nba_season, fingerprint),
-            lambda: PlayerValueService._score_category_pool(cats, window),
+            lambda: PlayerValueService._score_category_pool(cats, loaded),
+            valid=lambda scored: scored.pool is loaded,
         )
 
     @staticmethod
@@ -568,6 +590,8 @@ class PlayerValueService:
             scorer = PlayerValueService._scorer(scoring.point_weights)
             return {eid: round(scorer.score(line), 1) for eid, line in lines.items()}
 
+        # The current load, which `_category_scored` also scores the board's
+        # values from, so a drop prior weighs projection and value like for like.
         _, pool = PlayerValueService._category_pool(days)
         if not pool:
             return {}

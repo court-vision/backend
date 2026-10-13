@@ -268,3 +268,52 @@ def test_followers_of_a_stuck_build_each_build_for_themselves():
 @pytest.mark.unit
 def test_the_default_wait_outlasts_any_healthy_build():
     assert SyncTTLCache("t", ttl_seconds=60, max_entries=1).wait_timeout_seconds == 30.0
+
+
+@pytest.mark.unit
+def test_a_stored_value_that_no_longer_serves_the_caller_is_rebuilt_and_replaced():
+    cache = _cache()
+    current = {"version": 1}
+
+    def build():
+        return {"built_from": current["version"]}
+
+    def valid(value):
+        return value["built_from"] == current["version"]
+
+    first = cache.get_or_build("k", build, valid=valid)
+    assert cache.get_or_build("k", build, valid=valid) is first      # still serves: a hit
+    current["version"] = 2                                           # what it was derived from moved on
+    second = cache.get_or_build("k", build, valid=valid)
+    assert second == {"built_from": 2}
+    assert cache.get_or_build("k", build, valid=valid) is second     # the rebuild replaced it
+    assert cache.stats()["hits"] == 2 and cache.stats()["misses"] == 2
+
+
+@pytest.mark.unit
+def test_a_follower_the_leaders_build_does_not_serve_builds_for_itself():
+    cache = _cache()
+    started, release = threading.Event(), threading.Event()
+    got = {}
+
+    def old_build():
+        started.set()
+        release.wait(5)
+        return "v1"
+
+    leader = threading.Thread(target=lambda: got.setdefault("leader", cache.get_or_build("k", old_build)))
+    leader.start()
+    assert started.wait(5)
+
+    def follower():
+        got["follower"] = cache.get_or_build("k", lambda: "v2", valid=lambda v: v == "v2")
+
+    t = threading.Thread(target=follower)
+    t.start()
+    _wait_for_followers(cache, 1)
+    release.set()
+    leader.join(5)
+    t.join(5)
+
+    assert got == {"leader": "v1", "follower": "v2"}
+    assert cache.stats()["coalesced"] == 1 and cache.stats()["entries"] == 1   # the leader's build is the one stored

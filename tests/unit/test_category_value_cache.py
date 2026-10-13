@@ -189,6 +189,51 @@ def test_a_new_snapshot_is_picked_up_once_the_ttl_runs_out(pools, monkeypatch):
     assert pools.calls["rolling"] == 2
 
 
+def _expected(pool, cats, espn_ids=ESPN_IDS):
+    values = real_category_values(pool, cats)
+    by_espn = {row.espn_id: values[row.id][0] for row in pool if row.id in values}
+    return {eid: ValueResult(by_espn[eid], "rolling") if eid in by_espn else ValueResult(None, None) for eid in espn_ids}
+
+
+@pytest.mark.unit
+def test_values_scored_late_in_a_loads_life_refresh_with_the_load(pools, monkeypatch):
+    """A scored entry is tied to the load it came from: the 8-cat values scored at
+    TTL-1 off the 9-cat league's load must move to the new snapshot when that load
+    does (TTL+1), not a whole TTL after they were scored."""
+    from types import SimpleNamespace
+
+    now = [1000.0]
+    for cache in (pvs._POOL_CACHE, pvs._SCORED_CACHE):
+        monkeypatch.setattr(cache, "_clock", lambda: now[0])
+    proj = SimpleNamespace(player_id=ROLLING[3].id, projected_gp=60,
+                           player=SimpleNamespace(name="Player 3", name_normalized="player 3"),
+                           **{k: getattr(ROLLING[0].line, k) * 1.2 for k in StatLine.ROW_KEYS})
+    monkeypatch.setattr(PlayerValueService, "projections_by_espn_id",
+                        staticmethod(lambda espn_ids, season=None: {50003: proj}))
+    eight_league = _league_scoring(EIGHT_CAT)
+    ttl = settings.category_value_cache_ttl_seconds
+
+    PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT)                 # t=0: the load, 9-cat scored
+    now[0] += ttl - 1
+    eight_before = PlayerValueService.category_value_by_espn_id(ESPN_IDS, EIGHT_CAT)  # t=TTL-1: 8-cat scored off it
+    projected_before = PlayerValueService.projected_value_by_espn_id(eight_league, [50003])
+    assert eight_before == _expected(ROLLING, EIGHT_CAT)
+
+    pools.state["rolling"] = list(reversed(_pool(40, seed=11)))     # post-game writes a new snapshot
+    now[0] += 2                                                      # t=TTL+1: the load has expired
+    eight_after = PlayerValueService.category_value_by_espn_id(ESPN_IDS, EIGHT_CAT)
+    projected_after = PlayerValueService.projected_value_by_espn_id(eight_league, [50003])
+    nine_after = PlayerValueService.category_value_by_espn_id(ESPN_IDS, NINE_CAT)
+
+    assert eight_after != eight_before and eight_after == _expected(pools.state["rolling"], EIGHT_CAT)
+    assert nine_after == _expected(pools.state["rolling"], NINE_CAT)
+    assert pools.calls == {"rolling": 2, "baseline": 0, "scored": 4}   # one reload, each category set rescored once
+
+    _disable_cache(monkeypatch)                                      # board values and projection: one snapshot
+    assert PlayerValueService.category_value_by_espn_id(ESPN_IDS, EIGHT_CAT) == eight_after
+    assert PlayerValueService.projected_value_by_espn_id(eight_league, [50003]) == projected_after != projected_before
+
+
 @pytest.mark.unit
 def test_the_kill_switch_loads_and_scores_on_every_call(pools, monkeypatch):
     _disable_cache(monkeypatch)
@@ -225,9 +270,10 @@ def test_concurrent_valuations_build_the_pool_once(pools):
     def hold():
         """Keep the first load going until every other thread waits on it."""
         deadline = time.monotonic() + 5
-        while pvs._SCORED_CACHE.stats()["coalesced"] < n - 1 and time.monotonic() < deadline:
+        while pvs._POOL_CACHE.stats()["coalesced"] - pool_before["coalesced"] < n - 1 and time.monotonic() < deadline:
             time.sleep(0.001)
 
+    pool_before, scored_before = pvs._POOL_CACHE.stats(), pvs._SCORED_CACHE.stats()   # counters span tests
     pools.state["hold"] = hold
     scoring = _league_scoring()
     barrier = threading.Barrier(n)
@@ -245,7 +291,9 @@ def test_concurrent_valuations_build_the_pool_once(pools):
 
     assert all(r == results[0] for r in results) and results[0][50000].value is not None
     assert pools.calls == {"rolling": 1, "baseline": 0, "scored": 1}
-    assert pvs._SCORED_CACHE.stats()["coalesced"] == n - 1
+    assert pvs._POOL_CACHE.stats()["coalesced"] - pool_before["coalesced"] == n - 1   # all waited on the one load...
+    scored = {k: v - scored_before[k] for k, v in pvs._SCORED_CACHE.stats().items() if k != "name"}
+    assert scored["misses"] == 1 and scored["hits"] + scored["coalesced"] == n - 1     # ...and shared one scoring
 
 
 # ---- what callers get back cannot corrupt the shared copy ---------------------------------

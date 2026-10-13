@@ -36,7 +36,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Hashable, TypeVar
+from typing import Any, Callable, Hashable, Optional, TypeVar
 
 from core.logging import get_logger
 
@@ -93,11 +93,18 @@ class SyncTTLCache:
         """False bypasses the cache entirely — the kill switch is a TTL of 0."""
         return self.ttl_seconds > 0 and self.max_entries > 0
 
-    def get_or_build(self, key: Hashable, build: Callable[[], T]) -> T:
+    def get_or_build(self, key: Hashable, build: Callable[[], T], *,
+                     valid: Optional[Callable[[T], bool]] = None) -> T:
         """Return the live value for `key`, building it once if needed.
 
         `build` runs on the calling thread, outside the lock, and must not ask
         this cache for its own key (that would wait on itself).
+
+        `valid`, when given, is asked whether a stored value (or the result of a
+        build this caller joined) still serves this caller: False is a miss, and
+        the caller builds — the way a value derived from another cached value
+        follows that value to its next version rather than outliving it. It may
+        run under the lock, so it must be cheap and must not use the cache.
         """
         if not self.enabled:
             return build()
@@ -106,7 +113,7 @@ class SyncTTLCache:
             entry = self._entries.get(key)
             if entry is not None:
                 stored_at, value = entry
-                if self._clock() - stored_at < self.ttl_seconds:
+                if self._clock() - stored_at < self.ttl_seconds and (valid is None or valid(value)):
                     self._entries.move_to_end(key)
                     self.hits += 1
                     return value
@@ -120,7 +127,7 @@ class SyncTTLCache:
                 self.coalesced += 1
 
         if not leader:
-            return self._follow(key, flight, build)
+            return self._follow(key, flight, build, valid)
 
         try:
             value = build()
@@ -162,8 +169,10 @@ class SyncTTLCache:
                 "wait_timeouts": self.wait_timeouts,
             }
 
-    def _follow(self, key: Hashable, flight: _Flight, build: Callable[[], T]) -> T:
-        """Wait for the leader's build and share it; build alone when it fails or hangs."""
+    def _follow(self, key: Hashable, flight: _Flight, build: Callable[[], T],
+                valid: Optional[Callable[[T], bool]]) -> T:
+        """Wait for the leader's build and share it; build alone when it fails,
+        hangs, or does not serve this caller."""
         if not flight.done.wait(self.wait_timeout_seconds):
             with self._lock:
                 self.wait_timeouts += 1
@@ -174,7 +183,7 @@ class SyncTTLCache:
             log.warning("sync_cache_wait_timeout", cache=self.name, key=str(key),
                         timeout_s=self.wait_timeout_seconds)
             return build()
-        if flight.failed:
+        if flight.failed or (valid is not None and not valid(flight.value)):
             return build()
         return flight.value
 
