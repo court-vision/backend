@@ -352,7 +352,7 @@ class TestAgentTeamTools:
 
         def fa(espn_id, nba_id):
             return SimpleNamespace(player_id=espn_id, nba_player_id=nba_id, name=f"P{nba_id}", team="UTA",
-                                   valid_positions=["PF", "C"], avg_points_last_n=2.0, avg_points_season=1.5,
+                                   valid_positions=["PF", "C", "F", "UT1", "UT2", "BE", "IR"], avg_points_last_n=2.0, avg_points_season=1.5,
                                    games_remaining=4, game_days=[1, 2], b2b_game_count=1, streamer_score=9.0,
                                    injured=False, injury_status=None, acquisition_status=None, waivers_until=None)
 
@@ -369,7 +369,7 @@ class TestAgentTeamTools:
         body = json.loads(outcome.content)
         assert [p["player_id"] for p in body["players"]] == [1_600_000, 1_600_001]
         assert body["pool_size"] == 5 and body["value_kind"] == "category_value"
-        assert body["players"][0]["positions"] == "PF/C"
+        assert body["players"][0]["positions"] == "PF/C/F"
         assert seen[0]["target_day"] == 2 and seen[0]["mode"].value == "daily" and seen[0]["team_id"] == 22
         assert "101" not in json.dumps([p["player_id"] for p in body["players"]])
 

@@ -258,6 +258,9 @@ async def _owned(ctx: ToolContext | None, team_id: int) -> tuple[OwnedTeamContex
     return team, await load_owned_league_info(team)
 
 
+_SLOT_PREFIXES = ("UT", "BE", "IR")
+
+
 def _injury(injured: bool, status: Optional[str]) -> Optional[str]:
     return status or ("injured" if injured else None)
 
@@ -355,7 +358,8 @@ async def _get_free_agents(args: FreeAgentsInput, ctx: ToolContext | None) -> di
                 "player_id": p.nba_player_id,
                 "name": p.name,
                 "team": p.team,
-                "positions": "/".join(p.valid_positions),
+                # Positions only: ESPN's list also names the slots (UT1, BE, IR)
+                "positions": "/".join(pos for pos in p.valid_positions if not pos.startswith(_SLOT_PREFIXES)),
                 "avg_value_last_7": p.avg_points_last_n,
                 "avg_value_season": p.avg_points_season,
                 "games_left": p.games_remaining,

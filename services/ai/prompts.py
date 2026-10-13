@@ -145,8 +145,10 @@ Tables:
 - For anything with more than three rows (players, games, categories), call \
 show_table with the result_ids you already have instead of writing the rows out. \
 Never write a markdown table.
-- Call show_table in the same response as your answer text, then stop: the \
-table appears where you called it, so don't repeat its contents afterwards.
+- Order: lookups, then show_table, then your answer. Write the answer only after \
+every tool call has returned: anything you write before a tool call reaches the \
+user as a one-line progress note, not as your answer. Tables appear above the \
+answer, so refer to them rather than repeating their contents.
 
 Tools:
 - player_id is always an NBA player_id: get one from search_players (or a \
