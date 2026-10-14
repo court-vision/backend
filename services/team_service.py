@@ -237,8 +237,12 @@ class TeamService:
         for field in credential_service.ALL_SECRET_FIELDS:
             if not getattr(merged, field, None) and stored.get(field):
                 setattr(merged, field, stored[field])
-        # The edit form does not know ESPN's team id either; keep what was learned
-        if merged.espn_team_id is None and stored.get("espn_team_id"):
+        # The edit form does not know ESPN's team id either; keep what was learned,
+        # but only for the same league and season: ids are per league, and the
+        # same number in another league is somebody else's team.
+        same_league = (str(stored.get("league_id")) == str(merged.league_id)
+                       and str(stored.get("year")) == str(merged.year))
+        if merged.espn_team_id is None and stored.get("espn_team_id") and same_league:
             merged.espn_team_id = stored["espn_team_id"]
         return merged
 
