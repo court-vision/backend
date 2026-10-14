@@ -330,13 +330,16 @@ def test_deleting_a_session_you_do_not_own_is_a_404(authed_client, draft_service
 
 
 @pytest.mark.api
-def test_a_live_room_without_a_team_is_a_422(authed_client, draft_service, monkeypatch):
+def test_a_live_room_without_a_team_is_league_pending_not_a_422(authed_client, draft_service, monkeypatch):
+    # A league joined minutes before its draft: the room starts first and adopts
+    # the league on the tap's first INIT, so the schema lets it through.
     _own(monkeypatch)
 
-    res = authed_client.post("/v1/internal/drafts", json={"kind": "live"})
+    res = authed_client.post("/v1/internal/drafts", json={"kind": "live", "scoring_format": "categories"})
 
-    assert res.status_code == 422
-    assert draft_service == []
+    assert res.status_code == 200
+    req = draft_service[0][1][1]
+    assert req.kind == "live" and req.team_id is None and req.scoring_format == "categories"
 
 
 @pytest.mark.api
@@ -510,6 +513,49 @@ def test_sync_init_reaches_the_service_with_the_owned_session_id(authed_client, 
     assert body["inserted"] == 45 and body["espn_team_id"] == 4 and body["header_applied"] is True
     args, _ = draft_sync_service[0]
     assert args[0] == 12 and args[1].payload == "A" * 40
+
+
+@pytest.mark.api
+def test_sync_init_on_a_league_pending_room_adopts_the_league_it_linked_to(authed_client, draft_sync_service, monkeypatch):
+    from schemas.draft import DraftInitSyncResp, DraftInitSyncResponse, DraftLeagueAdoption, DraftSessionResponse
+    from services import draft_adoption_service as adoption
+    from services import draft_service as drafts_module
+    from services import draft_sync_service as sync_module
+
+    _own_session(monkeypatch, session_id=12, team_id=None, league_id=None, kind="live")
+    pending = SESSION.model_copy(update={"team_id": None, "league_id": None, "kind": "live", "league_pending": True, "espn_league_id": 588175580})
+
+    async def fake_sync(session_id, req):
+        return DraftInitSyncResponse(status=ApiStatus.SUCCESS, message="INIT reconciled", data=DraftInitSyncResp(
+            session=pending, espn_league_id=588175580, espn_team_id=4, draft_state=0, draft_type="snake",
+            made=0, inserted=0, skipped=0, espn_front=1, header_applied=True,
+        ))
+    monkeypatch.setattr(sync_module.DraftSyncService, "sync_init", staticmethod(fake_sync))
+
+    adopted = DraftLeagueAdoption(team_id=99, league_id=5, espn_league_id=588175580, espn_team_id=4,
+                                  team_name="Goblins", league_name="Public 10", team_created=True)
+    calls = []
+
+    async def fake_adopt(session_id, user_id, espn_league_id, espn_team_id):
+        calls.append((session_id, user_id, espn_league_id, espn_team_id))
+        return adopted
+    monkeypatch.setattr(adoption.DraftAdoptionService, "adopt", staticmethod(fake_adopt))
+
+    after = SESSION.model_copy(update={"team_id": 99, "league_id": 5, "kind": "live", "espn_league_id": 588175580})
+
+    async def fake_get(session_id):
+        return DraftSessionResponse(status=ApiStatus.SUCCESS, message="Draft session fetched", data=after)
+    monkeypatch.setattr(drafts_module.DraftService, "get_session", staticmethod(fake_get))
+
+    res = authed_client.post("/v1/internal/drafts/12/sync/init", json={"payload": "A" * 40})
+
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert calls == [(12, 42, 588175580, 4)]
+    assert body["league_adopted"]["team_name"] == "Goblins" and body["league_adopted"]["team_created"] is True
+    assert body["league_adoption_error"] is None
+    # The reply carries the room as it is now: on its team, no longer pending.
+    assert body["session"]["team_id"] == 99 and body["session"]["league_pending"] is False
 
 
 @pytest.mark.api

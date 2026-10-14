@@ -57,6 +57,11 @@ from services.scoring.resolver import resolve_scoring_for_room, resolve_scoring_
 # roster, never from the draft board.
 NON_DRAFTABLE_SLOTS = frozenset({"IR", ""})
 
+# Rounds a room drafts when nothing says otherwise: ESPN's standard roster of
+# ten starters and a three-deep bench. A synced league whose roster shape is
+# known overrides it; a league-less room gets it outright.
+DEFAULT_ROUNDS = 13
+
 # How far past the next pick we look for the caller's next turn. A round of a
 # 30-team league is 30 picks; two rounds is a generous ceiling for a snake.
 _MY_TURN_SEARCH_LIMIT = 200
@@ -297,6 +302,11 @@ def lock_room(session_id: int) -> None:
     DraftSession.select(DraftSession.id).where(DraftSession.id == session_id).for_update().first()
 
 
+def league_pending(session) -> bool:
+    """A live room with no team yet: it adopts the league the Draft Tap connects to."""
+    return getattr(session, "kind", None) == "live" and getattr(session, "team_id", None) is None
+
+
 def espn_league_id_of(league: Optional[League]) -> Optional[int]:
     """The ESPN draft a synced ESPN league maps to; None for Yahoo or unsynced."""
     if league is None or getattr(league, "provider", None) != "espn":
@@ -360,9 +370,13 @@ def punt_options(session: DraftSession) -> list[str]:
 
 
 def league_prefill(league: Optional[League]) -> dict:
-    """Draft-room defaults from a synced league: type, order, rounds, keepers."""
+    """Draft-room defaults from a synced league: type, order, rounds, keepers.
+
+    Rounds are the one field that always has an answer: the league's draftable
+    roster spots when it has synced them, else `DEFAULT_ROUNDS`.
+    """
     if league is None:
-        return {"draft_type": "snake", "pick_order": [], "rounds": None, "keeper_count": None}
+        return {"draft_type": "snake", "pick_order": [], "rounds": DEFAULT_ROUNDS, "keeper_count": None}
 
     settings = dict(getattr(league, "draft_settings", None) or {})
     raw_type = str(settings.get("type") or "").upper()
@@ -382,7 +396,7 @@ def league_prefill(league: Optional[League]) -> dict:
         # ESPN's other types (OFFLINE, AUTOPICK) still draft in pick order.
         "draft_type": "auction" if raw_type == "AUCTION" else "snake",
         "pick_order": order,
-        "rounds": rounds_from_roster_slots(getattr(league, "roster_slots", None)),
+        "rounds": rounds_from_roster_slots(getattr(league, "roster_slots", None)) or DEFAULT_ROUNDS,
         "keeper_count": keeper_count,
     }
 
@@ -616,6 +630,7 @@ def _session_resp(
         status=session.status,
         name=session.name,
         espn_league_id=session.espn_league_id,
+        league_pending=league_pending(session),
         draft_type=session.draft_type,
         pick_order=order,
         my_slot=session.my_slot,
@@ -661,11 +676,15 @@ class DraftService:
 
         check_slot_in_range(req.my_slot, len(pick_order) or None)
 
-        # A live room follows exactly one ESPN draft — its team's league's — and
-        # is linked to it here. A mock room links to whichever ESPN lobby it
-        # first reconciles with; a manual room follows nothing.
+        # A live room follows exactly one ESPN draft. With a team it is that
+        # team's league's draft, linked here. Without one it is league-pending:
+        # it links to whichever ESPN draft the Draft Tap connects to and adopts
+        # that league then (`DraftAdoptionService`) — for a league joined
+        # minutes before the draft, with no time to add the team first. A mock
+        # room links to whichever ESPN lobby it first reconciles with; a manual
+        # room follows nothing.
         espn_league_id = None
-        if req.kind == "live":
+        if req.kind == "live" and team is not None:
             espn_league_id = espn_league_id_of(league)
             if espn_league_id is None:
                 raise BadRequestError(

@@ -284,6 +284,12 @@ async def test_a_live_room_needs_a_synced_espn_league(user):
     # The same team is fine for practice: a mock room links later, to whatever lobby it joins.
     mock = (await DraftService.create_session(user.user_id, DraftSessionCreate(kind="mock", team_id=team.team_id))).data
     assert mock.espn_league_id is None
+    # No team at all is the other way in: the room is league-pending and adopts
+    # whichever ESPN draft the tap connects to, on the generic settings until then.
+    pending = (await DraftService.create_session(user.user_id, DraftSessionCreate(kind="live", scoring_format="points"))).data
+    assert pending.league_pending is True and pending.team_id is None and pending.espn_league_id is None
+    assert pending.rounds == 13 and pending.scoring_format == "points"
+    assert mock.league_pending is False
 
 
 async def test_linking_by_patch_is_exclusive_and_an_explicit_null_unlinks(user):
