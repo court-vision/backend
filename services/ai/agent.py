@@ -77,6 +77,8 @@ class Turn:
     user_id: int
     message: str
     history: conversations.History
+    # The spend reserved for this turn (usr.ai_spend), settled when it is written
+    reservation_id: Optional[int] = None
     run: _Run = field(default_factory=_Run)
     messages: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, Any] = field(default_factory=dict)
@@ -363,10 +365,14 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                     "ungrounded_numbers": ungrounded,
                 },
                 title=conversations.title_of(turn.message),
+                reservation_id=turn.reservation_id,
             )
         except Exception:
-            # The spend is real even when the row isn't; release so the user can go on
+            # The spend is real even when the row isn't: settle it on its own (or,
+            # failing that, it stays charged at the ceiling), and release the
+            # conversation so the user can go on
             get_logger().exception("ai_turn_record_failed", conversation_id=turn.conversation_id, cost_micros=turn.cost)
+            await _settle_quietly(turn)
             await _release_quietly(turn.conversation_id)
         _log_turn(turn, outcome, duration_ms, ungrounded, turn_id)
         try:
@@ -383,6 +389,15 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             "spend": spent,
         })
         emit.close()
+
+
+async def _settle_quietly(turn: Turn) -> None:
+    if turn.reservation_id is None:
+        return
+    try:
+        await spend.settle(turn.reservation_id, turn.cost)
+    except Exception:
+        get_logger().exception("ai_spend_settle_failed", reservation_id=turn.reservation_id, cost_micros=turn.cost)
 
 
 async def _release_quietly(conversation_id: int) -> None:

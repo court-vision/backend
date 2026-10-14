@@ -3,9 +3,9 @@ What the AI desk's routes call (docs/AI_AGENT_PLAN.md § 1, § 6).
 
 Access comes first on every call: the kill switch (`AI_ENABLED`), then the
 allowlist (`AI_AGENT_USER_IDS`). A turn then checks, in order: the
-conversation is the caller's, no other turn holds it, it isn't full, and this
-month's spend leaves room under both caps. Anything that fails after the
-claim releases it before the error goes out.
+conversation is the caller's, no other turn holds it, it isn't full, and one
+turn's ceiling can be reserved under both monthly caps. Anything that fails
+after the claim releases it (and the reservation) before the error goes out.
 """
 
 from __future__ import annotations
@@ -109,16 +109,21 @@ class AgentService:
         hold = timedelta(seconds=settings.ai_agent_turn_timeout_seconds + 30)
         if not await conversations.claim(conversation_id, user_id, hold):
             raise ConflictError("AI_CONVERSATION_BUSY", "This conversation is still answering; wait for it to finish")
+        reservation_id = None
         try:
             history = await conversations.history(conversation_id, user_id)
             if history.full:
                 raise ConflictError("AI_CONVERSATION_FULL", "This conversation is full; start a new one")
-            await spend.ensure_budget(user_id)
+            reservation_id = await spend.reserve(user_id)
             header_line = await agent.header(user_id, row.team_id_id)
         except BaseException:
+            # Nothing has been spent: hand back the reservation and the claim
+            if reservation_id is not None:
+                await spend.cancel(reservation_id)
             await conversations.release(conversation_id)
             raise
-        turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history)
+        turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
+                          reservation_id=reservation_id)
         return agent.start(turn, header_line)
 
     @staticmethod

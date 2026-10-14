@@ -24,8 +24,9 @@ from typing import Any, Optional
 from peewee import fn
 
 from core.settings import settings
-from db.base import db_operation
+from db.base import db, db_operation
 from db.models.ai_conversations import AiConversation, AiTurn
+from services.ai import spend
 
 TITLE_LENGTH = 80
 OK = "ok"
@@ -84,6 +85,7 @@ def turns_of(conversation_id: int, user_id: int) -> list[AiTurn]:
 
 @db_operation("ai.delete_conversation")
 def delete(conversation_id: int, user_id: int) -> bool:
+    """The conversation and its turns. Their spend stays in usr.ai_spend."""
     return AiConversation.delete().where(
         AiConversation.id == conversation_id, AiConversation.user_id == user_id).execute() > 0
 
@@ -139,21 +141,26 @@ def history(conversation_id: int, user_id: int) -> History:
 
 
 @db_operation("ai.record_turn")
-def _insert(conversation_id: int, row: dict[str, Any], title: Optional[str]) -> int:
-    turn_id = AiTurn.insert(conversation_id=conversation_id, **row).execute()
-    AiConversation.update(updated_at=_now(), busy_until=None).where(AiConversation.id == conversation_id).execute()
-    if title:
-        # The first message names the conversation; a later one never renames it
-        (AiConversation.update(title=title)
-         .where(AiConversation.id == conversation_id, AiConversation.title.is_null())
-         .execute())
+def _insert(conversation_id: int, row: dict[str, Any], title: Optional[str], reservation_id: Optional[int]) -> int:
+    with db.atomic():
+        turn_id = AiTurn.insert(conversation_id=conversation_id, **row).execute()
+        if reservation_id is not None:
+            spend.settle_sync(reservation_id, row.get("cost_micros", 0), turn_id)
+        AiConversation.update(updated_at=_now(), busy_until=None).where(AiConversation.id == conversation_id).execute()
+        if title:
+            # The first message names the conversation; a later one never renames it
+            (AiConversation.update(title=title)
+             .where(AiConversation.id == conversation_id, AiConversation.title.is_null())
+             .execute())
     return turn_id
 
 
-async def record(conversation_id: int, row: dict[str, Any], *, title: Optional[str] = None) -> int:
-    """Write one turn and release the conversation, in that order: the next turn
-    must not start until this one's messages are part of the history."""
-    return await _insert(conversation_id, storable(row), title)
+async def record(conversation_id: int, row: dict[str, Any], *, title: Optional[str] = None,
+                 reservation_id: Optional[int] = None) -> int:
+    """Write one turn, settle its spend reservation to its cost, and release the
+    conversation, together: the next turn must not start until this one's
+    messages are part of the history."""
+    return await _insert(conversation_id, storable(row), title, reservation_id)
 
 
 @db_operation("ai.turn_feedback")

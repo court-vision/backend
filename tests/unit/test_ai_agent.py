@@ -119,14 +119,17 @@ def agent_on(monkeypatch):
 @pytest.fixture
 def recorded(monkeypatch):
     """The rows the turns write, and the conversations released."""
-    rows, released = [], []
+    rows, released, settled = [], [], []
 
-    async def record(conversation_id, row, *, title=None):
-        rows.append({"conversation_id": conversation_id, "title": title, **row})
+    async def record(conversation_id, row, *, title=None, reservation_id=None):
+        rows.append({"conversation_id": conversation_id, "title": title, "reservation_id": reservation_id, **row})
         return 900 + len(rows)
 
     async def release(conversation_id):
         released.append(conversation_id)
+
+    async def settle(reservation_id, cost, turn_id=None):
+        settled.append((reservation_id, cost))
 
     async def month(user_id):
         return spend.Spend(user=0, total=0, user_cap=100_000_000, total_cap=100_000_000)
@@ -134,7 +137,8 @@ def recorded(monkeypatch):
     monkeypatch.setattr(conversations, "record", record)
     monkeypatch.setattr(conversations, "release", release)
     monkeypatch.setattr(spend, "month_spend", month)
-    return SimpleNamespace(rows=rows, released=released)
+    monkeypatch.setattr(spend, "settle", settle)
+    return SimpleNamespace(rows=rows, released=released, settled=settled)
 
 
 def _client(monkeypatch, script):
@@ -159,7 +163,7 @@ def _tools(monkeypatch, results):
 
 def _turn(history=None, message="Who should I stream for blocks?"):
     return agent.Turn(conversation_id=7, user_id=42, message=message,
-                      history=history or conversations.History())
+                      history=history or conversations.History(), reservation_id=55)
 
 
 def _run(turn, header_line="[Today is Tuesday 2026-10-13.]"):
@@ -208,8 +212,9 @@ class TestTurn:
                                       "content": "[Today is Tuesday 2026-10-13.]\n\nWho should I stream for blocks?"}
         assert row["messages"][1]["content"][0] == {"type": "thinking", "thinking": "", "signature": "sig"}
         assert row["parts"] == [{"kind": "text", "text": "Duren is your best \n\nshot-blocker."}]
-        # 1000 in x $4 + 100 out x $20 per million
+        # 1000 in x $4 + 100 out x $20 per million, settled against the turn's reservation
         assert row["cost_micros"] == 6000
+        assert row["reservation_id"] == 55
         assert events[-2][1]["turn_id"] == 901 and events[-2][1]["outcome"] == "ok"
         call = fake.calls[0]
         assert call["model"] == "claude-opus-5-5"
@@ -357,7 +362,7 @@ class TestTurn:
         assert events[0][0] == "error" and events[0][1]["code"] == "AI_BUSY"
 
     def test_a_turn_that_cannot_be_written_still_releases_and_closes(self, agent_on, recorded, monkeypatch):
-        async def broken(conversation_id, row, *, title=None):
+        async def broken(conversation_id, row, *, title=None, reservation_id=None):
             raise RuntimeError("db down")
         monkeypatch.setattr(conversations, "record", broken)
         _client(monkeypatch, [msg("end_turn", text("ok"))])
@@ -365,6 +370,8 @@ class TestTurn:
         events = _run(_turn())
 
         assert recorded.released == [7]
+        # The spend is settled on its own, so the caps still see it
+        assert recorded.settled == [(55, 6000)]
         assert events[-2][0] == "done" and events[-2][1]["turn_id"] is None
         assert events[-1][0] == "<closed>"
 
@@ -494,20 +501,33 @@ class TestSpend:
         (99_500_000, 10_000_000, "AI_USER_BUDGET_REACHED"),
     ])
     def test_a_turn_needs_one_turn_s_ceiling_left_under_both_caps(self, agent_on, monkeypatch, mine, everyone, code):
-        async def sums(user_id, since):
-            return mine, everyone
-        monkeypatch.setattr(spend, "_month_spend", sums)
+        seen = []
+
+        async def reserve(user_id, since, amount, user_cap, total_cap):
+            seen.append((user_id, amount, user_cap, total_cap))
+            if total_cap - everyone < amount:
+                return "total"
+            return "user" if user_cap - mine < amount else 77
+        monkeypatch.setattr(spend, "_reserve", reserve)
 
         with pytest.raises(AppError) as err:
-            asyncio.run(spend.ensure_budget(42))
+            asyncio.run(spend.reserve(42))
         assert err.value.error_code == code
+        assert seen == [(42, 1_000_000, 100_000_000, 100_000_000)]
+
+    def test_a_reservation_s_id_comes_back(self, agent_on, monkeypatch):
+        async def reserve(*args):
+            return 77
+        monkeypatch.setattr(spend, "_reserve", reserve)
+        assert asyncio.run(spend.reserve(42)) == 77
 
 
 # ---- starting a turn ----
 
 @pytest.fixture
 def service_stubs(agent_on, monkeypatch):
-    state = SimpleNamespace(claimed=True, released=[], history=conversations.History(), started=[], budget_error=None)
+    state = SimpleNamespace(claimed=True, released=[], history=conversations.History(), started=[], budget_error=None,
+                            cancelled=[], header_error=None)
 
     async def get(conversation_id, user_id):
         return SimpleNamespace(id=conversation_id, team_id_id=22) if user_id == 42 else None
@@ -521,11 +541,17 @@ def service_stubs(agent_on, monkeypatch):
     async def history(conversation_id, user_id):
         return state.history
 
-    async def budget(user_id):
+    async def reserve(user_id):
         if state.budget_error:
             raise state.budget_error
+        return 77
+
+    async def cancel(reservation_id):
+        state.cancelled.append(reservation_id)
 
     async def header(user_id, pinned):
+        if state.header_error:
+            raise state.header_error
         return f"[pinned {pinned}]"
 
     def start(turn, header_line):
@@ -536,7 +562,8 @@ def service_stubs(agent_on, monkeypatch):
     monkeypatch.setattr(conversations, "claim", claim)
     monkeypatch.setattr(conversations, "release", release)
     monkeypatch.setattr(conversations, "history", history)
-    monkeypatch.setattr(spend, "ensure_budget", budget)
+    monkeypatch.setattr(spend, "reserve", reserve)
+    monkeypatch.setattr(spend, "cancel", cancel)
     monkeypatch.setattr(agent, "header", header)
     monkeypatch.setattr(agent, "start", start)
     return state
@@ -552,7 +579,8 @@ class TestStartTurn:
         _start()
         turn, line = service_stubs.started[0]
         assert (turn.conversation_id, turn.user_id, turn.message, line) == (7, 42, "hello", "[pinned 22]")
-        assert service_stubs.released == []
+        assert turn.reservation_id == 77
+        assert service_stubs.released == [] and service_stubs.cancelled == []
 
     def test_off_and_invite_only_come_first(self, service_stubs, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_user_ids", [])
@@ -582,6 +610,13 @@ class TestStartTurn:
         with pytest.raises(AppError):
             _start()
         assert service_stubs.released == [7]
+        assert service_stubs.cancelled == [] and service_stubs.started == []
+
+    def test_a_failure_after_reserving_hands_the_reservation_back(self, service_stubs):
+        service_stubs.header_error = RuntimeError("teams unavailable")
+        with pytest.raises(RuntimeError):
+            _start()
+        assert service_stubs.cancelled == [77] and service_stubs.released == [7]
         assert service_stubs.started == []
 
     def test_another_user_s_conversation_is_missing(self, service_stubs, monkeypatch):

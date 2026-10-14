@@ -1,6 +1,6 @@
 """
-usr.ai_conversations and usr.ai_turns — the AI agent's chats (migration 0032,
-docs/AI_AGENT_PLAN.md § 1).
+usr.ai_conversations and usr.ai_turns — the AI agent's chats — and usr.ai_spend,
+the ledger its monthly caps sum (migration 0032, docs/AI_AGENT_PLAN.md § 1, § 6).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -10,7 +10,7 @@ these tables.
 
 from datetime import datetime, timezone
 
-from peewee import BigAutoField, BigIntegerField, DateTimeField, ForeignKeyField, IntegerField, TextField
+from peewee import BigAutoField, BigIntegerField, BooleanField, DateTimeField, ForeignKeyField, IntegerField, TextField
 from playhouse.postgres_ext import BinaryJSONField
 
 from db.base import BaseModel
@@ -61,4 +61,20 @@ class AiTurn(BaseModel):
 
     class Meta:
         table_name = "ai_turns"
+        schema = "usr"
+
+
+class AiSpend(BaseModel):
+    """One turn's reservation, settled to its cost. Cascades from the user only:
+    deleting a conversation leaves its spend counted."""
+
+    id = BigAutoField(primary_key=True)
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
+    created_at = DateTimeField(default=_now)
+    cost_micros = BigIntegerField()
+    settled = BooleanField(default=False)
+
+    class Meta:
+        table_name = "ai_spend"
         schema = "usr"

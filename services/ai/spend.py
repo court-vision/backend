@@ -3,15 +3,20 @@ What the agent costs, and the monthly caps it runs under (docs/AI_AGENT_PLAN.md 
 
 Request counts don't fit an agent: one turn can be a single cached call or eight
 calls over a long history. So turns are priced in dollars from their token
-meters, stored on the turn (`usr.ai_turns.cost_micros`), and summed per
-calendar month (UTC):
+meters and summed per calendar month (UTC):
 
 - the whole allowlist shares `ai_monthly_budget_usd`;
 - each allowed user may spend that budget divided by the allowlist's size.
 
-A turn is refused while less than one turn's ceiling (`ai_agent_turn_max_usd`)
-is left under either cap, so no turn can carry spend past it by more than its
-own overrun. The Anthropic Console workspace spend limit stays the last line.
+The sums read the ledger, usr.ai_spend, never the turns: deleting a
+conversation deletes its turns, and must not hand their spend back. Before a
+turn starts it reserves one turn's ceiling (`ai_agent_turn_max_usd`) there,
+under a lock, so turns started at the same moment queue for the check instead
+of all passing it; the reservation is refused while less than the ceiling is
+left under either cap. Writing the turn settles the reservation to its real
+cost. One that is never settled (the process died) stays charged at the
+ceiling: the caps err high, never low. The Anthropic Console workspace spend
+limit stays the last line.
 """
 
 from __future__ import annotations
@@ -24,9 +29,12 @@ from peewee import fn
 from core.errors import AppError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
-from db.base import db_operation
-from db.models.ai_conversations import AiTurn
+from db.base import db, db_operation
+from db.models.ai_conversations import AiSpend
 from schemas.common import ApiStatus
+
+# Serializes reservations; any key no other code uses
+_LEDGER_LOCK = 0x41_49_53_50
 
 
 @dataclass(frozen=True)
@@ -81,14 +89,18 @@ def month_start(now: datetime | None = None) -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-@db_operation("ai.month_spend")
-def _month_spend(user_id: int, since: datetime) -> tuple[int, int]:
+def _sums(user_id: int, since: datetime) -> tuple[int, int]:
     def total(query) -> int:
         return int(query.scalar() or 0)
-    mine = total(AiTurn.select(fn.SUM(AiTurn.cost_micros))
-                 .where(AiTurn.user_id == user_id, AiTurn.created_at >= since))
-    everyone = total(AiTurn.select(fn.SUM(AiTurn.cost_micros)).where(AiTurn.created_at >= since))
+    mine = total(AiSpend.select(fn.SUM(AiSpend.cost_micros))
+                 .where(AiSpend.user_id == user_id, AiSpend.created_at >= since))
+    everyone = total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(AiSpend.created_at >= since))
     return mine, everyone
+
+
+@db_operation("ai.month_spend")
+def _month_spend(user_id: int, since: datetime) -> tuple[int, int]:
+    return _sums(user_id, since)
 
 
 @dataclass(frozen=True)
@@ -113,28 +125,43 @@ def _micros(dollars: float) -> int:
     return round(dollars * 1_000_000)
 
 
+def _caps() -> tuple[int, int]:
+    total_cap = _micros(settings.ai_monthly_budget_usd)
+    return total_cap // max(len(settings.ai_agent_user_ids), 1), total_cap
+
+
 async def month_spend(user_id: int) -> Spend:
     mine, everyone = await _month_spend(user_id, month_start())
-    total_cap = _micros(settings.ai_monthly_budget_usd)
-    return Spend(
-        user=mine,
-        total=everyone,
-        user_cap=total_cap // max(len(settings.ai_agent_user_ids), 1),
-        total_cap=total_cap,
-    )
+    user_cap, total_cap = _caps()
+    return Spend(user=mine, total=everyone, user_cap=user_cap, total_cap=total_cap)
 
 
-async def ensure_budget(user_id: int) -> Spend:
-    """Refuse a turn while either cap has less than one turn's ceiling left."""
-    spend = await month_spend(user_id)
-    reserve = _micros(settings.ai_agent_turn_max_usd)
-    if spend.total_left < reserve:
+@db_operation("ai.reserve_turn")
+def _reserve(user_id: int, since: datetime, amount: int, user_cap: int, total_cap: int) -> int | str:
+    """The reservation's id, or which cap refused it ("total", "user"). The check
+    and the insert happen under one transaction-scoped lock, so two turns can't
+    both read the same total and both pass."""
+    with db.atomic():
+        db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
+        mine, everyone = _sums(user_id, since)
+        if total_cap - everyone < amount:
+            return "total"
+        if user_cap - mine < amount:
+            return "user"
+        return AiSpend.insert(user_id=user_id, cost_micros=amount).execute()
+
+
+async def reserve(user_id: int) -> int:
+    """Reserve one turn's ceiling against both caps; returns the reservation's id."""
+    user_cap, total_cap = _caps()
+    outcome = await _reserve(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd), user_cap, total_cap)
+    if outcome == "total":
         raise ServiceUnavailableError(
             "AI_MONTHLY_BUDGET_REACHED",
             "The assistant has used this month's budget; it resets on the 1st",
             log_level="warning",
         )
-    if spend.user_left < reserve:
+    if outcome == "user":
         raise AppError(
             "AI_USER_BUDGET_REACHED",
             "You've used this month's assistant budget; it resets on the 1st",
@@ -142,4 +169,22 @@ async def ensure_budget(user_id: int) -> Spend:
             api_status=ApiStatus.RATE_LIMITED,
             log_level="info",
         )
-    return spend
+    return outcome
+
+
+@db_operation("ai.cancel_reservation")
+def cancel(reservation_id: int) -> None:
+    """Drop a reservation whose turn never started (nothing was spent)."""
+    AiSpend.delete().where(AiSpend.id == reservation_id, AiSpend.settled == False).execute()  # noqa: E712
+
+
+def settle_sync(reservation_id: int, cost: int, turn_id: int | None) -> None:
+    """Set a reservation to its turn's real cost. Callers hold the transaction."""
+    (AiSpend.update(cost_micros=cost, settled=True, turn_id=turn_id)
+     .where(AiSpend.id == reservation_id)
+     .execute())
+
+
+@db_operation("ai.settle_reservation")
+def settle(reservation_id: int, cost: int, turn_id: int | None = None) -> None:
+    settle_sync(reservation_id, cost, turn_id)
