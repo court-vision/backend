@@ -189,3 +189,66 @@ def test_a_zero_ttl_disables_the_cache_entirely():
 def test_etag_is_stable_for_identical_bytes_and_differs_otherwise():
     assert CachedResponse.of(b"same").etag == CachedResponse.of(b"same").etag
     assert CachedResponse.of(b"same").etag != CachedResponse.of(b"other").etag
+
+
+# ---- the byte budget ----
+
+def _fill(cache: ResponseCache, items: list[tuple[str, bytes]]) -> None:
+    async def scenario():
+        for key, body in items:
+            await cache.get_or_render(key, lambda b=body: _render(b))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.unit
+def test_a_byte_budget_evicts_the_least_recently_used_until_it_fits():
+    cache = ResponseCache("test", ttl_seconds=60, max_entries=100, max_bytes=10)
+
+    _fill(cache, [("a", b"aaaa"), ("b", b"bbbb"), ("c", b"cccc")])   # 12 bytes > 10
+
+    assert cache.get("a") is None
+    assert (cache.get("b").body, cache.get("c").body) == (b"bbbb", b"cccc")
+    assert cache.size_bytes == 8
+    assert cache.stats()["bytes"] == 8
+
+
+@pytest.mark.unit
+def test_a_body_larger_than_the_whole_budget_is_served_but_not_kept():
+    cache = ResponseCache("test", ttl_seconds=60, max_entries=100, max_bytes=10)
+    _fill(cache, [("small", b"12345")])
+
+    async def scenario():
+        return await cache.get_or_render("huge", lambda: _render(b"x" * 11))
+
+    assert asyncio.run(scenario()).body == b"x" * 11
+    assert cache.get("huge") is None
+    assert cache.get("small").body == b"12345"      # nothing else was pushed out for it
+    assert cache.size_bytes == 5
+
+
+@pytest.mark.unit
+def test_bytes_are_released_on_expiry_replacement_and_clear():
+    cache = ResponseCache("test", ttl_seconds=0.05, max_entries=100, max_bytes=100)
+    _fill(cache, [("a", b"aaaa"), ("b", b"bb")])
+    assert cache.size_bytes == 6
+
+    async def expire_then_rerender():
+        await asyncio.sleep(0.06)
+        assert cache.get("a") is None                # expired: its 4 bytes go
+        await cache.get_or_render("b", lambda: _render(b"bbbbbbbb"))   # replaced: 2 -> 8
+
+    asyncio.run(expire_then_rerender())
+    assert cache.size_bytes == 8
+
+    cache.clear()
+    assert cache.size_bytes == 0 and cache.stats()["entries"] == 0
+
+
+@pytest.mark.unit
+def test_without_a_byte_budget_only_the_entry_count_bounds_it():
+    cache = _cache(max_entries=2)
+    _fill(cache, [("a", b"a" * 1000), ("b", b"b" * 1000)])
+
+    assert cache.max_bytes is None
+    assert cache.size_bytes == 2000 and cache.get("a") is not None

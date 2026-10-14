@@ -8,6 +8,9 @@ from services.team_schedule_service import TeamScheduleService
 from services.nba_team_stats_service import NBATeamStatsService
 from services.nba_team_roster_service import NBATeamRosterService
 from services.nba_team_live_game_service import NBATeamLiveGameService
+from core import public_read_cache as caches
+from core.http_cache import serve_cached_envelope
+from core.nba_calendar import nba_date_et
 from core.responses import respond
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 
@@ -33,11 +36,17 @@ async def get_team_schedule(
     limit: int = Query(20, ge=1, le=200, description="Maximum number of games to return"),
 ) -> TeamScheduleResp:
     """Get schedule for a team."""
-    return respond(await TeamScheduleService.get_team_schedule(
-        team_abbrev=team_abbrev,
-        upcoming=upcoming,
-        limit=limit,
-    ))
+    # The service upper-cases the abbreviation before anything else reads it.
+    # An upcoming list starts at today's NBA date, so a new date is a new entry.
+    return await serve_cached_envelope(
+        request, caches.TEAM_SCHEDULE,
+        caches.key(team_abbrev.upper(), upcoming, limit, nba_date_et() if upcoming else None),
+        lambda: TeamScheduleService.get_team_schedule(
+            team_abbrev=team_abbrev,
+            upcoming=upcoming,
+            limit=limit,
+        ),
+    )
 
 
 @router.get(
@@ -57,7 +66,10 @@ async def get_team_stats(
     team_abbrev: str = Path(..., description="Team abbreviation (e.g., LAL, BOS, GSW)"),
 ) -> NBATeamStatsResp:
     """Get season stats for a team."""
-    return respond(await NBATeamStatsService.get_team_stats(team_abbrev=team_abbrev))
+    return await serve_cached_envelope(
+        request, caches.TEAM_STATS, caches.key(team_abbrev.upper()),
+        lambda: NBATeamStatsService.get_team_stats(team_abbrev=team_abbrev),
+    )
 
 
 @router.get(
@@ -77,7 +89,10 @@ async def get_team_roster(
     team_abbrev: str = Path(..., description="Team abbreviation (e.g., LAL, BOS, GSW)"),
 ) -> NBATeamRosterResp:
     """Get active roster for a team."""
-    return respond(await NBATeamRosterService.get_team_roster(team_abbrev=team_abbrev))
+    return await serve_cached_envelope(
+        request, caches.TEAM_ROSTER, caches.key(team_abbrev.upper()),
+        lambda: NBATeamRosterService.get_team_roster(team_abbrev=team_abbrev),
+    )
 
 
 @router.get(

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterator, Literal, Optional
 
@@ -112,6 +112,20 @@ def _get_nba_today() -> date:
     if now_et.hour < 2:
         return (now_et - timedelta(days=1)).date()
     return now_et.date()
+
+
+def seconds_left_in_fantasy_day(day: date, now: Optional[datetime] = None) -> int:
+    """Seconds until fantasy day `day` ends at the next 2 AM ET rollover; at least 1.
+
+    For a response built from `get_nba_today()` (the current week, the season
+    day) that a client must not keep past that moment. Taking the day the
+    response was built from, rather than reading the clock twice, means a body
+    built a moment before the rollover is never handed out with a full day left.
+    """
+    eastern = pytz.timezone("US/Eastern")
+    now_et = datetime.now(eastern) if now is None else now.astimezone(eastern)
+    ends = eastern.localize(datetime.combine(day + timedelta(days=1), time(2)))
+    return max(1, int((ends - now_et).total_seconds()))
 
 
 # ---- weeks -----------------------------------------------------------------

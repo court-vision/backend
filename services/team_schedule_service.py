@@ -2,7 +2,7 @@
 Service for NBA team schedule operations.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 from core.logging import get_logger
 from core.nba_calendar import nba_date_et
@@ -70,12 +70,27 @@ class TeamScheduleService:
             # Limit results
             games = games[:limit]
 
+            # Back-to-backs from one query instead of an EXISTS per game (82 of
+            # them for a full season, 90-110 ms of a team sheet in production):
+            # every date the team played from the day before its first listed
+            # game, in any season or season type, as Game.is_back_to_back asked
+            # it. A preseason game the night before opening night still counts.
+            one_day = timedelta(days=1)
+            played_on = (
+                Game.team_game_dates(team_id, games[0].game_date - one_day, games[-1].game_date - one_day)
+                if games else set()
+            )
+
             # Build def_rating lookup: {team_abbrev: def_rating}
             def_rating_map: dict[str, float] = {}
             try:
-                for ts in TeamStats.get_all_latest():
-                    if ts.def_rating is not None:
-                        def_rating_map[ts.team_id] = float(ts.def_rating)
+                def_rating_map = TeamStats.latest_def_ratings()
+            except DB_RUNTIME_ERRORS:
+                # Not swallowed: the route caches a success for five minutes,
+                # so a dropped connection here would blank every opponent's
+                # rating that long, on this replica and in every browser that
+                # kept the copy. Failing the request (a 503) caches nothing.
+                raise
             except Exception:
                 pass  # Non-fatal; games still render without def_rating
 
@@ -91,7 +106,7 @@ class TeamScheduleService:
                         date=g.game_date.isoformat(),
                         opponent=opponent,
                         home=is_home,
-                        back_to_back=Game.is_back_to_back(team_id, g.game_date),
+                        back_to_back=(g.game_date - one_day) in played_on,
                         status=g.status,
                         team_score=team_score,
                         opponent_score=opponent_score,

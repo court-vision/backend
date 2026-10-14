@@ -9,12 +9,15 @@ from schemas.market import PlayerProjectionResp, PlayerProjectionsResp, SeasonKe
 from schemas.player_profiles import PlayerProfileResp, PlayerSearchResp
 from services.public_market_service import PublicMarketService
 from services.player_profile_service import PlayerProfileService
-from services.player_service import PlayerService
+from services.player_service import PlayerService, percentile_pool_window
 from services.players_list_service import PlayersListService
 from services.player_games_service import PlayerGamesService
 from services.trends_service import TrendsService
 from services.ownership_service import OwnershipService
+from core import public_read_cache as caches
+from core.http_cache import serve_cached_envelope
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
+from core.settings import settings
 from db.models.nba.player_injuries import CURRENT_REPORT_MAX_AGE_DAYS
 from core.responses import respond
 
@@ -69,7 +72,10 @@ async def get_player_profile(
     request: Request,
     player_id: int = Path(..., gt=0, description="NBA player ID"),
 ) -> PlayerProfileResp:
-    return respond(await PlayerProfileService.get_profile(player_id=player_id))
+    return await serve_cached_envelope(
+        request, caches.PLAYER_PROFILE, caches.key(player_id),
+        lambda: PlayerProfileService.get_profile(player_id=player_id),
+    )
 
 
 @router.get(
@@ -121,7 +127,11 @@ async def get_player_projection(
     season: Optional[SeasonKey] = Query(None, description="NBA season; defaults to the configured active season"),
     as_of: Optional[date] = Query(None, description="Latest snapshot on or before this date; omit for latest"),
 ) -> PlayerProjectionResp:
-    return respond(await PublicMarketService.get_projection(player_id=player_id, season=season, as_of=as_of))
+    # The service reads an omitted season as the active one; so does the key.
+    return await serve_cached_envelope(
+        request, caches.PLAYER_PROJECTION, caches.key(player_id, season or settings.nba_season, as_of),
+        lambda: PublicMarketService.get_projection(player_id=player_id, season=season, as_of=as_of),
+    )
 
 
 @router.get(
@@ -192,7 +202,11 @@ async def get_player_stats_by_query(
     Game logs are always returned in full regardless of window.
     Advanced stats (net rating, usage, PIE, etc.) are always season-level.
     """
-    return respond(await PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team, window=window))
+    # Keyed on the raw inputs: lookup precedence and name/team normalisation stay the service's.
+    return await serve_cached_envelope(
+        request, caches.PLAYER_STATS, caches.key(espn_id, player_id, name, team, window),
+        lambda: PlayerService.get_player_stats(espn_id=espn_id, player_id=player_id, name=name, team=team, window=window),
+    )
 
 
 @router.get(
@@ -213,7 +227,11 @@ async def get_player_stats(
     window: str = Query("season", pattern="^(season|l[1-9][0-9]?)$", description="Full season or last N games (l5, l10, etc.)"),
 ) -> PlayerStatsResp:
     """Get player stats by NBA ID with the same windows as the query endpoint."""
-    return respond(await PlayerService.get_player_stats(player_id=player_id, window=window))
+    # The same entry as /players/stats?player_id=...&window=...: one service call, one body.
+    return await serve_cached_envelope(
+        request, caches.PLAYER_STATS, caches.key(None, player_id, None, None, window),
+        lambda: PlayerService.get_player_stats(player_id=player_id, window=window),
+    )
 
 
 @router.get(
@@ -254,7 +272,10 @@ async def get_player_trends(
     player_id: int = Path(..., description="NBA player ID"),
 ) -> PlayerTrendsResp:
     """Get trend data for a player."""
-    return respond(await TrendsService.get_player_trends(player_id=player_id))
+    return await serve_cached_envelope(
+        request, caches.PLAYER_TRENDS, caches.key(player_id),
+        lambda: TrendsService.get_player_trends(player_id=player_id),
+    )
 
 
 @router.get(
@@ -275,7 +296,18 @@ async def get_player_percentiles(
     min_games: int = Query(20, ge=1, description="Minimum games played to qualify"),
 ) -> PlayerPercentilesResp:
     """Get percentile ranks for a player's stats vs the league."""
-    return respond(await PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games))
+    # The body is read off the league pool, held for one ten-minute window.
+    # Keyed by that window and never held by a client past its end, an entry
+    # dies with its pool: otherwise one built from a pool about to be replaced
+    # would live the full five-minute TTL after it, fifteen minutes behind a
+    # pipeline write instead of ten. The service reads the window after this,
+    # so its pool is this window's or a later, fresher one.
+    window, seconds_left = percentile_pool_window()
+    return await serve_cached_envelope(
+        request, caches.PLAYER_PERCENTILES, caches.key(player_id, min_games, window),
+        lambda: PlayerService.get_player_percentiles(player_id=player_id, min_games=min_games),
+        max_age=seconds_left,
+    )
 
 
 @router.get(
