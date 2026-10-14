@@ -63,7 +63,10 @@ class DraftSessionCreate(BaseRequest):
     draft_type: Optional[DraftType] = Field(default=None, description="Defaults to the league's draft type, else snake")
     pick_order: Optional[List[int]] = Field(default=None, description="Provider team ids in first-round order; defaults to the league's")
     my_slot: Optional[int] = Field(default=None, ge=1, description="1-based slot the caller drafts from")
-    rounds: Optional[int] = Field(default=None, ge=1, le=40, description="Defaults to the league's draftable roster size")
+    rounds: Optional[int] = Field(
+        default=None, ge=1, le=40,
+        description="Defaults to the league's draftable roster spots (starters plus bench, IR excluded), else 13",
+    )
     keepers: List[DraftKeeper] = []
     scoring_format: Optional[ScoringFormat] = Field(
         default=None,

@@ -57,6 +57,11 @@ from services.scoring.resolver import resolve_scoring_for_room, resolve_scoring_
 # roster, never from the draft board.
 NON_DRAFTABLE_SLOTS = frozenset({"IR", ""})
 
+# Rounds a room drafts when nothing says otherwise: ESPN's standard roster of
+# ten starters and a three-deep bench. A synced league whose roster shape is
+# known overrides it; a league-less room gets it outright.
+DEFAULT_ROUNDS = 13
+
 # How far past the next pick we look for the caller's next turn. A round of a
 # 30-team league is 30 picks; two rounds is a generous ceiling for a snake.
 _MY_TURN_SEARCH_LIMIT = 200
@@ -360,9 +365,13 @@ def punt_options(session: DraftSession) -> list[str]:
 
 
 def league_prefill(league: Optional[League]) -> dict:
-    """Draft-room defaults from a synced league: type, order, rounds, keepers."""
+    """Draft-room defaults from a synced league: type, order, rounds, keepers.
+
+    Rounds are the one field that always has an answer: the league's draftable
+    roster spots when it has synced them, else `DEFAULT_ROUNDS`.
+    """
     if league is None:
-        return {"draft_type": "snake", "pick_order": [], "rounds": None, "keeper_count": None}
+        return {"draft_type": "snake", "pick_order": [], "rounds": DEFAULT_ROUNDS, "keeper_count": None}
 
     settings = dict(getattr(league, "draft_settings", None) or {})
     raw_type = str(settings.get("type") or "").upper()
@@ -382,7 +391,7 @@ def league_prefill(league: Optional[League]) -> dict:
         # ESPN's other types (OFFLINE, AUTOPICK) still draft in pick order.
         "draft_type": "auction" if raw_type == "AUCTION" else "snake",
         "pick_order": order,
-        "rounds": rounds_from_roster_slots(getattr(league, "roster_slots", None)),
+        "rounds": rounds_from_roster_slots(getattr(league, "roster_slots", None)) or DEFAULT_ROUNDS,
         "keeper_count": keeper_count,
     }
 

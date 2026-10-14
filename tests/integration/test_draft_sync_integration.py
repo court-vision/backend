@@ -79,6 +79,16 @@ async def test_room_open_init_sets_the_header_on_an_empty_session(user):
     assert _stored(session.id) == []
 
 
+async def test_a_league_less_room_takes_the_lobbys_round_count(user):
+    # The room assumed the standard 13 (or the user typed something); the ESPN
+    # lobby it joins is the one authority on how long its draft is.
+    session = await _mock_session(user, rounds=12)
+    resp = await DraftSyncService.sync_init(session.id, DraftInitSyncRequest(payload=ROOMOPEN))
+
+    assert resp.data.header_applied is True
+    assert resp.data.session.rounds == 13 and _header_of(session.id)["rounds"] == 13
+
+
 async def test_in_progress_init_records_every_made_pick_once(user, players):
     session = await _mock_session(user)
     resp = await DraftSyncService.sync_init(session.id, DraftInitSyncRequest(payload=INPROGRESS))
