@@ -38,18 +38,18 @@ def _stats_resp(message="Player stats fetched successfully"):
 @pytest.mark.unit
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
-        defined = {t["name"] for t in tools.TOOLS} | {t["name"] for t in tools.ROUTER_TOOLS}
+        defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
         assert [t["name"] for t in tools.ROUTER_TOOLS] == ["search_players", "get_my_teams"]
 
     def test_schemas_forbid_extra_properties(self):
-        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]:
             assert tool["input_schema"]["additionalProperties"] is False, tool["name"]
 
     def test_no_tool_takes_an_espn_id(self):
-        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]:
             assert not any("espn" in prop for prop in tool["input_schema"]["properties"]), tool["name"]
 
 
@@ -260,3 +260,119 @@ class TestToolsets:
         outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42),
                                              allowed=tools.ASK_TOOL_NAMES))
         assert outcome.is_error and "Unknown tool" in outcome.content
+
+
+# ---- the agent's team-scoped tools ----
+
+def _agent(name, raw, user_id=42):
+    return asyncio.run(tools.run_tool(name, raw, ctx=tools.ToolContext(user_id=user_id),
+                                      allowed=tools.AGENT_TOOL_NAMES))
+
+
+@pytest.fixture
+def owns_22(monkeypatch):
+    """User 42 owns team 22 and nothing else; returns the provider calls made."""
+    provider_calls = []
+
+    def owned(team_id, user_id):
+        return SimpleNamespace(team_id=team_id, user_id=user_id) if (team_id, user_id) == (22, 42) else None
+
+    async def league_info(team):
+        provider_calls.append(("credentials", team.team_id))
+        return SimpleNamespace(provider="espn")
+
+    async def run_db(name, fn, *args):
+        return fn(*args)
+    monkeypatch.setattr(tools, "run_db", run_db)
+    monkeypatch.setattr(tools, "ensure_team_owned", owned)
+    monkeypatch.setattr(tools, "load_owned_league_info", league_info)
+    return provider_calls
+
+
+def _player(espn_id, nba_id, name, **kw):
+    base = dict(player_id=espn_id, nba_player_id=nba_id, name=name, team="DET", position="C", lineup_slot="C",
+                avg_points=1.8, projected_points=0.0, games_remaining=3, injured=False, injury_status=None)
+    return SimpleNamespace(**{**base, **kw})
+
+
+def _cat(key, you, opp, winner):
+    return SimpleNamespace(key=key, label=key.upper(), you=you, opp=opp, winner=winner,
+                           higher_is_better=key != "tov", is_rate=False)
+
+
+@pytest.mark.unit
+class TestAgentTeamTools:
+    def test_someone_else_s_team_is_refused_before_any_provider_call(self, owns_22, monkeypatch):
+        from services.matchup_service import MatchupService
+        called = []
+
+        async def matchup(*a, **k):
+            called.append(a)
+        monkeypatch.setattr(MatchupService, "get_matchup_by_team_id", staticmethod(matchup))
+
+        outcome = _agent("get_matchup", {"team_id": 23})
+
+        assert outcome.is_error and "not one of the user's teams" in outcome.content
+        assert called == [] and owns_22 == []
+
+    def test_the_matchup_carries_nba_ids_and_merges_the_category_projection(self, owns_22, monkeypatch):
+        from services.matchup_service import MatchupService
+
+        md = SimpleNamespace(
+            matchup_period=1, matchup_period_start="2026-10-20", matchup_period_end="2026-10-26",
+            scoring_format="categories", projected_margin=2.0,
+            your_team=SimpleNamespace(team_name="Mine", current_score=0, projected_score=5,
+                                      roster=[_player(4396993, 1631105, "Jalen Duren")]),
+            opponent_team=SimpleNamespace(team_name="Theirs", current_score=0, projected_score=3,
+                                          roster=[_player(1, None, "Unmapped", injured=True)]),
+            category_comparison=SimpleNamespace(items=[_cat("blk", 0, 0, "tie")]),
+            projected_category_comparison=SimpleNamespace(items=[_cat("blk", 19, 23, "opp"), _cat("tov", 30, 35, "you")]),
+        )
+        seen = []
+
+        async def matchup(user_id, team_id, window):
+            seen.append((user_id, team_id, window))
+            return SimpleNamespace(data=md, message="ok")
+        monkeypatch.setattr(MatchupService, "get_matchup_by_team_id", staticmethod(matchup))
+
+        outcome = _agent("get_matchup", {"team_id": 22, "window": "last_14"})
+
+        assert seen == [(42, 22, "last_14")]
+        body = json.loads(outcome.content)
+        assert body["your_roster"][0]["player_id"] == 1631105
+        assert body["opponent_roster"][0] == {**body["opponent_roster"][0], "player_id": None, "injury": "injured"}
+        assert "4396993" not in outcome.content
+        blk, tov = body["categories"]
+        assert (blk["you"], blk["projected_you"], blk["projected_opponent"], blk["projected_leader"]) == (0, 19, 23, "opp")
+        assert (tov["you"], tov["projected_you"], tov["lower_is_better"]) == (None, 30, True)
+
+    def test_free_agents_are_cut_to_the_limit_with_nba_ids(self, owns_22, monkeypatch):
+        from services.streamer_service import StreamerService
+        seen = []
+
+        def fa(espn_id, nba_id):
+            return SimpleNamespace(player_id=espn_id, nba_player_id=nba_id, name=f"P{nba_id}", team="UTA",
+                                   valid_positions=["PF", "C", "F", "UT1", "UT2", "BE", "IR"], avg_points_last_n=2.0, avg_points_season=1.5,
+                                   games_remaining=4, game_days=[1, 2], b2b_game_count=1, streamer_score=9.0,
+                                   injured=False, injury_status=None, acquisition_status=None, waivers_until=None)
+
+        async def find(**kwargs):
+            seen.append(kwargs)
+            return SimpleNamespace(message="ok", data=SimpleNamespace(
+                matchup_number=1, start_date="2026-10-20", end_date="2026-10-26", current_day_index=0,
+                target_day=2, upcoming=True, value_kind="category_value",
+                streamers=[fa(100 + i, 1_600_000 + i) for i in range(5)]))
+        monkeypatch.setattr(StreamerService, "find_streamers", staticmethod(find))
+
+        outcome = _agent("get_free_agents", {"team_id": 22, "mode": "day", "day": 2, "limit": 2})
+
+        body = json.loads(outcome.content)
+        assert [p["player_id"] for p in body["players"]] == [1_600_000, 1_600_001]
+        assert body["pool_size"] == 5 and body["value_kind"] == "category_value"
+        assert body["players"][0]["positions"] == "PF/C/F"
+        assert seen[0]["target_day"] == 2 and seen[0]["mode"].value == "daily" and seen[0]["team_id"] == 22
+        assert "101" not in json.dumps([p["player_id"] for p in body["players"]])
+
+    def test_limits_are_validated(self, owns_22):
+        assert _agent("get_free_agents", {"team_id": 22, "limit": 500}).is_error
+        assert _agent("get_game_log", {"player_id": 1, "games": 50}).is_error

@@ -157,6 +157,30 @@ class Settings(BaseSettings):
     # Wall clock for a whole request, retries included (the SDK retries 429/5xx).
     ai_request_timeout_seconds: float = 90.0
 
+    # The AI agent (docs/AI_AGENT_PLAN.md): the AI desk's conversations. Also off
+    # unless AI_ENABLED, and then only for the users listed here (internal
+    # usr.users ids; env format is JSON: [12]). Opus 5.5 at medium effort is the
+    # user's choice (2026-10-13): its own model and effort, apart from the
+    # router's, because a turn reasons where a routed question only classifies.
+    ai_agent_user_ids: list[int] = []
+    ai_agent_model: str = "claude-opus-5-5"
+    ai_agent_effort: str = "medium"
+    # Every agent turn, priced from its token meters, counts against this in each
+    # calendar month (UTC). Each allowed user may spend the budget divided by the
+    # allowlist's size. The Console workspace spend limit stays the last line.
+    ai_monthly_budget_usd: float = 100.0
+    # One turn's bounds. Past the spend ceiling its next model call is its last,
+    # made without tools; and a turn is refused while less than the ceiling is
+    # left in the month, so no turn can carry spend far past a cap.
+    ai_agent_turn_max_usd: float = 1.0
+    ai_agent_max_model_calls: int = 8
+    ai_agent_max_tool_calls: int = 20
+    ai_agent_turn_timeout_seconds: float = 150.0
+    # A conversation past either limit is closed: start a new one. Every turn
+    # resends the whole history, so a long conversation costs more per turn.
+    ai_agent_max_turns: int = 20
+    ai_agent_max_context_tokens: int = 150_000
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "console"
@@ -244,13 +268,13 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid_levels}")
         return upper_v
 
-    @field_validator("ai_effort")
+    @field_validator("ai_effort", "ai_agent_effort")
     @classmethod
     def validate_ai_effort(cls, v: str) -> str:
         allowed = {"low", "medium", "high", "xhigh", "max"}
         lower_v = v.lower()
         if lower_v not in allowed:
-            raise ValueError(f"ai_effort must be one of {sorted(allowed)}")
+            raise ValueError(f"effort must be one of {sorted(allowed)}")
         return lower_v
 
     @field_validator("log_format")
@@ -346,10 +370,18 @@ class Settings(BaseSettings):
             "ai_max_tool_calls": self.ai_max_tool_calls,
             "ai_user_daily_limit": self.ai_user_daily_limit,
             "ai_global_daily_limit": self.ai_global_daily_limit,
+            "ai_request_timeout_seconds": self.ai_request_timeout_seconds,
+            "ai_monthly_budget_usd": self.ai_monthly_budget_usd,
+            "ai_agent_turn_max_usd": self.ai_agent_turn_max_usd,
+            "ai_agent_max_model_calls": self.ai_agent_max_model_calls,
+            "ai_agent_max_tool_calls": self.ai_agent_max_tool_calls,
+            "ai_agent_turn_timeout_seconds": self.ai_agent_turn_timeout_seconds,
+            "ai_agent_max_turns": self.ai_agent_max_turns,
+            "ai_agent_max_context_tokens": self.ai_agent_max_context_tokens,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
-        if invalid or self.ai_request_timeout_seconds <= 0:
-            raise ValueError(f"AI bounds must be positive: {', '.join(invalid) or 'ai_request_timeout_seconds'}")
+        if invalid:
+            raise ValueError(f"AI bounds must be positive: {', '.join(invalid)}")
         return self
 
     @model_validator(mode="after")
