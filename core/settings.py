@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     db_pool_max_connections: int = 20
     db_max_in_flight: int = 16
     db_queue_timeout_seconds: float = 2.0
+    # Peewee closes a pooled connection this long after it was opened (its age,
+    # not its idle time) and opens new ones one at a time under a process-wide
+    # lock. At 300 s every connection had aged out between two visits, so the
+    # next page open queued its parallel requests behind ~11 serial reconnects
+    # (TCP + TLS + SCRAM, 14-28 ms each in prod): 90-330 ms on every request of
+    # the burst (docs/PERF_AUDIT_2026-10.md, A2).
+    db_pool_stale_timeout_seconds: int = 3600
+    # Peewee's pool does not ping a connection at checkout, so run_db pings one
+    # that has sat idle at least this long before using it, and swaps a dead one
+    # (one whose server restarted) for a live one instead of failing a request
+    # with it. A connection used more recently than this is trusted: one round
+    # trip saved on each query of a burst. 0 pings at every checkout.
+    db_pool_ping_after_idle_seconds: float = 30.0
+    # Connections opened at startup, before the first request, so the first
+    # page open after a deploy does not queue behind those serial connects.
+    # 8 covers most of the Week desk's first wave (9-11 parallel requests);
+    # 0 turns the warm-up off. At most db_max_in_flight are opened.
+    db_pool_warm_connections: int = 8
 
     # CPU-bound request work (category z-scoring, response assembly) runs in its
     # own small pool -- see core/compute.py. GIL-bound, so this is a
@@ -242,6 +260,14 @@ class Settings(BaseSettings):
             raise ValueError(f"concurrency limits must be positive: {', '.join(invalid)}")
         if self.db_max_in_flight >= self.db_pool_max_connections:
             raise ValueError("db_max_in_flight must be smaller than db_pool_max_connections")
+        if self.db_pool_stale_timeout_seconds <= 0:
+            # 0 would mean "never recycle" to Peewee, whose pool does not ping
+            # a connection on checkout; keep a finite lifetime.
+            raise ValueError("db_pool_stale_timeout_seconds must be positive")
+        if self.db_pool_warm_connections < 0:
+            raise ValueError("db_pool_warm_connections must not be negative")
+        if self.db_pool_ping_after_idle_seconds < 0:
+            raise ValueError("db_pool_ping_after_idle_seconds must not be negative")
         timeouts = (
             self.db_queue_timeout_seconds,
             self.provider_queue_timeout_seconds,

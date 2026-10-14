@@ -73,3 +73,12 @@ def test_the_origins_we_serve(client, origin):
 def test_the_origins_we_refuse(client, origin):
     res = _preflight(client, origin)
     assert "access-control-allow-origin" not in res.headers, origin
+
+
+@pytest.mark.api
+def test_a_preflight_is_cached_for_two_hours(client):
+    """Starlette's default is 600 s, so a return visit after 10 minutes paid a
+    round trip per wave of new URLs before any data. 7200 s is Chrome's cap."""
+    res = _preflight(client, "https://www.courtvision.dev")
+    assert res.status_code == 200
+    assert res.headers["access-control-max-age"] == "7200"

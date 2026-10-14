@@ -1,15 +1,18 @@
 """
 Unit tests for Clerk JWT verification.
 
-Covers issuer enforcement and the optional `azp` (authorized party) allowlist.
-Tokens are signed with a throwaway RSA key that is injected in place of the
-JWKS lookup, so no network access is needed.
+Covers issuer enforcement, the optional `azp` (authorized party) allowlist,
+and that verification never calls Clerk's Backend API: the email is the
+token's claim or nothing. Tokens are signed with a throwaway RSA key that is
+injected in place of the JWKS lookup, so no network access is needed.
 """
 
+import json
 import time
 
 import jwt
 import pytest
+import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.security import HTTPAuthorizationCredentials
@@ -132,3 +135,78 @@ def test_malformed_token_is_401_invalid_token():
         _verify("not-a-jwt")
     assert exc.value.status_code == 401
     assert exc.value.error_code == "INVALID_TOKEN"
+
+
+@pytest.fixture
+def no_clerk_api(monkeypatch):
+    """Fail the test if anything reaches Clerk over HTTP."""
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"unexpected Clerk HTTP call: {args[:1]}")
+    monkeypatch.setattr(clerk_auth._clerk_http, "get", refuse)
+    monkeypatch.setattr(clerk_auth, "fetch_clerk_user", refuse)
+
+
+@pytest.mark.unit
+def test_token_without_email_claim_is_verified_without_calling_clerk(rsa_keys, trust_test_key, no_clerk_api):
+    """Verification used to fetch the email from Clerk's Backend API on every
+    request whose token had no claim: about 100 ms alone and 300-480 ms in a
+    desk-open burst. The email is only needed to create or link a user, so it
+    is fetched there (UserSyncService.get_or_create_user)."""
+    private_pem, _ = rsa_keys
+    now = int(time.time())
+    token = jwt.encode(
+        {"sub": "user_abc", "iss": settings.clerk_issuer, "iat": now, "exp": now + 300},
+        private_pem, algorithm="RS256", headers={"kid": "test-kid"},
+    )
+    user = _verify(token)
+    assert user["clerk_user_id"] == "user_abc"
+    assert user["email"] is None
+
+
+@pytest.mark.unit
+def test_empty_email_claim_reads_as_no_email(rsa_keys, trust_test_key, no_clerk_api):
+    """The session-token template renders a user without a primary email as ""."""
+    private_pem, _ = rsa_keys
+    user = _verify(_make_token(private_pem, iss=settings.clerk_issuer, email=""))
+    assert user["email"] is None
+
+
+@pytest.mark.unit
+def test_email_claim_is_passed_through_without_calling_clerk(rsa_keys, trust_test_key, no_clerk_api):
+    private_pem, _ = rsa_keys
+    user = _verify(_make_token(private_pem, iss=settings.clerk_issuer, email="new@example.com"))
+    assert user["email"] == "new@example.com"
+
+
+@pytest.mark.unit
+def test_clerk_calls_share_one_cookieless_session():
+    """One Session keeps the connection to Clerk alive between the calls that
+    remain (the audit saw a new TLS connection to api.clerk.com per request).
+    Its threads share the cookie jar, so the jar accepts nothing."""
+    assert isinstance(clerk_auth._clerk_http, requests.Session)
+    policy = clerk_auth._clerk_http.cookies.get_policy()
+    assert policy.is_not_allowed("api.clerk.com")
+    assert policy.is_not_allowed(".clerk.courtvision.dev")
+
+
+@pytest.mark.unit
+def test_user_fetch_goes_through_the_shared_session(monkeypatch):
+    calls = []
+
+    def get(url, headers=None, timeout=None):
+        calls.append(url)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": "user_abc",
+            "primary_email_address_id": "e2",
+            "email_addresses": [{"id": "e1", "email_address": "old@example.com"},
+                                {"id": "e2", "email_address": "primary@example.com"}],
+        }).encode()
+        return response
+
+    monkeypatch.setattr(clerk_auth._clerk_http, "get", get)
+    monkeypatch.setattr(clerk_auth, "CLERK_SECRET_KEY", "sk_test_fake")
+    user = clerk_auth.fetch_clerk_user("user_abc")
+    assert calls == ["https://api.clerk.com/v1/users/user_abc"]
+    assert user["email"] == "primary@example.com"
