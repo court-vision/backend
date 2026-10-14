@@ -15,7 +15,7 @@ rather than overwriting it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterator
+from typing import Iterator, Optional
 
 from peewee import IntegrityError
 
@@ -34,6 +34,7 @@ from services.draft_sync_service import (
     fold_picks,
 )
 from services.espn_service import EspnService
+from services.espn_team_match import find_espn_team
 from services.providers.http import provider_get
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from services.providers import get_provider_adapter
@@ -90,18 +91,20 @@ def header_from_detail(payload: dict, espn_team_id: int) -> RoomHeader:
     )
 
 
-def my_team_id(payload: dict, team_name: str) -> int:
+def my_team_id(
+    payload: dict, team_name: str, espn_team_id: Optional[int] = None, swid: Optional[str] = None
+) -> int:
     """The caller's ESPN team id, by the rule `get_roster` already uses.
 
     A pick's `memberId` is the SWID of whoever clicked, but ESPN only sets it on
-    picks a human made — two thirds of a real draft are autopicks — so the team
-    name is the identity that is always there.
+    picks a human made — two thirds of a real draft are autopicks — so the
+    stored team (id, name, then the SWID that owns it) is the identity used.
     """
     wanted = (team_name or "").strip()
     teams = payload.get("teams") or []
-    for team in teams:
-        if wanted == (team.get("name") or "").strip():
-            return int(team["id"])
+    found = find_espn_team(teams, team_name=team_name, espn_team_id=espn_team_id, swid=swid)
+    if found is not None:
+        return int(found["id"])
     names = ", ".join(str(team.get("name")) for team in teams)
     raise BadRequestError(
         "TEAM_NAME_NOT_IN_LEAGUE",
@@ -151,7 +154,7 @@ class DraftImportService:
                 data={"in_progress": bool(detail.get("inProgress"))},
             )
 
-        espn_team_id = my_team_id(payload, league_info.team_name)
+        espn_team_id = my_team_id(payload, league_info.team_name, league_info.espn_team_id, league_info.swid)
         header = header_from_detail(payload, espn_team_id)
 
         # Which ESPN draft this room follows, decided before anything takes a

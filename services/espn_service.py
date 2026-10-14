@@ -7,6 +7,7 @@ import pytz
 from core.errors import BadRequestError
 from core.logging import get_logger
 from db.base import run_db
+from services.espn_team_match import find_espn_team
 from services.nba_id_resolver import nba_ids_by_espn_id
 from services.providers.http import provider_get
 from services.player_value_service import PlayerValueService, ValueResult
@@ -175,21 +176,40 @@ class EspnService:
         # Rejected cookies (403 PROVIDER_AUTH_EXPIRED), an unknown league (400 LEAGUE_NOT_FOUND) and an
         # ESPN outage (502/504) raise from provider_get; only "this team isn't in the league" is valid=False.
         data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
-        teams = [team['name'] for team in data['teams']]
-        if league_info.team_name in teams:
+        if EspnService.resolve_team(league_info, data['teams']) is not None:
             # league_payload is excluded from serialization; LeagueService reuses it for settings sync
             return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found", league_payload=data)
+        teams = [team['name'] for team in data['teams']]
         return ValidateLeagueResp(
             status=ApiStatus.SUCCESS, valid=False, error_code="TEAM_NAME_NOT_IN_LEAGUE",
             message=f"Team '{league_info.team_name}' not found in league {league_info.league_id}; teams: {', '.join(teams)}",
         )
 
     @staticmethod
-    def get_roster(team_name, teams):
-        for team in teams:
-            if team_name.strip() == team['name']:
-                return team['roster']['entries']
-        return None
+    def resolve_team(league_info: LeagueInfo, teams: list[dict]) -> Optional[dict]:
+        """The user's team in `teams` (see find_espn_team), or None.
+
+        Brings `league_info` up to date with what ESPN calls the team now, so a
+        caller that persists it (add, update, the adapter's heal) stores the
+        id and the current name instead of a name the user has since changed.
+        """
+        team = find_espn_team(
+            teams,
+            team_name=league_info.team_name,
+            espn_team_id=league_info.espn_team_id,
+            swid=league_info.swid,
+        )
+        if team is not None:
+            if team.get('id') is not None:
+                league_info.espn_team_id = int(team['id'])
+            if (team.get('name') or '').strip():
+                league_info.team_name = team['name'].strip()
+        return team
+
+    @staticmethod
+    def get_roster(league_info: LeagueInfo, teams: list[dict]):
+        team = EspnService.resolve_team(league_info, teams)
+        return team['roster']['entries'] if team is not None else None
 
     @staticmethod
     def _cookies(league_info: LeagueInfo) -> dict:
@@ -320,7 +340,7 @@ class EspnService:
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
         data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
 
-        roster = EspnService.get_roster(league_info.team_name, data['teams'])
+        roster = EspnService.get_roster(league_info, data['teams'])
         if roster is None:
             raise BadRequestError(
                 "TEAM_NAME_NOT_IN_LEAGUE",
@@ -493,13 +513,8 @@ class EspnService:
 
         # Find our team
         teams = data.get('teams', [])
-        our_team = None
-        our_team_id = None
-        for team in teams:
-            if team.get('name', '').strip() == league_info.team_name.strip():
-                our_team = team
-                our_team_id = team.get('id')
-                break
+        our_team = EspnService.resolve_team(league_info, teams)
+        our_team_id = our_team.get('id') if our_team else None
 
         if not our_team:
             raise BadRequestError(

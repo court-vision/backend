@@ -21,7 +21,6 @@ the next day that has its own edit.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any, Literal, Mapping, Optional
@@ -37,6 +36,7 @@ from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupSlotDef, LineupState, WriteBlockedReason
 from services.acquisitions import parse_acquisitions
 from services.credential_service import normalize_swid
+from services.espn_team_match import find_espn_team, persist_espn_identity
 from services.espn_service import EspnService
 from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, OUT_STATUSES
 from services.matchup_days import index_games
@@ -115,15 +115,10 @@ def parse_espn_lineup(
     fallback_slot_counts: Optional[Mapping[str, int]] = None,
 ) -> ParsedLineup:
     teams = payload.get("teams") or []
-    target = None
-    resolved_by: Literal["id", "name"] = "name"
-    if espn_team_id is not None:
-        target = next((t for t in teams if t.get("id") == espn_team_id), None)
-        if target is not None:
-            resolved_by = "id"
-    if target is None:
-        wanted = (team_name or "").strip()
-        target = next((t for t in teams if (t.get("name") or "").strip() == wanted), None)
+    target = find_espn_team(teams, team_name=team_name, espn_team_id=espn_team_id, swid=swid)
+    resolved_by: Literal["id", "name"] = (
+        "id" if target is not None and espn_team_id is not None and target.get("id") == espn_team_id else "name"
+    )
     if target is None:
         raise BadRequestError("TEAM_NAME_NOT_IN_LEAGUE", f"Team '{team_name}' not found in league")
 
@@ -221,19 +216,9 @@ def _values_for(league_info: LeagueInfo, espn_ids: list[int]) -> tuple[str, dict
     return value_kind, values, nba_ids_by_espn_id(espn_ids)
 
 
-def _persist_espn_team_id(team_id: int, espn_team_id: int) -> bool:
-    """Record the provider's team id on the STORED json (never the hydrated copy)."""
-    from db.models.teams import Team
-    team = Team.get_or_none(Team.team_id == team_id)
-    if team is None:
-        return False
-    stored = json.loads(team.league_info)
-    if stored.get("espn_team_id") == espn_team_id:
-        return False
-    stored["espn_team_id"] = espn_team_id
-    team.league_info = json.dumps(stored)
-    team.save(only=[Team.league_info])
-    return True
+def _persist_espn_team_id(team_id: int, espn_team_id: int, team_name: Optional[str] = None) -> bool:
+    """Record the provider's team id (and current name) on the STORED json."""
+    return persist_espn_identity(team_id, espn_team_id, team_name)
 
 
 # ------------------------------- the read ------------------------------- #
@@ -353,9 +338,11 @@ class LineupReadService:
             acquisitions=_with_matchup_dates(parsed.acquisitions, payload),
         )
 
-        if league_info.espn_team_id != parsed.espn_team_id:
+        renamed = (league_info.team_name or "").strip() != (parsed.team_name or "").strip()
+        if league_info.espn_team_id != parsed.espn_team_id or renamed:
             try:
-                if await run_db("teams.persist_espn_team_id", _persist_espn_team_id, team_id, parsed.espn_team_id):
+                if await run_db("teams.persist_espn_team_id", _persist_espn_team_id, team_id, parsed.espn_team_id,
+                                parsed.team_name):
                     log.info("lineup_espn_team_id_learned", team_id=team_id, espn_team_id=parsed.espn_team_id)
             except Exception as exc:
                 log.warning("lineup_espn_team_id_persist_failed", team_id=team_id, error=str(exc))

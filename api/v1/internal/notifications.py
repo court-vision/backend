@@ -39,6 +39,7 @@ from schemas.notifications import (
     LineupCheckResp,
     LineupCheckResponse,
 )
+from services.espn_team_match import find_espn_team
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
@@ -48,12 +49,11 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 lineup_checker = LineupCheckService()
 
 
-def _parse_espn_roster_with_slots(data: dict, team_name: str) -> list[dict] | None:
+def _parse_espn_roster_with_slots(
+    data: dict, team_name: str, espn_team_id: int | None = None, swid: str | None = None
+) -> list[dict] | None:
     """Pure parser for the notification-specific roster representation."""
-    target = next(
-        (team for team in data.get("teams", []) if team.get("name", "").strip() == team_name.strip()),
-        None,
-    )
+    target = find_espn_team(data.get("teams", []), team_name=team_name, espn_team_id=espn_team_id, swid=swid)
     if target is None:
         return None
     roster = []
@@ -84,7 +84,9 @@ async def _fetch_espn_roster_with_slots(league_info: dict) -> list[dict] | None:
         cookies={"espn_s2": league_info.get("espn_s2", ""), "SWID": league_info.get("swid", "")},
         expect_key="teams",
     )
-    return _parse_espn_roster_with_slots(data, league_info.get("team_name", ""))
+    return _parse_espn_roster_with_slots(
+        data, league_info.get("team_name", ""), league_info.get("espn_team_id"), league_info.get("swid")
+    )
 
 
 def _lineup_check_context(user_id: int, team_id: int) -> dict | None:

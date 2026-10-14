@@ -30,6 +30,28 @@ from services.scoring.models import LeagueSettings
 from services.scoring.resolver import ResolvedScoring
 
 
+async def _remember_espn_identity(team_id: int | None, before: tuple, league_info: LeagueInfo) -> None:
+    """Store the ESPN team id and current name a read just resolved, when they moved.
+
+    A team renamed on ESPN is still found (by id, or by the SWID that owns it);
+    this makes the rename stick so the Account desk shows the new name and the
+    pipelines that look the team up by name find it too. Never fails the read.
+    """
+    if team_id is None or before == (league_info.espn_team_id, league_info.team_name):
+        return
+    from core.logging import get_logger
+    from db.base import run_db
+    from services.espn_team_match import persist_espn_identity
+
+    try:
+        if await run_db("teams.persist_espn_identity", persist_espn_identity,
+                        team_id, league_info.espn_team_id, league_info.team_name):
+            get_logger(__name__).info("espn_team_identity_learned", team_id=team_id,
+                                      espn_team_id=league_info.espn_team_id)
+    except Exception as exc:
+        get_logger(__name__).warning("espn_team_identity_persist_failed", team_id=team_id, error=str(exc))
+
+
 @runtime_checkable
 class FantasyProviderAdapter(Protocol):
     """Operations shared by every supported fantasy provider."""
@@ -105,7 +127,10 @@ class EspnAdapter:
     async def get_team(self, league_info: LeagueInfo, *, team_id: int | None = None):
         from services.espn_service import EspnService
 
-        return await EspnService.get_team_data(league_info, 0)
+        before = (league_info.espn_team_id, league_info.team_name)
+        resp = await EspnService.get_team_data(league_info, 0)
+        await _remember_espn_identity(team_id, before, league_info)
+        return resp
 
     async def get_free_agents(
         self, league_info: LeagueInfo, count: int, *, team_id: int | None = None
@@ -124,7 +149,10 @@ class EspnAdapter:
     ):
         from services.espn_service import EspnService
 
-        return await EspnService.get_matchup_data(league_info, avg_window, scoring=scoring)
+        before = (league_info.espn_team_id, league_info.team_name)
+        resp = await EspnService.get_matchup_data(league_info, avg_window, scoring=scoring)
+        await _remember_espn_identity(team_id, before, league_info)
+        return resp
 
     async def fetch_league_settings(self, league_info, *, team_id=None, payload=None):
         from services.providers.http import provider_get
