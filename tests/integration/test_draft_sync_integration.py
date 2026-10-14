@@ -185,6 +185,20 @@ async def test_adoption_attaches_a_team_already_on_the_account(user, espn_league
     assert Team.get_by_id(mine.team_id).league_id == data.league_adopted.league_id
 
 
+async def test_a_concurrent_adoption_keeps_the_first_team_and_drops_the_duplicate(user, espn_league):
+    # Two INITs (two tabs) both created the team before either attached it: the
+    # first attach wins, the loser reports the winner's team and removes its own.
+    room = await _pending_room(user)
+    first = (await _init(room.id, user.user_id)).data.league_adopted
+    duplicate = Team.create(user_id=user.user_id, team_identifier="35392660Room Team 5", league_info="{}")
+
+    team_id, league_id = DraftAdoptionService._attach(room.id, duplicate.team_id, True)
+
+    assert (team_id, league_id) == (first.team_id, first.league_id)
+    assert Team.get_or_none(Team.team_id == duplicate.team_id) is None
+    assert Team.select().where(Team.team_identifier == "35392660Room Team 5").count() == 1
+
+
 async def test_adoption_failing_keeps_the_room_pending_and_the_picks_synced(user, espn_league):
     espn_league["error"] = RuntimeError("ESPN is down")
     room = await _pending_room(user)

@@ -113,28 +113,38 @@ class DraftAdoptionService:
         if not has_league:
             await LeagueService.sync_for_team(team_id, league_info, espn_payload=data)
 
-        league_id = await run_db("drafts.adopt_attach", DraftAdoptionService._attach, session_id, team_id)
+        attached_id, league_id = await run_db(
+            "drafts.adopt_attach", DraftAdoptionService._attach, session_id, team_id, not already_exists
+        )
+        # A concurrent INIT may have attached its own team first; report the one the room has.
+        created = not already_exists and attached_id == team_id
         log.info(
-            "draft_league_adopted", session_id=session_id, team_id=team_id, league_id=league_id,
-            espn_league_id=espn_league_id, espn_team_id=espn_team_id, team_created=not already_exists,
+            "draft_league_adopted", session_id=session_id, team_id=attached_id, league_id=league_id,
+            espn_league_id=espn_league_id, espn_team_id=espn_team_id, team_created=created,
         )
         return DraftLeagueAdoption(
-            team_id=team_id, league_id=league_id,
+            team_id=attached_id, league_id=league_id,
             espn_league_id=int(espn_league_id), espn_team_id=int(espn_team_id),
             team_name=name, league_name=league_info.league_name if league_name else None,
-            team_created=not already_exists,
+            team_created=created,
         )
 
     @staticmethod
-    def _attach(session_id: int, team_id: int) -> Optional[int]:
-        """Give the room its team and league; the league answers for scoring from here on."""
+    def _attach(session_id: int, team_id: int, created: bool) -> tuple[Optional[int], Optional[int]]:
+        """Give the room its team and league; the league answers for scoring from here on.
+
+        Returns the (team, league) the room ends up on.
+        """
         with db.atomic():
             lock_room(session_id)
             session = DraftService._session_or_404(session_id)
             team = Team.get_by_id(team_id)
             if not league_pending(session):
-                # A concurrent INIT adopted first; its answer stands.
-                return session.league_id
+                # A concurrent INIT adopted first; its answer stands. A team this
+                # call created alongside it is a duplicate nothing points at.
+                if created and session.team_id != team_id:
+                    team.delete_instance()
+                return session.team_id, session.league_id
             session.team = team.team_id
             session.league = team.league_id
             session.scoring_format = None     # exclusive with a team (migration 0021's CHECK)
@@ -142,7 +152,7 @@ class DraftAdoptionService:
             session.save(only=[
                 DraftSession.team, DraftSession.league, DraftSession.scoring_format, DraftSession.updated_at,
             ])
-            return team.league_id
+            return team.team_id, team.league_id
 
 
 def _int(value) -> Optional[int]:

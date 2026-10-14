@@ -13,3 +13,5 @@ secrets.env
 .claude/hillclimb/**/*.py
 .claude/hillclimb/**/errors.jsonl
 .claude/hillclimb/**/harness.lock
+
+.DS_Store
