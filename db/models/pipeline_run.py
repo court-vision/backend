@@ -44,6 +44,10 @@ class PipelineRun(BaseModel):
     class Meta:
         table_name = "pipeline_runs"
         schema = "nba"
+        # Migration 0033 adds (pipeline_name, started_at DESC) and, over the
+        # success rows only, (pipeline_name, completed_at DESC): the "newest
+        # run" reads of data-platform's dashboard and gates. Meta.indexes'
+        # tuple form has no DESC or WHERE, so they are not listed here.
 
     def __repr__(self) -> str:
         return (
