@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     db_pool_max_connections: int = 20
     db_max_in_flight: int = 16
     db_queue_timeout_seconds: float = 2.0
+    # Peewee closes a pooled connection this long after it was opened (its age,
+    # not its idle time) and opens new ones one at a time under a process-wide
+    # lock. At 300 s every connection had aged out between two visits, so the
+    # next page open queued its parallel requests behind ~11 serial reconnects
+    # (TCP + TLS + SCRAM, 14-28 ms each in prod): 90-330 ms on every request of
+    # the burst (docs/PERF_AUDIT_2026-10.md, A2).
+    db_pool_stale_timeout_seconds: int = 3600
+    # Peewee's pool does not ping a connection at checkout, so run_db pings one
+    # that has sat idle at least this long before using it, and swaps a dead one
+    # (one whose server restarted) for a live one instead of failing a request
+    # with it. A connection used more recently than this is trusted: one round
+    # trip saved on each query of a burst. 0 pings at every checkout.
+    db_pool_ping_after_idle_seconds: float = 30.0
+    # Connections opened at startup, before the first request, so the first
+    # page open after a deploy does not queue behind those serial connects.
+    # 8 covers most of the Week desk's first wave (9-11 parallel requests);
+    # 0 turns the warm-up off. At most db_max_in_flight are opened.
+    db_pool_warm_connections: int = 8
 
     # CPU-bound request work (category z-scoring, response assembly) runs in its
     # own small pool -- see core/compute.py. GIL-bound, so this is a
@@ -44,6 +62,15 @@ class Settings(BaseSettings):
     # switch: every route answers exactly as it did before it was cached,
     # percentiles included (their league pool is aggregated per call again).
     public_read_cache_enabled: bool = True
+    # Category leagues value players against a z-scored pool of every player
+    # (services.player_value_service). The pool comes from the once-a-day
+    # rolling snapshot, so each process keeps it for this long instead of
+    # rebuilding it 10-13 times per Week open. 0 disables the cache (kill switch).
+    category_value_cache_ttl_seconds: float = 300.0
+    # Per cache: the loaded pools (~0.55 MB each, one per window) and the scored
+    # pools (~0.1 MB each, one per window per league category set), so the bound
+    # is on distinct league setups.
+    category_value_cache_max_entries: int = 64
 
     # Shared fixed-window counters for SlowAPI. Railway injects REDIS_URL when
     # a Redis service is linked; RATE_LIMIT_STORAGE_URI is the explicit alias.
@@ -76,6 +103,12 @@ class Settings(BaseSettings):
     espn_max_in_flight: int = 8
     yahoo_max_in_flight: int = 8
     nba_max_in_flight: int = 4
+    # Concurrent identical provider GETs share one upstream request (core/inflight.py):
+    # a Week open fired 11 ESPN reads at once, and 3 of them repeated one in flight.
+    # In flight only (nothing is cached), never across credentials, and never across
+    # a roster write. False sends every read on its own again (kill switch). The
+    # write fence is per process: read core/inflight.py before adding a replica.
+    provider_read_coalescing: bool = True
     features_max_in_flight: int = 4
     # SQLMate is reached only over Railway private networking in deployed
     # environments. The browser talks to the public/internal proxy routes on
@@ -248,6 +281,14 @@ class Settings(BaseSettings):
             raise ValueError(f"concurrency limits must be positive: {', '.join(invalid)}")
         if self.db_max_in_flight >= self.db_pool_max_connections:
             raise ValueError("db_max_in_flight must be smaller than db_pool_max_connections")
+        if self.db_pool_stale_timeout_seconds <= 0:
+            # 0 would mean "never recycle" to Peewee, whose pool does not ping
+            # a connection on checkout; keep a finite lifetime.
+            raise ValueError("db_pool_stale_timeout_seconds must be positive")
+        if self.db_pool_warm_connections < 0:
+            raise ValueError("db_pool_warm_connections must not be negative")
+        if self.db_pool_ping_after_idle_seconds < 0:
+            raise ValueError("db_pool_ping_after_idle_seconds must not be negative")
         timeouts = (
             self.db_queue_timeout_seconds,
             self.provider_queue_timeout_seconds,
@@ -259,6 +300,8 @@ class Settings(BaseSettings):
             raise ValueError("concurrency queue timeouts must be positive")
         if self.rankings_cache_ttl_seconds < 0 or self.rankings_cache_max_entries < 0:
             raise ValueError("rankings cache settings must not be negative")
+        if self.category_value_cache_ttl_seconds < 0 or self.category_value_cache_max_entries < 0:
+            raise ValueError("category value cache settings must not be negative")
         return self
 
     @model_validator(mode="after")

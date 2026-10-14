@@ -7,11 +7,22 @@ It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
 Failures raise `core.errors` exceptions, rendered as the standard envelope:
 missing/invalid/expired tokens are 401 (`AUTH_REQUIRED`, `INVALID_TOKEN`,
 `TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`.
+
+Verifying a token makes no network call once the JWKS is cached. The user's
+email comes from the session token's `email` claim (Clerk dashboard → Sessions
+→ Customize session token, live since 2026-10-13). Without the claim the email
+is None: it is fetched from Clerk's Backend API only where it is needed, when
+`UserSyncService.get_or_create_user` has to create or link a user. Fetching it
+here on every request cost about 100 ms alone and 300-480 ms in a desk-open
+burst (docs/PERF_AUDIT_2026-10.md, A1).
 """
+
+import threading
+from http.cookiejar import DefaultCookiePolicy
 
 import jwt
 import requests
-from functools import lru_cache
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -31,24 +42,138 @@ CLERK_SECRET_KEY = settings.clerk_secret_key.get_secret_value()
 # auto_error=False: a missing header is our 401 AUTH_REQUIRED, not FastAPI's 403
 security = HTTPBearer(auto_error=False)
 
+# One HTTP session for Clerk, so the rare calls that remain reuse a kept-alive
+# connection instead of paying DNS + TCP + TLS each time (the audit measured a
+# new connection to api.clerk.com per request). Callers are threadpool threads:
+# urllib3's pool is thread-safe, and the cookie policy keeps the shared jar
+# empty, since nothing here needs cookies (Cloudflare in front of Clerk sets them).
+_clerk_http = requests.Session()
+_clerk_http.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 
-@lru_cache(maxsize=1)
-def get_clerk_jwks() -> dict:
+# Clerk's signing keys by kid, built from the JWKS once and shared by every
+# thread. A plain lru_cache let each of the 9 parallel requests in the first
+# Week open after a deploy make its own fetch (about 330 ms each in prod); the
+# lock makes them wait for one.
+_jwks: Optional[dict[str, rsa.RSAPublicKey]] = None
+_jwks_lock = threading.Lock()
+# Fetches finished so far, and whether the last one failed. Callers that queued
+# on the lock behind a fetch share its failure too. Otherwise, with the cache
+# cold and Clerk down, they fetched one after another: the k-th caller waited k
+# fetch timeouts (up to 20 s each) for its 503 while holding a threadpool thread
+# that pipeline auth also needs, where each used to wait for one.
+_jwks_fetches = 0
+_jwks_last_fetch_failed = False
+
+
+def _usable_keys(entries: list[dict]) -> dict[str, rsa.RSAPublicKey]:
+    """The entries that build into an RSA public key, by kid; the rest are dropped.
+
+    Each key is built here, once per fetch, not on every request. An entry that
+    could not be built (a partial `{"kid": ...}` with no `n`/`e`, say) used to
+    be cached as it came, and every token naming its kid then failed to build
+    it: 401 INVALID_TOKEN on every request until a restart, even after Clerk
+    recovered, because only an unknown kid refetches. Dropped, its kid is
+    unknown, so a token naming it refetches the keys like after a rotation.
     """
-    Fetch and cache Clerk's JWKS public keys.
-    Uses lru_cache to avoid repeated network calls.
-    """
+    keys: dict[str, rsa.RSAPublicKey] = {}
+    for entry in entries:
+        kid = entry.get("kid")
+        if not isinstance(kid, str) or not kid:
+            # No token can name it: a token without a kid is refused before the lookup
+            log.warning("clerk_jwks_key_unusable", kid=None, reason="no kid")
+            continue
+        try:
+            key = jwt.algorithms.RSAAlgorithm.from_jwk(entry)
+        except Exception as e:
+            # PyJWT and cryptography raise InvalidKeyError, ValueError or TypeError
+            # depending on what is missing or wrong; any of them means unusable.
+            log.warning("clerk_jwks_key_unusable", kid=kid, reason=type(e).__name__)
+            continue
+        if not isinstance(key, rsa.RSAPublicKey):
+            # A private key (an entry with `d`) builds, but cannot verify a signature
+            log.warning("clerk_jwks_key_unusable", kid=kid, reason=type(key).__name__)
+            continue
+        keys.setdefault(kid, key)   # the first entry for a kid wins, as the lookup always did
+    return keys
+
+
+def _fetch_jwks() -> dict[str, rsa.RSAPublicKey]:
     if not CLERK_JWKS_URL:
         log.error("clerk_jwks_url_missing")
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
-        response = requests.get(CLERK_JWKS_URL, timeout=10)
+        response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
+        jwks = response.json()
+    except requests.RequestException as e:  # includes a body that is not JSON
         log.error("clerk_jwks_fetch_failed", error=type(e).__name__, detail=str(e))
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+
+    # A 200 whose JSON is not a key set (null, a list, an error object), or whose
+    # keys cannot verify anything, must not be cached as one: every token would
+    # then fail on it until the next deploy. Refused, it is a failed fetch: the
+    # keys already cached stay, and the next caller fetches again.
+    entries = jwks.get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        log.error("clerk_jwks_malformed", body_type=type(jwks).__name__)
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+    keys = _usable_keys(entries)
+    if not keys:
+        log.error("clerk_jwks_malformed", body_type=type(jwks).__name__, entries=len(entries), usable=0)
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+    return keys
+
+
+def get_clerk_jwks(replacing: Optional[dict] = None) -> dict[str, rsa.RSAPublicKey]:
+    """
+    Clerk's JWKS public keys by kid, fetched once and cached for the process.
+    Only keys that built are cached (see `_usable_keys`).
+
+    `replacing` is a key set the caller found no key in for its token (Clerk
+    rotated its keys). The keys are fetched again only while the cache still
+    holds that set: a caller that finds another thread has already replaced
+    it uses the new set.
+
+    Concurrent callers make one fetch between them and share its outcome: the
+    keys, or a 503 when it fails. A caller that arrives after a failed fetch
+    tries again, so the keys are still fetched lazily once Clerk answers. A
+    failed fetch keeps the keys already cached.
+    """
+    global _jwks, _jwks_fetches, _jwks_last_fetch_failed
+    jwks = _jwks
+    if jwks is not None and jwks is not replacing:
+        return jwks
+    fetches_seen = _jwks_fetches
+    with _jwks_lock:
+        jwks = _jwks
+        if jwks is not None and jwks is not replacing:
+            return jwks
+        if _jwks_fetches != fetches_seen and _jwks_last_fetch_failed:
+            # A fetch failed while this caller waited for the lock; that was its fetch too.
+            raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication keys could not be fetched")
+        failed = True
+        try:
+            _jwks = _fetch_jwks()
+            failed = False
+        finally:
+            _jwks_fetches += 1
+            _jwks_last_fetch_failed = failed
+        return _jwks
+
+
+def warm_clerk_jwks() -> None:
+    """Fetch the JWKS before the first request (application startup).
+
+    Best effort: a failure is logged and the first request fetches the keys
+    itself, as it always has.
+    """
+    try:
+        keys = len(get_clerk_jwks())
+    except Exception as e:
+        log.warning("clerk_jwks_warm_failed", error=type(e).__name__)
+        return
+    log.info("clerk_jwks_warmed", keys=keys)
 
 
 def get_public_key_for_token(token: str):
@@ -67,18 +192,15 @@ def get_public_key_for_token(token: str):
 
     # Only well-formed tokens get as far as the (cached) JWKS fetch
     jwks = get_clerk_jwks()
+    key = jwks.get(kid)
+    if key is not None:
+        return key
 
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
-
-    # If key not found, clear cache and retry once (key rotation)
-    get_clerk_jwks.cache_clear()
-    jwks = get_clerk_jwks()
-
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key)
+    # If key not found, refresh the keys and retry once (key rotation). A key
+    # that was dropped because it could not be built lands here too.
+    key = get_clerk_jwks(replacing=jwks).get(kid)
+    if key is not None:
+        return key
 
     raise AuthenticationError("INVALID_TOKEN", "Unable to find appropriate signing key")
 
@@ -87,8 +209,10 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
     """
     Fetch user details from Clerk's Backend API.
 
-    This is used to get user information (like email) that isn't included
-    in the JWT by default.
+    This is used to get user information (like email) that the session token
+    does not carry. Request verification never calls it: only
+    `UserSyncService.get_or_create_user` does, when it has to create or link
+    a user and the token had no email.
 
     Args:
         clerk_user_id: The Clerk user ID (e.g., 'user_xxx')
@@ -101,7 +225,7 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         return None
 
     try:
-        response = requests.get(
+        response = _clerk_http.get(
             f"https://api.clerk.com/v1/users/{clerk_user_id}",
             headers={
                 "Authorization": f"Bearer {CLERK_SECRET_KEY}",
@@ -157,7 +281,8 @@ def verify_clerk_token(
             ...
 
     Returns:
-        dict with 'clerk_user_id' (sub claim), 'email', and other token claims
+        dict with 'clerk_user_id' (sub claim), 'email' (the token's claim, or
+        None), and other token claims
     """
     token = _require_token(credentials)
 
@@ -180,18 +305,11 @@ def verify_clerk_token(
         if settings.clerk_authorized_parties and azp and azp not in settings.clerk_authorized_parties:
             raise AuthenticationError("INVALID_TOKEN", "Invalid authorized party")
 
-        clerk_user_id = payload.get("sub")
-        email = payload.get("email")  # May be None if not in JWT claims
-
-        # If email not in JWT, fetch from Clerk's API
-        if not email and clerk_user_id:
-            clerk_user = fetch_clerk_user(clerk_user_id)
-            if clerk_user:
-                email = clerk_user.get("email")
-
         return {
-            "clerk_user_id": clerk_user_id,
-            "email": email,
+            "clerk_user_id": payload.get("sub"),
+            # None when the session token has no email claim. Nothing is fetched
+            # here: get_or_create_user fetches it when it creates or links a user.
+            "email": payload.get("email") or None,
             "exp": payload.get("exp"),
             "iat": payload.get("iat"),
         }
@@ -228,4 +346,6 @@ def clear_jwks_cache():
     Clear the JWKS cache. Call this if you need to force a refresh
     of Clerk's public keys (e.g., after key rotation).
     """
-    get_clerk_jwks.cache_clear()
+    global _jwks
+    with _jwks_lock:
+        _jwks = None
