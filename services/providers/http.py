@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 import httpx
 import sentry_sdk
 
 from core.errors import AppError, BadRequestError, ProviderAuthError, ProviderError, ProviderTimeout
+from core.inflight import InFlight, provider_write, write_epoch
 from core.logging import get_logger
 from core.resilience import ClientError, NetworkError, RateLimitError, ServerError
 from core.settings import settings
@@ -46,6 +48,8 @@ class _NoCookiePersistenceTransport(httpx.AsyncBaseTransport):
 
 _clients: dict[str, httpx.AsyncClient] = {}
 _capacity: dict[str, asyncio.Semaphore] = {}
+# Identical GETs in flight at the same time share one request (core/inflight.py).
+_reads = InFlight("provider_get")
 
 
 def _limit_for(provider: str) -> int:
@@ -196,6 +200,7 @@ async def _send(
     url: str,
     *,
     timeout: Optional[float],
+    before_retry: Optional[Callable[[], None]] = None,
     **kwargs: Any,
 ) -> httpx.Response:
     client, capacity = _ensure_provider_runtime(provider)
@@ -229,6 +234,8 @@ async def _send(
                     get_logger("retry").warning(
                         "retry_attempt", function="provider_get", provider=provider, attempt=attempt
                     )
+                    if before_retry is not None:
+                        before_retry()
                     await asyncio.sleep(RETRY_BASE_DELAY)
             raise AssertionError("unreachable")
         finally:
@@ -239,6 +246,66 @@ async def _send(
                 get_logger("provider").warning(
                     "provider_queue_slow", provider=provider, queue_ms=queue_ms
                 )
+
+
+def _read_key(provider: str, url: str, *, params: Optional[dict], headers: dict,
+              timeout: Optional[float]) -> tuple:
+    """What makes two GETs the same read.
+
+    The query is keyed as httpx will send it, in key order: a dict's insertion
+    order changes nothing upstream, but the order of a repeated key's values
+    (ESPN's `view`) is kept. Every header is in the key, and with them the
+    caller's identity -- ESPN's cookies, Yahoo's bearer token -- so two users,
+    or one league read with two sets of cookies, never share a response. The
+    headers are hashed so the in-flight map never holds a credential. The write
+    epoch fences reads across a roster write (core/inflight.py).
+    """
+    query = tuple(sorted(httpx.QueryParams(params or {}).multi_items(), key=lambda item: item[0]))
+    header_items = sorted((name.lower(), str(value)) for name, value in headers.items())
+    identity = hashlib.sha256(repr(header_items).encode()).hexdigest()
+    return (write_epoch(), provider, url, query, identity, timeout)
+
+
+async def _dispatch(
+    method: str,
+    provider: str,
+    url: str,
+    *,
+    timeout: Optional[float],
+    **kwargs: Any,
+) -> httpx.Response:
+    """`_send`, except that a GET joins an identical GET already in flight.
+
+    What is shared is the httpx.Response, never a parsed body: each caller runs
+    its own `response.json()` in `_call`, so callers that build objects from the
+    payload or keep it (the league sync reuses the validation payload) never
+    hold the same dict. A failure reaches every waiter as the same exception,
+    and each maps it to its own error (`not_found`, `expect_key`).
+
+    A joiner shares the request's budgets, not just its answer:
+
+    - Retries: the read is sealed before its retry backoff, so only the callers
+      that joined before the first attempt failed share the second; one that
+      arrives after the failure sends its own request with its own two attempts,
+      exactly as it did before coalescing.
+    - Queue: a joiner gives up with the request when the request's own wait for
+      a provider slot runs out (PROVIDER_QUEUE_TIMEOUT_SECONDS, 5 s), so one
+      that joined t seconds into that wait gets `provider_capacity_timeout` t
+      seconds sooner than its own wait would have. Accepted: in the bursts this
+      exists for (one page load's routes fired together) joins come within
+      milliseconds of the start, and a read that has waited seconds for a slot
+      means the cap has been full all that time -- a request of its own would
+      have queued behind it, in the backlog that coalescing drains.
+    """
+    if method != "GET" or not settings.provider_read_coalescing:
+        return await _send(method, provider, url, timeout=timeout, **kwargs)
+    key = _read_key(provider, url, params=kwargs.get("params"), headers=kwargs.get("headers") or {},
+                    timeout=timeout)
+    return await _reads.run(
+        key,
+        lambda seal: _send(method, provider, url, timeout=timeout, before_retry=seal, **kwargs),
+        log_fields={"provider": provider, "url": _redacted_url(url)},
+    )
 
 
 async def _call(
@@ -262,7 +329,7 @@ async def _call(
     preview: Optional[str] = None
 
     try:
-        response = await _send(method, provider, url, timeout=timeout, **request_kwargs)
+        response = await _dispatch(method, provider, url, timeout=timeout, **request_kwargs)
     except ProviderError as exc:
         status, error = 429, exc
     except ClientError as exc:
@@ -377,9 +444,14 @@ async def provider_post(
     timeout: Optional[float] = None,
     auth_statuses: tuple[int, ...] = DEFAULT_AUTH_STATUSES,
 ) -> dict:
-    return await _call(
-        "POST", provider, url,
-        expect_key=expect_key, timeout=timeout,
-        auth_statuses=auth_statuses, league_404=False,
-        data=data, headers=dict(headers or {}),
-    )
+    # Today's only POST is Yahoo's token exchange, which changes no league data;
+    # it is fenced like a roster write anyway, because a POST is the shape the
+    # next provider write would take and the fence costs nothing but one missed
+    # coalesce.
+    with provider_write():
+        return await _call(
+            "POST", provider, url,
+            expect_key=expect_key, timeout=timeout,
+            auth_statuses=auth_statuses, league_404=False,
+            data=data, headers=dict(headers or {}),
+        )
