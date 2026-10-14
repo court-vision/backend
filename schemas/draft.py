@@ -54,9 +54,11 @@ class DraftSessionCreate(BaseRequest):
     kind: DraftKind = Field(
         default="manual",
         description=(
-            "Where the picks come from. `live`: this team's own ESPN draft (needs a team in a synced "
-            "ESPN league; the room is linked to it at once). `mock`: an ESPN mock lobby, linked on "
-            "the first INIT it reconciles with. `manual`: the caller enters every pick."
+            "Where the picks come from. `live`: an ESPN draft. With a `team_id` it is that team's own "
+            "draft (the team needs a synced ESPN league) and the room is linked to it at once; without "
+            "one the room is `league_pending`: it links to the ESPN draft the Draft Tap connects to, "
+            "reads that league's settings and adds your team there on the first INIT. `mock`: an ESPN "
+            "mock lobby, linked on the first INIT it reconciles with. `manual`: the caller enters every pick."
         ),
     )
     name: Optional[str] = Field(default=None, max_length=80, description="A label of the caller's choosing")
@@ -76,12 +78,6 @@ class DraftSessionCreate(BaseRequest):
             "league's format, and the team's `scoring_preview` is how that one is overridden."
         ),
     )
-
-    @model_validator(mode="after")
-    def _live_follows_a_team(self) -> "DraftSessionCreate":
-        if self.kind == "live" and self.team_id is None:
-            raise ValueError("a live room needs a team_id: it follows that team's own ESPN draft")
-        return self
 
     @model_validator(mode="after")
     def _format_only_without_a_team(self) -> "DraftSessionCreate":
@@ -197,7 +193,15 @@ class DraftSessionResp(ApiModel):
     name: Optional[str] = None
     espn_league_id: Optional[int] = Field(
         default=None,
-        description="The ESPN draft this room follows; null until a mock room links to one",
+        description="The ESPN draft this room follows; null until a mock or league-pending room links to one",
+    )
+    league_pending: bool = Field(
+        default=False,
+        description=(
+            "A live room started without a team: on the first INIT it adopts the ESPN league the "
+            "Draft Tap connected to (settings synced, your team added) and this turns false. Until "
+            "then its teams, scoring and rounds are the placeholders it was created with."
+        ),
     )
     draft_type: DraftType
     pick_order: List[int] = []
@@ -298,6 +302,18 @@ class DraftSyncConflict(ApiModel):
     message: str
 
 
+class DraftLeagueAdoption(ApiModel):
+    """What a league-pending room took from the ESPN draft it connected to."""
+
+    team_id: int = Field(description="Your team in that league, in `usr.teams` — created now unless it already existed")
+    league_id: Optional[int] = Field(default=None, description="The synced league row; null if ESPN's settings could not be read")
+    espn_league_id: int
+    espn_team_id: int
+    team_name: str
+    league_name: Optional[str] = None
+    team_created: bool = Field(description="False when the team was already on your account")
+
+
 class DraftInitSyncResp(ApiModel):
     session: DraftSessionResp
     espn_league_id: int = Field(description="The ESPN league id decoded from the INIT frame")
@@ -312,6 +328,18 @@ class DraftInitSyncResp(ApiModel):
     espn_front: int = Field(description="Next pick number to assign — one past the last made pick; what the live path numbers from")
     header_applied: bool = Field(description="Whether pick order / slot / rounds / type were written from INIT (only on an empty session)")
     position_limits: dict[str, int] = Field(default={}, description="Hard per-position caps decoded from the room (display; the league's own are authoritative)")
+    league_adopted: Optional[DraftLeagueAdoption] = Field(
+        default=None,
+        description="Set when this INIT turned a league-pending room into a room on a real league (see `session.league_pending`)",
+    )
+    league_adoption_error: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why a league-pending room could not adopt its league this time (ESPN unreachable, a "
+            "private league with no ESPN connection on the account, …). Picks still sync; the room "
+            "keeps its placeholder settings and tries again on the next connect."
+        ),
+    )
 
 
 class DraftInitSyncResponse(BaseResponse):

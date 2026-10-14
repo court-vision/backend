@@ -24,6 +24,7 @@ from services.draft_service import (
     draft_front,
     duplicate_pick_of,
     DEFAULT_ROUNDS,
+    league_pending,
     league_prefill,
     next_pick_for_slot,
     matching_keeper,
@@ -147,6 +148,13 @@ def test_espns_other_draft_types_still_draft_in_pick_order():
     for espn_type in ("OFFLINE", "AUTOPICK", None):
         league = _league(draft_settings={**ESPN_DRAFT_SETTINGS, "type": espn_type})
         assert league_prefill(league)["draft_type"] == "snake"
+
+
+@pytest.mark.unit
+def test_only_a_live_room_without_a_team_is_league_pending():
+    assert league_pending(SimpleNamespace(kind="live", team_id=None)) is True
+    assert league_pending(SimpleNamespace(kind="live", team_id=7)) is False
+    assert league_pending(SimpleNamespace(kind="mock", team_id=None)) is False
 
 
 @pytest.mark.unit

@@ -302,6 +302,11 @@ def lock_room(session_id: int) -> None:
     DraftSession.select(DraftSession.id).where(DraftSession.id == session_id).for_update().first()
 
 
+def league_pending(session) -> bool:
+    """A live room with no team yet: it adopts the league the Draft Tap connects to."""
+    return getattr(session, "kind", None) == "live" and getattr(session, "team_id", None) is None
+
+
 def espn_league_id_of(league: Optional[League]) -> Optional[int]:
     """The ESPN draft a synced ESPN league maps to; None for Yahoo or unsynced."""
     if league is None or getattr(league, "provider", None) != "espn":
@@ -625,6 +630,7 @@ def _session_resp(
         status=session.status,
         name=session.name,
         espn_league_id=session.espn_league_id,
+        league_pending=league_pending(session),
         draft_type=session.draft_type,
         pick_order=order,
         my_slot=session.my_slot,
@@ -670,11 +676,15 @@ class DraftService:
 
         check_slot_in_range(req.my_slot, len(pick_order) or None)
 
-        # A live room follows exactly one ESPN draft — its team's league's — and
-        # is linked to it here. A mock room links to whichever ESPN lobby it
-        # first reconciles with; a manual room follows nothing.
+        # A live room follows exactly one ESPN draft. With a team it is that
+        # team's league's draft, linked here. Without one it is league-pending:
+        # it links to whichever ESPN draft the Draft Tap connects to and adopts
+        # that league then (`DraftAdoptionService`) — for a league joined
+        # minutes before the draft, with no time to add the team first. A mock
+        # room links to whichever ESPN lobby it first reconciles with; a manual
+        # room follows nothing.
         espn_league_id = None
-        if req.kind == "live":
+        if req.kind == "live" and team is not None:
             espn_league_id = espn_league_id_of(league)
             if espn_league_id is None:
                 raise BadRequestError(
