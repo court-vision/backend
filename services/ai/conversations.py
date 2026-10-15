@@ -163,6 +163,13 @@ async def record(conversation_id: int, row: dict[str, Any], *, title: Optional[s
     return await _insert(conversation_id, storable(row), title, reservation_id)
 
 
+@db_operation("ai.turn_comment")
+def set_comment(turn_id: int, user_id: int, comment: Optional[str]) -> bool:
+    return (AiTurn.update(comment=comment, comment_at=_now() if comment else None)
+            .where(AiTurn.id == turn_id, AiTurn.user_id == user_id)
+            .execute()) > 0
+
+
 @db_operation("ai.turn_feedback")
 def set_feedback(turn_id: int, user_id: int, feedback: Optional[str]) -> bool:
     return (AiTurn.update(feedback=feedback)

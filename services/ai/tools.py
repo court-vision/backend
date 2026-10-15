@@ -27,18 +27,29 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal, Optional
+from datetime import date, timedelta
+from decimal import Decimal
+from typing import Any, Awaitable, Callable, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from api.deps import OwnedTeamContext, ensure_team_owned, load_owned_league_info
 from core.errors import AppError
 from core.logging import get_logger
-from db.base import run_db
+from db.base import db_operation, run_db
+from db.models.nba.games import Game
+from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.player_projections import PlayerProjection
+from db.models.nba.players import Player
 from schemas.common import ApiStatus, LeagueInfo
 from schemas.streamer import StreamerMode
+from core.nba_calendar import nba_date_et
+from core.settings import settings
+from services.draft_service import DraftService
+from services.game_context import GameContext
 from services.matchup_service import MatchupService
-from services.player_games_service import PlayerGamesService
+from services.public_market_service import PublicMarketService, _snapshot_date
+from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services.player_service import PlayerService
 from services.scheduled_pickup_service import ScheduledPickupService
 from services.streamer_service import StreamerService
@@ -83,9 +94,47 @@ class FreeAgentsInput(TeamInput):
     b2b_only: bool = False
 
 
+STAT_KEYS = ("pts", "reb", "ast", "stl", "blk", "tov", "fg3m", "fgm", "fga", "ftm", "fta", "fg3a", "min", "fpts")
+StatKey = Literal["pts", "reb", "ast", "stl", "blk", "tov", "fg3m", "fgm", "fga", "ftm", "fta", "fg3a", "min", "fpts"]
+SEASON_PATTERN = r"^20[0-9]{2}-[0-9]{2}$"
+
+
 class GameLogInput(_Input):
     player_id: int = Field(..., gt=0, lt=2**31)
-    games: int = Field(5, ge=1, le=15)
+    games: int = Field(5, ge=1, le=82)
+    season: Optional[str] = Field(None, pattern=SEASON_PATTERN)
+    season_type: Literal["regular", "playoffs", "play_in", "all"] = "regular"
+    sort_by: Union[Literal["date"], StatKey] = "date"
+
+
+class ProjectionsInput(_Input):
+    player_ids: list[int] = Field(default_factory=list, max_length=30)
+    sort_by: Optional[StatKey] = None
+    limit: int = Field(15, ge=1, le=50)
+
+
+class DraftMarketInput(_Input):
+    player_ids: list[int] = Field(default_factory=list, max_length=30)
+    sort_by: Literal["rank", "adp", "auction_value", "auction_value_avg"] = "adp"
+    limit: int = Field(25, ge=1, le=60)
+
+
+class MarketMovementInput(_Input):
+    days: int = Field(7, ge=1, le=60)
+    metric: Literal["rank", "adp", "auction_value", "auction_value_avg"] = "adp"
+    direction: Literal["up", "down", "both"] = "both"
+    limit: int = Field(20, ge=1, le=50)
+
+
+class ScheduleInput(_Input):
+    teams: list[str] = Field(default_factory=list, max_length=30)
+    week: Literal["current", "next"] = "current"
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
+class DraftRoomInput(_Input):
+    room_id: int = Field(..., gt=0, lt=2**31)
 
 
 @dataclass(frozen=True)
@@ -375,16 +424,276 @@ async def _get_free_agents(args: FreeAgentsInput, ctx: ToolContext | None) -> di
     }
 
 
-async def _get_game_log(args: GameLogInput, ctx: ToolContext | None) -> dict[str, Any]:
-    resp = await PlayerGamesService.get_player_games(player_id=args.player_id, limit=args.games)
-    if resp.status != ApiStatus.SUCCESS or resp.data is None:
-        raise AppError("PLAYER_NOT_FOUND", resp.message or f"No player {args.player_id}")
-    data = resp.data
+_GAME_FIELDS = ("min", "pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "fpts")
+
+
+@db_operation("ai.game_log")
+def _game_log(player_id: int, games: int, season: Optional[str], season_type: str, sort_by: str) -> dict[str, Any]:
+    player = Player.get_or_none(Player.id == player_id)
+    if player is None:
+        raise AppError("PLAYER_NOT_FOUND", f"No player {player_id}")
+    played = (PlayerGameStats.player == player_id) & (PlayerGameStats.min > 0)
+    if season_type != "all":
+        played &= PlayerGameStats.season_type == season_type
+    if season is None:
+        # The latest season he has games in: last season's until this one starts
+        season = (PlayerGameStats.select(PlayerGameStats.season).where(played)
+                  .order_by(PlayerGameStats.game_date.desc()).limit(1).scalar())
+        if season is None:
+            return {"player_id": player_id, "name": player.name, "season": None, "games": [],
+                    "note": "No games on record for this player"}
+    query = PlayerGameStats.select().where(played & (PlayerGameStats.season == season))
+    total = query.count()
+    if sort_by == "date":
+        query = query.order_by(PlayerGameStats.game_date.desc())
+    else:
+        query = query.order_by(getattr(PlayerGameStats, sort_by).desc(), PlayerGameStats.game_date.desc())
+    rows = list(query.limit(games))
+    fixtures = GameContext.for_rows(rows)
+    out = []
+    for r in rows:
+        fx = fixtures.of(r)
+        out.append({
+            "date": r.game_date,
+            "opponent": fx.get("opponent"),
+            "home": fx.get("home"),
+            "type": r.season_type,
+            **{k: getattr(r, k) for k in _GAME_FIELDS},
+        })
     return {
-        "player_id": args.player_id,
-        "name": data.player_name,
-        "games": [g.model_dump(exclude={"game_id"}) for g in data.games],
+        "player_id": player_id,
+        "name": player.name,
+        "season": season,
+        "season_type": season_type,
+        "sort_by": sort_by,
+        # Games played that season (sub-minute appearances left out), before the limit
+        "games_played": total,
+        "games": out,
+    }
+
+
+async def _get_game_log(args: GameLogInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await _game_log(args.player_id, args.games, args.season, args.season_type, args.sort_by)
+
+
+def _num(value: Any) -> Any:
+    """Numeric columns come back as Decimal, which JSON would write as a string."""
+    return float(value) if isinstance(value, Decimal) else value
+
+
+def _projection_row(row: Any) -> dict[str, Any]:
+    stats = {k: _num(getattr(row, k)) for k in PlayerProjection.STAT_KEYS}
+    for rate, made, attempted in (("fg_pct", "fgm", "fga"), ("fg3_pct", "fg3m", "fg3a"), ("ft_pct", "ftm", "fta")):
+        a = stats.get(attempted)
+        stats[rate] = round(stats[made] / a, 3) if a and stats.get(made) is not None else None
+    return {"player_id": row.player_id, "name": row.player.name, "projected_gp": row.projected_gp, **stats}
+
+
+@db_operation("ai.projections")
+def _projections(player_ids: list[int], sort_by: Optional[str], limit: int) -> dict[str, Any]:
+    season = settings.nba_season
+    snapshot = _snapshot_date(PlayerProjection, season)
+    if snapshot is None:
+        return {"season": season, "players": [], "note": f"No ESPN projections for {season} yet"}
+    query = (PlayerProjection.select(PlayerProjection, Player).join(Player)
+             .where((PlayerProjection.season == season) & (PlayerProjection.source == "espn")
+                    & (PlayerProjection.as_of_date == snapshot)))
+    if player_ids:
+        query = query.where(PlayerProjection.player.in_(player_ids))
+    if sort_by and sort_by != "fpts" and hasattr(PlayerProjection, sort_by):
+        query = query.order_by(getattr(PlayerProjection, sort_by).desc(nulls="LAST"), Player.name)
+    else:
+        query = query.order_by(Player.name)
+    rows = list(query.limit(len(player_ids) if player_ids else limit))
+    return {
+        "season": season,
+        "source": "ESPN season projections",
+        "as_of": snapshot,
+        "per": "game",
+        "players": [_projection_row(r) for r in rows],
+    }
+
+
+async def _get_projections(args: ProjectionsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if not args.player_ids and not args.sort_by:
+        raise AppError("AI_BAD_INPUT", "Give player_ids, or sort_by to list the top projected players")
+    return await _projections(args.player_ids, args.sort_by, args.limit)
+
+
+def _market_row(p: Any) -> dict[str, Any]:
+    return {
+        "player_id": p.player_id,
+        "name": p.name,
+        "espn_rank": p.overall_rank,
+        "adp": p.adp,
+        "auction_value": p.auction_value,
+        "auction_avg": p.auction_value_avg,
+        "injury": p.injury_status if p.injury_status not in (None, "ACTIVE") else None,
+    }
+
+
+async def _get_draft_market(args: DraftMarketInput, ctx: ToolContext | None) -> dict[str, Any]:
+    # The whole board when filtering by player (ESPN lists a few hundred), the top otherwise
+    resp = await PublicMarketService.get_market(sort_by=args.sort_by, limit=500 if args.player_ids else args.limit)
+    data = resp.data
+    if data is None or not data.players:
+        return {"players": [], "note": resp.message}
+    players = data.players
+    if args.player_ids:
+        wanted = set(args.player_ids)
+        players = [p for p in players if p.player_id in wanted]
+    return {
+        "season": data.season,
+        "source": "ESPN draft market",
+        "as_of": data.as_of_date,
+        "sort_by": args.sort_by,
+        "players": [_market_row(p) for p in players],
+    }
+
+
+# How each market metric appears in a movement row: the field on the service's
+# measurements, and the prefix of the row's before / after / change keys
+_MOVEMENT_FIELDS: dict[str, tuple[str, str]] = {
+    "rank": ("overall_rank", "rank"),
+    "adp": ("adp", "adp"),
+    "auction_value": ("auction_value", "auction_value"),
+    "auction_value_avg": ("auction_value_avg", "auction_avg"),
+}
+
+
+def _movement_row(p: Any, metric: str) -> dict[str, Any]:
+    """Rank and ADP always, plus the metric the movement was ranked by when it is
+    an auction one, so the row always carries the numbers that explain its place."""
+    def measured(field: str, prefix: str) -> dict[str, Any]:
+        return {
+            f"{prefix}_before": getattr(p.before, field) if p.before else None,
+            f"{prefix}_after": getattr(p.after, field) if p.after else None,
+            f"{prefix}_change": getattr(p.changes, field),
+        }
+    row = {"player_id": p.player_id, "name": p.name,
+           **measured(*_MOVEMENT_FIELDS["adp"]), **measured(*_MOVEMENT_FIELDS["rank"])}
+    if metric not in ("rank", "adp"):
+        row.update(measured(*_MOVEMENT_FIELDS[metric]))
+    return row
+
+
+async def _get_market_movement(args: MarketMovementInput, ctx: ToolContext | None) -> dict[str, Any]:
+    today = nba_date_et()
+    resp = await PublicMarketService.get_market_movement(
+        from_as_of=today - timedelta(days=args.days), to_as_of=today,
+        metric=args.metric, direction=args.direction, limit=args.limit)
+    data = resp.data
+    if data is None:
+        return {"players": [], "note": resp.message}
+    return {
+        "season": data.season,
+        "from": data.from_as_of_date,
+        "to": data.to_as_of_date,
+        "metric": args.metric,
+        # Positive change = rising: an earlier rank or ADP, or a higher auction value
+        "players": [_movement_row(p, args.metric) for p in data.players],
         "note": resp.message,
+    }
+
+
+MAX_SCHEDULE_DAYS = 28
+
+
+@db_operation("ai.schedule")
+def _schedule(teams: list[str], start: date, end: date) -> dict[str, Any]:
+    games = list(Game.select().where((Game.game_date >= start) & (Game.game_date <= end)
+                                     & (Game.season_type.is_null() | (Game.season_type != "preseason")))
+                 .order_by(Game.game_date, Game.start_time_et))
+    per_day: dict[str, int] = {}
+    by_team: dict[str, list[dict[str, Any]]] = {}
+    for g in games:
+        day = g.game_date.isoformat()
+        per_day[day] = per_day.get(day, 0) + 1
+        for team, opp, home in ((g.home_team_id, g.away_team_id, True), (g.away_team_id, g.home_team_id, False)):
+            by_team.setdefault(team, []).append({"date": day, "opponent": opp, "home": home})
+    wanted = [t.upper() for t in teams] or sorted(by_team)
+    return {
+        "start": start,
+        "end": end,
+        "games_per_day": [{"date": d, "games": n} for d, n in sorted(per_day.items())],
+        "teams": [
+            {"team": t, "games": len(by_team.get(t, [])),
+             "dates": ", ".join(x["date"][5:] for x in by_team.get(t, [])), "schedule": by_team.get(t, [])}
+            for t in wanted
+        ],
+    }
+
+
+async def _get_schedule(args: ScheduleInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if args.start_date or args.end_date:
+        start = args.start_date or nba_date_et()
+        end = args.end_date or start + timedelta(days=6)
+        label = "dates given"
+    else:
+        week = get_streaming_matchup()
+        if week is not None and args.week == "next":
+            week = get_matchup_by_number(int(week["matchup_number"]) + 1)
+        if week is None:
+            raise AppError("AI_NO_WEEK", "No fantasy week on the calendar for that")
+        start, end = week["start_date"], week["end_date"]
+        label = f"fantasy week {week['matchup_number']}"
+    if end < start or (end - start).days >= MAX_SCHEDULE_DAYS:
+        raise AppError("AI_BAD_INPUT", f"Give a range of 1-{MAX_SCHEDULE_DAYS} days")
+    result = await _schedule(args.teams, start, end)
+    return {"range": label, **result}
+
+
+async def _get_draft_rooms(args: MyTeamsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    resp = await DraftService.list_sessions(ctx.user_id)
+    return {
+        "rooms": [
+            {
+                "room_id": r.id,
+                "name": r.name,
+                "kind": getattr(r.kind, "value", r.kind),
+                "status": getattr(r.status, "value", r.status),
+                "scoring": r.scoring_format,
+                "teams": r.league_size,
+                "rounds": r.rounds,
+                "my_slot": r.my_slot,
+                "picks_made": r.pick_count,
+                "next_pick": r.next_overall_pick,
+                "my_next_pick": r.my_next_pick,
+                "team_id": r.team_id,
+                "updated": r.updated_at,
+            }
+            for r in (resp.data or [])
+        ]
+    }
+
+
+async def _get_draft_room(args: DraftRoomInput, ctx: ToolContext | None) -> dict[str, Any]:
+    from api.deps import _owned_session
+
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if await run_db("ai.owned_session", _owned_session, args.room_id, ctx.user_id) is None:
+        raise AppError("DRAFT_NOT_FOUND", f"Draft room {args.room_id} is not one of the user's rooms")
+    room = (await DraftService.get_session(args.room_id)).data
+    return {
+        "room_id": room.id,
+        "name": room.name,
+        "status": getattr(room.status, "value", room.status),
+        "scoring": room.scoring_format,
+        "teams": room.league_size,
+        "rounds": room.rounds,
+        "my_slot": room.my_slot,
+        "punts": room.punts,
+        "picks_made": room.pick_count,
+        "my_next_pick": room.my_next_pick,
+        "picks_until_my_turn": room.picks_until_my_turn,
+        "picks": [
+            {"pick": p.overall_pick, "round": p.round, "slot": p.slot, "player_id": p.player_id,
+             "name": p.player_name, "mine": p.by_me, "keeper": getattr(p.source, "value", p.source) == "keeper"}
+            for p in room.picks
+        ],
     }
 
 
@@ -467,15 +776,23 @@ AGENT_READ_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_game_log",
         "description": (
-            "A player's most recent box scores, newest first: date, opponent, minutes, points, "
-            "rebounds, assists, steals, blocks, turnovers, makes and attempts, and CV fantasy "
-            "points (fpts, Court Vision's own formula, not the user's league scoring)."
+            "A player's box scores from Court Vision's game history (every season from "
+            "2012-13). By default his latest season's most recent games, newest first; give "
+            "`season` for another one, and `sort_by` a stat for his best games in it (his top 10 "
+            "blocks games: sort_by 'blk', games 10). Up to 82 games. Each has date, opponent, home, "
+            "minutes, points, rebounds, assists, steals, blocks, turnovers, makes and attempts, "
+            "and CV fantasy points (fpts, Court Vision's formula, not the user's league scoring). "
+            "games_played is how many he played that season. Appearances under a minute are left out."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "player_id": {"type": "integer", "description": "NBA player_id"},
-                "games": {"type": "integer", "description": "How many games, 1-15 (default 5)"},
+                "games": {"type": "integer", "description": "How many games, 1-82 (default 5)"},
+                "season": {"type": "string", "description": "e.g. '2025-26'; default his latest season"},
+                "season_type": {"type": "string", "enum": ["regular", "playoffs", "play_in", "all"]},
+                "sort_by": {"type": "string", "enum": ["date", *STAT_KEYS],
+                            "description": "'date' (newest first, default) or a stat (highest first)"},
             },
             "required": ["player_id"],
             "additionalProperties": False,
@@ -496,9 +813,113 @@ AGENT_READ_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+_PLAYER_IDS = {"type": "array", "items": {"type": "integer"}, "description": "NBA player_ids, at most 30"}
+_MARKET_SORT = ["rank", "adp", "auction_value", "auction_value_avg"]
+
+# Added 2026-10-15. Appended after the first set, never interleaved: the order is
+# part of every request's prefix.
+AGENT_MORE_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "get_projections",
+        "description": (
+            "ESPN's season projections, per game: projected games played and every stat (shooting "
+            "rates from projected makes and attempts). Give player_ids, or sort_by a stat for the "
+            "top projected players in it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player_ids": _PLAYER_IDS,
+                "sort_by": {"type": "string", "enum": [k for k in STAT_KEYS if k != "fpts"]},
+                "limit": {"type": "integer", "description": "1-50 (default 15), with sort_by"},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_draft_market",
+        "description": (
+            "ESPN's draft market, from its latest daily snapshot: editorial rank, ADP (average "
+            "pick in real ESPN drafts), auction value and average auction price. Give player_ids "
+            "for those players, or sort_by for the top of the board."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player_ids": _PLAYER_IDS,
+                "sort_by": {"type": "string", "enum": _MARKET_SORT},
+                "limit": {"type": "integer", "description": "1-60 (default 25)"},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_market_movement",
+        "description": (
+            "Who rose and fell in ESPN's draft market over the last `days` days, ranked by "
+            "`metric`. Rows carry rank and ADP before and after, plus the auction value or average "
+            "auction price when that is the metric. A positive change means rising: an earlier "
+            "rank or ADP, or a higher auction value."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "1-60 (default 7)"},
+                "metric": {"type": "string", "enum": _MARKET_SORT},
+                "direction": {"type": "string", "enum": ["up", "down", "both"]},
+                "limit": {"type": "integer", "description": "1-50 (default 20)"},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_schedule",
+        "description": (
+            "NBA games over a fantasy week (the current one by default, or `next`) or given "
+            "dates (up to 28 days): games per day league-wide, and for each team asked about "
+            "(NBA abbreviations; all 30 when none) its game count, dates and opponents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "teams": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['DET', 'UTA']"},
+                "week": {"type": "string", "enum": ["current", "next"]},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD, instead of a week"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_draft_rooms",
+        "description": (
+            "The user's draft rooms in Court Vision's Draft desk, newest first: room_id, name, "
+            "live or mock, status, scoring, teams, rounds, their slot, picks made, and their next pick."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+    },
+    {
+        "name": "get_draft_room",
+        "description": (
+            "One of the user's draft rooms with every pick so far (pick, round, slot, player, and "
+            "whether it was the user's), plus their slot, punts and next pick."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"room_id": {"type": "integer", "description": "A room_id from get_draft_rooms"}},
+            "required": ["room_id"],
+            "additionalProperties": False,
+        },
+    },
+]
+
 # Stats and status (step 0), name lookup, the user's teams, then their leagues.
 # The order is part of every request's cached prefix: append, never reorder.
-AGENT_TOOLS: list[dict[str, Any]] = [*TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS]
+AGENT_TOOLS: list[dict[str, Any]] = [*TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
@@ -522,6 +943,12 @@ _REGISTRY: dict[str, _Tool] = {
     "get_free_agents": _Tool(FreeAgentsInput, _get_free_agents),
     "get_game_log": _Tool(GameLogInput, _get_game_log),
     "get_scheduled_pickups": _Tool(TeamInput, _get_scheduled_pickups),
+    "get_projections": _Tool(ProjectionsInput, _get_projections),
+    "get_draft_market": _Tool(DraftMarketInput, _get_draft_market),
+    "get_market_movement": _Tool(MarketMovementInput, _get_market_movement),
+    "get_schedule": _Tool(ScheduleInput, _get_schedule),
+    "get_draft_rooms": _Tool(MyTeamsInput, _get_draft_rooms),
+    "get_draft_room": _Tool(DraftRoomInput, _get_draft_room),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

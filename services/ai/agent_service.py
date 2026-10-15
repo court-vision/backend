@@ -55,6 +55,7 @@ def _turn_view(row) -> AiTurnView:
         parts=row.parts or [],
         outcome=row.outcome,
         feedback=row.feedback,
+        comment=row.comment,
         cost_usd=row.cost_micros / 1e6,
     )
 
@@ -137,6 +138,15 @@ class AgentService:
             model=settings.ai_agent_model,
             effort=settings.ai_agent_effort,
         )
+
+    @staticmethod
+    async def comment(turn_id: int, user_id: int, text: Optional[str]) -> Optional[str]:
+        """Save (or clear) the user's note on one of their answers; returns what was stored."""
+        ensure_access(user_id)
+        value = text.strip() if text else None
+        if not await conversations.set_comment(turn_id, user_id, value or None):
+            raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
+        return value or None
 
     @staticmethod
     async def feedback(turn_id: int, user_id: int, value: Optional[str]) -> None:
