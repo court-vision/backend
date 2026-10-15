@@ -65,7 +65,9 @@ class RosterTransactionInvalid(AppError):
     """The board or ESPN's pool refuses the request before it is sent. `data.reason` is
     one of: nothing_to_do, same_player, drop_not_on_roster, drop_locked,
     add_already_on_roster, add_not_found, add_on_waivers, add_not_available, add_locked,
-    drop_is_lane_holder (an active stream lane holds its spot with that player)."""
+    drop_is_lane_holder (an active stream lane holds its spot with that player),
+    drop_is_scheduled (a pending scheduled pickup already drops that player — `apply` only:
+    the pickup executor, which reuses `_validate` and `_write`, is the one making that drop)."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -85,6 +87,20 @@ def _lane_holder(team_id: int) -> Optional[int]:
     """The player an active stream lane holds its spot with, whom the desk may not drop."""
     from db.models.stream_lanes import active_lane_holder
     return active_lane_holder(team_id)
+
+
+def _scheduled_drop(team_id: int, player_id: int):
+    """The team's pending scheduled pickup that drops this player (the soonest), or None: dropped
+    now, he would be missing from the roster on that pickup's day."""
+    from db.models.scheduled_pickups import ScheduledPickup as Row
+    return (Row.select()
+            .where((Row.team == team_id) & (Row.status == "pending") & (Row.drop_player_id == player_id))
+            .order_by(Row.nba_date, Row.id)
+            .first())
+
+
+def _day_label(d: date) -> str:
+    return f"{d:%a %b} {d.day}"
 
 
 def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: Optional[int]) -> str:
@@ -135,6 +151,12 @@ class RosterTransactionService:
                                                                     team.team_id) == drop:
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
                                                   "stop the lane to drop them", drop)
+        if drop is not None and holder is not None:
+            pickup = await run_db("txn.scheduled_drop", _scheduled_drop, team.team_id, drop)
+            if pickup is not None:
+                raise _invalid("drop_is_scheduled", f"{holder.name} is already being dropped for {pickup.add_name} "
+                                                    f"on {_day_label(pickup.nba_date)} — cancel that pickup to "
+                                                    "drop them now", drop)
 
         names = {p.player_id: p.name for p in state.players}
         if pool_entry is not None:
