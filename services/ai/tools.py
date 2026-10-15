@@ -551,6 +551,32 @@ async def _get_draft_market(args: DraftMarketInput, ctx: ToolContext | None) -> 
     }
 
 
+# How each market metric appears in a movement row: the field on the service's
+# measurements, and the prefix of the row's before / after / change keys
+_MOVEMENT_FIELDS: dict[str, tuple[str, str]] = {
+    "rank": ("overall_rank", "rank"),
+    "adp": ("adp", "adp"),
+    "auction_value": ("auction_value", "auction_value"),
+    "auction_value_avg": ("auction_value_avg", "auction_avg"),
+}
+
+
+def _movement_row(p: Any, metric: str) -> dict[str, Any]:
+    """Rank and ADP always, plus the metric the movement was ranked by when it is
+    an auction one, so the row always carries the numbers that explain its place."""
+    def measured(field: str, prefix: str) -> dict[str, Any]:
+        return {
+            f"{prefix}_before": getattr(p.before, field) if p.before else None,
+            f"{prefix}_after": getattr(p.after, field) if p.after else None,
+            f"{prefix}_change": getattr(p.changes, field),
+        }
+    row = {"player_id": p.player_id, "name": p.name,
+           **measured(*_MOVEMENT_FIELDS["adp"]), **measured(*_MOVEMENT_FIELDS["rank"])}
+    if metric not in ("rank", "adp"):
+        row.update(measured(*_MOVEMENT_FIELDS[metric]))
+    return row
+
+
 async def _get_market_movement(args: MarketMovementInput, ctx: ToolContext | None) -> dict[str, Any]:
     today = nba_date_et()
     resp = await PublicMarketService.get_market_movement(
@@ -564,20 +590,8 @@ async def _get_market_movement(args: MarketMovementInput, ctx: ToolContext | Non
         "from": data.from_as_of_date,
         "to": data.to_as_of_date,
         "metric": args.metric,
-        # Positive change = moving earlier (rising); negative = falling
-        "players": [
-            {
-                "player_id": p.player_id,
-                "name": p.name,
-                "adp_before": p.before.adp if p.before else None,
-                "adp_after": p.after.adp if p.after else None,
-                "rank_before": p.before.overall_rank if p.before else None,
-                "rank_after": p.after.overall_rank if p.after else None,
-                "adp_change": p.changes.adp,
-                "rank_change": p.changes.overall_rank,
-            }
-            for p in data.players
-        ],
+        # Positive change = rising: an earlier rank or ADP, or a higher auction value
+        "players": [_movement_row(p, args.metric) for p in data.players],
         "note": resp.message,
     }
 
@@ -844,8 +858,10 @@ AGENT_MORE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_market_movement",
         "description": (
-            "Who rose and fell in ESPN's draft market over the last `days` days. A positive "
-            "change means moving earlier (rising); negative means falling."
+            "Who rose and fell in ESPN's draft market over the last `days` days, ranked by "
+            "`metric`. Rows carry rank and ADP before and after, plus the auction value or average "
+            "auction price when that is the metric. A positive change means rising: an earlier "
+            "rank or ADP, or a higher auction value."
         ),
         "input_schema": {
             "type": "object",

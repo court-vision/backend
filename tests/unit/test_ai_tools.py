@@ -9,17 +9,26 @@ readable `is_error` results rather than exceptions that would sink the answer.
 
 import asyncio
 import json
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
 from core.errors import NotFoundError
 from schemas.common import ApiStatus
+from schemas.market import (
+    ESPNMarketMovementData,
+    ESPNMarketMovementPlayer,
+    ESPNMarketMovementResp,
+    MarketChanges,
+    MarketMeasurements,
+)
 from schemas.player import PlayerStatusData, PlayerStatusResp
 from schemas.players_list import PlayerListItem, PlayersListData, PlayersListResp
 from services.ai import tools
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
+from services.public_market_service import PublicMarketService
 
 
 def _run(name, raw):
@@ -376,3 +385,67 @@ class TestAgentTeamTools:
     def test_limits_are_validated(self, owns_22):
         assert _agent("get_free_agents", {"team_id": 22, "limit": 500}).is_error
         assert _agent("get_game_log", {"player_id": 1, "games": 50}).is_error
+
+
+def _movement_resp(metric):
+    player = ESPNMarketMovementPlayer(
+        player_id=1630578, espn_id=4397102, name="Alperen Sengun",
+        before=MarketMeasurements(overall_rank=20, adp=18.4, auction_value=41, auction_value_avg=38.5),
+        after=MarketMeasurements(overall_rank=12, adp=13.1, auction_value=49, auction_value_avg=44.0),
+        changes=MarketChanges(overall_rank=8, adp=5.3, auction_value=8, auction_value_avg=5.5),
+    )
+    data = ESPNMarketMovementData(
+        season="2026-27", from_as_of_date=date(2026, 10, 8), to_as_of_date=date(2026, 10, 15),
+        metric=metric, direction="both", players=[player], total=1, limit=20, offset=0,
+    )
+    return ESPNMarketMovementResp(status=ApiStatus.SUCCESS, message="Market movement", data=data)
+
+
+@pytest.mark.unit
+class TestMarketMovement:
+    def _rows(self, monkeypatch, raw):
+        seen = {}
+
+        async def fake(**kwargs):
+            seen.update(kwargs)
+            return _movement_resp(kwargs["metric"])
+
+        monkeypatch.setattr(PublicMarketService, "get_market_movement", staticmethod(fake))
+        out = _agent("get_market_movement", raw)
+        assert not out.is_error, out.content
+        return seen, json.loads(out.content)
+
+    def test_an_auction_metric_carries_its_own_before_after_and_change(self, monkeypatch):
+        seen, data = self._rows(monkeypatch, {"metric": "auction_value", "days": 7})
+        assert seen["metric"] == "auction_value"
+        assert data["metric"] == "auction_value"
+        row = data["players"][0]
+        # The numbers the ordering comes from are in the row, beside rank and ADP
+        assert (row["auction_value_before"], row["auction_value_after"], row["auction_value_change"]) == (41, 49, 8)
+        assert (row["adp_before"], row["adp_after"], row["adp_change"]) == (18.4, 13.1, 5.3)
+        assert (row["rank_before"], row["rank_after"], row["rank_change"]) == (20, 12, 8)
+        assert "auction_avg_before" not in row
+
+    def test_the_average_price_metric_uses_its_own_keys(self, monkeypatch):
+        _, data = self._rows(monkeypatch, {"metric": "auction_value_avg"})
+        row = data["players"][0]
+        assert (row["auction_avg_before"], row["auction_avg_after"], row["auction_avg_change"]) == (38.5, 44.0, 5.5)
+        assert "auction_value_before" not in row
+
+    def test_rank_and_adp_rows_stay_narrow(self, monkeypatch):
+        _, data = self._rows(monkeypatch, {})
+        row = data["players"][0]
+        assert not any(k.startswith("auction") for k in row), row
+        assert row["adp_change"] == 5.3 and row["rank_change"] == 8
+
+    def test_a_player_absent_from_a_snapshot_reads_as_null(self, monkeypatch):
+        async def fake(**kwargs):
+            resp = _movement_resp(kwargs["metric"])
+            resp.data.players[0].before = None
+            resp.data.players[0].changes = MarketChanges()
+            return resp
+
+        monkeypatch.setattr(PublicMarketService, "get_market_movement", staticmethod(fake))
+        row = json.loads(_agent("get_market_movement", {"metric": "auction_value"}).content)["players"][0]
+        assert row["auction_value_before"] is None and row["auction_value_change"] is None
+        assert row["auction_value_after"] == 49
