@@ -518,8 +518,20 @@ class TestShowChart:
         assert shown.block["categories"] == ["2026-10-19", "2026-10-21"]
         assert shown.block["series"] == [{"key": "A", "label": "A", "values": [1, 3]},
                                          {"key": "C", "label": "C", "values": [None, 4]}]
-        assert shown.block["tools"] == ["get_game_log"] and shown.block["total_rows"] == 3
+        assert shown.block["tools"] == ["get_game_log"] and shown.block["total_rows"] == 2
         assert shown.summary == "Shown to the user as chart c1: line chart of A, C over 2 x values."
+
+    def test_a_line_per_player_keeps_the_latest_dates_and_counts_them(self):
+        data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": f"2026-10-{d:02d}", "pts": d} for d in (1, 2, 3)]}},
+                "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "B", "games": [
+            {"date": f"2026-10-{d:02d}", "pts": d * 2} for d in (2, 3, 4)]}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "limit": 2, "title": "x"}, data, "c1")
+        assert shown.block["categories"] == ["2026-10-03", "2026-10-04"]
+        assert [s["values"] for s in shown.block["series"]] == [[3, None], [6, 8]]
+        assert shown.block["total_rows"] == 4
+        assert shown.summary == "Shown to the user as chart c1: line chart of A, B over 2 of 4 x values."
 
     def test_a_line_keeps_its_latest_points(self):
         data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
@@ -528,7 +540,7 @@ class TestShowChart:
                                     "title": "Points"}, data, "c1")
         assert shown.block["categories"] == ["2026-10-05", "2026-10-06", "2026-10-07"]
         assert shown.block["series"][0]["values"] == [5, 6, 7]
-        assert shown.summary == "Shown to the user as chart c1: line chart of PTS over 3 x values of 7 rows."
+        assert shown.summary == "Shown to the user as chart c1: line chart of PTS over 3 of 7 x values."
 
     def test_bars_default_to_the_first_twelve_in_lookup_order(self):
         data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": f"p{i}", "v": i} for i in range(15)]}}}

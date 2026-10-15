@@ -234,7 +234,7 @@ class AiChart(ApiModel):
     x: AiChartAxis = Field(..., description="The column along the x axis")
     categories: list[str] = Field(..., description="The x values, in drawing order")
     series: list[AiChartSeries] = Field(..., min_length=1, max_length=4)
-    total_rows: int = Field(..., description="Rows before the chart's limit")
+    total_rows: int = Field(..., description="X values before the chart's limit")
 
 
 AiBlock = Annotated[Union[AiTable, AiChart], Field(discriminator="type")]

@@ -282,6 +282,8 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     Bars keep the lookup's order unless `sort_by` says otherwise and show the first
     `limit` x values; lines always run along x and keep the latest `limit` points.
     With `series_by`, one series per distinct value of that column, aligned on x.
+    `total_rows` counts the x values before the limit, so the block can say
+    "12 of 30" whichever way the series were made.
     """
     args = _validate(_ShowChartInput, raw_input)
     if args.series_by and len(args.y) != 1:
@@ -313,6 +315,7 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         if len(groups) > MAX_SERIES:
             raise DisplayError(f"'{args.series_by}' has {len(groups)} values and a chart holds at most "
                                f"{MAX_SERIES} series; narrow the rows or use show_table")
+        total = len(categories)
         categories = cut(categories)
         series = [{"key": key, "label": key, "values": [points.get(c) for c in categories]}
                   for key, points in groups.items()]
@@ -341,6 +344,6 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     }
     json.dumps(block, default=str)
     what = ", ".join(s["label"] for s in series)
-    cut_note = f" of {total} rows" if total > len(categories) and not args.series_by else ""
+    cut_note = f" of {total}" if total > len(categories) else ""
     return Shown(block=block, summary=f"Shown to the user as chart {next_id}: {args.kind} chart of {what} "
-                                      f"over {len(categories)} x values{cut_note}.")
+                                      f"over {len(categories)}{cut_note} x values.")
