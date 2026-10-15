@@ -542,6 +542,42 @@ class TestShowChart:
         assert shown.block["series"][0]["values"] == [5, 6, 7]
         assert shown.summary == "Shown to the user as chart c1: line chart of PTS over 3 of 7 x values."
 
+    def test_a_series_with_no_values_is_left_out_and_the_model_is_told(self):
+        data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": "a", "v": 1, "w": None},
+                                                                   {"n": "b", "v": 2, "w": None}]}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v", "w"], "title": "x"},
+                                   data, "c1")
+        assert [s["key"] for s in shown.block["series"]] == ["v"]
+        assert shown.summary == "Shown to the user as chart c1: bar chart of v over 2 x values. Left out, no values: w."
+        # With series_by, a player whose games all fall before the kept points is left out the same way
+        logs = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": "2026-10-01", "pts": 1}, {"date": "2026-10-02", "pts": 2}]}},
+                "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "B", "games": [
+            {"date": "2026-10-03", "pts": 3}, {"date": "2026-10-04", "pts": 4}]}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "limit": 2, "title": "x"}, logs, "c1")
+        assert shown.block["series"] == [{"key": "B", "label": "B", "values": [3, 4]}]
+        assert shown.summary == ("Shown to the user as chart c1: line chart of B over 2 of 4 x values. "
+                                 "Left out, no values: A.")
+
+    def test_a_line_drops_rows_without_a_date_and_overlapping_results_must_agree(self):
+        games = [{"date": None, "pts": 9}, {"date": "2026-10-02", "pts": 2}, {"date": "2026-10-01", "pts": 1}]
+        data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": games}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "date", "y": ["pts"], "title": "x"},
+                                   data, "c1")
+        assert shown.block["categories"] == ["2026-10-01", "2026-10-02"] and shown.block["total_rows"] == 2
+        assert shown.block["series"][0]["values"] == [1, 2]
+        # The same games fetched twice (two lookups for one player) agree, so they chart once
+        same = {**data, "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": list(games)}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "title": "x"}, same, "c1")
+        assert shown.block["series"] == [{"key": "A", "label": "A", "values": [1, 2]}]
+        differ = {**data, "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": "2026-10-02", "pts": 5}]}}}
+        with pytest.raises(display.DisplayError, match="A has two different pts values at date 2026-10-02"):
+            display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                "y": ["pts"], "series_by": "name", "title": "x"}, differ, "c1")
+
     def test_bars_default_to_the_first_twelve_in_lookup_order(self):
         data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": f"p{i}", "v": i} for i in range(15)]}}}
         shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v"], "title": "x"}, data, "c1")

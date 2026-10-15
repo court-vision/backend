@@ -294,7 +294,8 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
 
     line = args.kind == "line"
     if line:
-        rows = _sorted(rows, args.x, descending=False)
+        # A row with no x has no place on the time axis
+        rows = _sorted([r for r in rows if r.get(args.x) is not None], args.x, descending=False)
     elif args.sort_by:
         rows = _sorted(rows, args.sort_by, args.descending)
     total = len(rows)
@@ -309,9 +310,15 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         groups: dict[str, dict[str, Optional[float]]] = {}
         for r in rows:
             category = _category(r.get(args.x))
+            key = _category(r.get(args.series_by))
+            value = _point(r.get(y), y)
+            points = groups.setdefault(key, {})
+            if category in points and points[category] != value:
+                raise DisplayError(f"{key} has two different {y} values at {args.x} {category}; "
+                                   "the results overlap, chart one of them")
             if category not in categories:
                 categories.append(category)
-            groups.setdefault(_category(r.get(args.series_by)), {})[category] = _point(r.get(y), y)
+            points[category] = value
         if len(groups) > MAX_SERIES:
             raise DisplayError(f"'{args.series_by}' has {len(groups)} values and a chart holds at most "
                                f"{MAX_SERIES} series; narrow the rows or use show_table")
@@ -327,7 +334,11 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
 
     if len(categories) < 2:
         raise DisplayError("A chart needs at least two x values; say a single number in prose")
-    if all(v is None for s in series for v in s["values"]):
+    # A series with nothing in the shown range (a column of nulls, a player whose
+    # games all fall before the kept points) is left out and the model is told
+    left_out = [s["label"] for s in series if all(v is None for v in s["values"])]
+    series = [s for s in series if s["label"] not in left_out]
+    if not series:
         raise DisplayError("Those rows have no values to chart")
 
     block = {
@@ -345,5 +356,6 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     json.dumps(block, default=str)
     what = ", ".join(s["label"] for s in series)
     cut_note = f" of {total}" if total > len(categories) else ""
+    left_out_note = f" Left out, no values: {', '.join(left_out)}." if left_out else ""
     return Shown(block=block, summary=f"Shown to the user as chart {next_id}: {args.kind} chart of {what} "
-                                      f"over {len(categories)}{cut_note} x values.")
+                                      f"over {len(categories)}{cut_note} x values.{left_out_note}")
