@@ -13,9 +13,12 @@
 --   nba.news_item_teams       the player was linked (an ESPN id or a name match).
 --   nba.availability_reports  append-only observations: one row per (source,
 --                             player, game or date) status *change*. The pipeline
---                             inserts only when (status, reason) differs from that
---                             source's latest row for the player and date, so a
---                             2-minute poll that sees nothing new writes nothing.
+--                             inserts only when (status, reason, detail) differs
+--                             from that source's latest row for the player and
+--                             date, so a 2-minute poll that sees nothing new
+--                             writes nothing. (detail counts: ESPN can keep a
+--                             player Day-To-Day while his note turns into "won't
+--                             play Tuesday".)
 --   nba.player_availability   the resolved verdict, one row per (player, game
 --                             date). `changed_at` moves only when `verdict`
 --                             changes; it is what the late-scratch reactor keys
@@ -95,9 +98,11 @@ CREATE TABLE IF NOT EXISTS nba.availability_reports (
     pipeline_run_id uuid
 );
 
--- "That source's latest row for the player and date", the idempotency read.
+-- Every read is one date's: each source's latest row per player (the idempotency
+-- read, DISTINCT ON in this order), the players a write touched, the sources
+-- heard from.
 CREATE INDEX IF NOT EXISTS availability_reports_latest
-    ON nba.availability_reports (player_id, game_date, source, observed_at DESC);
+    ON nba.availability_reports (game_date, player_id, source, observed_at DESC);
 CREATE INDEX IF NOT EXISTS availability_reports_observed ON nba.availability_reports (observed_at);
 
 CREATE TABLE IF NOT EXISTS nba.player_availability (
