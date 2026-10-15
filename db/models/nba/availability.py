@@ -1,5 +1,5 @@
 """
-nba.availability_reports and nba.player_availability (migration 0034).
+nba.availability_reports and nba.player_availability (migration 0035).
 
 `AvailabilityReport` is the append-only log of what each source said about a
 player for a game (or, for roster-level sources, a date): one row per status
@@ -44,7 +44,7 @@ def _now() -> datetime:
 class AvailabilityReport(BaseModel):
     id = BigAutoField()
     player = ForeignKeyField(Player, on_delete="CASCADE", backref="availability_reports", column_name="player_id")
-    game_id = CharField(max_length=20, null=True)  # when the source is per game; no FK, see 0034
+    game_id = CharField(max_length=20, null=True)  # when the source is per game; no FK, see 0035
     game_date = DateField()
     source = CharField(max_length=16)
     status = CharField(max_length=12)

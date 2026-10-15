@@ -1,5 +1,5 @@
 """
-nba.news_items and its link tables (migration 0034).
+nba.news_items and its link tables (migration 0035).
 
 One row per item from any news source, linked to the players and teams it is
 about. data-platform's news pipeline writes it; the backend reads it for

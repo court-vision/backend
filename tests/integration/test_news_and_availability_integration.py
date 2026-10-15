@@ -1,5 +1,5 @@
 """
-Integration: migration 0034 (news items, availability, roster_moves reactions).
+Integration: migration 0035 (news items, availability, roster_moves reactions).
 
 The models round-trip against the real tables; the generated `search` column
 fills itself; one counted availability reaction per (team, day, trigger player)
@@ -128,9 +128,9 @@ def test_the_source_check_refuses_an_unknown_source(team):
         _reaction(team, "applied", trigger=1, source="news")
 
 
-def test_0034_rollback_applies_and_the_forward_file_restores_it(integration_db):
-    forward = (Path(MIGRATIONS_DIR) / "0034__news_and_availability.sql").read_text()
-    rollback = (Path(MIGRATIONS_DIR) / "0034__news_and_availability.rollback.sql").read_text()
+def test_0035_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.rollback.sql").read_text()
     assert _tables() == set(NEW_TABLES) and _trigger_column()
     try:
         with db.atomic():

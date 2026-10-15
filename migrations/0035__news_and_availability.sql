@@ -1,4 +1,4 @@
--- Migration 0034: news items and player availability (docs/NEWS_AND_INJURY_PIPELINES_PLAN.md § 1).
+-- Migration 0035: news items and player availability (docs/NEWS_AND_INJURY_PIPELINES_PLAN.md § 1).
 --
 -- Four nba.* tables, written by data-platform and read by the backend:
 --

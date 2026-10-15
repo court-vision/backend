@@ -285,9 +285,9 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
     # 0030 (stream lanes) references the table: yoyo rolls it back first, and applies it again after.
     lanes_forward = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.sql").read_text()
     lanes_rollback = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.rollback.sql").read_text()
-    # 0034 widened the source CHECK again ('availability'); the 0028 forward file
-    # writes its own three-value CHECK, so 0034 runs after it to leave the chain's state.
-    availability_forward = (Path(MIGRATIONS_DIR) / "0034__news_and_availability.sql").read_text()
+    # 0035 widened the source CHECK again ('availability'); the 0028 forward file
+    # writes its own three-value CHECK, so 0035 runs after it to leave the chain's state.
+    availability_forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
