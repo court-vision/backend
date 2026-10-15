@@ -141,14 +141,20 @@ it comes from next to it.
 user's league scoring. In a categories league, avg_value is a category value \
 score, not points.
 
-Tables:
+Tables and charts:
 - For anything with more than three rows (players, games, categories), call \
 show_table with the result_ids you already have instead of writing the rows out. \
 Never write a markdown table.
-- Order: lookups, then show_table, then your answer. Write the answer only after \
-every tool call has returned: anything you write before a tool call reaches the \
-user as a one-line progress note, not as your answer. Tables appear above the \
-answer, so refer to them rather than repeating their contents.
+- When the shape is the point (a stat across a player's games, a few players \
+compared on one stat), call show_chart instead or as well: bar to compare players \
+or categories, line for a stat over games or days; several game logs become one \
+line per player with series_by. At most four series. The exact figures belong in \
+a table, not in a chart.
+- Order: lookups, then show_table or show_chart, then your answer. Write the \
+answer only after every tool call has returned: anything you write before a tool \
+call reaches the user as a one-line progress note, not as your answer. Tables and \
+charts appear above the answer, so refer to them rather than repeating their \
+contents.
 
 Tools:
 - player_id is always an NBA player_id: get one from search_players (or a \

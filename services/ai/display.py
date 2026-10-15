@@ -1,16 +1,18 @@
 """
-Display tools: how the agent puts tables in front of the user
+Display tools: how the agent puts tables and charts in front of the user
 (docs/AI_AGENT_PLAN.md § 2-3).
 
-The model never types a table. It calls `show_table` naming a tool result it
-already has ("r3"), which list in it to show, and which columns; the server
-copies the values out of the stored result. So every number in a table is a
-number a lookup returned, by construction, and a column the result doesn't
-have is an error the model can read and fix -- never a made-up value.
+The model never types a table or a chart. It calls `show_table` or `show_chart`
+naming a tool result it already has ("r3"), which list in it to show, and which
+columns; the server copies the values out of the stored result. So every number
+in a block is a number a lookup returned, by construction, and a column the
+result doesn't have is an error the model can read and fix -- never a made-up
+value.
 
-A table can join several results of the same shape (one game log per player):
+A block can join several results of the same shape (one game log per player):
 their rows are concatenated, and each row can show its parent result's
-top-level fields (the player's `name` beside each of his games).
+top-level fields (the player's `name` beside each of his games). A chart can
+then draw one series per player with `series_by`.
 """
 
 from __future__ import annotations
@@ -18,12 +20,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 MAX_COLUMNS = 10
 MAX_ROWS = 40
+MAX_SERIES = 4
+MAX_POINTS = 30
+BAR_DEFAULT = 12
 _RESULT_ID = re.compile(r"^r[1-9][0-9]{0,3}$")
 
 SHOW_TABLE: dict[str, Any] = {
@@ -54,7 +59,47 @@ SHOW_TABLE: dict[str, Any] = {
         "additionalProperties": False,
     },
 }
-DISPLAY_TOOL_NAMES = frozenset({SHOW_TABLE["name"]})
+SHOW_CHART: dict[str, Any] = {
+    "name": "show_chart",
+    "description": (
+        "Show the user a bar or line chart built from tool results you already have, like show_table: "
+        "name the result(s), the list to chart (`rows`), the column for the x axis (`x`: a name for bars, "
+        "a date for lines) and the numeric column(s) to plot (`y`, one series each, at most "
+        f"{MAX_SERIES}), or one `y` column with `series_by` to draw one series per value of that column "
+        "(several players' game logs become one line per player). Bars compare players or categories on "
+        "a stat; lines show a stat over games or days and are drawn in x order. Use it when the shape "
+        "matters more than the exact figures; the figures belong in show_table. The server copies the "
+        "values: never describe the numbers yourself."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "result_ids": {"type": "array", "items": {"type": "string"},
+                           "description": "One or more result_ids, e.g. ['r3'] or ['r4', 'r5', 'r6']"},
+            "rows": {"type": "string", "description": "Key of the list to chart; may be omitted when "
+                                                      "the result holds exactly one list"},
+            "kind": {"type": "string", "enum": ["bar", "line"],
+                     "description": "bar compares the x values; line shows a stat over time"},
+            "x": {"type": "string", "description": "The column for the categories (bar) or the time axis "
+                                                   "(line), e.g. 'name' or 'date'"},
+            "y": {"type": "array", "items": {"type": "string"},
+                  "description": f"Numeric columns to plot, one series each, at most {MAX_SERIES}; "
+                                 "exactly one when series_by is set"},
+            "series_by": {"type": "string",
+                          "description": f"A column whose values become the series (at most {MAX_SERIES}), "
+                                         "e.g. 'name' across several players' game logs"},
+            "sort_by": {"type": "string", "description": "A column to order bars by; lines always run in x order"},
+            "descending": {"type": "boolean", "description": "Sort high to low (default true)"},
+            "limit": {"type": "integer",
+                      "description": f"Most x values to show, 1-{MAX_POINTS} (default {BAR_DEFAULT} for bars, "
+                                     f"{MAX_POINTS} for lines; a line keeps its latest points)"},
+            "title": {"type": "string", "description": "A short title, e.g. 'Blocks per game, last 10'"},
+        },
+        "required": ["result_ids", "kind", "x", "y", "title"],
+        "additionalProperties": False,
+    },
+}
+DISPLAY_TOOL_NAMES = frozenset({SHOW_TABLE["name"], SHOW_CHART["name"]})
 
 # Column headers for the keys the read tools return; anything else is shown as its key
 LABELS: dict[str, str] = {
@@ -80,6 +125,21 @@ class _ShowTableInput(BaseModel):
     sort_by: Optional[str] = Field(None, max_length=60)
     descending: bool = True
     limit: int = Field(20, ge=1, le=MAX_ROWS)
+    title: str = Field(..., min_length=1, max_length=100)
+
+
+class _ShowChartInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result_ids: list[str] = Field(..., min_length=1, max_length=12)
+    rows: Optional[str] = Field(None, max_length=60)
+    kind: Literal["bar", "line"]
+    x: str = Field(..., min_length=1, max_length=60)
+    y: list[str] = Field(..., min_length=1, max_length=MAX_SERIES)
+    series_by: Optional[str] = Field(None, max_length=60)
+    sort_by: Optional[str] = Field(None, max_length=60)
+    descending: bool = True
+    limit: Optional[int] = Field(None, ge=1, le=MAX_POINTS)
     title: str = Field(..., min_length=1, max_length=100)
 
 
@@ -131,34 +191,55 @@ def _sort_key(value: Any) -> tuple[int, Any]:
     return (0, value)
 
 
-def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
-    """Build one table block from stored results, or raise DisplayError."""
+def _validate(model: type[BaseModel], raw_input: Any) -> Any:
     try:
-        args = _ShowTableInput.model_validate(raw_input)
+        return model.model_validate(raw_input)
     except ValidationError as exc:
         problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'input'}: {e['msg']}" for e in exc.errors())
         raise DisplayError(f"Invalid input: {problems}") from exc
 
+
+def _collect(result_ids: list[str], path: Optional[str], results: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The rows of the named results, joined, and the lookups they came from."""
     rows: list[dict[str, Any]] = []
     tools: list[str] = []
-    for rid in args.result_ids:
+    for rid in result_ids:
         stored = results.get(rid) if _RESULT_ID.match(rid) else None
         if stored is None:
             raise DisplayError(f"No result {rid}: use a result_id a lookup returned")
-        rows.extend(_rows_of(stored["data"], args.rows, rid))
+        rows.extend(_rows_of(stored["data"], path, rid))
         tools.append(stored["tool"])
     if not rows:
         raise DisplayError("Those results have no rows to show")
+    return rows, tools
 
+
+def _require_columns(rows: list[dict[str, Any]], columns: list[str]) -> None:
     known = set().union(*(row.keys() for row in rows))
-    missing = [c for c in [*args.columns, *([args.sort_by] if args.sort_by else [])] if c not in known]
+    missing = [c for c in columns if c not in known]
     if missing:
         raise DisplayError(f"No column {', '.join(repr(c) for c in missing)}; the rows have: {', '.join(sorted(known))}")
 
+
+def _sorted(rows: list[dict[str, Any]], by: str, descending: bool) -> list[dict[str, Any]]:
+    """Rows ordered by one column, with the rows that lack it last either way."""
+    present = [r for r in rows if r.get(by) is not None]
+    absent = [r for r in rows if r.get(by) is None]
+    return sorted(present, key=lambda r: _sort_key(r[by]), reverse=descending) + absent
+
+
+def _label_of(column: str) -> str:
+    return LABELS.get(column, column.replace("_", " "))
+
+
+def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
+    """Build one table block from stored results, or raise DisplayError."""
+    args = _validate(_ShowTableInput, raw_input)
+    rows, tools = _collect(args.result_ids, args.rows, results)
+    _require_columns(rows, [*args.columns, *([args.sort_by] if args.sort_by else [])])
+
     if args.sort_by:
-        present = [r for r in rows if r.get(args.sort_by) is not None]
-        absent = [r for r in rows if r.get(args.sort_by) is None]
-        rows = sorted(present, key=lambda r: _sort_key(r[args.sort_by]), reverse=args.descending) + absent
+        rows = _sorted(rows, args.sort_by, args.descending)
     shown = rows[: args.limit]
     block = {
         "type": "table",
@@ -166,7 +247,7 @@ def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         "title": args.title,
         "result_ids": args.result_ids,
         "tools": sorted(set(tools)),
-        "columns": [{"key": c, "label": LABELS.get(c, c.replace("_", " "))} for c in args.columns],
+        "columns": [{"key": c, "label": _label_of(c)} for c in args.columns],
         "rows": [[_cell(r.get(c), c) for c in args.columns] for r in shown],
         "total_rows": len(rows),
     }
@@ -174,3 +255,92 @@ def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     json.dumps(block, default=str)
     cut = f" of {len(rows)}" if len(rows) > len(shown) else ""
     return Shown(block=block, summary=f"Shown to the user as table {next_id}: {len(shown)}{cut} rows.")
+
+
+
+# ---- charts ----
+
+def _point(value: Any, column: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DisplayError(f"'{column}' is not a numeric column; chart a number such as pts or blk")
+    return value
+
+
+def _category(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
+    """Build one bar or line chart block from stored results, or raise DisplayError.
+
+    Bars keep the lookup's order unless `sort_by` says otherwise and show the first
+    `limit` x values; lines always run along x and keep the latest `limit` points.
+    With `series_by`, one series per distinct value of that column, aligned on x.
+    """
+    args = _validate(_ShowChartInput, raw_input)
+    if args.series_by and len(args.y) != 1:
+        raise DisplayError("With series_by, y is exactly one column: the series come from series_by")
+    rows, tools = _collect(args.result_ids, args.rows, results)
+    _require_columns(rows, [args.x, *args.y, *([args.series_by] if args.series_by else []),
+                            *([args.sort_by] if args.sort_by else [])])
+
+    line = args.kind == "line"
+    if line:
+        rows = _sorted(rows, args.x, descending=False)
+    elif args.sort_by:
+        rows = _sorted(rows, args.sort_by, args.descending)
+    total = len(rows)
+    limit = args.limit or (MAX_POINTS if line else BAR_DEFAULT)
+
+    def cut(items: list[Any]) -> list[Any]:
+        return items[-limit:] if line else items[:limit]
+
+    if args.series_by:
+        y = args.y[0]
+        categories: list[str] = []
+        groups: dict[str, dict[str, Optional[float]]] = {}
+        for r in rows:
+            category = _category(r.get(args.x))
+            if category not in categories:
+                categories.append(category)
+            groups.setdefault(_category(r.get(args.series_by)), {})[category] = _point(r.get(y), y)
+        if len(groups) > MAX_SERIES:
+            raise DisplayError(f"'{args.series_by}' has {len(groups)} values and a chart holds at most "
+                               f"{MAX_SERIES} series; narrow the rows or use show_table")
+        categories = cut(categories)
+        series = [{"key": key, "label": key, "values": [points.get(c) for c in categories]}
+                  for key, points in groups.items()]
+    else:
+        shown = cut(rows)
+        categories = [_category(r.get(args.x)) for r in shown]
+        series = [{"key": col, "label": _label_of(col), "values": [_point(r.get(col), col) for r in shown]}
+                  for col in args.y]
+
+    if len(categories) < 2:
+        raise DisplayError("A chart needs at least two x values; say a single number in prose")
+    if all(v is None for s in series for v in s["values"]):
+        raise DisplayError("Those rows have no values to chart")
+
+    block = {
+        "type": "chart",
+        "id": next_id,
+        "title": args.title,
+        "kind": args.kind,
+        "result_ids": args.result_ids,
+        "tools": sorted(set(tools)),
+        "x": {"key": args.x, "label": _label_of(args.x)},
+        "categories": categories,
+        "series": series,
+        "total_rows": total,
+    }
+    json.dumps(block, default=str)
+    what = ", ".join(s["label"] for s in series)
+    cut_note = f" of {total} rows" if total > len(categories) and not args.series_by else ""
+    return Shown(block=block, summary=f"Shown to the user as chart {next_id}: {args.kind} chart of {what} "
+                                      f"over {len(categories)} x values{cut_note}.")
