@@ -16,6 +16,9 @@ from schemas.ai import (
     AiFeedbackData,
     AiFeedbackReq,
     AiFeedbackResp,
+    AiTurnCommentData,
+    AiTurnCommentReq,
+    AiTurnCommentResp,
     AiTurnFeedbackData,
     AiTurnFeedbackResp,
     AiTurnReq,
@@ -241,3 +244,20 @@ async def turn_feedback(
     await AgentService.feedback(turn_id, user.user_id, req.feedback)
     return AiTurnFeedbackResp(status=ApiStatus.SUCCESS, message="Feedback saved",
                               data=AiTurnFeedbackData(turn_id=turn_id, feedback=req.feedback))
+
+
+@router.post(
+    "/turns/{turn_id}/comment",
+    response_model=AiTurnCommentResp,
+    summary="Leave a note on one of the agent's answers",
+    description="Free text beside the 👍 / 👎, read back when answers are reviewed; null or blank clears it.",
+    responses={**_AGENT_ERRORS, 404: {"description": "No such turn for this caller (AI_TURN_NOT_FOUND)"}},
+)
+async def turn_comment(
+    turn_id: int = Path(..., gt=0),
+    req: AiTurnCommentReq = Body(...),
+    user: UserContext = Depends(get_db_user),
+) -> AiTurnCommentResp:
+    stored = await AgentService.comment(turn_id, user.user_id, req.comment)
+    return AiTurnCommentResp(status=ApiStatus.SUCCESS, message="Note saved",
+                             data=AiTurnCommentData(turn_id=turn_id, comment=stored))

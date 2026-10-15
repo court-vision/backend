@@ -58,6 +58,9 @@ class AiTurn(BaseModel):
     duration_ms = IntegerField(null=True)
     ungrounded_numbers = IntegerField(null=True)
     feedback = TextField(null=True)
+    # The user's own note on the answer (migration 0034)
+    comment = TextField(null=True)
+    comment_at = DateTimeField(null=True)
 
     class Meta:
         table_name = "ai_turns"

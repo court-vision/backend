@@ -219,7 +219,10 @@ class TestTurn:
         call = fake.calls[0]
         assert call["model"] == "claude-opus-5-5"
         assert call["output_config"] == {"effort": "medium"}
-        assert call["thinking"] == {"type": "adaptive", "display": "updates"}
+        # Old reasoning that no longer matches its history (tools changed in a deploy) is dropped, not fatal
+        assert call["thinking"] == {"type": "adaptive", "display": "updates",
+                                    "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+        assert agent.BINDING_BETA in call["betas"]
         assert call["fallbacks"] == "default" and agent.FALLBACK_BETA in call["betas"]
         assert "tool_choice" not in call
 
@@ -262,6 +265,9 @@ class TestTurn:
         assert block["id"] == "t1" and block["tools"] == ["get_matchup"]
         assert ("status", {"text": "Checking your matchup.", "kind": "note"}) in events
         assert ("status", {"text": "Reading your matchup", "kind": "tool", "tool": "get_matchup"}) in events
+        # Each step after the first says so, so a finished table never leaves "Building a table" up
+        names = [(e, d.get("text")) for e, d in events if e in ("status", "block")]
+        assert names.index(("block", None)) < names.index(("status", "Thinking"), names.index(("block", None)))
         row = recorded.rows[0]
         assert row["outcome"] == "ok"
         assert row["results"]["r1"]["data"] == MATCHUP

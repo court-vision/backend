@@ -231,6 +231,7 @@ class AiTurnView(ApiModel):
     parts: list[AiPart] = Field(..., description="The answer as the user saw it: text and blocks, in order")
     outcome: str = Field(..., description="'ok', or the error code the turn ended with")
     feedback: Optional[Literal["up", "down"]] = None
+    comment: Optional[str] = Field(None, description="The user's own note on this answer")
     cost_usd: float
 
 
@@ -271,6 +272,22 @@ class AiUsageResp(BaseResponse):
 class AiTurnFeedbackData(ApiModel):
     turn_id: int
     feedback: Optional[Literal["up", "down"]] = None
+
+
+class AiTurnCommentReq(ApiModel):
+    """Body for POST /v1/internal/ai/turns/{turn_id}/comment."""
+
+    comment: Optional[str] = Field(..., max_length=AGENT_MESSAGE_MAX, pattern=NO_NUL,
+                                   description="The note; null or blank clears it")
+
+
+class AiTurnCommentData(ApiModel):
+    turn_id: int
+    comment: Optional[str] = None
+
+
+class AiTurnCommentResp(BaseResponse):
+    data: Optional[AiTurnCommentData] = None
 
 
 class AiTurnFeedbackResp(BaseResponse):
