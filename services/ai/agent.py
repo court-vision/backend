@@ -50,6 +50,11 @@ from services.ai.tools import AGENT_TOOL_NAMES, AGENT_TOOLS, ToolContext, list_m
 # Progress notes between tool calls come back as `thinking` blocks on Opus 5.5;
 # "updates" returns a short summary of each one and keeps the reasoning hidden.
 UPDATES_BETA = "thinking-display-updates-2026-08-18"
+# A replayed thinking block whose history no longer matches (the tools or the
+# prompt changed in a deploy since the conversation began) is dropped, and the
+# conversation carries on without that reasoning, instead of the turn failing.
+BINDING_BETA = "thinking-binding-controls-2026-08-01"
+THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
 TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE]
@@ -65,6 +70,12 @@ STATUS: dict[str, str] = {
     "get_free_agents": "Reading free agents",
     "get_game_log": "Reading box scores",
     "get_scheduled_pickups": "Reading your scheduled pickups",
+    "get_projections": "Reading projections",
+    "get_draft_market": "Reading the draft market",
+    "get_market_movement": "Reading draft market moves",
+    "get_schedule": "Reading the schedule",
+    "get_draft_rooms": "Reading your draft rooms",
+    "get_draft_room": "Reading the draft room",
     "show_table": "Building a table",
 }
 
@@ -156,10 +167,10 @@ async def _stream_call(turn: Turn, emit: Emitter, *, final: bool, messages: list
             system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
             tools=TOOLS,
             messages=messages,
-            thinking={"type": "adaptive", "display": "updates"},
+            thinking=THINKING,
             output_config={"effort": settings.ai_agent_effort},
             cache_control={"type": "ephemeral"},
-            betas=[FALLBACK_BETA, UPDATES_BETA],
+            betas=[FALLBACK_BETA, UPDATES_BETA, BINDING_BETA],
             fallbacks="default",
             **({"tool_choice": {"type": "none"}} if final else {}),
         ) as stream:
@@ -289,6 +300,9 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
     try:
         async with asyncio.timeout(settings.ai_agent_turn_timeout_seconds):
             for call in range(1, settings.ai_agent_max_model_calls + 1):
+                if call > 1:
+                    # A new step: whatever the last status said (a table, a lookup) is done
+                    emit("status", {"text": "Thinking", "kind": "step"})
                 final = (call == settings.ai_agent_max_model_calls
                          or len(turn.run.tool_calls) >= settings.ai_agent_max_tool_calls
                          or turn.cost >= round(settings.ai_agent_turn_max_usd * 1_000_000))
