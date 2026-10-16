@@ -5,7 +5,8 @@ the pool lookup a dict, the writer a queue of results/exceptions, and the
 audit repository functions in-memory fakes — the lineup editor's harness, with
 a pool.
 
-Covers the gates (disabled, not ESPN, blocked, stale), every validation reason,
+Covers the gates (disabled, not ESPN, blocked, stale), every validation reason
+(the lane holder and a pending scheduled pickup's drop included),
 the three writer failures, verified add-only / drop-only / both, the
 unverified re-read, and the verify-read failure that still settles the audit.
 """
@@ -64,10 +65,16 @@ def pool(pid=KAWHI, status="FREEAGENT", on_team=0, locked=False, name="Kawhi Leo
     return PoolEntry(pid, status, on_team, locked, name, team, until)
 
 
+def pickup(*, id=1, team_id=21, status="pending", drop=EDWARDS, add_name="Kawhi Leonard", nba_date=date(2026, 10, 22)):
+    """A usr.scheduled_pickups row as the repository returns it (day 2026-10-22 is a Thursday)."""
+    return SimpleNamespace(id=id, team_id=team_id, status=status, add_player_id=KAWHI, add_name=add_name,
+                           drop_player_id=drop, nba_date=nba_date)
+
+
 @pytest.fixture
 def harness(monkeypatch):
     h = SimpleNamespace(reads=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[], updates=[],
-                        lane_holder=None)
+                        lane_holder=None, pickups=[], scheduled_calls=[])
 
     async def fake_read(team_id, league_info, **kwargs):
         nxt = h.reads.pop(0)
@@ -97,11 +104,18 @@ def harness(monkeypatch):
     def audit_update(audit_id, status, *, provider_status=None, error=None):
         h.updates.append((audit_id, status, provider_status, error))
 
+    def scheduled_drop(team_id, player_id):
+        """The repository query in memory: the team's soonest pending pickup dropping the player."""
+        h.scheduled_calls.append((team_id, player_id))
+        rows = [r for r in h.pickups if r.team_id == team_id and r.status == "pending" and r.drop_player_id == player_id]
+        return min(rows, key=lambda r: (r.nba_date, r.id), default=None)
+
     monkeypatch.setattr(svc.LineupReadService, "read", staticmethod(fake_read))
     monkeypatch.setattr(svc.EspnService, "get_player_pool_entries", staticmethod(fake_pool))
     monkeypatch.setattr(fantasy_writer_client, "apply_transaction", fake_apply)
     monkeypatch.setattr(svc, "run_db", direct_run_db)
     monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_scheduled_drop", scheduled_drop)                # no pickups unless a test adds one
     monkeypatch.setattr(svc, "_audit_insert", audit_insert)
     monkeypatch.setattr(svc, "_audit_update", audit_update)
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
@@ -192,6 +206,48 @@ def test_the_player_a_stream_lane_holds_its_spot_with_cannot_be_dropped(harness)
     after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
     harness.reads = [state(board()), state(after, version="v2")]
     assert apply(req(add=KAWHI, drop=EDWARDS)).data.verified is True
+
+
+@pytest.mark.unit
+def test_a_drop_a_pending_scheduled_pickup_already_makes_is_refused(harness):
+    """That pickup would find him gone on its day. Drop-only and add+drop alike."""
+    harness.pickups = [pickup(id=2, add_name="Joel Embiid", nba_date=date(2026, 10, 24)), pickup()]
+    exc = _invalid(harness, req(drop=EDWARDS), "drop_is_scheduled", EDWARDS)
+    assert exc.message == ("Anthony Edwards is already being dropped for Kawhi Leonard on Thu Oct 22 — "
+                           "cancel that pickup to drop them now")                 # the soonest of the two
+    harness.pool = {EMBIID: pool(EMBIID, name="Joel Embiid", team="PHI")}
+    _invalid(harness, req(add=EMBIID, drop=EDWARDS), "drop_is_scheduled", EDWARDS)
+    assert harness.scheduled_calls == [(21, EDWARDS), (21, EDWARDS)]
+
+
+@pytest.mark.unit
+def test_a_lane_holder_is_refused_as_one_before_his_lanes_pickup(harness):
+    """A lane's switch is itself a pending pickup dropping the holder: the lane is what to stop."""
+    harness.lane_holder = EDWARDS
+    harness.pickups = [pickup()]
+    _invalid(harness, req(drop=EDWARDS), "drop_is_lane_holder", EDWARDS)
+    assert harness.scheduled_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("other", [
+    {"status": "executed"}, {"status": "skipped"}, {"status": "failed"}, {"status": "cancelled"},
+    {"status": "expired"}, {"drop": JOKIC}, {"drop": None}, {"team_id": 99},
+])
+def test_a_settled_pickup_or_one_dropping_someone_else_does_not_block(harness, other):
+    harness.pickups = [pickup(**other)]
+    harness.reads = [state(board()), state([player(JOKIC, "Nikola Jokic")], version="v2")]
+    resp = apply(req(drop=EDWARDS))
+    assert resp.data.verified is True and resp.data.dropped.name == "Anthony Edwards"
+    assert harness.scheduled_calls == [(21, EDWARDS)] and len(harness.writer_calls) == 1
+
+
+@pytest.mark.unit
+def test_an_add_alone_never_looks_for_scheduled_drops(harness):
+    harness.pickups = [pickup()]
+    harness.reads = [state(board()), state(board() + [player(KAWHI, "Kawhi Leonard", BE, team="LAC")], version="v2")]
+    harness.pool = {KAWHI: pool()}
+    assert apply(req(add=KAWHI)).data.verified is True and harness.scheduled_calls == []
 
 
 @pytest.mark.unit

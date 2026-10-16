@@ -154,6 +154,23 @@ def test_a_row_whose_write_is_out_is_claimed_once_past_the_budget_to_confirm_it(
                                                                             "in_progress")
 
 
+def test_a_manual_drop_finds_the_teams_soonest_pending_pickup_that_drops_him(user, team):
+    """roster_transaction_service._scheduled_drop, behind the desk's drop_is_scheduled refusal."""
+    from services import roster_transaction_service as txn
+    other = Team.create(user_id=user.user_id, team_identifier="1Other", league_info=json.dumps({"provider": "espn"}))
+    _pickup(user, team, add=1, status="executed")
+    _pickup(user, team, add=2, status="cancelled")
+    _pickup(user, team, add=3, drop=KAWHI)
+    _pickup(user, team, add=4, drop=None)
+    _pickup(user, other, add=5)
+    assert txn._scheduled_drop(team.team_id, EDWARDS) is None
+
+    _pickup(user, team, add=6, scoring_period_id=5, nba_date=DAY + timedelta(days=2))
+    soonest = _pickup(user, team, add=7, add_name="Joel Embiid")
+    found = txn._scheduled_drop(team.team_id, EDWARDS)
+    assert (found.id, found.add_name, found.nba_date) == (soonest.id, "Joel Embiid", DAY)
+
+
 def test_release_pushes_due_rows_without_counting_an_attempt(user, team):
     row = _pickup(user, team)
     assert svc._release_due(NOW, NOW + svc.RETRY) == 1
