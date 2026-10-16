@@ -219,13 +219,40 @@ class TestFanTeams:
         marked = {t.team_name: t.tracked_team_id for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked)}
         assert marked == {"Charlie": None, "Alpha": 7, "Bravo": None, "Delta": 9}
 
-    def test_a_team_saved_last_season_is_the_same_team(self):
+    def test_a_team_saved_last_season_is_the_one_to_move_not_tracking_the_renewal(self):
         """Court Vision's team identity is league + name, with no season: a team
-        saved for 2026 is the one ESPN now lists under the league's 2027 renewal,
-        and adding it again would only say it already exists."""
+        saved for 2026 is the one ESPN now lists under the league's 2027 renewal.
+        It does not track the renewal until it moves there, so the 2027 entry is
+        offered for adding (which moves it), marked with that team."""
         tracked = [(7, {"league_id": 1111111, "year": 2026, "team_name": "Alpha"})]
-        marked = {t.team_name: t.tracked_team_id for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked)}
-        assert marked["Alpha"] == 7
+        marked = {t.team_name: (t.tracked_team_id, t.previous_season_team_id)
+                  for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked)}
+        assert marked["Alpha"] == (None, 7)
+        assert marked["Bravo"] == (None, None)
+
+    def test_a_renamed_team_saved_last_season_is_matched_by_its_espn_id(self):
+        tracked = [(7, {"league_id": 1111111, "year": 2026, "team_name": "Old Alpha", "espn_team_id": 1})]
+        alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
+        assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (None, 7)
+
+    def test_a_team_already_moved_tracks_its_earlier_seasons_entry_too(self):
+        """Once the team is on 2027, last season's entry is not one to add."""
+        tracked = [(9, {"league_id": 3333333, "year": 2027, "team_name": "Delta"})]
+        delta = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Delta")
+        assert (delta.season, delta.tracked_team_id, delta.previous_season_team_id) == (2026, 9, None)
+
+    def test_the_team_on_the_entrys_season_wins_over_an_older_copy(self):
+        tracked = [
+            (7, {"league_id": 1111111, "year": 2026, "team_name": "Alpha"}),
+            (8, {"league_id": 1111111, "year": 2027, "team_name": "Alpha", "espn_team_id": 1}),
+        ]
+        alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
+        assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (8, None)
+
+    def test_a_team_with_no_stored_season_still_tracks(self):
+        tracked = [(7, {"league_id": 1111111, "team_name": "Alpha"})]
+        alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
+        assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (7, None)
 
 
 @pytest.fixture
