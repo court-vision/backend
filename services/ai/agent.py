@@ -76,6 +76,7 @@ STATUS: dict[str, str] = {
     "get_schedule": "Reading the schedule",
     "get_draft_rooms": "Reading your draft rooms",
     "get_draft_room": "Reading the draft room",
+    "query_stats": "Computing stats",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
 }

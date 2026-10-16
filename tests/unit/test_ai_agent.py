@@ -325,6 +325,37 @@ class TestTurn:
         assert row["outcome"] == "ok"  # a chart with no prose is still an answer
         assert row["parts"] == [{"kind": "block", "block": block}]
 
+    def test_stats_rows_chart_as_one_line_per_series_on_game_number(self, agent_on, recorded, monkeypatch):
+        rows = [{"player_id": pid, "name": name, "season": "2024-25", "season_type": "regular", "game_no": g,
+                 "date": f"2024-11-{g:02d}", "opponent": "X", "home": True, "fpts": 40 + g,
+                 "fpts_rm2": None if g < 2 else 40.0 + g - 0.5, "series": name}
+                for pid, name in ((1641705, "Victor Wembanyama"), (203999, "Nikola Jokic")) for g in (1, 2, 3)]
+        stats = {"grain": "game", "season_type": "regular", "seasons": ["2024-25"],
+                 "labels": {"fpts_rm2": "CV fantasy points, 2-game rolling mean"}, "rows": rows, "total_rows": 6,
+                 "note": "fpts is Court Vision's fantasy points formula, not the user's league scoring"}
+        calls = _tools(monkeypatch, {"query_stats": stats})
+        spec = {"players": [1641705, 203999], "grain": "game", "metrics": ["fpts"], "seasons": ["2024-25"],
+                "transform": {"rolling_mean": 2}}
+        _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "query_stats", spec)),
+            msg("tool_use", tool_use("tu2", "show_chart", {"result_ids": ["r1"], "kind": "line", "x": "game_no",
+                                                           "y": ["fpts_rm2"], "series_by": "series",
+                                                           "title": "2-game rolling CV FPTS"})),
+            msg("end_turn", text("Wemby ran ahead of Jokic all season.")),
+        ])
+
+        events = _run(_turn(message="Plot Wemby's 2 game moving average fpts against Jokic's for last season"))
+
+        assert calls[0][:2] == ("query_stats", spec)
+        assert ("status", {"text": "Computing stats", "kind": "tool", "tool": "query_stats"}) in events
+        block = next(e[1] for e in events if e[0] == "block")
+        assert block["kind"] == "line" and block["x"] == {"key": "game_no", "label": "Game"}
+        assert block["categories"] == ["1", "2", "3"]
+        assert block["series"] == [{"key": "Victor Wembanyama", "label": "Victor Wembanyama", "values": [None, 41.5, 42.5]},
+                                   {"key": "Nikola Jokic", "label": "Nikola Jokic", "values": [None, 41.5, 42.5]}]
+        assert block["tools"] == ["query_stats"]
+        assert recorded.rows[0]["outcome"] == "ok"
+
     def test_the_last_call_cannot_use_tools(self, agent_on, recorded, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_max_model_calls", 2)
         _tools(monkeypatch, {"get_matchup": MATCHUP})
@@ -583,6 +614,37 @@ class TestShowChart:
         shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v"], "title": "x"}, data, "c1")
         assert shown.block["categories"] == [f"p{i}" for i in range(12)]
         assert shown.block["series"][0]["values"] == list(range(12)) and shown.block["total_rows"] == 15
+
+    def test_a_line_holds_a_season_of_points_and_bars_stop_at_thirty(self):
+        data = {"r1": {"tool": "query_stats", "input": {}, "data": {"rows": [
+            {"game_no": g, "pts": g} for g in range(1, 121)]}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "game_no", "y": ["pts"], "title": "x"},
+                                   data, "c1")
+        assert len(shown.block["categories"]) == display.MAX_POINTS == 100
+        assert shown.block["categories"][:2] == ["21", "22"] and shown.block["total_rows"] == 120
+        with pytest.raises(display.DisplayError, match="at most 30 x values"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "game_no", "y": ["pts"], "limit": 31,
+                                "title": "x"}, data, "c1")
+        with pytest.raises(display.DisplayError, match="Invalid input"):
+            display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "game_no", "y": ["pts"], "limit": 101,
+                                "title": "x"}, data, "c1")
+
+    def test_a_result_s_own_labels_name_its_derived_columns(self):
+        data = {"r1": {"tool": "query_stats", "input": {}, "data": {
+            "labels": {"fpts_rm5": "CV fantasy points, 5-game rolling mean", "gp": 7},
+            "rows": [{"name": "A", "game_no": 1, "fpts": 50, "fpts_rm5": None, "gp": 1},
+                     {"name": "A", "game_no": 2, "fpts": 60, "fpts_rm5": 55.0, "gp": 2}]}}}
+        table = display.show_table({"result_ids": ["r1"], "columns": ["name", "game_no", "fpts", "fpts_rm5", "gp"],
+                                    "title": "x"}, data, "t1")
+        assert [c["label"] for c in table.block["columns"]] == [
+            "Player", "Game", "CV FPTS", "CV fantasy points, 5-game rolling mean", "GP"]  # a non-string label is ignored
+        chart = display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "game_no", "y": ["fpts_rm5"], "title": "x"},
+                                   data, "c1")
+        assert chart.block["x"] == {"key": "game_no", "label": "Game"}
+        assert chart.block["series"][0]["label"] == "CV fantasy points, 5-game rolling mean"
+        assert chart.block["series"][0]["values"] == [None, 55.0]
+        assert chart.summary == ("Shown to the user as chart c1: line chart of CV fantasy points, 5-game rolling mean "
+                                 "over 2 x values.")
 
     def test_text_columns_single_points_and_too_many_series_are_refused(self):
         with pytest.raises(display.DisplayError, match="'injury' is not a numeric column"):
