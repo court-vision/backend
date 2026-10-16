@@ -184,6 +184,16 @@ database is the `Postgres-ZxBc` service (staging environment); the `Postgres` se
 is production. Local dev writes real rows and applies pending migrations on startup,
 so the two must not be confused.
 
+#### Database roles (`ops/roles.sql`)
+
+The backend connects as the database owner. One more role exists beside it:
+`ask_reader`, which the AI agent's `query_stats` tool reads on (SELECT on the two
+`nba.ask_*` views only, read-only transactions, a 2 s statement timeout). Create it
+once per database as a superuser with `psql "$DATABASE_URL" -f ops/roles.sql` (it
+prompts for the password and never stores it), then set `ASK_READER_DATABASE_URL`
+on the service. Migrations grant the views to the role when it exists, so a
+database without it still migrates, and the tool falls back to the main pool.
+
 ### 4. Start the server
 
 ```bash
@@ -217,6 +227,7 @@ refused.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection URL (`postgresql://user:pass@host/dbname`). Read from `.env` or the environment; use the **dev** database locally (Railway `Postgres-ZxBc`), never production |
+| `ASK_READER_DATABASE_URL` | No | — | Same database as `DATABASE_URL`, connected as the read-only `ask_reader` role (`ops/roles.sql`) for the AI agent's `query_stats` tool. Unset, the tool runs on the main pool in a read-only transaction with the same 2 s timeout and logs that once |
 | `CLERK_JWKS_URL` | Yes | — | Clerk JWKS endpoint (`https://<your-clerk-api>.clerk.accounts.dev/.well-known/jwks.json`) |
 | `CLERK_SECRET_KEY` | Yes | — | Clerk Backend API secret key (`sk_...`) |
 | `PIPELINE_API_TOKEN` | Yes | — | Shared bearer token for service-to-service calls (not used by user routes) |

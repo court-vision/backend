@@ -7,4 +7,5 @@ services, never by computing from a context dump (docs/AI_LAYER_PLAN.md).
     prompts.py  the system prompt, a byte-stable constant
     client.py   the Anthropic client
     service.py  the bounded tool loop behind POST /v1/internal/ai/ask
+    stats/      the metric catalog and read-only reader behind query_stats
 """
