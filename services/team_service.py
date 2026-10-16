@@ -9,6 +9,7 @@ YahooService untouched (403 PROVIDER_AUTH_EXPIRED, 400 LEAGUE_NOT_FOUND,
 """
 
 import json
+from typing import NamedTuple
 
 from peewee import JOIN
 
@@ -20,11 +21,28 @@ from schemas.common import ApiStatus, LeagueInfo, LeagueInfoPublic, FantasyProvi
 from schemas.espn import ValidateLeagueResp
 from schemas.team import TeamGetResp, TeamAddResp, TeamRemoveResp, TeamUpdateResp, TeamResponse, TeamViewResp
 from services import credential_service
+from services.espn_team_match import find_espn_team
 from services.league_service import LeagueService
 from services.providers import get_provider_adapter
 from schemas.common import ProviderCapabilitiesResp
 
 LEAGUE_VALIDATION_FAILED = "LEAGUE_VALIDATION_FAILED"
+
+
+class SavedTeam(NamedTuple):
+    """What `_create_or_find` did: found the team, created it, or moved it to a new season."""
+    team_id: int
+    created: bool
+    has_league: bool
+    # The season the team was on before it moved to the requested one
+    moved_from_season: int | None = None
+
+
+def _season_of(info: dict) -> int | None:
+    try:
+        return int(info.get("year"))
+    except (TypeError, ValueError):
+        return None
 
 
 class TeamService:
@@ -139,17 +157,96 @@ class TeamService:
     # ---- CRUD -----------------------------------------------------------------
 
     @staticmethod
-    def _create_or_find(user_id: int, team_identifier: str, league_info: LeagueInfo) -> tuple[int, bool, bool]:
+    def _create_or_find(
+        user_id: int, team_identifier: str, league_info: LeagueInfo, league_teams: list[dict] | None = None,
+    ) -> SavedTeam:
+        """The user's team for `league_info`: the one already saved, or a new one.
+
+        A team saved for an earlier season of the same ESPN league is the same
+        team -- ESPN renews a league under the same id and team ids -- so it
+        moves to this season instead of answering with last season's league.
+        `league_teams` (the league's `teams` in this season's payload) lets a
+        team saved before its ESPN id was known be recognized after a rename.
+        """
         with db.atomic():
-            existing = Team.get_or_none(
-                (Team.user_id == user_id) & (Team.team_identifier == team_identifier)
-            )
+            existing = TeamService._saved_copy(user_id, team_identifier, league_info, league_teams)
             if existing is not None:
-                return existing.team_id, True, existing.league_id is not None
+                stored = json.loads(existing.league_info)
+                season = _season_of(stored)
+                if league_info.provider == FantasyProvider.ESPN and season is not None and season < int(league_info.year):
+                    TeamService._move_to_season(user_id, existing, stored, team_identifier, league_info)
+                    return SavedTeam(existing.team_id, created=False, has_league=False, moved_from_season=season)
+                return SavedTeam(existing.team_id, created=False, has_league=existing.league_id is not None)
             serialized = TeamService.serialize_league_info(league_info)
             team = Team.create(user_id=user_id, team_identifier=team_identifier, league_info=serialized)
             credential_service.persist(user_id, team, json.loads(serialized))
-            return team.team_id, False, False
+            return SavedTeam(team.team_id, created=True, has_league=False)
+
+    @staticmethod
+    def _saved_copy(
+        user_id: int, team_identifier: str, league_info: LeagueInfo, league_teams: list[dict] | None,
+    ) -> Team | None:
+        """The user's saved team that is this one: by identifier (league + name),
+        else, for ESPN, by ESPN's team id in the same league, any season."""
+        existing = Team.get_or_none((Team.user_id == user_id) & (Team.team_identifier == team_identifier))
+        if league_info.provider != FantasyProvider.ESPN or league_info.espn_team_id is None:
+            return existing
+        if existing is not None:
+            # The same name on a different ESPN team (a leaguemate took it) is not this team
+            known = json.loads(existing.league_info).get("espn_team_id")
+            if known is None or int(known) == int(league_info.espn_team_id):
+                return existing
+        same_league = []
+        for team in Team.select().where(Team.user_id == user_id).order_by(Team.team_id):
+            stored = json.loads(team.league_info)
+            if stored.get("provider", "espn") == "espn" and str(stored.get("league_id")) == str(league_info.league_id):
+                same_league.append((team, stored))
+        # The newest season first: it is the one to move or to answer with
+        same_league.sort(key=lambda pair: _season_of(pair[1]) or 0, reverse=True)
+        for team, stored in same_league:
+            if TeamService._is_espn_team(stored, league_info, league_teams):
+                return team
+        return None
+
+    @staticmethod
+    def _is_espn_team(stored: dict, league_info: LeagueInfo, league_teams: list[dict] | None) -> bool:
+        """Whether a saved ESPN team (same league) is the ESPN team `league_info` resolved to.
+
+        By the stored ESPN team id when one was learned. Otherwise the stored
+        team is looked up in this season's teams the way every read finds it
+        (find_espn_team: its name, else the one team the SWID owns), which is
+        what recognizes a team renamed before its id was learned.
+        """
+        stored_id = stored.get("espn_team_id")
+        if stored_id is not None:
+            return int(stored_id) == int(league_info.espn_team_id)
+        if not league_teams:
+            return False
+        found = find_espn_team(league_teams, team_name=stored.get("team_name"), swid=league_info.swid)
+        return found is not None and found.get("id") == int(league_info.espn_team_id)
+
+    @staticmethod
+    def _move_to_season(user_id: int, team: Team, stored: dict, team_identifier: str, league_info: LeagueInfo) -> None:
+        """Rewrite a saved team as `league_info`'s season of it, keeping what the add does not carry.
+
+        The league link is cleared: it is last season's league, and the
+        caller's sync links this season's.
+        """
+        data = json.loads(TeamService.serialize_league_info(league_info))
+        for field in credential_service.ALL_SECRET_FIELDS:
+            if not data.get(field) and stored.get(field):
+                data[field] = stored[field]
+        if data.get("league_name") in (None, "", "N/A") and stored.get("league_name"):
+            data["league_name"] = stored["league_name"]
+        if data.get("scoring_preview") is None and stored.get("scoring_preview"):
+            data["scoring_preview"] = stored["scoring_preview"]
+        team.league_info = json.dumps(data)
+        team.team_identifier = team_identifier
+        team.league = None
+        team.save(only=[Team.league_info, Team.team_identifier, Team.league])
+        credential_service.persist(user_id, team, data)
+        get_logger().info("team_moved_to_season", team_id=team.team_id,
+                          from_season=_season_of(stored), to_season=int(league_info.year))
 
     @staticmethod
     def _response_for(team_id: int, league_info: LeagueInfo) -> TeamResponse:
@@ -164,7 +261,10 @@ class TeamService:
             if team is None:
                 raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
             team.league_info = serialized
-            team.save(only=[Team.league_info])
+            # The identifier follows the league and the name ESPN answered with,
+            # or adding the team again would not find it
+            team.team_identifier = str(league_info.league_id) + league_info.team_name
+            team.save(only=[Team.league_info, Team.team_identifier])
             credential_service.persist(user_id, team, json.loads(serialized))
 
     @staticmethod
@@ -260,19 +360,25 @@ class TeamService:
             if not validation_result.valid:
                 raise TeamService._rejected(validation_result)
         team_identifier = str(league_info.league_id) + league_info.team_name
-        team_id, already_exists, has_league = await run_db(
+        saved = await run_db(
             "teams.create_or_find", TeamService._create_or_find,
-            user_id, team_identifier, league_info,
+            user_id, team_identifier, league_info, (validation_result.league_payload or {}).get("teams"),
         )
-        if not has_league:
-            await LeagueService.sync_for_team(team_id, league_info, espn_payload=validation_result.league_payload)
-        response = await run_db("teams.response", TeamService._response_for, team_id, league_info)
+        if not saved.has_league:
+            await LeagueService.sync_for_team(saved.team_id, league_info, espn_payload=validation_result.league_payload)
+        response = await run_db("teams.response", TeamService._response_for, saved.team_id, league_info)
+        already_exists = not saved.created and saved.moved_from_season is None
+        if saved.moved_from_season is not None:
+            message = f"Team moved from season {saved.moved_from_season} to {league_info.year}"
+        else:
+            message = "Team already exists" if already_exists else "Team added successfully"
         return TeamAddResp(
             status=ApiStatus.SUCCESS,
-            message="Team already exists" if already_exists else "Team added successfully",
+            message=message,
             data=response,
-            team_id=team_id,
+            team_id=saved.team_id,
             already_exists=already_exists,
+            moved_from_season=saved.moved_from_season,
         )
 
     @staticmethod
