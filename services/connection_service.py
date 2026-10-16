@@ -263,13 +263,12 @@ def _mark_tracked(teams: list[EspnAccountTeam], tracked: list[tuple[int, dict]])
             index.setdefault(key, []).append((team_id, _season_of(info)))
     marked = []
     for team in teams:
-        # One group per key, ESPN's id before the name: a later group is only a fallback
-        groups = [index.get(key, []) for key in _team_keys(team.league_id, team.espn_team_id, team.team_name)]
-        current = next((team_id for group in groups for team_id, season in group
-                        if season is None or season >= team.season), None)
-        earlier = next((max(older)[1] for group in groups
-                        if (older := [(season, team_id) for team_id, season in group
-                                      if season is not None and season < team.season])), None)
+        # ESPN's id before the name: the name is only the fallback when no saved team has the id
+        keys = _team_keys(team.league_id, team.espn_team_id, team.team_name)
+        group = next((group for group in (index.get(key) for key in keys) if group), [])
+        current = next((team_id for team_id, season in group if season is None or season >= team.season), None)
+        older = [(season, team_id) for team_id, season in group if season is not None and season < team.season]
+        earlier = max(older)[1] if older else None
         marked.append(team.model_copy(update={
             "tracked_team_id": current,
             "previous_season_team_id": earlier if current is None else None,

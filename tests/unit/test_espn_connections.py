@@ -244,6 +244,16 @@ class TestFanTeams:
         alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
         assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (None, 7)
 
+    def test_a_newer_team_that_only_shares_the_name_does_not_track_the_entry(self):
+        """The name is only the fallback: last season's team with the entry's ESPN
+        id is the one to roll over, not this season's team of another ESPN id."""
+        tracked = [
+            (7, {"league_id": 1111111, "year": 2026, "team_name": "Was Alpha", "espn_team_id": 1}),
+            (8, {"league_id": 1111111, "year": 2027, "team_name": "Alpha", "espn_team_id": 5}),
+        ]
+        alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
+        assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (None, 7)
+
     def test_a_team_already_moved_tracks_its_earlier_seasons_entry_too(self):
         """Once the team is on 2027, last season's entry is not one to add."""
         tracked = [(9, {"league_id": 3333333, "year": 2027, "team_name": "Delta"})]
