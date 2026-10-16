@@ -7,7 +7,7 @@ What is pinned here is the envelope, not answer quality:
 - history is replayed verbatim and only a finished turn becomes history;
 - the turn's bounds (model calls, tool calls, its spend ceiling) hold, and the
   last call can't use tools;
-- tables are built from stored results, never from model-typed values;
+- tables and charts are built from stored results, never from model-typed values;
 - every turn is written and priced, failed or not, and the stream always ends
   with `done`;
 - access, the claim and the monthly caps run before any model call, and a
@@ -301,6 +301,30 @@ class TestTurn:
         assert refused["is_error"] is True and "No column 'blocks'" in refused["content"]
         assert "block" not in _names(events)
 
+    def test_a_chart_is_drawn_from_stored_results_and_counts_as_an_answer(self, agent_on, recorded, monkeypatch):
+        _tools(monkeypatch, {"get_matchup": MATCHUP})
+        fake = _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "get_matchup", {"team_id": 22})),
+            msg("tool_use", tool_use("tu2", "show_chart", {"result_ids": ["r1"], "rows": "your_roster", "kind": "bar",
+                                                           "x": "name", "y": ["avg_value"], "sort_by": "avg_value",
+                                                           "title": "Your bigs"})),
+            msg("end_turn"),
+        ])
+
+        events = _run(_turn())
+
+        block = next(e[1] for e in events if e[0] == "block")
+        assert block["type"] == "chart" and block["id"] == "c1" and block["kind"] == "bar"
+        assert block["categories"] == ["Walker Kessler", "Jalen Duren"]
+        assert block["series"] == [{"key": "avg_value", "label": "Avg", "values": [2.4, 1.8]}]
+        assert block["tools"] == ["get_matchup"] and block["result_ids"] == ["r1"]
+        assert ("status", {"text": "Drawing a chart", "kind": "tool", "tool": "show_chart"}) in events
+        shown = fake.calls[2]["messages"][-1]["content"][0]
+        assert shown["content"] == "Shown to the user as chart c1: bar chart of Avg over 2 x values."
+        row = recorded.rows[0]
+        assert row["outcome"] == "ok"  # a chart with no prose is still an answer
+        assert row["parts"] == [{"kind": "block", "block": block}]
+
     def test_the_last_call_cannot_use_tools(self, agent_on, recorded, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_max_model_calls", 2)
         _tools(monkeypatch, {"get_matchup": MATCHUP})
@@ -475,6 +499,114 @@ class TestShowTable:
         data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"name": "A", "you": {"score": 1}}]}}}
         with pytest.raises(display.DisplayError, match="not a simple column"):
             display.show_table({"result_ids": ["r1"], "columns": ["you"], "title": "x"}, data, "t1")
+
+
+@pytest.mark.unit
+class TestShowChart:
+    def test_bars_copy_values_in_sorted_order_and_keep_gaps(self):
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "name", "y": ["avg_value_last_7"],
+                                    "sort_by": "avg_value_last_7", "title": "FA"}, RESULTS, "c1")
+        assert shown.block["categories"] == ["C", "A", "B"]
+        assert shown.block["series"] == [{"key": "avg_value_last_7", "label": "Avg L7", "values": [3.0, 1.0, None]}]
+        assert shown.block["x"] == {"key": "name", "label": "Player"}
+        assert shown.block["total_rows"] == 3 and shown.block["tools"] == ["get_free_agents"]
+        assert shown.summary == "Shown to the user as chart c1: bar chart of Avg L7 over 3 x values."
+
+    def test_a_line_runs_in_x_order_with_one_series_per_player(self):
+        shown = display.show_chart({"result_ids": ["r2", "r3"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["blk"], "series_by": "name", "title": "Blocks"}, RESULTS, "c1")
+        assert shown.block["categories"] == ["2026-10-19", "2026-10-21"]
+        assert shown.block["series"] == [{"key": "A", "label": "A", "values": [1, 3]},
+                                         {"key": "C", "label": "C", "values": [None, 4]}]
+        assert shown.block["tools"] == ["get_game_log"] and shown.block["total_rows"] == 2
+        assert shown.summary == "Shown to the user as chart c1: line chart of A, C over 2 x values."
+
+    def test_a_line_per_player_keeps_the_latest_dates_and_counts_them(self):
+        data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": f"2026-10-{d:02d}", "pts": d} for d in (1, 2, 3)]}},
+                "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "B", "games": [
+            {"date": f"2026-10-{d:02d}", "pts": d * 2} for d in (2, 3, 4)]}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "limit": 2, "title": "x"}, data, "c1")
+        assert shown.block["categories"] == ["2026-10-03", "2026-10-04"]
+        assert [s["values"] for s in shown.block["series"]] == [[3, None], [6, 8]]
+        assert shown.block["total_rows"] == 4
+        assert shown.summary == "Shown to the user as chart c1: line chart of A, B over 2 of 4 x values."
+
+    def test_a_line_keeps_its_latest_points(self):
+        data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": f"2026-10-{d:02d}", "pts": d} for d in (7, 3, 1, 5, 6, 2, 4)]}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "date", "y": ["pts"], "limit": 3,
+                                    "title": "Points"}, data, "c1")
+        assert shown.block["categories"] == ["2026-10-05", "2026-10-06", "2026-10-07"]
+        assert shown.block["series"][0]["values"] == [5, 6, 7]
+        assert shown.summary == "Shown to the user as chart c1: line chart of PTS over 3 of 7 x values."
+
+    def test_a_series_with_no_values_is_left_out_and_the_model_is_told(self):
+        data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": "a", "v": 1, "w": None},
+                                                                   {"n": "b", "v": 2, "w": None}]}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v", "w"], "title": "x"},
+                                   data, "c1")
+        assert [s["key"] for s in shown.block["series"]] == ["v"]
+        assert shown.summary == "Shown to the user as chart c1: bar chart of v over 2 x values. Left out, no values: w."
+        # With series_by, a player whose games all fall before the kept points is left out the same way
+        logs = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": "2026-10-01", "pts": 1}, {"date": "2026-10-02", "pts": 2}]}},
+                "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "B", "games": [
+            {"date": "2026-10-03", "pts": 3}, {"date": "2026-10-04", "pts": 4}]}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "limit": 2, "title": "x"}, logs, "c1")
+        assert shown.block["series"] == [{"key": "B", "label": "B", "values": [3, 4]}]
+        assert shown.summary == ("Shown to the user as chart c1: line chart of B over 2 of 4 x values. "
+                                 "Left out, no values: A.")
+
+    def test_a_line_drops_rows_without_a_date_and_overlapping_results_must_agree(self):
+        games = [{"date": None, "pts": 9}, {"date": "2026-10-02", "pts": 2}, {"date": "2026-10-01", "pts": 1}]
+        data = {"r1": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": games}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "line", "x": "date", "y": ["pts"], "title": "x"},
+                                   data, "c1")
+        assert shown.block["categories"] == ["2026-10-01", "2026-10-02"] and shown.block["total_rows"] == 2
+        assert shown.block["series"][0]["values"] == [1, 2]
+        # The same games fetched twice (two lookups for one player) agree, so they chart once
+        same = {**data, "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": list(games)}}}
+        shown = display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                    "y": ["pts"], "series_by": "name", "title": "x"}, same, "c1")
+        assert shown.block["series"] == [{"key": "A", "label": "A", "values": [1, 2]}]
+        differ = {**data, "r2": {"tool": "get_game_log", "input": {}, "data": {"name": "A", "games": [
+            {"date": "2026-10-02", "pts": 5}]}}}
+        with pytest.raises(display.DisplayError, match="A has two different pts values at date 2026-10-02"):
+            display.show_chart({"result_ids": ["r1", "r2"], "rows": "games", "kind": "line", "x": "date",
+                                "y": ["pts"], "series_by": "name", "title": "x"}, differ, "c1")
+
+    def test_bars_default_to_the_first_twelve_in_lookup_order(self):
+        data = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": f"p{i}", "v": i} for i in range(15)]}}}
+        shown = display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v"], "title": "x"}, data, "c1")
+        assert shown.block["categories"] == [f"p{i}" for i in range(12)]
+        assert shown.block["series"][0]["values"] == list(range(12)) and shown.block["total_rows"] == 15
+
+    def test_text_columns_single_points_and_too_many_series_are_refused(self):
+        with pytest.raises(display.DisplayError, match="'injury' is not a numeric column"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "name", "y": ["injury"], "title": "x"},
+                               RESULTS, "c1")
+        with pytest.raises(display.DisplayError, match="at least two x values"):
+            display.show_chart({"result_ids": ["r3"], "rows": "games", "kind": "line", "x": "date", "y": ["blk"],
+                                "title": "x"}, RESULTS, "c1")
+        with pytest.raises(display.DisplayError, match="y is exactly one column"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "name", "y": ["avg_value_last_7", "player_id"],
+                                "series_by": "name", "title": "x"}, RESULTS, "c1")
+        with pytest.raises(display.DisplayError, match="No column 'pts'"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "name", "y": ["pts"], "title": "x"},
+                               RESULTS, "c1")
+        many = {"r1": {"tool": "x", "input": {}, "data": {"rows": [
+            {"g": str(i), "d": "a", "v": i} for i in range(5)] + [{"g": "0", "d": "b", "v": 1}]}}}
+        with pytest.raises(display.DisplayError, match="at most 4 series"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "d", "y": ["v"], "series_by": "g",
+                                "title": "x"}, many, "c1")
+        empty = {"r1": {"tool": "x", "input": {}, "data": {"rows": [{"n": "a", "v": None}, {"n": "b", "v": None}]}}}
+        with pytest.raises(display.DisplayError, match="no values to chart"):
+            display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v"], "title": "x"}, empty, "c1")
+        with pytest.raises(display.DisplayError, match="Invalid input"):
+            display.show_chart({"result_ids": ["r1"], "kind": "pie", "x": "name", "y": ["v"], "title": "x"}, RESULTS, "c1")
 
 
 # ---- spend ----

@@ -211,6 +211,35 @@ class AiTable(ApiModel):
     total_rows: int = Field(..., description="Rows before the table's limit")
 
 
+class AiChartAxis(ApiModel):
+    key: str
+    label: str
+
+
+class AiChartSeries(ApiModel):
+    key: str
+    label: str
+    values: list[Optional[float]] = Field(..., description="One value per category, in order; null is a gap")
+
+
+class AiChart(ApiModel):
+    """A bar or line chart the server built from the agent's tool results; the model never types its values."""
+
+    type: Literal["chart"] = "chart"
+    id: str = Field(..., description="Unique within its turn, e.g. 'c1'")
+    title: str
+    kind: Literal["bar", "line"]
+    result_ids: list[str] = Field(..., description="The tool results the values were copied from")
+    tools: list[str] = Field(..., description="The lookups behind those results")
+    x: AiChartAxis = Field(..., description="The column along the x axis")
+    categories: list[str] = Field(..., description="The x values, in drawing order")
+    series: list[AiChartSeries] = Field(..., min_length=1, max_length=4)
+    total_rows: int = Field(..., description="X values before the chart's limit")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart], Field(discriminator="type")]
+
+
 class AiTextPart(ApiModel):
     kind: Literal["text"] = "text"
     text: str
@@ -218,7 +247,7 @@ class AiTextPart(ApiModel):
 
 class AiBlockPart(ApiModel):
     kind: Literal["block"] = "block"
-    block: AiTable
+    block: AiBlock
 
 
 AiPart = Annotated[Union[AiTextPart, AiBlockPart], Field(discriminator="kind")]

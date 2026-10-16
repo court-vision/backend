@@ -13,8 +13,8 @@ A turn is the router's bounded loop grown up:
   `ai_agent_turn_max_usd` its next call is its last. The last call is made with
   `tool_choice: none`, so a turn always ends in an answer.
 - **Streaming.** Prose streams as the model writes it; tool calls and the
-  model's progress notes become status lines; display tools become blocks once
-  the server has built them. Events go on a queue the route drains as SSE.
+  model's progress notes become status lines; display tools become blocks (a
+  table or a chart) once the server has built them. Events go on a queue the route drains as SSE.
 - **Detached.** The turn runs in its own task. A client that disconnects stops
   hearing it, not running it: the tokens are already being spent, and the turn
   must still be written so the conversation stays whole.
@@ -42,7 +42,7 @@ from core.settings import settings
 from schemas.ai import AiToolCall
 from services.ai import conversations, spend
 from services.ai.client import get_client
-from services.ai.display import DISPLAY_TOOL_NAMES, SHOW_TABLE, DisplayError, show_table
+from services.ai.display import DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_TABLE, DisplayError, show_chart, show_table
 from services.ai.prompts import AGENT_PROMPT
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
 from services.ai.tools import AGENT_TOOL_NAMES, AGENT_TOOLS, ToolContext, list_my_teams, run_tool
@@ -57,7 +57,7 @@ BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
-TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE]
+TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART]
 ALLOWED = AGENT_TOOL_NAMES
 
 # What the user sees while a tool runs
@@ -77,6 +77,7 @@ STATUS: dict[str, str] = {
     "get_draft_rooms": "Reading your draft rooms",
     "get_draft_room": "Reading the draft room",
     "show_table": "Building a table",
+    "show_chart": "Drawing a chart",
 }
 
 
@@ -97,6 +98,7 @@ class Turn:
     cost: int = 0
     context_tokens: int = 0
     tables: int = 0
+    charts: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -200,11 +202,18 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
     name, raw = block.name, block.input
     emit("status", {"text": STATUS.get(name, "Working"), "kind": "tool", "tool": name})
     if name in DISPLAY_TOOL_NAMES:
+        chart = name == SHOW_CHART["name"]
         try:
-            shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")
+            if chart:
+                shown = show_chart(raw, turn.all_results(), f"c{turn.charts + 1}")
+            else:
+                shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")
         except DisplayError as exc:
             return {"type": "tool_result", "tool_use_id": block.id, "content": str(exc), "is_error": True}
-        turn.tables += 1
+        if chart:
+            turn.charts += 1
+        else:
+            turn.tables += 1
         turn.parts.append({"kind": "block", "block": shown.block})
         emit("block", shown.block)
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
@@ -332,7 +341,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 if final or response.stop_reason != "tool_use" or not tool_uses:
                     break
                 turn.messages.append({"role": "user", "content": await _run_tools(turn, tool_uses, emit)})
-        if not turn.answer_text().strip() and not turn.tables:
+        if not turn.answer_text().strip() and not turn.tables and not turn.charts:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
         ungrounded = ungrounded_numbers(
             turn.answer_text(),
@@ -435,6 +444,7 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         tool_calls=[call.name for call in run.tool_calls],
         tool_errors=sum(call.is_error for call in run.tool_calls),
         tables=turn.tables,
+        charts=turn.charts,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
         cache_read_input_tokens=run.cache_read_input_tokens,
