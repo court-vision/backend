@@ -381,6 +381,15 @@ class TestRunQueryStats:
         out = ask(reader, players=[JOKIC], grain="season", metrics=["pts"], where={"home": False})
         assert out["rows"] == [] and out["note"] == f"No regular games for player_id {JOKIC}"
 
+    def test_a_mean_runs_from_the_season_s_start_whatever_the_window(self, reader):
+        out = ask(reader, players=[JOKIC], grain="game", metrics=["pts"], transform={"cumulative_mean": True},
+                  window={"from": "2025-10-27"})
+        # Games 3 and 4 come back, and their means still count games 1 and 2 (30, 25, 14, 28 points)
+        assert [(r["game_no"], r["pts_cum"]) for r in out["rows"]] == [(3, 23.0), (4, 24.3)]
+        out = ask(reader, players=[JOKIC], grain="game", metrics=["pts"], transform={"rolling_mean": 2},
+                  window={"last_days": 60})
+        assert [(r["game_no"], r["pts_rm2"]) for r in out["rows"]] == [(4, 21.0)]
+
     def test_the_best_stretch_ranks_games_by_the_transform_column(self, reader):
         out = ask(reader, players=[JOKIC], grain="game", metrics=["fpts"], transform={"rolling_mean": 2},
                   rank={"by": "fpts_rm2", "top": 1})

@@ -269,14 +269,19 @@ def _rounded(metric: Metric, expr: str, *, averaged: bool) -> str:
 def _agg_label(metric: Metric, agg: str) -> str:
     base = metric_label(metric.name)
     if metric.kind != "count":
-        return base if agg != "max" else f"{base}, best game"
+        # A rate over a group of games is makes over attempts whatever the agg
+        # (catalog.Metric.agg_sql): "best single-game FG%" would crown a
+        # 1-for-1 night, so the tool does not offer it. Season figures are
+        # read as they are.
+        return base
     return {"per_game": f"{base} per game", "total": f"{base}, total", "max": f"{base}, best game",
             "count_games": f"{base} per game"}[agg]
 
 
-def _game_filters(spec: StatsSpec, seasons: Optional[list[str]], today: date) -> tuple[list[str], list[Any]]:
+def _base_filters(spec: StatsSpec, seasons: Optional[list[str]], *, min_minutes: int) -> tuple[list[str], list[Any]]:
+    """The rows a statement starts from: the players' played games of the seasons and season type."""
     conds: list[str] = ["min >= %s"]
-    params: list[Any] = [spec.where.min_minutes if spec.where else 1]
+    params: list[Any] = [min_minutes]
     if spec.players:
         conds.append("player_id = ANY(%s)")
         params.append(list(spec.players))
@@ -286,6 +291,13 @@ def _game_filters(spec: StatsSpec, seasons: Optional[list[str]], today: date) ->
     if spec.season_type != "all":
         conds.append("season_type = %s")
         params.append(spec.season_type)
+    return conds, params
+
+
+def _narrowing_filters(spec: StatsSpec, today: date) -> tuple[list[str], list[Any]]:
+    """The window's dates and the `where` filters: which of those rows count."""
+    conds: list[str] = []
+    params: list[Any] = []
     w = spec.window
     if w is not None:
         if w.last_days is not None:
@@ -310,6 +322,13 @@ def _game_filters(spec: StatsSpec, seasons: Optional[list[str]], today: date) ->
     return conds, params
 
 
+def _game_filters(spec: StatsSpec, seasons: Optional[list[str]], today: date) -> tuple[list[str], list[Any]]:
+    """Every filter in one WHERE: the rows a group, or a plain game list, is built from."""
+    conds, params = _base_filters(spec, seasons, min_minutes=spec.where.min_minutes if spec.where else 1)
+    more, more_params = _narrowing_filters(spec, today)
+    return conds + more, params + more_params
+
+
 def _last_games(spec: StatsSpec, inner: str, columns: list[str], params: list[Any]) -> str:
     """Wrap a game-row selection to keep each player's last N games of it."""
     n = spec.window.last_games if spec.window else None
@@ -321,13 +340,16 @@ def _last_games(spec: StatsSpec, inner: str, columns: list[str], params: list[An
 
 
 def _compile_game(spec: StatsSpec, seasons: Optional[list[str]], today: date) -> Compiled:
-    conds, params = _game_filters(spec, seasons, today)
-    selects = list(GAME_ROW_COLUMNS)
+    transformed = spec.transform is not None
+    # With a transform the first select keeps every view column (the filters
+    # below need them) and adds the derived ones; without, it selects the output.
+    selects = ["*"] if transformed else list(GAME_ROW_COLUMNS)
     columns = list(GAME_ROW_COLUMNS)
     labels: dict[str, str] = {}
     for name in spec.metrics:
         m = METRICS[name]
-        selects.append(f"{_rounded(m, m.game_sql(), averaged=False)} AS {name}")
+        if not transformed or m.kind == "rate":
+            selects.append(f"{_rounded(m, m.game_sql(), averaged=False)} AS {name}")
         columns.append(name)
         if spec.transform is not None:
             k = spec.transform.rolling_mean
@@ -341,7 +363,23 @@ def _compile_game(spec: StatsSpec, seasons: Optional[list[str]], today: date) ->
             selects.append(f"{expr} AS {col}")
             columns.append(col)
             labels[col] = metric_label(name, rolling=k, cumulative=not k)
-    inner = f"SELECT {', '.join(selects)} FROM {GAMES_VIEW} WHERE {' AND '.join(conds)}"
+    if not transformed:
+        conds, params = _game_filters(spec, seasons, today)
+        inner = f"SELECT {', '.join(selects)} FROM {GAMES_VIEW} WHERE {' AND '.join(conds)}"
+    else:
+        # A mean runs over every game the player played that season, in order;
+        # the window's dates and the where filters then choose which of those
+        # rows come back, so a cumulative mean in November still starts at
+        # opening night and a rolling mean's first rows are not null.
+        base, params = _base_filters(spec, seasons, min_minutes=1)
+        inner = f"SELECT {', '.join(selects)} FROM {GAMES_VIEW} WHERE {' AND '.join(base)}"
+        narrowing, more = _narrowing_filters(spec, today)
+        if spec.where is not None and spec.where.min_minutes > 1:
+            narrowing.append("min >= %s")
+            more.append(spec.where.min_minutes)
+        if narrowing:
+            params += more
+            inner = f"SELECT {', '.join(columns)} FROM ({inner}) f WHERE {' AND '.join(narrowing)}"
     body = _last_games(spec, inner, columns, params)
     if spec.rank is not None:
         order = f"{spec.rank.by} {spec.rank.order.upper()} NULLS LAST, date"

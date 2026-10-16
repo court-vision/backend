@@ -978,7 +978,8 @@ AGENT_STATS_TOOLS: list[dict[str, Any]] = [
                 "agg": {
                     "type": "string", "enum": ["per_game", "total", "max", "count_games"],
                     "description": "For grain total or season: per_game (default), total, max (the best single "
-                                   "game), or count_games (how many games passed where, as gp; rank by gp)",
+                                   "game; a rate stays makes over attempts across the games), or count_games "
+                                   "(how many games passed where, as gp; rank by gp)",
                 },
                 "seasons": {
                     "type": "array", "items": _SEASON, "minItems": 1, "maxItems": MAX_SEASONS,
@@ -1021,7 +1022,8 @@ AGENT_STATS_TOOLS: list[dict[str, Any]] = [
                 "transform": {
                     "type": "object",
                     "description": "grain game only: a mean over the player's games so far that season, as a "
-                                   "column <metric>_rm<k> or <metric>_cum (null until a rolling window is full)",
+                                   "column <metric>_rm<k> or <metric>_cum (null until a rolling window is full). "
+                                   "It runs over the whole season; window and where then pick the rows shown",
                     "properties": {
                         "rolling_mean": {"type": "integer", "minimum": 2, "maximum": 20,
                                          "description": "The window, in games"},

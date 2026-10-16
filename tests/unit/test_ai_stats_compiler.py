@@ -185,6 +185,21 @@ class TestCompiledGameRows:
         assert "date >= %s AND date <= %s" in _one_line(c.sql)
         assert c.params[-3:] == (date(2025, 11, 1), date(2025, 11, 30), ROW_CAP + 1)
 
+    def test_a_mean_runs_over_the_whole_season_and_the_filters_pick_the_rows_after(self):
+        c = compiled(players=[JOKIC], grain="game", metrics=["pts"], transform={"cumulative_mean": True},
+                     window={"from": "2025-12-01", "to": "2025-12-31"},
+                     where={"stats": [{"metric": "pts", "op": ">=", "value": 20}], "home": True, "min_minutes": 25})
+        sql = _one_line(c.sql)
+        base = ("FROM nba.ask_player_games WHERE min >= %s AND player_id = ANY(%s) AND season = ANY(%s) "
+                "AND season_type = %s)")
+        narrowing = "WHERE date >= %s AND date <= %s AND pts >= %s AND home = %s AND min >= %s"
+        assert sql.index("AS pts_cum") < sql.index(base) < sql.index(narrowing)
+        assert c.params == (1, [JOKIC], ["2025-26"], "regular", date(2025, 12, 1), date(2025, 12, 31), 20.0, True, 25,
+                            ROW_CAP + 1)
+        # Without a transform the same filters sit in the one WHERE, and min_minutes is the floor
+        plain = compiled(players=[JOKIC], grain="game", metrics=["pts"], where={"min_minutes": 25})
+        assert "WHERE min >= %s AND player_id = ANY(%s)" in plain.sql and plain.params[0] == 25
+
     def test_ranked_games_order_by_the_stat_and_stop_at_top(self):
         c = compiled(players=[JOKIC], grain="game", metrics=["pts", "fpts"], transform={"rolling_mean": 5},
                      rank={"by": "fpts_rm5", "top": 3, "order": "asc"})
@@ -216,6 +231,12 @@ class TestCompiledGroups:
         c = compiled(players=[JOKIC], grain="total", metrics=["pts"], agg=agg)
         assert expr in _one_line(c.sql)
         assert c.labels["pts"] == label
+
+    def test_a_rate_under_max_stays_makes_over_attempts_and_says_so(self):
+        c = compiled(players=[JOKIC], grain="total", metrics=["pts", "fg_pct"], agg="max")
+        assert "MAX(pts) AS pts" in c.sql and "SUM(fgm)::numeric / NULLIF(SUM(fga), 0)" in c.sql
+        assert "MAX(fgm" not in c.sql
+        assert c.labels == {"gp": "games played", "pts": "points, best game", "fg_pct": "field goal %"}
 
     def test_leaders_count_the_games_that_passed_where(self):
         c = compiled(grain="total", metrics=["pts"], agg="count_games",
