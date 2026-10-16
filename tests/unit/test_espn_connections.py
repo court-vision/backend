@@ -235,6 +235,15 @@ class TestFanTeams:
         alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
         assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (None, 7)
 
+    def test_the_previous_seasons_team_is_the_one_with_the_espn_id_before_a_name_match(self):
+        """An older exact-id match wins over a newer team that only shares the name."""
+        tracked = [
+            (7, {"league_id": 1111111, "year": 2025, "team_name": "Was Alpha", "espn_team_id": 1}),
+            (8, {"league_id": 1111111, "year": 2026, "team_name": "Alpha"}),
+        ]
+        alpha = next(t for t in cs._mark_tracked(cs.espn_fan_teams(FAN), tracked) if t.team_name == "Alpha")
+        assert (alpha.tracked_team_id, alpha.previous_season_team_id) == (None, 7)
+
     def test_a_team_already_moved_tracks_its_earlier_seasons_entry_too(self):
         """Once the team is on 2027, last season's entry is not one to add."""
         tracked = [(9, {"league_id": 3333333, "year": 2027, "team_name": "Delta"})]
