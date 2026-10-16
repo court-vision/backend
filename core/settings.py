@@ -180,6 +180,12 @@ class Settings(BaseSettings):
     # resends the whole history, so a long conversation costs more per turn.
     ai_agent_max_turns: int = 20
     ai_agent_max_context_tokens: int = 150_000
+    # The connection the agent's query_stats tool reads on (services/ai/stats/
+    # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
+    # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
+    # same database as DATABASE_URL. Unset, the tool runs on the main pool in a
+    # read-only transaction with the same 2 s timeout and says so in the log.
+    ask_reader_database_url: Optional[str] = None
 
     # Logging
     log_level: str = "INFO"
