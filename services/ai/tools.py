@@ -50,6 +50,11 @@ from services.game_context import GameContext
 from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
+from services.ai.stats.catalog import METRIC_NAMES, describe as describe_metrics
+from services.ai.stats.compiler import (
+    DEFAULT_MIN_GAMES, GAME_METRICS, MAX_METRICS, MAX_PLAYERS, MAX_SEASONS, MAX_TOP, StatsSpec,
+)
+from services.ai.stats.query import run_query_stats
 from services.player_service import PlayerService
 from services.scheduled_pickup_service import ScheduledPickupService
 from services.streamer_service import StreamerService
@@ -917,9 +922,146 @@ AGENT_MORE_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-# Stats and status (step 0), name lookup, the user's teams, then their leagues.
-# The order is part of every request's cached prefix: append, never reorder.
-AGENT_TOOLS: list[dict[str, Any]] = [*TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS]
+
+async def _query_stats(args: StatsSpec, ctx: ToolContext | None) -> dict[str, Any]:
+    return await run_query_stats(args)
+
+
+_SEASON = {"type": "string", "pattern": SEASON_PATTERN, "description": "A season, e.g. '2024-25'"}
+_STAT_FILTER = {
+    "type": "object",
+    "properties": {
+        "metric": {"type": "string", "enum": list(GAME_METRICS)},
+        "op": {"type": "string", "enum": [">=", ">", "<=", "<", "=="]},
+        "value": {"type": "number"},
+    },
+    "required": ["metric", "op", "value"],
+    "additionalProperties": False,
+}
+
+# The stats query (docs/QUERY_STATS_PLAN.md): a spec the server compiles to SQL
+# over the nba.ask_* views. The schema mirrors StatsSpec in services/ai/stats/compiler.py.
+AGENT_STATS_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "query_stats",
+        "description": (
+            "Compute figures from Court Vision's box scores, 2012-13 to today: a player's games with a "
+            "rolling or season-to-date mean, averages or totals over a stretch (last N games, last N days, "
+            "a date range), per-season figures, splits (home or away, against a team, games over a "
+            "threshold), and league-wide leaders. Use it whenever the question needs a number no other tool "
+            "returns as it is, instead of working it out yourself. "
+            f"Metrics: {describe_metrics()}. A rate is makes over attempts for the games in question. "
+            "Returns rows for show_table and show_chart. Game rows carry name, season, game_no, date, "
+            "opponent, home, each metric and, with transform, <metric>_rm<k> or <metric>_cum, plus `series` "
+            "(chart them as a line with x game_no and series_by series). Total rows carry gp, first_date and "
+            "last_date; season rows carry season and gp. `labels` names the derived columns."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "players": {
+                    "type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": MAX_PLAYERS,
+                    "description": f"NBA player_ids from search_players, at most {MAX_PLAYERS}. Omit for "
+                                   "league-wide leaders and give rank",
+                },
+                "grain": {
+                    "type": "string", "enum": ["game", "total", "season"],
+                    "description": "game: one row per game played, in order; total: one row per player over "
+                                   "the window; season: one row per player per season",
+                },
+                "metrics": {
+                    "type": "array", "items": {"type": "string", "enum": list(METRIC_NAMES)},
+                    "minItems": 1, "maxItems": MAX_METRICS,
+                    "description": f"Which stats, at most {MAX_METRICS}. gp, dd2, td3 and usg_pct are season "
+                                   "figures (grain season; gp also with grain total)",
+                },
+                "agg": {
+                    "type": "string", "enum": ["per_game", "total", "max", "count_games"],
+                    "description": "For grain total or season: per_game (default), total, max (the best single "
+                                   "game; a rate stays makes over attempts across the games), or count_games "
+                                   "(how many games passed where, as gp; rank by gp)",
+                },
+                "seasons": {
+                    "type": "array", "items": _SEASON, "minItems": 1, "maxItems": MAX_SEASONS,
+                    "description": "Default: the current season for grain game and total, every season for "
+                                   "grain season",
+                },
+                "season_type": {
+                    "type": "string", "enum": ["regular", "playoffs", "play_in", "all"],
+                    "description": "Default regular",
+                },
+                "window": {
+                    "type": "object",
+                    "description": "A stretch of games, in one of three forms",
+                    "properties": {
+                        "last_games": {"type": "integer", "minimum": 1, "maximum": 82,
+                                       "description": "Each player's last N games played"},
+                        "last_days": {"type": "integer", "minimum": 1, "maximum": 366,
+                                      "description": "Games in the last N days"},
+                        "from": {"type": "string", "format": "date", "description": "First date, YYYY-MM-DD"},
+                        "to": {"type": "string", "format": "date", "description": "Last date, YYYY-MM-DD"},
+                    },
+                    "additionalProperties": False,
+                },
+                "where": {
+                    "type": "object",
+                    "description": "Which games count",
+                    "properties": {
+                        "stats": {
+                            "type": "array", "items": _STAT_FILTER, "maxItems": 6,
+                            "description": "Thresholds on the game's own line, e.g. "
+                                           "[{\"metric\": \"pts\", \"op\": \">=\", \"value\": 40}]",
+                        },
+                        "opponent": {"type": "string", "description": "An NBA team abbreviation, e.g. 'BOS'"},
+                        "home": {"type": "boolean", "description": "true for home games, false for away"},
+                        "min_minutes": {"type": "integer", "minimum": 1, "maximum": 60,
+                                        "description": "Fewest minutes for a game to count (default 1)"},
+                    },
+                    "additionalProperties": False,
+                },
+                "transform": {
+                    "type": "object",
+                    "description": "grain game only: a mean over the player's games so far that season, as a "
+                                   "column <metric>_rm<k> or <metric>_cum (null until a rolling window is full). "
+                                   "It runs over the whole season; window and where then pick the rows shown",
+                    "properties": {
+                        "rolling_mean": {"type": "integer", "minimum": 2, "maximum": 20,
+                                         "description": "The window, in games"},
+                        "cumulative_mean": {"type": "boolean", "description": "The season-to-date mean"},
+                    },
+                    "additionalProperties": False,
+                },
+                "rank": {
+                    "type": "object",
+                    "description": "Order the rows and keep the top ones; required without players",
+                    "properties": {
+                        "by": {"type": "string", "description": "One of the metrics, gp off grain game, or a "
+                                                                "transform column such as fpts_rm5"},
+                        "top": {"type": "integer", "minimum": 1, "maximum": MAX_TOP,
+                                "description": "How many rows (default 10)"},
+                        "order": {"type": "string", "enum": ["desc", "asc"], "description": "Default desc"},
+                    },
+                    "required": ["by"],
+                    "additionalProperties": False,
+                },
+                "min_games": {
+                    "type": "integer", "minimum": 1, "maximum": 82,
+                    "description": f"Leaders only: fewest games to qualify (default {DEFAULT_MIN_GAMES}, or the "
+                                   "window's last_games when smaller; 1 with count_games)",
+                },
+            },
+            "required": ["grain", "metrics"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+# Stats and status (step 0), name lookup, the user's teams, their leagues, then
+# the stats query. The order is part of every request's cached prefix: append,
+# never reorder.
+AGENT_TOOLS: list[dict[str, Any]] = [
+    *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS,
+]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
@@ -930,7 +1072,7 @@ ROUTER_TOOL_NAMES = frozenset(t["name"] for t in ROUTER_TOOLS)
 
 @dataclass(frozen=True)
 class _Tool:
-    input_model: type[_Input]
+    input_model: type[BaseModel]
     handler: Callable[[Any, ToolContext | None], Awaitable[dict[str, Any]]]
 
 
@@ -949,6 +1091,7 @@ _REGISTRY: dict[str, _Tool] = {
     "get_schedule": _Tool(ScheduleInput, _get_schedule),
     "get_draft_rooms": _Tool(MyTeamsInput, _get_draft_rooms),
     "get_draft_room": _Tool(DraftRoomInput, _get_draft_room),
+    "query_stats": _Tool(StatsSpec, _query_stats),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

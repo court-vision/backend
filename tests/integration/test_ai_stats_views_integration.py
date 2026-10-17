@@ -10,6 +10,13 @@ run against the views (drift: every expression selects), and against
 hand-computed values (a rate is makes over attempts, a rolling mean is null
 until its window is full). The reader runs read-only with a 2 s timeout on
 either connection.
+
+Step 2 runs real specs through run_query_stats against the same fixture: the
+owner's rolling-mean chart, totals over the last N games, leaders counting
+the games that passed a threshold, season rows from the view and from game
+rows, coverage, the default season, and the row cap. Every shape the compiler
+can produce is also run once, so a view or catalog change that breaks a
+statement fails here.
 """
 
 import asyncio
@@ -28,8 +35,10 @@ from db.models.nba.player_history import PlayerHistory
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from db.models.nba.teams import NBATeam
-from services.ai.stats import catalog
+from services.ai.stats import catalog, query
 from services.ai.stats.catalog import GAMES_VIEW, METRICS, SEASONS_VIEW
+from services.ai.stats.compiler import GAME_METRICS, StatsSpec
+from services.ai.stats.query import Coverage, SpecError, coverage, run_query_stats
 from services.ai.stats.reader import StatsQueryTimeout, StatsReader
 
 pytestmark = [pytest.mark.integration]
@@ -287,3 +296,148 @@ class TestReader:
                 asyncio.run(reader.query("SELECT pg_sleep(2.5)"))
         finally:
             reader.pool.close_all()
+
+
+# ---- step 2: query_stats end to end ----
+
+TODAY = date(2026, 1, 15)
+# Jokic's regular-season 2025-26 lines the views count (the DNP is out, the Cup final is in), in order:
+# fpts = pts + reb + 2 ast + 2 fgm - fga with the other inputs at zero.
+JOKIC_REGULAR = [l for l in JOKIC_LINES if l[0].startswith(("0022500", "006")) and l[1] > 0]
+JOKIC_FPTS = [l[2] + l[3] + 2 * l[4] + 2 * l[5] - l[6] for l in JOKIC_REGULAR]  # 66, 58, 31, 60
+
+
+def ask(reader, **raw):
+    return asyncio.run(run_query_stats(StatsSpec.model_validate(raw), reader=reader, today=TODAY))
+
+
+def chunks(names, n=6):
+    names = list(names)
+    return [names[i:i + n] for i in range(0, len(names), n)]
+
+
+@pytest.fixture
+def reader(data):
+    query.reset_coverage_cache()
+    yield StatsReader(None)
+    query.reset_coverage_cache()
+
+
+class TestRunQueryStats:
+    def test_coverage_reads_the_seasons_with_games(self, reader):
+        assert asyncio.run(coverage(reader)) == Coverage("2024-25", "2025-26")
+        with pytest.raises(SpecError, match="covers 2024-25 to 2025-26; 2012-13 is outside it"):
+            ask(reader, players=[JOKIC], grain="game", metrics=["pts"], seasons=["2012-13"])
+
+    def test_the_owner_s_question_a_rolling_mean_per_player(self, reader):
+        out = ask(reader, players=[WEMBY, JOKIC], grain="game", metrics=["fpts"], transform={"rolling_mean": 2})
+        assert out["seasons"] == ["2025-26"]  # the default: the latest season with games
+        assert out["labels"] == {"fpts_rm2": "CV fantasy points, 2-game rolling mean"}
+        jokic = [r for r in out["rows"] if r["player_id"] == JOKIC]
+        wemby = [r for r in out["rows"] if r["player_id"] == WEMBY]
+        assert [r["game_no"] for r in jokic] == [1, 2, 3, 4] and [r["fpts"] for r in jokic] == JOKIC_FPTS
+        assert [r["fpts_rm2"] for r in jokic] == [None] + [round((a + b) / 2, 1) for a, b in zip(JOKIC_FPTS, JOKIC_FPTS[1:])]
+        assert [r["date"] for r in jokic] == ["2025-10-22", "2025-10-26", "2025-10-28", "2025-12-16"]
+        assert [r["fpts"] for r in wemby] == [20, 22] and [r["fpts_rm2"] for r in wemby] == [None, 21.0]
+        assert {r["series"] for r in jokic} == {"Nikola Jokic"} and {r["series"] for r in wemby} == {"Victor Wembanyama"}
+        assert out["rows"][0]["opponent"] == "SAS" and out["rows"][0]["home"] is True
+        assert out["note"] == catalog.FPTS_NOTE
+
+    def test_totals_over_the_last_games(self, reader):
+        out = ask(reader, players=[JOKIC], grain="total", metrics=["pts", "fg_pct", "gp"], window={"last_games": 2})
+        last_two = JOKIC_REGULAR[-2:]
+        assert out["rows"] == [{"player_id": JOKIC, "name": "Nikola Jokic", "gp": 2, "first_date": "2025-10-28",
+                                "last_date": "2025-12-16", "pts": sum(l[2] for l in last_two) / 2,
+                                "fg_pct": round(sum(l[5] for l in last_two) / sum(l[6] for l in last_two), 3)}]
+        assert out["window"] == {"last_games": 2} and out["agg"] == "per_game"
+        assert out["labels"] == {"gp": "games played", "pts": "points per game", "fg_pct": "field goal %"}
+
+    def test_leaders_count_the_games_over_a_threshold(self, reader):
+        out = ask(reader, grain="total", metrics=["pts"], agg="count_games",
+                  where={"stats": [{"metric": "pts", "op": ">=", "value": 25}]}, rank={"by": "gp", "top": 5})
+        assert [(r["name"], r["gp"]) for r in out["rows"]] == [("Nikola Jokic", 3)]  # Wemby never got there
+        assert out["min_games"] == 1 and out["rows"][0]["pts"] == pytest.approx((30 + 25 + 28) / 3, abs=0.05)
+
+    def test_leaders_qualify_on_games_played(self, reader):
+        out = ask(reader, grain="total", metrics=["pts"], rank={"by": "pts"})
+        assert out["rows"] == [] and out["note"] == "No rows matched" and out["min_games"] == 10
+        out = ask(reader, grain="total", metrics=["pts"], rank={"by": "pts"}, min_games=2)
+        # 97 / 4 = 24.25: Postgres rounds half away from zero
+        assert [(r["name"], r["pts"]) for r in out["rows"]] == [("Nikola Jokic", 24.3), ("Victor Wembanyama", 21.0)]
+
+    def test_season_rows_come_from_the_season_view_when_nothing_narrows_them(self, reader):
+        out = ask(reader, players=[JOKIC], grain="season", metrics=["pts", "fg_pct", "dd2", "td3"])
+        assert out["seasons"] == "all" and out["agg"] == "per_game"
+        assert [(r["season"], r["gp"], r["pts"], r["dd2"]) for r in out["rows"]] == [
+            ("2024-25", 70, round(2000 / 70, 1), 60),      # history
+            ("2025-26", 10, 30.0, None),                  # the latest snapshot
+        ]
+        assert out["rows"][0]["fg_pct"] == round(750 / 1300, 3)
+        assert out["labels"]["dd2"] == "double-doubles"
+
+    def test_season_rows_are_grouped_from_games_when_a_split_narrows_them(self, reader):
+        out = ask(reader, players=[JOKIC], grain="season", metrics=["pts"], where={"home": True})
+        assert [(r["season"], r["gp"], r["pts"]) for r in out["rows"]] == [("2024-25", 1, 26.0), ("2025-26", 4, 24.3)]
+        out = ask(reader, players=[JOKIC], grain="season", metrics=["pts"], where={"home": False})
+        assert out["rows"] == [] and out["note"] == f"No regular games for player_id {JOKIC}"
+
+    def test_a_mean_runs_from_the_season_s_start_whatever_the_window(self, reader):
+        out = ask(reader, players=[JOKIC], grain="game", metrics=["pts"], transform={"cumulative_mean": True},
+                  window={"from": "2025-10-27"})
+        # Games 3 and 4 come back, and their means still count games 1 and 2 (30, 25, 14, 28 points)
+        assert [(r["game_no"], r["pts_cum"]) for r in out["rows"]] == [(3, 23.0), (4, 24.3)]
+        out = ask(reader, players=[JOKIC], grain="game", metrics=["pts"], transform={"rolling_mean": 2},
+                  window={"last_days": 60})
+        assert [(r["game_no"], r["pts_rm2"]) for r in out["rows"]] == [(4, 21.0)]
+
+    def test_the_best_stretch_ranks_games_by_the_transform_column(self, reader):
+        out = ask(reader, players=[JOKIC], grain="game", metrics=["fpts"], transform={"rolling_mean": 2},
+                  rank={"by": "fpts_rm2", "top": 1})
+        assert [(r["game_no"], r["fpts_rm2"]) for r in out["rows"]] == [(2, (JOKIC_FPTS[0] + JOKIC_FPTS[1]) / 2)]
+
+    def test_another_season_type_and_a_player_without_games_there(self, reader):
+        out = ask(reader, players=[JOKIC, WEMBY], grain="game", metrics=["pts"], season_type="playoffs")
+        assert [(r["name"], r["game_no"], r["pts"]) for r in out["rows"]] == [("Nikola Jokic", 1, 35)]
+        assert out["note"] == f"No playoffs games in 2025-26 for player_id {WEMBY}"
+
+    def test_a_sub_minute_appearance_does_not_count_and_min_minutes_narrows_further(self, reader):
+        out = ask(reader, players=[JOKIC], grain="total", metrics=["pts"])
+        assert out["rows"][0]["gp"] == 4  # the 0-minute line is out
+        out = ask(reader, players=[JOKIC], grain="total", metrics=["pts"], where={"min_minutes": 36})
+        assert out["rows"][0]["gp"] == 2  # 38 and 36 minutes
+
+    def test_the_row_cap_is_a_readable_refusal(self, reader, monkeypatch):
+        monkeypatch.setattr(query, "ROW_CAP", 2)
+        with pytest.raises(SpecError, match="Over 2 rows. Narrow it"):
+            ask(reader, players=[JOKIC], grain="game", metrics=["pts"])
+
+
+class TestEveryShapeRuns:
+    """Each statement the compiler can produce runs against the migrated views."""
+
+    season_metrics = [n for n, m in METRICS.items() if m.in_seasons]
+
+    @pytest.mark.parametrize("metrics", chunks(GAME_METRICS))
+    @pytest.mark.parametrize("transform", [None, {"rolling_mean": 3}, {"cumulative_mean": True}])
+    def test_game_rows(self, reader, metrics, transform):
+        out = ask(reader, players=[JOKIC], grain="game", metrics=metrics, transform=transform, season_type="all")
+        assert out["total_rows"] == 5  # this season's four regular games and the playoff game
+
+    @pytest.mark.parametrize("metrics", chunks(GAME_METRICS))
+    @pytest.mark.parametrize("agg", ["per_game", "total", "max"])
+    def test_totals_and_seasons_from_game_rows(self, reader, metrics, agg):
+        assert ask(reader, players=[JOKIC], grain="total", metrics=metrics, agg=agg, window={"last_days": 365})["total_rows"] == 1
+        assert ask(reader, players=[JOKIC], grain="season", metrics=metrics, agg=agg, season_type="all")["total_rows"] == 2
+
+    @pytest.mark.parametrize("metrics", chunks(season_metrics))
+    @pytest.mark.parametrize("agg", ["per_game", "total"])
+    def test_season_view(self, reader, metrics, agg):
+        assert ask(reader, players=[JOKIC, WEMBY], grain="season", metrics=metrics, agg=agg)["total_rows"] == 4
+
+    def test_leaders_in_each_shape(self, reader):
+        ask(reader, grain="total", metrics=["fpts"], window={"last_games": 2}, rank={"by": "fpts", "top": 3})
+        ask(reader, grain="season", metrics=["fpts", "gp"], rank={"by": "gp", "order": "asc"}, min_games=1)
+        ask(reader, grain="season", metrics=["pts"], agg="max", rank={"by": "pts"}, min_games=1)
+        ask(reader, grain="total", metrics=["blk"], agg="count_games",
+            where={"stats": [{"metric": "blk", "op": ">=", "value": 4}], "opponent": "DEN", "home": False},
+            rank={"by": "gp"})

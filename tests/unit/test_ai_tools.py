@@ -449,3 +449,53 @@ class TestMarketMovement:
         row = json.loads(_agent("get_market_movement", {"metric": "auction_value"}).content)["players"][0]
         assert row["auction_value_before"] is None and row["auction_value_change"] is None
         assert row["auction_value_after"] == 49
+
+
+# ---- query_stats ----
+
+@pytest.mark.unit
+class TestQueryStats:
+    def test_it_is_the_last_agent_tool_and_mirrors_the_spec(self):
+        from services.ai.stats.catalog import METRIC_NAMES
+        from services.ai.stats.compiler import GAME_METRICS, StatsSpec
+
+        tool = tools.AGENT_TOOLS[-1]
+        assert tool["name"] == "query_stats" and tool is tools.AGENT_STATS_TOOLS[0]
+        assert tools._REGISTRY["query_stats"].input_model is StatsSpec
+        assert "query_stats" not in tools.ASK_TOOL_NAMES and "query_stats" not in tools.ROUTER_TOOL_NAMES
+        props = tool["input_schema"]["properties"]
+        assert set(props) == set(StatsSpec.model_fields)
+        assert tool["input_schema"]["required"] == ["grain", "metrics"]
+        assert props["metrics"]["items"]["enum"] == list(METRIC_NAMES)
+        assert props["where"]["properties"]["stats"]["items"]["properties"]["metric"]["enum"] == list(GAME_METRICS)
+        for nested in ("window", "where", "transform", "rank"):
+            assert props[nested]["additionalProperties"] is False, nested
+        assert "fpts (CV fantasy points)" in tool["description"]
+
+    def test_an_invalid_spec_comes_back_with_the_fix(self):
+        out = _agent("query_stats", {"grain": "game", "metrics": ["pts"]})
+        assert out.is_error and out.content.startswith("Invalid input: ")
+        assert "grain game needs players" in out.content
+        out = _agent("query_stats", {"players": [1], "grain": "game", "metrics": ["ppg"]})
+        assert out.is_error and "unknown metric 'ppg'" in out.content
+
+    def test_a_valid_spec_runs_the_query_and_a_spec_error_is_readable(self, monkeypatch):
+        from services.ai.stats.query import SpecError
+
+        seen = {}
+
+        async def fake(spec):
+            seen["spec"] = spec
+            return {"grain": spec.grain, "rows": [{"player_id": 1, "pts": 30}], "total_rows": 1}
+
+        monkeypatch.setattr(tools, "run_query_stats", fake)
+        out = _agent("query_stats", {"players": [1], "grain": "total", "metrics": ["pts"], "window": {"last_games": 5}})
+        assert not out.is_error and json.loads(out.content)["rows"] == [{"player_id": 1, "pts": 30}]
+        assert seen["spec"].window.last_games == 5
+
+        async def refuse(spec):
+            raise SpecError(message="Court Vision's game history covers 2012-13 to 2025-26; 2001-02 is outside it")
+
+        monkeypatch.setattr(tools, "run_query_stats", refuse)
+        out = _agent("query_stats", {"players": [1], "grain": "game", "metrics": ["pts"], "seasons": ["2001-02"]})
+        assert out.is_error and out.content.startswith("Court Vision's game history covers")

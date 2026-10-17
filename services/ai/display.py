@@ -27,7 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 MAX_COLUMNS = 10
 MAX_ROWS = 40
 MAX_SERIES = 4
-MAX_POINTS = 30
+MAX_POINTS = 100  # a line: a season of games
+MAX_BARS = 30
 BAR_DEFAULT = 12
 _RESULT_ID = re.compile(r"^r[1-9][0-9]{0,3}$")
 
@@ -64,7 +65,7 @@ SHOW_CHART: dict[str, Any] = {
     "description": (
         "Show the user a bar or line chart built from tool results you already have, like show_table: "
         "name the result(s), the list to chart (`rows`), the column for the x axis (`x`: a name for bars, "
-        "a date for lines) and the numeric column(s) to plot (`y`, one series each, at most "
+        "a date or game_no for lines) and the numeric column(s) to plot (`y`, one series each, at most "
         f"{MAX_SERIES}), or one `y` column with `series_by` to draw one series per value of that column "
         "(several players' game logs become one line per player). Bars compare players or categories on "
         "a stat; lines show a stat over games or days and are drawn in x order. Use it when the shape "
@@ -81,7 +82,7 @@ SHOW_CHART: dict[str, Any] = {
             "kind": {"type": "string", "enum": ["bar", "line"],
                      "description": "bar compares the x values; line shows a stat over time"},
             "x": {"type": "string", "description": "The column for the categories (bar) or the time axis "
-                                                   "(line), e.g. 'name' or 'date'"},
+                                                   "(line), e.g. 'name', 'date' or 'game_no'"},
             "y": {"type": "array", "items": {"type": "string"},
                   "description": f"Numeric columns to plot, one series each, at most {MAX_SERIES}; "
                                  "exactly one when series_by is set"},
@@ -91,8 +92,8 @@ SHOW_CHART: dict[str, Any] = {
             "sort_by": {"type": "string", "description": "A column to order bars by; lines always run in x order"},
             "descending": {"type": "boolean", "description": "Sort high to low (default true)"},
             "limit": {"type": "integer",
-                      "description": f"Most x values to show, 1-{MAX_POINTS} (default {BAR_DEFAULT} for bars, "
-                                     f"{MAX_POINTS} for lines; a line keeps its latest points)"},
+                      "description": f"Most x values to show: bars default {BAR_DEFAULT}, at most {MAX_BARS}; "
+                                     f"lines default and at most {MAX_POINTS}, keeping their latest points"},
             "title": {"type": "string", "description": "A short title, e.g. 'Blocks per game, last 10'"},
         },
         "required": ["result_ids", "kind", "x", "y", "title"],
@@ -113,6 +114,10 @@ LABELS: dict[str, str] = {
     "fpts": "CV FPTS", "category": "Cat", "label": "Category", "you": "You", "leader": "Leader",
     "projected_you": "Proj you", "projected_opponent": "Proj opp", "projected_leader": "Proj leader",
     "games_played": "GP", "avg_fpts": "Avg FPTS", "rank": "Rank", "status": "Status",
+    # query_stats rows
+    "season": "Season", "season_type": "Type", "game_no": "Game", "series": "Series", "won": "Won",
+    "gp": "GP", "first_date": "From", "last_date": "To", "fg_pct": "FG%", "ft_pct": "FT%", "fg3_pct": "3P%",
+    "oreb": "OREB", "dreb": "DREB", "pf": "PF", "plus_minus": "+/-", "dd2": "DD2", "td3": "TD3", "usg_pct": "USG%",
 }
 
 
@@ -199,19 +204,26 @@ def _validate(model: type[BaseModel], raw_input: Any) -> Any:
         raise DisplayError(f"Invalid input: {problems}") from exc
 
 
-def _collect(result_ids: list[str], path: Optional[str], results: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    """The rows of the named results, joined, and the lookups they came from."""
+def _collect(result_ids: list[str], path: Optional[str],
+             results: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """The rows of the named results, joined, the lookups they came from, and
+    the column labels those results carry (a `labels` dict, as query_stats
+    returns for its derived columns)."""
     rows: list[dict[str, Any]] = []
     tools: list[str] = []
+    labels: dict[str, str] = {}
     for rid in result_ids:
         stored = results.get(rid) if _RESULT_ID.match(rid) else None
         if stored is None:
             raise DisplayError(f"No result {rid}: use a result_id a lookup returned")
         rows.extend(_rows_of(stored["data"], path, rid))
         tools.append(stored["tool"])
+        carried = stored["data"].get("labels") if isinstance(stored["data"], dict) else None
+        if isinstance(carried, dict):
+            labels.update({k: v for k, v in carried.items() if isinstance(k, str) and isinstance(v, str)})
     if not rows:
         raise DisplayError("Those results have no rows to show")
-    return rows, tools
+    return rows, tools, labels
 
 
 def _require_columns(rows: list[dict[str, Any]], columns: list[str]) -> None:
@@ -228,14 +240,18 @@ def _sorted(rows: list[dict[str, Any]], by: str, descending: bool) -> list[dict[
     return sorted(present, key=lambda r: _sort_key(r[by]), reverse=descending) + absent
 
 
-def _label_of(column: str) -> str:
+def _label_of(column: str, labels: Optional[dict[str, str]] = None) -> str:
+    """The header for a column: the result's own label when it carries one,
+    else the shared header, else the key."""
+    if labels and column in labels:
+        return labels[column]
     return LABELS.get(column, column.replace("_", " "))
 
 
 def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     """Build one table block from stored results, or raise DisplayError."""
     args = _validate(_ShowTableInput, raw_input)
-    rows, tools = _collect(args.result_ids, args.rows, results)
+    rows, tools, labels = _collect(args.result_ids, args.rows, results)
     _require_columns(rows, [*args.columns, *([args.sort_by] if args.sort_by else [])])
 
     if args.sort_by:
@@ -247,7 +263,7 @@ def show_table(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         "title": args.title,
         "result_ids": args.result_ids,
         "tools": sorted(set(tools)),
-        "columns": [{"key": c, "label": _label_of(c)} for c in args.columns],
+        "columns": [{"key": c, "label": _label_of(c, labels)} for c in args.columns],
         "rows": [[_cell(r.get(c), c) for c in args.columns] for r in shown],
         "total_rows": len(rows),
     }
@@ -288,7 +304,7 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     args = _validate(_ShowChartInput, raw_input)
     if args.series_by and len(args.y) != 1:
         raise DisplayError("With series_by, y is exactly one column: the series come from series_by")
-    rows, tools = _collect(args.result_ids, args.rows, results)
+    rows, tools, labels = _collect(args.result_ids, args.rows, results)
     _require_columns(rows, [args.x, *args.y, *([args.series_by] if args.series_by else []),
                             *([args.sort_by] if args.sort_by else [])])
 
@@ -300,6 +316,8 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         rows = _sorted(rows, args.sort_by, args.descending)
     total = len(rows)
     limit = args.limit or (MAX_POINTS if line else BAR_DEFAULT)
+    if not line and limit > MAX_BARS:
+        raise DisplayError(f"A bar chart shows at most {MAX_BARS} x values; narrow the rows or use show_table")
 
     def cut(items: list[Any]) -> list[Any]:
         return items[-limit:] if line else items[:limit]
@@ -329,7 +347,7 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     else:
         shown = cut(rows)
         categories = [_category(r.get(args.x)) for r in shown]
-        series = [{"key": col, "label": _label_of(col), "values": [_point(r.get(col), col) for r in shown]}
+        series = [{"key": col, "label": _label_of(col, labels), "values": [_point(r.get(col), col) for r in shown]}
                   for col in args.y]
 
     if len(categories) < 2:
@@ -348,7 +366,7 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
         "kind": args.kind,
         "result_ids": args.result_ids,
         "tools": sorted(set(tools)),
-        "x": {"key": args.x, "label": _label_of(args.x)},
+        "x": {"key": args.x, "label": _label_of(args.x, labels)},
         "categories": categories,
         "series": series,
         "total_rows": total,
