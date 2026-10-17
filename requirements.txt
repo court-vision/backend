@@ -33,6 +33,9 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 tzdata==2025.3
 
+# Optimization (the multi-spot stream planner's integer program)
+highspy==1.15.1
+
 # NBA data
 nba_api==1.9.0
 curl_cffi==0.7.4
