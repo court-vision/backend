@@ -79,10 +79,11 @@ def test_every_internal_route_carries_an_auth_dependency(unauthed_app):
     from fastapi.routing import APIRoute, iter_route_contexts
 
     from api.deps import get_db_user
+    from core.app_map_auth import verify_app_map_token
     from core.clerk_auth import get_current_user, verify_clerk_token
     from core.pipeline_auth import verify_pipeline_token
 
-    guards = {get_db_user, get_current_user, verify_clerk_token, verify_pipeline_token}
+    guards = {get_db_user, get_current_user, verify_clerk_token, verify_pipeline_token, verify_app_map_token}
     # Since FastAPI 0.137, app.routes holds included routers as tree nodes, so a
     # flat walk finds no /v1/internal route at all and this passes vacuously.
     # The route contexts carry the prefixed path and a dependant that includes
