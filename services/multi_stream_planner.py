@@ -165,6 +165,8 @@ def plan_streams(
     if len(set(holder_ids)) != spots:
         raise ValueError("a player can hold only one spot")
     players = [*holders, *(c for c in candidates if c.player_id not in set(holder_ids))]
+    if len({p.player_id for p in players}) != len(players):
+        raise ValueError("a player can be a candidate only once")
     if any(len(p.values) != horizon for p in players):
         raise ValueError("every player needs a value for each day of the horizon")
     limits = list(day_limits) if day_limits is not None else [None] * horizon
@@ -329,7 +331,7 @@ def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequen
     switches: list[Switch] = []
     for d, ids in enumerate(held):
         leaving = [k for k, pid in enumerate(now) if pid not in ids]
-        for k, pid in zip(leaving, sorted(ids - set(now))):
+        for k, pid in zip(leaving, sorted(ids - set(now)), strict=True):
             switches.append(Switch(d, k, now[k], pid))
             now[k] = pid
         rows.append(tuple(now))

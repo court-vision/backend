@@ -170,6 +170,8 @@ def test_bad_input_is_refused():
         plan_streams([], [s(2, 1)], empty(1), {UT: 1}, adds=None)
     with pytest.raises(ValueError):
         plan_streams([s(1, 1), s(1, 1)], [], empty(1), {UT: 1}, adds=None)
+    with pytest.raises(ValueError):       # two entries for one player would let them hold two spots
+        plan_streams([s(1, 0), s(2, 0)], [s(3, 30), s(3, 30)], empty(1), {UT: 2}, adds=None)
     with pytest.raises(ValueError):
         plan_streams([s(1, 1, 1)], [s(2, 1)], empty(2), {UT: 1}, adds=None)
     with pytest.raises(ValueError):
