@@ -9,16 +9,18 @@ injected in place of the JWKS lookup, so no network access is needed.
 
 import json
 import time
+from types import SimpleNamespace
 
 import jwt
 import pytest
 import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import Request
 from fastapi.security import HTTPAuthorizationCredentials
 
 from core import clerk_auth
-from core.errors import AuthenticationError
+from core.errors import AuthenticationError, AuthorizationError, ServiceUnavailableError
 from core.settings import settings
 
 
@@ -210,3 +212,116 @@ def test_user_fetch_goes_through_the_shared_session(monkeypatch):
     user = clerk_auth.fetch_clerk_user("user_abc")
     assert calls == ["https://api.clerk.com/v1/users/user_abc"]
     assert user["email"] == "primary@example.com"
+
+
+# ---- The app map's account is read-only ----
+
+APP_MAP_USER = "user_app_map"
+
+
+def _request(method: str, path: str = "/v1/internal/teams/add") -> Request:
+    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
+
+
+@pytest.fixture
+def app_map_account(monkeypatch):
+    monkeypatch.setattr(settings, "app_map_clerk_user_id", APP_MAP_USER)
+
+
+def _app_map_credentials(private_pem: bytes, sub: str = APP_MAP_USER) -> HTTPAuthorizationCredentials:
+    token = _make_token(private_pem, iss=settings.clerk_issuer, sub=sub)
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("dependency", ["verify_clerk_token", "get_current_user"])
+def test_app_map_account_cannot_write(rsa_keys, trust_test_key, app_map_account, method, dependency):
+    private_pem, _ = rsa_keys
+    with pytest.raises(AuthorizationError) as exc:
+        getattr(clerk_auth, dependency)(_app_map_credentials(private_pem), _request(method))
+    assert exc.value.status_code == 403
+    assert exc.value.error_code == "APP_MAP_READ_ONLY"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+def test_app_map_account_can_read(rsa_keys, trust_test_key, app_map_account, method):
+    private_pem, _ = rsa_keys
+    user = clerk_auth.get_current_user(_app_map_credentials(private_pem), _request(method))
+    assert user["clerk_user_id"] == APP_MAP_USER
+
+
+@pytest.mark.unit
+def test_other_users_still_write(rsa_keys, trust_test_key, app_map_account):
+    private_pem, _ = rsa_keys
+    user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem, sub="user_abc"), _request("POST"))
+    assert user["clerk_user_id"] == "user_abc"
+
+
+@pytest.mark.unit
+def test_nobody_is_read_only_without_an_app_map_account(rsa_keys, trust_test_key, monkeypatch):
+    private_pem, _ = rsa_keys
+    monkeypatch.setattr(settings, "app_map_clerk_user_id", None)
+    user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem), _request("POST"))
+    assert user["clerk_user_id"] == APP_MAP_USER
+
+
+# ---- One-time sign-in tokens ----
+
+def _clerk_response(status: int, body) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    response.url = "https://api.clerk.com/v1/sign_in_tokens"
+    response._content = json.dumps(body).encode()
+    return response
+
+
+@pytest.fixture
+def clerk_post(monkeypatch):
+    """Answers Clerk's sign_in_tokens POST with `clerk_post.response` and records each call."""
+    fake = SimpleNamespace(
+        response=_clerk_response(200, {"object": "sign_in_token", "token": "ticket-abc", "status": "pending"}),
+        calls=[],
+    )
+
+    def post(url, **kwargs):
+        fake.calls.append({"url": url, "headers": kwargs.get("headers"), "json": kwargs.get("json")})
+        return fake.response
+
+    monkeypatch.setattr(clerk_auth._clerk_http, "post", post)
+    monkeypatch.setattr(clerk_auth, "CLERK_SECRET_KEY", "sk_test_fake")
+    return fake
+
+
+@pytest.mark.unit
+def test_sign_in_token_is_created_for_the_named_user(clerk_post):
+    ticket = clerk_auth.create_sign_in_token(APP_MAP_USER, 300)
+    assert ticket == "ticket-abc"
+    assert clerk_post.calls == [{
+        "url": "https://api.clerk.com/v1/sign_in_tokens",
+        "headers": {"Authorization": "Bearer sk_test_fake"},
+        "json": {"user_id": APP_MAP_USER, "expires_in_seconds": 300},
+    }]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("response", [
+    _clerk_response(404, {"errors": [{"code": "resource_not_found"}]}),
+    _clerk_response(200, {"object": "sign_in_token"}),
+    _clerk_response(200, ["token"]),
+])
+def test_sign_in_token_failure_is_503(clerk_post, response):
+    clerk_post.response = response
+    with pytest.raises(ServiceUnavailableError) as exc:
+        clerk_auth.create_sign_in_token(APP_MAP_USER, 300)
+    assert exc.value.error_code == "SIGN_IN_TOKEN_UNAVAILABLE"
+
+
+@pytest.mark.unit
+def test_sign_in_token_without_a_secret_key_is_503(clerk_post, monkeypatch):
+    monkeypatch.setattr(clerk_auth, "CLERK_SECRET_KEY", "")
+    with pytest.raises(ServiceUnavailableError) as exc:
+        clerk_auth.create_sign_in_token(APP_MAP_USER, 300)
+    assert exc.value.error_code == "AUTH_UNAVAILABLE"
+    assert clerk_post.calls == []

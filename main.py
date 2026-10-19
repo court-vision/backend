@@ -29,7 +29,7 @@ from api.v1.internal import (users, teams, lineups, yahoo, matchups, streamers, 
                              api_keys, rankings as internal_rankings, sqlmate as internal_sqlmate,
                              drafts, lineup_editor, jobs, team_streamers, roster_transactions,
                              scheduled_pickups, stream_lanes,
-                             connections, ai, lineup_snapshots)
+                             connections, ai, lineup_snapshots, app_map)
 from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
                            schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
 
@@ -163,6 +163,7 @@ api_v1_internal.include_router(scheduled_pickups.router)
 api_v1_internal.include_router(stream_lanes.router)
 api_v1_internal.include_router(connections.router)
 api_v1_internal.include_router(ai.router)
+api_v1_internal.include_router(app_map.router)
 
 app.include_router(api_v1_internal)
 

@@ -204,6 +204,16 @@ class Settings(BaseSettings):
     # Empty disables the check. Env format is JSON: ["http://localhost:3000"]
     clerk_authorized_parties: list[str] = []
 
+    # The app map's account (docs/APP_MAP_PLAN.md): the Clerk user the crawler
+    # signs in as to map the signed-in desks. Set, that user is read-only on
+    # every internal route (403 APP_MAP_READ_ONLY on anything but GET/HEAD/
+    # OPTIONS), so set it only once the account's leagues and conversations are
+    # in place. APP_MAP_TOKEN is the bearer the crawl presents to
+    # POST /v1/internal/app-map/sign-in-token for a one-time sign-in as that
+    # user; CI never holds the Clerk secret or the account's password.
+    app_map_clerk_user_id: Optional[str] = None
+    app_map_token: Optional[SecretStr] = None
+
     # Yahoo OAuth Configuration
     yahoo_client_id: Optional[str] = None
     yahoo_client_secret: Optional[SecretStr] = None
