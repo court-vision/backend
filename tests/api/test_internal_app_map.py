@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from api.v1.internal import app_map
 from core import clerk_auth
 from core.settings import settings
+from services.yahoo_service import YahooService
 from tests.api.conftest import make_test_app
 
 URL = "/v1/internal/app-map/sign-in-token"
@@ -125,3 +126,49 @@ def test_app_map_account_writes_are_403(signed_in_as, configured, method, path):
     body = r.json()
     assert body["status"] == "authorization_error"
     assert body["error_code"] == "APP_MAP_READ_ONLY"
+
+
+# ---- Nor connect Yahoo, a write that starts with a GET ----
+
+@pytest.fixture
+def yahoo_flow(monkeypatch):
+    """Yahoo's OAuth collaborators, recording any use."""
+    calls = []
+
+    def fake_get_auth_url(user_id, return_to=None):
+        calls.append(("auth_url", user_id))
+        return "https://api.login.yahoo.com/oauth2/request_auth?state=s", "s"
+
+    async def fake_exchange(code):
+        calls.append(("exchange", code))
+        return {}
+
+    monkeypatch.setattr(YahooService, "get_auth_url", staticmethod(fake_get_auth_url))
+    monkeypatch.setattr(YahooService, "exchange_code_for_tokens", staticmethod(fake_exchange))
+    monkeypatch.setattr(YahooService, "validate_state", staticmethod(lambda state: {"user_id": APP_MAP_USER}))
+    return calls
+
+
+@pytest.mark.api
+def test_app_map_account_cannot_start_a_yahoo_connection(signed_in_as, configured, yahoo_flow):
+    client, headers = signed_in_as
+    r = client.get("/v1/internal/yahoo/authorize", headers=headers(APP_MAP_USER))
+    assert r.status_code == 403
+    assert r.json()["error_code"] == "APP_MAP_READ_ONLY"
+    assert yahoo_flow == []
+
+
+@pytest.mark.api
+def test_other_users_still_start_a_yahoo_connection(signed_in_as, configured, yahoo_flow):
+    client, headers = signed_in_as
+    r = client.get("/v1/internal/yahoo/authorize", headers=headers("user_someone"))
+    assert r.status_code == 200
+    assert yahoo_flow == [("auth_url", "user_someone")]
+
+
+@pytest.mark.api
+def test_a_callback_for_the_app_map_account_stores_nothing(client, configured, yahoo_flow):
+    r = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+    assert r.status_code in (302, 307)
+    assert r.headers["location"].endswith("/account?yahoo_error=read_only")
+    assert yahoo_flow == []

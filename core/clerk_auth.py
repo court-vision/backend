@@ -308,15 +308,21 @@ def _require_token(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def is_app_map_user(clerk_user_id: Optional[str]) -> bool:
+    """Whether this is the app map's read-only account (settings.app_map_clerk_user_id)."""
+    app_map_user = settings.app_map_clerk_user_id
+    return bool(app_map_user) and clerk_user_id == app_map_user
+
+
 def _refuse_app_map_writes(clerk_user_id: Optional[str], request: Optional[Request]) -> None:
-    """The app map's account (settings.app_map_clerk_user_id) only reads.
+    """The app map's account only reads.
 
     The crawler that signs in as it already aborts every request but a GET, so
     this is the second wall: whatever reaches the API with its session, from
-    the crawl or from anyone else signed in as it, changes nothing.
+    the crawl or from anyone else signed in as it, changes nothing. A change
+    that starts with a GET (connecting Yahoo) checks `is_app_map_user` itself.
     """
-    app_map_user = settings.app_map_clerk_user_id
-    if not app_map_user or clerk_user_id != app_map_user or request is None:
+    if request is None or not is_app_map_user(clerk_user_id):
         return
     if request.method in _READ_METHODS:
         return
