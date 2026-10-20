@@ -1,8 +1,8 @@
 """
 services.stream_lane_service's pure rules: the first day a pickup can count, the waiver gap
 from the league's waiver period, the budget (limits, usage, pickups already scheduled), the
-slots a pool player fills, the plan's inputs from a board and a pool, the projection, and how
-a decision compares with the projection before it.
+slots a pool player fills, the plan's inputs from a board and a pool (one spot, and several
+planned together), the projections, and how a decision compares with the projection before it.
 """
 
 from datetime import date, datetime, timezone
@@ -20,8 +20,8 @@ from services.stream_lane_service import (
     compare_to_projection,
     first_open_period,
     lane_budget,
-    plan_lane,
-    projection_of,
+    plan_lanes,
+    projections_of,
     rehold_after_for,
 )
 
@@ -57,7 +57,7 @@ def test_an_add_counts_for_today_until_its_first_tip():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("hours, gap", [(24, 2), (None, 2), (0, 1), (12, 2), (48, None)])
+@pytest.mark.parametrize("hours, gap", [(24, 2), (None, 2), (0, 1), (12, 2), (48, 3), (72, 4)])
 def test_the_waiver_gap_follows_the_league(hours, gap):
     assert rehold_after_for(acq(waiver_hours=hours)) == gap
 
@@ -75,7 +75,7 @@ def test_a_matchup_limit_leaves_its_room_less_what_is_scheduled_inside_the_match
     days = [day(i, "DEN") for i in range(3)]
     inside, next_week = pending(29), pending(36, nba_date=date(2026, 11, 23))
     budget = lane_budget(acq(), days, [inside, next_week])
-    assert budget.adds == 2 and budget.switchable == (True, True, True)   # 4 - 1 used - 1 scheduled
+    assert budget.adds == 2 and budget.day_limits == (None, None, None)   # 4 - 1 used - 1 scheduled
 
 
 @pytest.mark.unit
@@ -86,12 +86,13 @@ def test_a_season_cap_can_be_the_tighter_one():
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_closes_days_already_spent():
+def test_a_per_day_limit_leaves_each_day_its_room():
     days = [day(i, "DEN") for i in range(3)]
     daily = acq(per="day", limit=1, matchup_used=0)
     budget = lane_budget(daily, days, [pending(29)], first_day_adds=1)
-    assert budget.adds is None and budget.switchable == (False, False, True)
-    assert lane_budget(daily, days, []).switchable == (True, True, True)       # unread: ESPN decides
+    assert budget.adds is None and budget.day_limits == (0, 0, 1)
+    assert lane_budget(daily, days, []).day_limits == (1, 1, 1)                 # unread: ESPN decides
+    assert lane_budget(acq(per="day", limit=2), days, [pending(29)]).day_limits == (2, 1, 2)
 
 
 @pytest.mark.unit
@@ -138,24 +139,26 @@ def fa(pid, team, *, value=22.0, positions=("SF", "F"), pos=3, available_on=None
     return PoolPlayer(pid, f"FA {pid}", team, active_slots([*positions, "UT1"]), value, pos, available_on)
 
 
-def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, switchable=(True, True, True), roster=ROSTER):
+def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, day_limits=(None, None, None), roster=ROSTER,
+         holders=(HOLDER,)):
     from services.stream_lane_service import Budget
-    return plan_lane(board(roster, limits=limits), HOLDER, pool, DAYS, list(pending_), Budget(adds, switchable), rehold)
+    return plan_lanes(board(roster, limits=limits), list(holders), pool, DAYS, list(pending_), Budget(adds, day_limits),
+                      rehold)
 
 
 @pytest.mark.unit
 def test_the_spot_is_worth_what_its_player_adds_to_each_days_lineup():
-    lp = plan([])
+    p = plan([])
     # The holder plays days 0 and 2 into the open UT seat (the guard and the big have their own).
-    assert lp.values[HOLDER] == (15.0, 0.0, 15.0) and lp.plan.holders == (HOLDER,) * 3
+    assert p.marginals == ((15.0, 0.0, 15.0),) and p.spots == ((HOLDER,) * 3,)
 
 
 @pytest.mark.unit
 def test_a_free_agent_who_plays_the_holders_day_off_takes_it_with_one_add():
-    lp = plan([fa(10, "LAL")], adds=1)
+    p = plan([fa(10, "LAL")], adds=1)
     # One add: switching for day 1 gives up the holder's day 2 (15) for the free agent's 22.
-    assert lp.plan.holders == (HOLDER, 10, 10) and lp.plan.value == 15 + 22 + 22
-    assert lp.considered == {10}
+    assert p.spots == ((HOLDER, 10, 10),) and p.value == 15 + 22 + 22
+    assert p.considered == {10}
 
 
 @pytest.mark.unit
@@ -167,18 +170,23 @@ def test_who_the_plan_may_not_take():
         fa(13, "OKC"),                                   # never plays in it
         fa(GUARD, "DEN"),                                # on the roster
         fa(14, "PHX"),                                   # already scheduled
+        fa(10, "LAL", value=99),                         # the pool listing a player twice: the first counts
     ]
-    lp = plan(pool, pending_=[pending(29, add=14)], limits={"5": 2})
-    assert lp.considered == {10}
+    p = plan(pool, pending_=[pending(29, add=14)], limits={"5": 2}, adds=1)
+    assert p.considered == {10} and p.value == 15 + 22 + 22
 
 
 @pytest.mark.unit
 def test_a_scheduled_pickup_that_fills_a_capped_position_closes_it_to_the_plan():
     """One C on the roster under a cap of two, and a pickup for day 2 adds a C (for the guard): a free-agent C
-    taken before then would still hold the spot on day 2, as a third C ESPN refuses."""
+    taken for day 1 would have to leave again before day 2, for an add the budget doesn't have."""
     pool = [fa(11, "LAL", pos=5, positions=("C",)), fa(14, "PHX", pos=5, positions=("C",))]
-    lp = plan(pool, pending_=[pending(30, add=14, drop=GUARD)], limits={"5": 2}, roster=ROSTER[:3], adds=1)
-    assert lp.considered == frozenset() and lp.plan.holders == (HOLDER,) * 3
+    p = plan(pool, pending_=[pending(30, add=14, drop=GUARD)], limits={"5": 2}, roster=ROSTER[:3], adds=1)
+    assert p.spots == ((HOLDER,) * 3,)
+    # With a second add he takes days 0 and 1 (22 on day 1 for the holder's 15 on day 0), and the holder,
+    # off waivers by day 2, takes the spot back for day 2 before the third C would arrive.
+    p = plan(pool, pending_=[pending(30, add=14, drop=GUARD)], limits={"5": 2}, roster=ROSTER[:3], adds=2)
+    assert p.spots == ((11, 11, HOLDER),) and p.value == 0 + 22 + 15
 
 
 @pytest.mark.unit
@@ -186,33 +194,52 @@ def test_a_scheduled_pickup_that_drops_a_capped_position_opens_it_from_its_day()
     """At the cap of two Cs (the big and the hurt one on IR), a pickup for day 1 drops the big: a free-agent C
     may take the spot from day 1, not before."""
     pool = [fa(11, "LAL", pos=5, positions=("C",)), fa(15, "OKC")]
-    lp = plan(pool, pending_=[pending(29, add=15, drop=BIG)], limits={"5": 2}, adds=1)
-    assert lp.considered == {11} and lp.plan.holders == (HOLDER, 11, 11)
+    p = plan(pool, pending_=[pending(29, add=15, drop=BIG)], limits={"5": 2}, adds=1)
+    assert p.considered == {11} and p.spots == ((HOLDER, 11, 11),)
 
 
 @pytest.mark.unit
 def test_an_out_player_and_ir_are_worth_nothing():
     roster = [p if p.player_id != HOLDER else p.model_copy(update={"injury_status": "OUT"}) for p in ROSTER]
-    lp = plan([], roster=roster)
-    assert lp.values[HOLDER] == (0.0, 0.0, 0.0)
+    assert plan([], roster=roster).marginals == ((0.0, 0.0, 0.0),)
 
 
 @pytest.mark.unit
 def test_a_scheduled_pickup_joins_the_rest_of_the_roster_on_its_day():
     """A UT-only pickup for day 2 takes the UT seat the holder would have had."""
     utility = fa(14, "MIA", value=40, positions=())
-    lp = plan([utility], pending_=[pending(30, add=14)])
-    assert lp.values[HOLDER] == (15.0, 0.0, 0.0)
+    assert plan([utility], pending_=[pending(30, add=14)]).marginals == ((15.0, 0.0, 0.0),)
 
 
 @pytest.mark.unit
 def test_closed_days_reach_the_planner():
     """Day 1 closed (its add is spent): the switch moves a day earlier, giving up the holder's 15
     on day 0 for both of the free agent's 22s — rather than waiting for day 2 and getting one."""
-    lp = plan([fa(10, "LAL")], adds=1, switchable=(True, False, True))
-    assert lp.plan.holders == (10, 10, 10) and lp.plan.value == 0 + 22 + 22
-    lp = plan([fa(10, "LAL")], adds=1, switchable=(False, False, True))
-    assert lp.plan.holders == (HOLDER, HOLDER, 10) and lp.plan.value == 15 + 0 + 22
+    p = plan([fa(10, "LAL")], adds=1, day_limits=(None, 0, None))
+    assert p.spots == ((10, 10, 10),) and p.value == 0 + 22 + 22
+    p = plan([fa(10, "LAL")], adds=1, day_limits=(0, 0, None))
+    assert p.spots == ((HOLDER, HOLDER, 10),) and p.value == 15 + 0 + 22
+
+
+# ---- several spots ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_two_spots_share_the_adds_and_one_free_agent_goes_to_one_of_them():
+    """The holder and the big both stream. One add left: it goes where it gains most — the big sits
+    days 1 and 2 (BOS plays day 0 only), so his spot takes the free agent; the holder keeps his."""
+    roster = [ROSTER[0], ROSTER[1], ROSTER[2].model_copy(update={"team": "DEN"})]
+    p = plan([fa(10, "LAL"), fa(11, "LAL")], roster=roster, holders=(HOLDER, BIG), adds=1)
+    assert p.adds == 1 and p.spots[0] == (HOLDER,) * 3
+    # The big plays day 0 only: his spot takes a free agent from day 1, whose LAL plays days 1 and 2.
+    assert p.spots[1][0] == BIG and p.spots[1][1] in (10, 11) and p.spots[1][1] == p.spots[1][2]
+
+
+@pytest.mark.unit
+def test_two_spots_with_adds_to_spare_each_stream():
+    roster = [ROSTER[0], ROSTER[1], ROSTER[2].model_copy(update={"team": "DEN"})]
+    p = plan([fa(10, "LAL"), fa(11, "LAL", positions=("C",), pos=5)], roster=roster, holders=(HOLDER, BIG), adds=2)
+    assert p.adds == 2 and {p.spots[0][1], p.spots[1][1]} == {10, 11}
 
 
 # ---- the projection --------------------------------------------------------------------------
@@ -225,11 +252,23 @@ AS_OF = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
 
 @pytest.mark.unit
 def test_the_projection_lists_each_days_holder_and_switch():
-    lp = plan([fa(10, "LAL")], adds=1)
-    proj = projection_of(lp, DAYS, NAMES, adds_left=1, rehold_after=2, now=AS_OF)
+    p = plan([fa(10, "LAL")], adds=1)
+    (proj,) = projections_of(p, DAYS, NAMES, adds_left=1, rehold_after=2, now=AS_OF)
     assert [(d.scoring_period_id, d.player.player_id, d.value, d.switch) for d in proj.days] == [
         (28, HOLDER, 15.0, False), (29, 10, 22.0, True), (30, 10, 22.0, False)]
     assert (proj.value, proj.hold_value, proj.gain, proj.adds, proj.adds_left) == (59.0, 30.0, 29.0, 1, 1)
+    assert proj.lanes == 1
+
+
+@pytest.mark.unit
+def test_each_spots_projection_counts_its_own_switches_and_shares_the_budget():
+    roster = [ROSTER[0], ROSTER[1], ROSTER[2].model_copy(update={"team": "DEN"})]
+    p = plan([fa(10, "LAL")], roster=roster, holders=(HOLDER, BIG), adds=1)
+    names = {**NAMES, BIG: LanePlayer(player_id=BIG, name="Big", team="DEN")}
+    holder, big = projections_of(p, DAYS, names, adds_left=1, rehold_after=2, now=AS_OF)
+    assert (holder.adds, big.adds, holder.lanes, big.adds_left) == (0, 1, 2, 1)
+    assert holder.gain == 0 and big.gain == round(big.value - big.hold_value, 2) > 0
+    assert [d.switch for d in big.days] == [False, True, False]
 
 
 def _shown(*holders):

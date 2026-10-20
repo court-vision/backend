@@ -315,6 +315,29 @@ def test_one_spot_matches_the_one_spot_planner():
         assert plan.hold_value == pytest.approx(expected.hold_value)
         assert bool(plan.first_moves) == (expected.first_move is not None)
         assert sum(st.value for st in plan.stretches[0]) == pytest.approx(plan.value)
+        assert sum(plan.marginals[0]) == pytest.approx(plan.value)
+        assert plan.hold_values[0] == pytest.approx(plan.hold_value)
+
+
+@pytest.mark.unit
+def test_each_spots_values_day_by_day_and_its_own_hold():
+    """Two spots and one seat. The free agent goes where he costs least: spot 2, whose 8 on day 1
+    would only have taken a seat spot 1 leaves empty. A spot's day is what its player adds with the
+    other spot's in the lineup; its hold is its player now kept, the other as planned."""
+    holders = [s(1, 10, 0, 10), s(2, 0, 8, 0)]
+    plan = plan_streams(holders, [s(3, 30, 30, 0)], empty(3), {UT: 1}, adds=1)
+    assert plan.spots == ((1, 1, 1), (3, 3, 3)) and plan.value == 70
+    assert plan.marginals == ((0.0, 0.0, 10.0), (20.0, 30.0, 0.0))
+    assert plan.hold_values == (10.0, 8.0) and plan.hold_value == 28
+    assert sum(plan.marginals[1]) - plan.hold_values[1] == plan.gain == 42
+
+
+@pytest.mark.unit
+def test_a_free_agent_who_cannot_crack_a_lineup_is_not_considered():
+    """The rest fill the only seat with 40 every day: a 20 adds nothing however the spots go."""
+    rest = [[DayPlayer(100, 40.0, frozenset({UT}))] for _ in range(3)]
+    plan = plan_streams([s(1, 5, 5, 5)], [s(2, 20, 20, 20), s(3, 50, 0, 0)], rest, {UT: 1}, adds=2)
+    assert plan.considered == {3} and plan.spots == ((3, 3, 3),) and plan.value == 10
 
 
 @pytest.mark.unit

@@ -48,6 +48,7 @@ outside the GIL.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
 
@@ -100,6 +101,11 @@ class MultiStreamPlan:
     adds: int
     switches: tuple[Switch, ...]                 # in day order
     optimal: bool                                # proven best (False: the best found in the time limit)
+    marginals: tuple[tuple[float, ...], ...] = ()   # marginals[k][d]: the stretches' values, day by day
+    # Per spot: what its player now would add keeping it every day, the other spots as planned. With
+    # one spot, `hold_value`.
+    hold_values: tuple[float, ...] = ()
+    considered: frozenset[int] = frozenset()     # the free agents that could add to a day in a spot
 
     @property
     def gain(self) -> float:
@@ -180,25 +186,40 @@ def plan_streams(
 
     seats = {s: int(n) for s, n in slot_counts.items() if s in ACTIVE_SLOT_IDS and int(n or 0) > 0}
 
-    def starts_on(p: Streamer, d: int) -> bool:
-        return p.values[d] > EPS and any(s in seats for s in p.eligible)
+    bases = [best_lineup_value(rest, seats) for rest in rest_by_day]
+    held_at = Counter(h.position for h in holders)
+
+    def may_hold(p: Streamer, d: int) -> bool:
+        """Day d's position room has a place for them (the spots' players there may make it)."""
+        return p.position not in room or max(room[p.position][d], held_at[p.position]) > 0
+
+    def adds_to(p: Streamer, d: int) -> bool:
+        """They add to day d's best lineup over the rest of the roster: the most they could add in
+        a spot, since the other spots' players only take seats from them."""
+        if p.values[d] <= EPS or not any(s in seats for s in p.eligible):
+            return False
+        me = DayPlayer(p.player_id, p.values[d], p.eligible)
+        return best_lineup_value([*rest_by_day[d], me], seats) - bases[d] > EPS
 
     day_caps = [spots if lim is None else max(0, min(spots, int(lim))) for lim in limits]
     most_adds = sum(day_caps) if adds is None else min(sum(day_caps), max(0, int(adds)))
-    # A free agent who never starts from the day they're available is worth nothing in a spot.
+    # A free agent who adds nothing to any day they could hold a spot is worth nothing in one.
     # They can still be the one a position limit needs to fill a spot whose player must leave it;
     # any of them will do (by position, if limited), and no plan adds more than `most_adds`.
     starters, fillers = [], {}
     for p in players[spots:]:
-        if any(starts_on(p, d) for d in range(p.available_from, horizon)):
+        days = [d for d in range(p.available_from, horizon) if may_hold(p, d)]
+        if any(adds_to(p, d) for d in days):
             starters.append(p)
-        elif room and p.available_from < horizon:
+        elif room and days:
             fillers.setdefault(p.position if p.position in room else None, []).append(p)
+    considered = frozenset(p.player_id for p in starters)
     players = [*players[:spots], *starters,
                *(p for group in fillers.values()
                  for p in sorted(group, key=lambda p: (p.available_from, p.player_id))[:most_adds])]
     if horizon == 0 or most_adds == 0 or len(players) == spots:
-        return _plan(holders, players, [frozenset(holder_ids)] * horizon, rest_by_day, seats, optimal=True)
+        return _plan(holders, players, [frozenset(holder_ids)] * horizon, rest_by_day, seats, optimal=True,
+                     considered=considered)
 
     inf = highspy.kHighsInf
     m = _Rows()
@@ -308,14 +329,17 @@ def plan_streams(
 
     status = h.getModelStatus()
     if h.getInfo().primal_solution_status != highspy.SolutionStatus.kSolutionStatusFeasible:
-        return _plan(holders, players, [frozenset(holder_ids)] * horizon, rest_by_day, seats, optimal=False)
+        return _plan(holders, players, [frozenset(holder_ids)] * horizon, rest_by_day, seats, optimal=False,
+                     considered=considered)
     col = h.getSolution().col_value
     held = [frozenset(p.player_id for j, p in enumerate(players) if col[x[j][d]] > 0.5) for d in range(horizon)]
-    return _plan(holders, players, held, rest_by_day, seats, optimal=status == highspy.HighsModelStatus.kOptimal)
+    return _plan(holders, players, held, rest_by_day, seats, optimal=status == highspy.HighsModelStatus.kOptimal,
+                 considered=considered)
 
 
 def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequence[frozenset[int]],
-          rest_by_day: Sequence[Sequence[DayPlayer]], seats: Mapping[int, int], *, optimal: bool) -> MultiStreamPlan:
+          rest_by_day: Sequence[Sequence[DayPlayer]], seats: Mapping[int, int], *, optimal: bool,
+          considered: frozenset[int]) -> MultiStreamPlan:
     """The plan from who holds a spot each day, its values recomputed from the lineups. A spot whose
     player leaves takes one who arrives that day, lowest id first."""
     by_id = {p.player_id: p for p in players}
@@ -337,17 +361,27 @@ def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequen
         rows.append(tuple(now))
     day_values = [worth(d, ids) for d, ids in enumerate(held)]
     runs_by_spot: list[tuple[Stretch, ...]] = []
-    for k in range(len(holders)):
+    marginals: list[tuple[float, ...]] = []
+    hold_values: list[float] = []
+    for k, h in enumerate(holders):
         runs: list[Stretch] = []
+        mine: list[float] = []
+        hold = 0.0
         for d, row in enumerate(rows):
             pid = row[k]
-            value = day_values[d] - worth(d, [other for other in row if other != pid])
+            others = [other for other in row if other != pid]
+            without = worth(d, others)
+            value = day_values[d] - without
+            mine.append(value)
+            hold += value if pid == h.player_id else worth(d, {*others, h.player_id}) - without
             if runs and runs[-1].player_id == pid:
                 last = runs[-1]
                 runs[-1] = Stretch(pid, last.start, d + 1, last.value + value)
             else:
                 runs.append(Stretch(pid, d, d + 1, value))
         runs_by_spot.append(tuple(runs))
+        marginals.append(tuple(mine))
+        hold_values.append(hold)
     holder_ids = tuple(h.player_id for h in holders)
     return MultiStreamPlan(
         holder_ids=holder_ids,
@@ -359,4 +393,7 @@ def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequen
         adds=len(switches),
         switches=tuple(switches),
         optimal=optimal,
+        marginals=tuple(marginals),
+        hold_values=tuple(hold_values),
+        considered=considered,
     )
