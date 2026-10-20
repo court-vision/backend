@@ -2,7 +2,7 @@
 Integration: the app map's storage against the real schema (migration 0037).
 
 One row per build, replaced by a later crawl of it unless that crawl couldn't
-sign in; maps over 30 days old pruned at each upload with the newest kept; and
+sign in (an older crawl that finishes last never replaces it); maps over 30 days old pruned at each upload with the newest kept; and
 loading a build's map, or the newest when the build has none yet.
 """
 
@@ -54,8 +54,8 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 def test_a_map_is_stored_as_uploaded():
     body = raw(A, NOW)
-    stored, stats, pruned = store(body)
-    assert (stored, pruned) == (True, 0)
+    kept, stats, pruned = store(body)
+    assert (kept, pruned) == (None, 0)
     row = AiAppMap.get_by_id(A)
     assert row.map == body
     assert row.crawled_at == NOW
@@ -69,14 +69,22 @@ def test_a_later_crawl_of_the_build_replaces_it():
     assert AiAppMap.get_by_id(A).map["desks"][0]["note"] == "after"
 
 
+def test_an_older_crawl_that_finishes_last_keeps_the_newer_map():
+    store(raw(A, NOW + timedelta(hours=12), note="newer"))
+    kept, _, _ = store(raw(A, NOW, note="older"))
+    assert kept == "Kept the newer map of this build"
+    row = AiAppMap.get_by_id(A)
+    assert (row.map["desks"][0]["note"], row.crawled_at) == ("newer", NOW + timedelta(hours=12))
+
+
 def test_a_crawl_that_could_not_sign_in_keeps_the_signed_in_map():
     store(raw(A, NOW, note="signed in"))
-    stored, _, _ = store(raw(A, NOW + timedelta(hours=12), signed_in=False, note="signed out"))
-    assert stored is False
+    kept, _, _ = store(raw(A, NOW + timedelta(hours=12), signed_in=False, note="signed out"))
+    assert kept == "Kept the signed-in map of this build"
     assert AiAppMap.get_by_id(A).map["desks"][0]["note"] == "signed in"
     # A signed-out map is replaced by anything
     store(raw(B, NOW, signed_in=False, note="signed out"))
-    assert store(raw(B, NOW, signed_in=False, note="again"))[0] is True
+    assert store(raw(B, NOW, signed_in=False, note="again"))[0] is None
 
 
 def test_old_maps_are_pruned_but_never_the_newest():

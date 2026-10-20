@@ -205,7 +205,7 @@ def stored(monkeypatch):
     async def fake_store(upload, raw, size):
         calls.append((upload, raw, size))
         stats = app_map.app_maps.stats_of(upload, size)
-        return True, stats, 2
+        return None, stats, 2
 
     monkeypatch.setattr(app_map.app_maps, "store", fake_store)
     return calls
@@ -255,6 +255,18 @@ def test_a_map_is_stored(client, upload_configured, stored):
     # Stored as uploaded, extra fields and all
     assert raw["screens"][0]["fingerprint"] == "ab12"
     assert size == data["stats"]["bytes"] > 0
+
+
+@pytest.mark.api
+def test_a_kept_map_says_why(client, upload_configured, monkeypatch):
+    async def fake_store(upload, raw, size):
+        return "Kept the newer map of this build", app_map.app_maps.stats_of(upload, size), 0
+
+    monkeypatch.setattr(app_map.app_maps, "store", fake_store)
+    r = _put(client, _map())
+    assert r.status_code == 200
+    assert r.json()["message"] == "Kept the newer map of this build"
+    assert r.json()["data"]["stored"] is False
 
 
 @pytest.mark.api

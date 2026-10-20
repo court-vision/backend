@@ -99,9 +99,10 @@ async def upload_app_map(request: Request, build: str = Path(pattern=BUILD_PATTE
     if upload.build != build:
         raise BadRequestError("APP_MAP_BUILD_MISMATCH", "The map is of another build", log_level="warning")
 
-    stored, stats, pruned = await app_maps.store(upload, raw, len(body))
+    kept, stats, pruned = await app_maps.store(upload, raw, len(body))
     return AppMapUploadResp(
         status=ApiStatus.SUCCESS,
-        message="Map stored" if stored else "Kept the signed-in map of this build",
-        data=AppMapUploadData(build=build, crawled_at=upload.crawled_at, stored=stored, stats=stats, pruned=pruned),
+        message=kept or "Map stored",
+        data=AppMapUploadData(build=build, crawled_at=upload.crawled_at, stored=kept is None, stats=stats,
+                              pruned=pruned),
     )

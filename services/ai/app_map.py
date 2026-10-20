@@ -233,14 +233,18 @@ def _prune() -> int:
 
 
 @db_operation("ai.store_app_map")
-def _store(build: str, crawled_at: datetime, raw: dict[str, Any], stats: dict[str, Any]) -> tuple[bool, int]:
+def _store(build: str, crawled_at: datetime, raw: dict[str, Any], stats: dict[str, Any]) -> tuple[Optional[str], int]:
     with db.atomic():
         # Uploads of one build are serialized here, so the check below holds until the write
         db.execute_sql("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"ai_app_maps:{build}",))
-        held = AiAppMap.select(AiAppMap.stats).where(AiAppMap.build == build).first()
-        if held and held.stats.get("signed_in_screens", 0) > 0 and not stats["signed_in_screens"]:
-            stored = False
+        held = AiAppMap.select(AiAppMap.crawled_at, AiAppMap.stats).where(AiAppMap.build == build).first()
+        if held and held.crawled_at > crawled_at:
+            # Two crawls of a build can finish out of order (a re-run and the next schedule)
+            kept = "Kept the newer map of this build"
+        elif held and held.stats.get("signed_in_screens", 0) > 0 and not stats["signed_in_screens"]:
+            kept = "Kept the signed-in map of this build"
         else:
+            kept = None
             now = datetime.now(timezone.utc)
             (AiAppMap
              .insert(build=build, crawled_at=crawled_at, map=raw, stats=stats, uploaded_at=now)
@@ -248,18 +252,20 @@ def _store(build: str, crawled_at: datetime, raw: dict[str, Any], stats: dict[st
                           update={AiAppMap.crawled_at: crawled_at, AiAppMap.map: raw,
                                   AiAppMap.stats: stats, AiAppMap.uploaded_at: now})
              .execute())
-            stored = True
         pruned = _prune()
-    return stored, pruned
+    return kept, pruned
 
 
-async def store(upload: AppMapUpload, raw: dict[str, Any], size: int) -> tuple[bool, AppMapStats, int]:
-    """Store one build's map as uploaded; returns whether it was stored, its stats and how many maps were pruned."""
+async def store(upload: AppMapUpload, raw: dict[str, Any], size: int) -> tuple[Optional[str], AppMapStats, int]:
+    """Store one build's map as uploaded; returns why the held map was kept instead (None when
+    this one was stored), its stats and how many maps were pruned."""
     stats = stats_of(upload, size)
-    stored, pruned = await _store(upload.build, upload.crawled_at, raw, stats.model_dump())
-    log.info("app_map_stored" if stored else "app_map_kept_signed_in", build=upload.build,
-             pruned=pruned, **stats.model_dump())
-    return stored, stats, pruned
+    kept, pruned = await _store(upload.build, upload.crawled_at, raw, stats.model_dump())
+    if kept:
+        log.info("app_map_kept", build=upload.build, reason=kept, pruned=pruned, **stats.model_dump())
+    else:
+        log.info("app_map_stored", build=upload.build, pruned=pruned, **stats.model_dump())
+    return kept, stats, pruned
 
 
 # ---- Loading ----
