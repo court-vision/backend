@@ -379,7 +379,8 @@ def fa(pid, nba_team, *, value, positions=("PG", "G"), pos=1):
 @pytest.fixture
 def lanes(monkeypatch):
     st = SimpleNamespace(board=BOARD, pool=[fa(10, "LAL", value=22), fa(11, "LAL", value=35)], transactions=True,
-                         scoring=POINTS, category_values={}, matchup=None, pending=[], named_pool=[], named_asked=None)
+                         scoring=POINTS, category_values={}, matchup=None, pending=[], named_pool=[], named_asked=None,
+                         scheduled_pool=([], set()), scheduled_asked=None)
 
     async def direct(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -400,9 +401,14 @@ def lanes(monkeypatch):
         st.named_asked = espn_ids
         return st.named_pool
 
+    async def scheduled_pool(league_info, espn_ids):
+        st.scheduled_asked = espn_ids
+        return st.scheduled_pool
+
     monkeypatch.setattr(fantasy, "run_db", direct)
     monkeypatch.setattr(fantasy, "run_cpu", direct)
     monkeypatch.setattr(fantasy, "_named_pool", named_pool)
+    monkeypatch.setattr(fantasy, "_scheduled_pool", scheduled_pool)
     monkeypatch.setattr(fantasy, "_identities", lambda ids: {i: fantasy._Identity(i, f"P{i}", i - 1000, "LAL") for i in ids})
     monkeypatch.setattr(fantasy, "get_provider_adapter", lambda provider: SimpleNamespace(
         capabilities=lambda li: SimpleNamespace(transactions=st.transactions), read_lineup=read_lineup))
@@ -493,6 +499,48 @@ def test_a_player_a_scheduled_pickup_drops_is_not_a_holder(lanes):
     assert out["switches"][0]["add_player_id"] == 1011                        # FA 10 is the pickup's, not the plan's
     with pytest.raises(AppError, match="scheduled to be dropped on 2026-11-17"):
         plan(holders=[1003])
+
+
+@pytest.mark.unit
+def test_a_player_a_scheduled_pickup_brings_in_is_read_by_id_when_outside_the_market(lanes):
+    """The pickup scheduled for day 1 drops the big for FA 50, a center outside the most-owned read.
+    He is read by his id, so the plan's roster-to-be has his position: with centers capped at two
+    (Out on IR and FA 50 from day 1), the guard's spot cannot take FA 12 (a center, the best value)
+    and streams FA 11 instead."""
+    lanes.board = BOARD.model_copy(update={"position_limits": {"5": 2}})
+    lanes.pool = [*lanes.pool, fa(12, "LAL", value=40, positions=("C",), pos=5)]
+    lanes.pending = [PendingPickup(1, 29, date(2026, 11, 17), 50, BIG)]
+    lanes.scheduled_pool = ([fa(50, "LAL", value=22, positions=("C",), pos=5)], set())
+    out = plan(holders=[1002])
+    assert lanes.scheduled_asked == [50]
+    assert [(s["day"], s["drop_player_id"], s["add_player_id"]) for s in out["switches"]] == [(1, 1002, 1011)]
+    assert out["notes"] == [] and "espn" not in str(out)
+    # Without the read, nothing would count his position and the plan would take the center.
+    lanes.scheduled_pool = ([], set())
+    out = plan(holders=[1002])
+    assert [s["add_player_id"] for s in out["switches"]] == [1012]
+    assert out["notes"] == ["Player 1050, scheduled to be added on 2026-11-17, is no longer a free agent the plan "
+                            "can read; the plan does not count him on the roster."]
+
+
+@pytest.mark.unit
+def test_a_scheduled_pickups_player_listed_out_is_worth_nothing_under_any_value(lanes, monkeypatch):
+    """The planner seats him and counts his position from his day, at nothing while out: the board's
+    value (the read gives 0) and a category's alike."""
+    lanes.pending = [PendingPickup(1, 29, date(2026, 11, 17), 50, BIG)]
+    lanes.scheduled_pool = ([fa(50, "LAL", value=0.0, positions=("C",), pos=5)], {50})
+    lanes.category_values = {HOLDER: 0.5, GUARD: 0.1, BIG: 2.0, 10: 3.0, 11: 0.0, 50: 9.0}
+    seen, original = {}, fantasy.plan_lanes
+
+    def plan_lanes(board, holder_ids, pool, days, pending, budget, rehold, values=None):
+        seen["pool"] = {f.player_id: f.value for f in pool}
+        seen["values"] = values
+        return original(board, holder_ids, pool, days, pending, budget, rehold, values)
+    monkeypatch.setattr(fantasy, "plan_lanes", plan_lanes)
+    plan(value="blk")
+    assert seen["pool"][50] == 0.0 and seen["values"][50] == 0.0 and seen["values"][10] == 3.0
+    plan()
+    assert seen["pool"][50] == 0.0 and seen["values"] is None
 
 
 @pytest.mark.unit

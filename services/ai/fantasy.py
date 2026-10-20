@@ -38,6 +38,7 @@ from db.models.nba.games import Game
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
+from schemas.espn import PlayerResp
 from services import schedule_service
 from services.acquisitions import adds_for_day
 from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
@@ -69,6 +70,7 @@ from services.stream_lane_service import (
     StreamLaneService,
     _days,
     _pending_pickups,
+    active_slots,
     first_open_period,
     lane_budget,
     plan_lanes,
@@ -619,17 +621,35 @@ def _rehold_after(acq: Any) -> int:
     return 1 if hours <= 0 else 1 + math.ceil(hours / 24)
 
 
-async def _named_pool(league_info: LeagueInfo, espn_ids: list[int]) -> list[PoolPlayer]:
-    """The free agents among ESPN ids named outside the market's read (its most-owned players),
-    built as the lanes' pool is; [] when the read fails, never a failure."""
+async def _read_by_ids(league_info: LeagueInfo, espn_ids: list[int]) -> list[PlayerResp]:
+    """The free agents and waiver claims among ESPN ids outside the market's read (its most-owned
+    players); [] when the read fails, never a failure."""
     if league_info.provider != FantasyProvider.ESPN or not espn_ids:
         return []
     try:
         resp = await EspnService.get_free_agents_by_ids(league_info, espn_ids)
     except Exception as exc:
-        log.warning("ai_named_pool_unavailable", error=str(exc))
+        log.warning("ai_pool_read_unavailable", error=str(exc))
         return []
-    return StreamLaneService._pool_players(resp.data or []) if resp.status == ApiStatus.SUCCESS else []
+    return list(resp.data or []) if resp.status == ApiStatus.SUCCESS else []
+
+
+async def _named_pool(league_info: LeagueInfo, espn_ids: list[int]) -> list[PoolPlayer]:
+    """The candidates named outside the market's read, built as the lanes' pool is."""
+    return StreamLaneService._pool_players(await _read_by_ids(league_info, espn_ids))
+
+
+async def _scheduled_pool(league_info: LeagueInfo, espn_ids: list[int]) -> tuple[list[PoolPlayer], set[int]]:
+    """The players scheduled pickups bring in, when outside the market's read: on the roster-to-be
+    from their days, the plan needs their games and positions. With the ids of those listed out,
+    who count for nothing while out (as an out holder does) but keep a seat and a position. One
+    no longer free is absent."""
+    players = await _read_by_ids(league_info, espn_ids)
+    out = {p.player_id for p in players if _is_out(p.injury_status)}
+    pool = [PoolPlayer(p.player_id, p.name, normalize_nba_abbrev(p.team), active_slots(p.valid_positions),
+                       0.0 if p.player_id in out else float(p.avg_points or 0.0), p.default_position_id)
+            for p in players]
+    return pool, out
 
 
 def _category_lines(espn_ids: list[int]) -> dict[int, Optional[StatLine]]:
@@ -699,9 +719,23 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
 
     on_board = {p.player_id: p for p in board.players}
     in_pool = {f.player_id: f for f in pool}
-    nba_ids = await run_db("ai.nba_ids", nba_ids_by_espn_id, sorted({*on_board, *in_pool}))
+    # A player a scheduled pickup brings in is on the roster-to-be from his day (`plan_lanes` seats
+    # him and counts his position); one outside the market's read is read by his id.
+    scheduled = sorted({pk.add_player_id for pk in pending} - on_board.keys() - in_pool.keys())
+    scheduled_out: set[int] = set()
+    if scheduled:
+        extra, scheduled_out = await _scheduled_pool(league_info, scheduled)
+        pool = [*pool, *extra]
+        in_pool.update({f.player_id: f for f in extra})
+    nba_ids = await run_db("ai.nba_ids", nba_ids_by_espn_id, sorted({*on_board, *in_pool, *scheduled}))
     espn_ids = {nba: espn for espn, nba in nba_ids.items()}
     notes: list[str] = []
+    for eid in scheduled:
+        if eid not in in_pool:
+            when = next(pk.nba_date for pk in pending if pk.add_player_id == eid)
+            who_ = f"Player {nba_ids[eid]}" if eid in nba_ids else "A player"
+            notes.append(f"{who_}, scheduled to be added on {when}, is no longer a free agent the plan can read; "
+                         "the plan does not count him on the roster.")
 
     # A candidate named outside the market's read (ESPN's most-owned free agents) is read by his id
     unread = [nba for nba in args.candidates if nba not in espn_ids]
@@ -731,6 +765,8 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         valued = await run_db("ai.category_values", _category_values, args.value, sorted({*on_board, *in_pool}))
     notes.extend(valued.notes)
     values = valued.values
+    if values is not None and scheduled_out:
+        values = {**values, **{e: 0.0 for e in scheduled_out}}
 
     def value_of(espn_id: int, default: float) -> float:
         return default if values is None else float(values.get(espn_id, 0.0))
