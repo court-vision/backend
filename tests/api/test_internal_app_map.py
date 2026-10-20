@@ -287,6 +287,10 @@ def test_build_must_be_a_commit(client, upload_configured, stored, build):
     (_map(version=2), "APP_MAP_VERSION"),
     # A newer version is refused as one, whatever its shape
     (_map(version=2, screens=[{"id": "week", "tree": {"role": "main"}}]), "APP_MAP_VERSION"),
+    # A version that only coerces to an int, and a crawl time with no zone
+    (_map(version="2"), "APP_MAP_INVALID"),
+    (_map(version=2.0), "APP_MAP_INVALID"),
+    (_map(crawledAt="2026-10-20T07:00:00"), "APP_MAP_INVALID"),
     (_map(build="0" * 40), "APP_MAP_BUILD_MISMATCH"),
 ])
 def test_anything_but_this_builds_map_is_refused(client, upload_configured, stored, body, code):

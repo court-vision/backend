@@ -6,7 +6,7 @@ the crawler's one-time sign-in, and the map the workflow uploads.
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from schemas.common import ApiModel, BaseResponse
 
@@ -68,9 +68,11 @@ class MapCopy(_MapPart):
 
 
 class AppMapUpload(_MapPart):
-    version: int
+    # Strict: a "2" or 2.0 would pass as 2 and slip past the upload's version check
+    version: int = Field(strict=True)
     build: str
-    crawled_at: datetime = Field(alias="crawledAt")
+    # Aware: it is compared with the stored map's, which Postgres gives back with its zone
+    crawled_at: AwareDatetime = Field(alias="crawledAt")
     desks: list[MapDesk] = Field(min_length=1)
     screens: list[MapScreen] = Field(min_length=1)
     # `copy` would shadow BaseModel.copy
