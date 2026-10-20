@@ -3,8 +3,8 @@
 `ensure_team_owned` stub, the credential loader stubbed at the route, and the service
 replaced per test so the routes' plumbing and every documented status are exercised —
 200, 404 STREAM_LANE_NOT_FOUND, 403 ROSTER_WRITE_DISABLED, 409 STREAM_LANE_EXISTS /
-STREAM_LANE_ENDED / STREAM_LANE_BUSY, 422 STREAM_LANE_INVALID with `data.reason`, and
-FastAPI's own 422.
+STREAM_LANE_LIMIT / STREAM_LANE_ENDED / STREAM_LANE_BUSY, 422 STREAM_LANE_INVALID with
+`data.reason`, and FastAPI's own 422.
 """
 
 from datetime import date, datetime, timezone
@@ -112,6 +112,7 @@ def test_list_update_and_stop(authed_client, owned, monkeypatch):
 @pytest.mark.parametrize("method, verb, path, body, error, status, code", [
     ("start", "post", "", {"player_id": 1}, editor.RosterWriteDisabled(), 403, "ROSTER_WRITE_DISABLED"),
     ("start", "post", "", {"player_id": 1}, svc.StreamLaneExists(), 409, "STREAM_LANE_EXISTS"),
+    ("start", "post", "", {"player_id": 1}, svc.StreamLaneLimit(), 409, "STREAM_LANE_LIMIT"),
     ("plan", "post", "/plan", {"player_id": 1}, svc._invalid("on_ir", "On IR"), 422, "STREAM_LANE_INVALID"),
     ("update", "patch", "/3", {"status": "active"}, svc.StreamLaneEnded(), 409, "STREAM_LANE_ENDED"),
     ("update", "patch", "/3", {"status": "paused"}, svc.StreamLaneBusy(), 409, "STREAM_LANE_BUSY"),

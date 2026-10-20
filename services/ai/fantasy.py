@@ -71,7 +71,7 @@ from services.stream_lane_service import (
     _pending_pickups,
     first_open_period,
     lane_budget,
-    plan_spots,
+    plan_lanes,
 )
 from services.stream_value import (
     LEAGUE,
@@ -802,8 +802,7 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     ranked_pool = sorted(pool, key=lambda f: (-value_of(f.player_id, f.value), f.player_id))
     kept = ranked_pool[:POOL_CAP] + [f for f in ranked_pool[POOL_CAP:] if f.player_id in keep]
 
-    spots_plan = await run_cpu("ai.plan_spots", plan_spots, board, holder_ids, kept, days, pending, budget, rehold, values)
-    plan = spots_plan.plan
+    plan = await run_cpu("ai.plan_lanes", plan_lanes, board, holder_ids, kept, days, pending, budget, rehold, values)
 
     def who(eid: int) -> dict[str, Any]:
         p = on_board.get(eid) or in_pool.get(eid)
@@ -818,7 +817,7 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         prev = plan.holder_ids[k]
         for i, (day, pid) in enumerate(zip(days, spot)):
             plan_rows.append({"day": i, "date": day.nba_date, "spot": k + 1, **who(pid),
-                              "value": round(spots_plan.values[pid][i], 2), "switch": pid != prev})
+                              "value": round(plan.marginals[k][i], 2), "switch": pid != prev})
             prev = pid
     switch_rows = [{
         "day": s.day, "date": days[s.day].nba_date, "spot": s.spot + 1,
@@ -845,7 +844,7 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         "gain": round(plan.gain, 2),
         "adds": plan.adds,
         "optimal": plan.optimal,
-        "candidates_considered": len(spots_plan.considered),
+        "candidates_considered": len(plan.considered),
         "weights": valued.weights or None,
         "notes": notes,
         "labels": LABELS,

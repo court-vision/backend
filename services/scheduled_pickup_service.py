@@ -417,10 +417,10 @@ def _window_for(nba_date: date) -> AttemptWindow:
     return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
 
 
-def _lane_holder(team_id: int) -> Optional[int]:
-    """The player an active stream lane holds its spot with, whom no pickup may drop."""
-    from db.models.stream_lanes import active_lane_holder
-    return active_lane_holder(team_id)
+def _lane_holders(team_id: int) -> set[int]:
+    """The players active stream lanes hold their spots with, whom no pickup may drop."""
+    from db.models.stream_lanes import active_lane_holders
+    return active_lane_holders(team_id)
 
 
 def _lane_status(lane_id: int) -> Optional[str]:
@@ -507,8 +507,8 @@ class ScheduledPickupService:
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
-        if drop is not None and holder is not None and await run_db("pickup.lane_holder", _lane_holder,
-                                                                    team.team_id) == drop:
+        if drop is not None and holder is not None and drop in await run_db("pickup.lane_holder", _lane_holders,
+                                                                            team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
                                                   "stop the lane to drop them", drop)
         blocked = budget_block(state.acquisitions, nba_date)

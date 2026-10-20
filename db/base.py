@@ -15,6 +15,7 @@ from playhouse.pool import PooledPostgresqlExtDatabase
 from core.logging import get_logger
 from core.errors import DatabaseUnavailableError
 from core.settings import settings
+from core.tracing import timed, waiting
 
 # One source of truth for the connection string. `Settings` reads the process
 # environment first (how Railway supplies it) and falls back to backend/.env
@@ -265,7 +266,8 @@ async def run_db(operation_name: str, fn: Callable[..., T], *args: Any, **kwargs
     executor, capacity = _ensure_db_runtime()
     queued_at = time.perf_counter()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.db_queue_timeout_seconds)
+        with waiting("db slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.db_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         log.error(
             "db_capacity_timeout",
@@ -280,7 +282,10 @@ async def run_db(operation_name: str, fn: Callable[..., T], *args: Any, **kwargs
 
     def _call() -> T:
         started = time.perf_counter()
-        with sentry_sdk.start_span(op="db.query", name=operation_name) as span:
+        # The whole operation is Postgres time (checkout, queries, reading the
+        # rows); its queries are the calls (core/tracing.py traces each one).
+        with sentry_sdk.start_span(op="db.query", name=operation_name) as span, \
+                timed("postgres", operation_name, call=False):
             span.set_data("db.queue_ms", queue_ms)
             try:
                 with db.connection_context():

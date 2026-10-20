@@ -1,16 +1,19 @@
 """
-Integration: migration 0030 against the real schema.
+Integration: migrations 0030 and 0037 against the real schema.
 
 The unit layer decides what each decision does; here the tables decide what may be stored
-and claimed: one open lane per team, the CHECKs, the lane id on scheduled pickups, and the
-repository functions the service runs through `run_db` — the claim lease and the writes-off
-release, a decision's writes landing together and only for the claim that made it, a user's
-change fencing out a running decision, a settled lane pickup moving the holder, the guard's
-lookup, the listing, the schedule read — plus the rollback.
+and claimed: one open lane per spot and four per team (two starts at once included), the CHECKs, the lane id on scheduled
+pickups, and the repository functions the service runs through `run_db` — the claim lease
+(a team's due lanes together, none while its decisions run) and the writes-off release, a decision's writes landing
+together and only for the claim that made it, a user's change fencing out a running
+decision, other lanes' projections written only for an unclaimed lane, a settled lane
+pickup moving the holder, the guard's lookup, the listing, the schedule read — plus the
+rollbacks.
 """
 
 import asyncio
 import json
+import threading
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from peewee import IntegrityError
 from db.base import db
 from db.migrate import MIGRATIONS_DIR
 from db.models.scheduled_pickups import ScheduledPickup
-from db.models.stream_lanes import StreamLane, StreamLaneEvent, active_lane_holder
+from db.models.stream_lanes import StreamLane, StreamLaneEvent, active_lane_holders
 from db.models.teams import Team
 from db.models.users import User
 from schemas.stream_lane import StreamLaneUpdateReq
@@ -66,25 +69,79 @@ def _pickup_fields(user, team, lane_id=None, add=FA, **kw):
 # ---- the schema --------------------------------------------------------------------------------
 
 
-def test_0030_is_applied_by_the_chain(integration_db):
+def test_0030_and_0037_are_applied_by_the_chain(integration_db):
     ids = {r[0] for r in db.execute_sql("SELECT migration_id FROM public._yoyo_migration").fetchall()}
-    assert "0030__stream_lanes" in ids
+    assert {"0030__stream_lanes", "0037__stream_lanes_per_spot"} <= ids
 
 
-def test_one_open_lane_per_team(user, team):
+def _new_lane(user, team, holder):
+    return svc._insert_lane(dict(user=user.user_id, team=team.team_id, holder_player_id=holder, holder_name="K",
+                                 original_player_id=holder, original_name="K", start_period=28, end_period=34,
+                                 end_date=date(2026, 11, 22), next_period=28), dict(action="started"))
+
+
+def test_one_open_lane_per_spot(user, team):
     first = _lane(user, team)
     with pytest.raises(svc.StreamLaneExists):
-        svc._insert_lane(dict(user=user.user_id, team=team.team_id, holder_player_id=FA, holder_name="K",
-                              original_player_id=FA, original_name="K", start_period=28, end_period=34,
-                              end_date=date(2026, 11, 22), next_period=28), dict(action="started"))
+        _new_lane(user, team, HOLDER)
     StreamLane.update(status="paused").where(StreamLane.id == first.id).execute()
     with pytest.raises(IntegrityError), db.atomic():
         _lane(user, team)                                          # paused is still open
+    second = _new_lane(user, team, FA)                             # another spot: a second lane
+    assert StreamLaneEvent.select().where(StreamLaneEvent.lane == second.id).count() == 1
     StreamLane.update(status="ended", ended_at=NOW).where(StreamLane.id == first.id).execute()
-    second = svc._insert_lane(dict(user=user.user_id, team=team.team_id, holder_player_id=FA, holder_name="K",
-                                   original_player_id=FA, original_name="K", start_period=28, end_period=34,
-                                   end_date=date(2026, 11, 22), next_period=28), dict(action="started"))
-    assert second.id != first.id and StreamLaneEvent.select().where(StreamLaneEvent.lane == second.id).count() == 1
+    third = _new_lane(user, team, HOLDER)                          # the spot is free again
+    assert [lane.id for lane in svc._open_lanes(team.team_id)] == [second.id, third.id]
+
+
+def test_four_open_lanes_per_team(user, team):
+    for holder in range(1, svc.MAX_LANES + 1):
+        _new_lane(user, team, holder)
+    with pytest.raises(svc.StreamLaneLimit):
+        _new_lane(user, team, 99)
+    assert StreamLane.select().count() == svc.MAX_LANES
+    StreamLane.update(status="ended", ended_at=NOW).where(StreamLane.holder_player_id == 1).execute()
+    _new_lane(user, team, 99)
+
+
+def test_two_starts_at_once_still_stop_at_four(user, team, monkeypatch):
+    """Two starts for different spots while the team has three lanes: the second waits for the first
+    to commit, counts four and is refused, instead of both counting three and making five."""
+    for holder in range(1, svc.MAX_LANES):
+        _new_lane(user, team, holder)
+    created, go = threading.Event(), threading.Event()
+    real_create = StreamLane.create.__func__
+
+    def create(cls, **fields):
+        lane = real_create(cls, **fields)
+        if threading.current_thread().name == "first":
+            created.set()
+            go.wait(5)                                              # hold the transaction open
+        return lane
+    monkeypatch.setattr(StreamLane, "create", classmethod(create))
+    outcome = {}
+
+    def start(name, holder):
+        try:
+            outcome[name] = _new_lane(user, team, holder).id
+        except Exception as exc:
+            outcome[name] = exc
+        finally:
+            if not db.is_closed():
+                db.close()
+    first = threading.Thread(target=start, args=("first", 10), name="first")
+    first.start()
+    assert created.wait(5)
+    second = threading.Thread(target=start, args=("second", 11), name="second")
+    second.start()
+    second.join(0.5)
+    blocked = second.is_alive()                                     # waiting on the team's lock
+    go.set()
+    first.join(5)
+    second.join(5)
+    assert blocked
+    assert isinstance(outcome["first"], int) and isinstance(outcome["second"], svc.StreamLaneLimit)
+    assert StreamLane.select().count() == svc.MAX_LANES
 
 
 @pytest.mark.parametrize("field, value", [("status", "stopped"), ("notify", "sms")])
@@ -125,6 +182,35 @@ def test_the_claim_leases_due_active_lanes_only(user, team):
     assert [r.id for r in svc._claim_due_lanes(NOW + svc.LEASE, 10)] == [due.id]
 
 
+def test_the_claim_takes_a_teams_due_lanes_together(user, team):
+    first = _lane(user, team, next_decision_at=NOW - timedelta(minutes=2))
+    second = _lane(user, team, holder_player_id=FA)
+    later = _lane(user, team, holder_player_id=FA2, next_decision_at=NOW + timedelta(hours=1))
+    other_team = Team.create(user_id=user.user_id, team_identifier="x2", league_info="{}")
+    _lane(user, other_team)
+    claimed = svc._claim_due_lanes(NOW, 1)                         # one lane's team: both its due lanes
+    assert sorted(r.id for r in claimed) == [first.id, second.id] and later.id not in {r.id for r in claimed}
+    assert [r.team_id for r in svc._claim_due_lanes(NOW, 1)] == [other_team.team_id]
+
+
+def test_a_team_whose_decisions_are_running_is_left_alone_until_they_land(user, team):
+    running = _lane(user, team)
+    (claimed,) = svc._claim_due_lanes(NOW, 10)
+    started = _lane(user, team, holder_player_id=FA)                # started meanwhile, due at once
+    other_team = Team.create(user_id=user.user_id, team_identifier="x2", league_info="{}")
+    elsewhere = _lane(user, other_team)
+    later = NOW + timedelta(minutes=1)
+    assert [r.id for r in svc._claim_due_lanes(later, 10)] == [elsewhere.id]
+    svc._record_decision(running.id, claimed.attempts, later,
+                         dict(next_period=30, next_decision_at=NOW + timedelta(days=1), reason=None), [], None)
+    assert [r.id for r in svc._claim_due_lanes(later, 10)] == [started.id]
+    # A run that dies mid-decision holds the team only until its lease runs out.
+    third = _lane(user, team, holder_player_id=FA2)
+    assert svc._claim_due_lanes(later + timedelta(minutes=1), 10) == []
+    reclaimed = svc._claim_due_lanes(later + svc.LEASE, 10)
+    assert {r.id for r in reclaimed if r.team_id == team.team_id} == {started.id, third.id}
+
+
 def test_writes_off_push_due_decisions_back(user, team):
     lane = _lane(user, team)
     assert svc._release_due_lanes(NOW, NOW + timedelta(minutes=10)) == 1
@@ -162,6 +248,15 @@ def test_a_switch_to_a_player_already_scheduled_is_recorded_as_blocked(user, tea
     event = StreamLaneEvent.get(StreamLaneEvent.lane == lane.id)
     assert (event.action, event.reason, event.pickup_id) == ("blocked", "already_scheduled", None)
     assert StreamLane.get_by_id(lane.id).next_period == 30         # the lane still moves on
+
+
+def test_a_new_lanes_projections_for_the_others_land_only_where_unclaimed(user, team):
+    idle = _lane(user, team, next_decision_at=NOW + timedelta(hours=1))
+    busy = _lane(user, team, holder_player_id=FA)
+    (claimed,) = svc._claim_due_lanes(NOW, 1)                       # a decision is running for `busy`
+    svc._set_projections([(idle.id, idle.attempts, {"lanes": 2}), (busy.id, busy.attempts, {"lanes": 2})], NOW)
+    assert StreamLane.get_by_id(idle.id).projection == {"lanes": 2}
+    assert StreamLane.get_by_id(busy.id).projection is None and claimed.id == busy.id
 
 
 def test_a_users_change_fences_out_a_running_decision(user, team):
@@ -248,11 +343,12 @@ def test_an_attempt_on_a_paused_lanes_pickup_cancels_it_unsent(user, team, monke
     assert StreamLane.get_by_id(lane.id).holder_player_id == HOLDER
 
 
-def test_the_guard_sees_only_an_active_lanes_holder(user, team):
+def test_the_guard_sees_the_active_lanes_holders(user, team):
     lane = _lane(user, team)
-    assert active_lane_holder(team.team_id) == HOLDER
+    _lane(user, team, holder_player_id=FA)
+    assert active_lane_holders(team.team_id) == {HOLDER, FA}
     StreamLane.update(status="paused").where(StreamLane.id == lane.id).execute()
-    assert active_lane_holder(team.team_id) is None
+    assert active_lane_holders(team.team_id) == {FA}
 
 
 def test_the_listing(user, team):
@@ -293,3 +389,19 @@ def test_0030_rollback_and_forward(user, team):
     assert db.execute_sql("SELECT status FROM usr.scheduled_pickups WHERE id = %s", (pickup.id,)).fetchone() == ("executed",)
     db.execute_sql(forward)
     assert db.execute_sql("SELECT lane_id FROM usr.scheduled_pickups WHERE id = %s", (pickup.id,)).fetchone() == (None,)
+    db.execute_sql((Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.sql").read_text())   # as the chain left it
+
+
+def test_0037_rollback_and_forward(user, team):
+    forward = (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.rollback.sql").read_text()
+    _lane(user, team)
+    second = _lane(user, team, holder_player_id=FA)
+    with pytest.raises(IntegrityError), db.atomic():
+        db.execute_sql(rollback)                                    # two open lanes: one per team can't hold
+    StreamLane.update(status="ended", ended_at=NOW).where(StreamLane.id == second.id).execute()
+    db.execute_sql(rollback)
+    with pytest.raises(IntegrityError), db.atomic():
+        _lane(user, team, holder_player_id=FA2)                     # one open lane per team again
+    db.execute_sql(forward)
+    _lane(user, team, holder_player_id=FA2)

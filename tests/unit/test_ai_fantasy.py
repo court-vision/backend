@@ -539,12 +539,12 @@ def test_a_provider_without_transactions_is_refused(lanes):
 @pytest.mark.unit
 def test_the_pool_is_capped_to_the_best_under_the_value_plus_the_named(lanes, monkeypatch):
     lanes.pool = [fa(100 + i, "LAL", value=float(200 - i)) for i in range(100)]
-    seen, original = {}, fantasy.plan_spots
+    seen, original = {}, fantasy.plan_lanes
 
-    def plan_spots(board, holder_ids, pool, *rest):
+    def plan_lanes(board, holder_ids, pool, *rest):
         seen["pool"] = [f.player_id for f in pool]
         return original(board, holder_ids, pool[:3], *rest)
-    monkeypatch.setattr(fantasy, "plan_spots", plan_spots)
+    monkeypatch.setattr(fantasy, "plan_lanes", plan_lanes)
     plan(candidates=[1199])
     assert len(seen["pool"]) == fantasy.POOL_CAP + 1 and seen["pool"][-1] == 199 and seen["pool"][0] == 100
     # A player a scheduled pickup brings in stays in the pool too: the plan's roster-to-be needs his games.

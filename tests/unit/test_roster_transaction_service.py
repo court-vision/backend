@@ -74,7 +74,7 @@ def pickup(*, id=1, team_id=21, status="pending", drop=EDWARDS, add_name="Kawhi 
 @pytest.fixture
 def harness(monkeypatch):
     h = SimpleNamespace(reads=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[], updates=[],
-                        lane_holder=None, pickups=[], scheduled_calls=[])
+                        lane_holders=set(), pickups=[], scheduled_calls=[])
 
     async def fake_read(team_id, league_info, **kwargs):
         nxt = h.reads.pop(0)
@@ -114,7 +114,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(svc.EspnService, "get_player_pool_entries", staticmethod(fake_pool))
     monkeypatch.setattr(fantasy_writer_client, "apply_transaction", fake_apply)
     monkeypatch.setattr(svc, "run_db", direct_run_db)
-    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_holders", lambda team_id: h.lane_holders)   # no lane unless a test sets one
     monkeypatch.setattr(svc, "_scheduled_drop", scheduled_drop)                # no pickups unless a test adds one
     monkeypatch.setattr(svc, "_audit_insert", audit_insert)
     monkeypatch.setattr(svc, "_audit_update", audit_update)
@@ -198,11 +198,11 @@ def test_drop_must_be_on_the_board_and_unlocked(harness):
 
 @pytest.mark.unit
 def test_the_player_a_stream_lane_holds_its_spot_with_cannot_be_dropped(harness):
-    harness.lane_holder = EDWARDS
+    harness.lane_holders = {JOKIC, EDWARDS}     # two lanes: either holder is refused
     harness.pool = {KAWHI: pool()}
     exc = _invalid(harness, req(add=KAWHI, drop=EDWARDS), "drop_is_lane_holder", EDWARDS)
     assert "stream lane" in exc.message
-    harness.lane_holder = JOKIC          # another player's spot: this drop goes through
+    harness.lane_holders = {JOKIC}              # another player's spot: this drop goes through
     after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
     harness.reads = [state(board()), state(after, version="v2")]
     assert apply(req(add=KAWHI, drop=EDWARDS)).data.verified is True
@@ -223,7 +223,7 @@ def test_a_drop_a_pending_scheduled_pickup_already_makes_is_refused(harness):
 @pytest.mark.unit
 def test_a_lane_holder_is_refused_as_one_before_his_lanes_pickup(harness):
     """A lane's switch is itself a pending pickup dropping the holder: the lane is what to stop."""
-    harness.lane_holder = EDWARDS
+    harness.lane_holders = {EDWARDS}
     harness.pickups = [pickup()]
     _invalid(harness, req(drop=EDWARDS), "drop_is_lane_holder", EDWARDS)
     assert harness.scheduled_calls == []

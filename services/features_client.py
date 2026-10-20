@@ -21,6 +21,7 @@ import httpx
 
 from core.logging import get_correlation_id, get_logger
 from core.settings import settings
+from core.tracing import timed, trace_headers, waiting
 from utils.constants import FEATURES_SERVER_ENDPOINT
 
 # The optimizer runs a genetic algorithm over the whole week: generous read timeout,
@@ -107,7 +108,7 @@ async def _request_client():
 
 def _request_headers() -> dict[str, str]:
     correlation_id = get_correlation_id()
-    return {"X-Correlation-ID": correlation_id} if correlation_id else {}
+    return trace_headers({"X-Correlation-ID": correlation_id} if correlation_id else {})
 
 
 async def _acquire_capacity() -> asyncio.Semaphore:
@@ -115,7 +116,8 @@ async def _acquire_capacity() -> asyncio.Semaphore:
         start_features_runtime()
     assert _capacity is not None
     try:
-        await asyncio.wait_for(_capacity.acquire(), settings.provider_queue_timeout_seconds)
+        with waiting("features slot"):
+            await asyncio.wait_for(_capacity.acquire(), settings.provider_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         get_logger("features").warning(
             "features_capacity_timeout",
@@ -162,7 +164,8 @@ async def post_generate_lineup(payload: dict, **context: Any) -> httpx.Response:
         retry_error: Optional[Exception] = None
         try:
             async with _request_client() as client:
-                response = await client.post("/generate-lineup", json=payload, headers=_request_headers())
+                with timed("features", "POST features /generate-lineup"):
+                    response = await client.post("/generate-lineup", json=payload, headers=_request_headers())
         except RETRYABLE_ERRORS as exc:
             last_error = exc
             retry_error = exc
@@ -240,7 +243,8 @@ async def get_healthz() -> dict:
     capacity = await _acquire_capacity()
     try:
         async with _request_client() as client:
-            response = await client.get("/healthz", headers=_request_headers())
+            with timed("features", "GET features /healthz"):
+                response = await client.get("/healthz", headers=_request_headers())
             response.raise_for_status()
             return response.json()
     finally:

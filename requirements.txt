@@ -55,6 +55,17 @@ structlog==24.4.0
 slowapi==0.1.9
 redis==5.2.1
 sentry-sdk[fastapi]==2.68.1
+# Request timing (core/tracing.py): spans per request, OTLP export to Railway when tracing is on
+googleapis-common-protos==1.75.5
+opentelemetry-api==1.45.1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+protobuf==7.36.2
 
 # AI (anthropic 1.x runs on httpx2, which installs alongside httpx)
 anthropic==1.7.0

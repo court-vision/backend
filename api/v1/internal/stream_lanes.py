@@ -1,7 +1,8 @@
 """
 Stream lanes for a saved team: a standing order to keep one roster spot streaming
-for the rest of the matchup. Preview what a lane would do, start one, list it with
-its history, pause / resume / change how it tells you, stop it. Clerk-authenticated;
+for the rest of the matchup, up to four spots per team, planned together. Preview
+what a lane would do, start one, list them with their history, pause / resume /
+change how one tells you, stop it. Clerk-authenticated;
 ownership via `get_owned_team`; credentials hydrated only here, at the provider
 boundary. The decisions themselves run in the scheduled-pickups executor
 (`jobs.py`), before each day of the matchup.
@@ -29,11 +30,14 @@ async def plan_stream_lane(req: StreamLanePlanReq, team: OwnedTeamContext = Depe
     """
     What a lane started now on `player_id`'s spot would do: who would hold the spot each
     remaining day of the matchup, what each adds to that day's lineup, the gain over
-    keeping the spot's player, and the adds it would use. A projection only — the lane
-    re-plans before each day with the players available then. Nothing is stored.
+    keeping the spot's player, and the adds it would use. It is planned with the team's
+    open lanes that decide its first day too (they share the adds); `others` is their
+    projections then. A projection only — the lanes re-plan before each day with the
+    players available then. Nothing is stored.
 
     422 STREAM_LANE_INVALID with `data.reason` (not_on_roster, on_ir, no_matchup_end,
-    matchup_over, waiver_period_unsupported); 409 ROSTER_WRITE_BLOCKED for a league
+    matchup_over); 409 STREAM_LANE_EXISTS (a lane already streams that spot),
+    STREAM_LANE_LIMIT (the team has four open lanes), ROSTER_WRITE_BLOCKED for a league
     whose rosters can't be changed from here.
     """
     league_info = await load_owned_league_info(team)
@@ -47,9 +51,8 @@ async def start_stream_lane(req: StreamLaneStartReq, team: OwnedTeamContext = De
     is made when a pickup for the first open day can first be made (possibly at once).
     `notify: desk` keeps the lane from emailing.
 
-    Besides the plan route's errors: 403 ROSTER_WRITE_DISABLED, 409 STREAM_LANE_EXISTS
-    (one open lane per team), 422 STREAM_LANE_INVALID `scheduled_out` (a pickup already
-    scheduled drops that player).
+    Besides the plan route's errors: 403 ROSTER_WRITE_DISABLED, 422 STREAM_LANE_INVALID
+    `scheduled_out` (a pickup already scheduled drops that player).
     """
     league_info = await load_owned_league_info(team)
     return respond(await StreamLaneService.start(team, league_info, req))
@@ -57,8 +60,8 @@ async def start_stream_lane(req: StreamLaneStartReq, team: OwnedTeamContext = De
 
 @router.get("/{team_id}/stream-lanes", response_model=StreamLaneListResp)
 async def list_stream_lanes(team: OwnedTeamContext = Depends(get_owned_team)):
-    """The open lane (active or paused) and lanes that ended in the last week, each with its
-    latest projection and its events (newest first)."""
+    """The open lanes (active or paused, oldest first) and lanes that ended in the last week,
+    each with its latest projection and its events (newest first)."""
     return respond(await StreamLaneService.list_for_team(team))
 
 
