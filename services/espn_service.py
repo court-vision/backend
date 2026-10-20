@@ -356,23 +356,46 @@ class EspnService:
 
     @staticmethod
     async def get_free_agents(league_info: LeagueInfo, fa_count: int) -> TeamDataResp:
+        """The `fa_count` most-owned free agents and waiver claims: the market's read."""
+        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Free agents fetched successfully",
+            data=await EspnService._free_agents(league_info, filters),
+        )
+
+    @staticmethod
+    async def get_free_agents_by_ids(league_info: LeagueInfo, player_ids: list[int]) -> TeamDataResp:
+        """The free agents and waiver claims among specific ESPN ids, built as `get_free_agents`
+        builds its players; a rostered or unknown id is simply absent. For a player named
+        outside the market's read, which is ESPN's most-owned `fa_count`. The same `filterIds`
+        read as `get_player_pool_entries` (a sort, since ESPN refuses `limit` without one),
+        with the pool status checked here rather than asked of the filter."""
+        ids = sorted({int(i) for i in player_ids})
+        if not ids:
+            return TeamDataResp(status=ApiStatus.SUCCESS, message="No players asked for", data=[])
+        filters = {"players": {"filterIds": {"value": ids}, "limit": len(ids),
+                               "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+        players = await EspnService._free_agents(league_info, filters)
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Free agents fetched successfully",
+            data=[p for p in players if p.acquisition_status in ("free_agent", "waivers")],
+        )
+
+    @staticmethod
+    async def _free_agents(league_info: LeagueInfo, filters: dict) -> list[PlayerResp]:
         params = {
             'view': 'kona_player_info',
             'scoringPeriodId': 0,
         }
-        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
         data = await provider_get("espn", endpoint, params=params, headers=headers,
                             cookies=EspnService._cookies(league_info), expect_key="players")
         players = [Player(player, league_info.year) for player in data['players']]
-
-        return TeamDataResp(
-            status=ApiStatus.SUCCESS,
-            message="Free agents fetched successfully",
-            data=await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info),
-        )
+        return await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info)
 
     @staticmethod
     async def get_player_pool_entries(

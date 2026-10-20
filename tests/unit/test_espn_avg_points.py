@@ -185,6 +185,31 @@ def test_free_agents_carry_their_pool_status(espn):
 
 
 @pytest.mark.unit
+def test_free_agents_by_ids_are_the_pool_read_for_named_players(espn, monkeypatch):
+    """A player named outside the market's read is read by id, the same `filterIds` read as the
+    pool entries (a sort, no status filter), and kept only as a free agent or a waiver claim."""
+    seen = {}
+
+    async def provider_get(provider, url, *, params=None, headers=None, cookies=None, expect_key=None, **_):
+        seen.update(params=params, headers=headers)
+        return {"players": [
+            {"id": 1, "status": "FREEAGENT", "onTeamId": 0, "player": _espn_player(1, "Free Guy", 10.0)},
+            {"id": 2, "status": "WAIVERS", "onTeamId": 0, "waiverProcessDate": WAIVER_MS, "player": _espn_player(2, "Waiver Guy", 9.0)},
+            {"id": 3, "status": "ONTEAM", "onTeamId": 4, "player": _espn_player(3, "Rostered Guy", 8.0)},
+        ]}
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
+    resp = asyncio.run(EspnService.get_free_agents_by_ids(LEAGUE, [3, 1, 2, 1]))
+    assert seen["params"] == {"view": "kona_player_info", "scoringPeriodId": 0}
+    assert json.loads(seen["headers"]["x-fantasy-filter"]) == {"players": {
+        "filterIds": {"value": [1, 2, 3]}, "limit": 3, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+    assert [(p.player_id, p.acquisition_status, p.waivers_until) for p in resp.data] == [
+        (1, "free_agent", None), (2, "waivers", date(2025, 10, 25))]
+    assert resp.data[0].valid_positions == ["PG", "G", "UT1", "UT2", "UT3"] and resp.data[0].default_position_id == 1
+    seen.clear()
+    assert asyncio.run(EspnService.get_free_agents_by_ids(LEAGUE, [])).data == [] and seen == {}   # nothing to ask
+
+
+@pytest.mark.unit
 def test_roster_entries_read_the_pool_status_under_player_pool_entry(espn):
     espn["payload"] = {"teams": [{"id": 1, "name": "My Team", "roster": {"entries": [
         {"lineupSlotId": 0, "status": "NORMAL",

@@ -37,7 +37,7 @@ from db.base import run_db
 from db.models.nba.games import Game
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
-from schemas.common import FantasyProvider, LeagueInfo
+from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from services import schedule_service
 from services.acquisitions import adds_for_day
 from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
@@ -65,6 +65,7 @@ from services.scoring.category_rank import compute_category_scores
 from services.scoring.category_value import rankable_categories
 from services.scoring.models import CategoryTeamScoreData, StatLine
 from services.stream_lane_service import (
+    PoolPlayer,
     StreamLaneService,
     _days,
     _pending_pickups,
@@ -394,6 +395,9 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
                          _game_days(week, p.team, today_index), _counts(p, provider), p._avg_line)
               for p in md.your_team.roster]
     by_nba = {p.player_id: p for p in roster if p.player_id is not None}
+    # The players in an injury slot: dropping one frees no active spot, so the rule never picks him
+    on_ir = {p.nba_player_id for p in md.your_team.roster
+             if p.nba_player_id is not None and (p.lineup_slot or "").upper() in INJURY_SLOTS}
     espn_ids = {p.nba_player_id: p.player_id for p in md.your_team.roster if p.nba_player_id is not None} \
         if provider == FantasyProvider.ESPN else {}
     sources = {p.nba_player_id: p._value_source for p in md.your_team.roster if p.nba_player_id is not None}
@@ -463,6 +467,8 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
             else:
                 candidates = []
                 for pid, p in holdings.items():
+                    if pid in on_ir:
+                        continue
                     w = weighed.get(pid)
                     candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected)))
                 choice = choose_drop(candidates, day=day, last_day=last_day)
@@ -474,9 +480,17 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
                     f"{choice.candidate.weighed:.1f} per game"
                     + (" (his season projection)" if choice.candidate.projected else "")
                 )
+        elif add is not None and drop_id in on_ir:
+            dropped = holdings[drop_id].name
+            if room > 0:
+                room -= 1
+                assumes.append(f"{add.name} takes an open roster spot on day {day}; dropping {dropped} from IR frees none.")
+            else:
+                raise AppError("AI_MOVE_INVALID", f"{dropped} is on IR, so dropping him frees no active spot for "
+                                                  f"{add.name}; name an active player to drop")
         if drop_id is not None:
             holdings.pop(drop_id)
-            if add is None:
+            if add is None and drop_id not in on_ir:
                 room += 1
         if add is not None:
             holdings[add.player_id] = add
@@ -573,6 +587,19 @@ def _rehold_after(acq: Any) -> int:
     return 1 if hours <= 0 else 1 + math.ceil(hours / 24)
 
 
+async def _named_pool(league_info: LeagueInfo, espn_ids: list[int]) -> list[PoolPlayer]:
+    """The free agents among ESPN ids named outside the market's read (its most-owned players),
+    built as the lanes' pool is; [] when the read fails, never a failure."""
+    if league_info.provider != FantasyProvider.ESPN or not espn_ids:
+        return []
+    try:
+        resp = await EspnService.get_free_agents_by_ids(league_info, espn_ids)
+    except Exception as exc:
+        log.warning("ai_named_pool_unavailable", error=str(exc))
+        return []
+    return StreamLaneService._pool_players(resp.data or []) if resp.status == ApiStatus.SUCCESS else []
+
+
 def _category_lines(espn_ids: list[int]) -> dict[int, Optional[StatLine]]:
     rolling = PlayerValueService.rolling_lines_by_espn_id(espn_ids, BOARD_WINDOW_DAYS)
     baseline = PlayerValueService.baseline_lines_by_espn_id([e for e in espn_ids if rolling.get(e) is None])
@@ -644,6 +671,18 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     espn_ids = {nba: espn for espn, nba in nba_ids.items()}
     notes: list[str] = []
 
+    # A candidate named outside the market's read (ESPN's most-owned free agents) is read by his id
+    unread = [nba for nba in args.candidates if nba not in espn_ids]
+    if unread:
+        known = await run_db("ai.identities", _identities, unread)
+        wanted = {who.espn_id: nba for nba, who in known.items()
+                  if who.espn_id is not None and who.espn_id not in on_board and who.espn_id not in in_pool}
+        extra = await _named_pool(league_info, sorted(wanted))
+        pool = [*pool, *extra]
+        in_pool.update({f.player_id: f for f in extra})
+        nba_ids.update({f.player_id: wanted[f.player_id] for f in extra})
+        espn_ids.update({wanted[f.player_id]: f.player_id for f in extra})
+
     # The value function
     if args.value == LEAGUE:
         valued = _Valued(None, LEAGUE, [], [])
@@ -665,8 +704,10 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         return default if values is None else float(values.get(espn_id, 0.0))
 
     def games_of(p: Any) -> int:
+        """His NBA team's games left: his whatever today's listing, as the projection's drop rule
+        counts them (a player out today may be back; the plan itself values him at nothing while out)."""
         team_ = normalize_nba_abbrev(p.team) if p.team else None
-        return 0 if _is_out(p.injury_status) else sum(1 for d in days if team_ in d.teams)
+        return sum(1 for d in days if team_ in d.teams)
 
     # The holders: named, or the drop rule's. A player a scheduled pickup already drops leaves on its day,
     # so his spot is that pickup's to fill, not the plan's.
@@ -711,6 +752,10 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         if len(holders) < args.spots:
             notes.append(f"Only {len(holders)} roster player(s) can be dropped by the rule; the plan streams that many spots.")
     holder_ids = [h.player_id for h in holders]
+    for h in holders:
+        if _is_out(h.injury_status):
+            notes.append(f"{h.name} is listed {h.injury_status} today: the plan counts him for nothing until he is "
+                         "dropped, while the rule weighs his games left as his.")
 
     named: set[int] = set()
     for nba in args.candidates:

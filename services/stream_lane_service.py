@@ -714,13 +714,18 @@ class StreamLaneService:
 
     @staticmethod
     async def _pool(league_info: LeagueInfo, adapter, team_id: int) -> list[PoolPlayer]:
-        """The free agents the lane may take: the pool as the market reads it, out players left
-        out, a waiver claim available the day after its waivers clear."""
+        """The free agents the lane may take: the pool as the market reads it (`_pool_players`)."""
         resp = await adapter.get_free_agents(league_info, FA_COUNT, team_id=team_id)
         if resp.status != ApiStatus.SUCCESS:
             raise RuntimeError(resp.message or "could not read the free-agent pool")
+        return StreamLaneService._pool_players(resp.data or [])
+
+    @staticmethod
+    def _pool_players(free_agents: Sequence[Any]) -> list[PoolPlayer]:
+        """Pool players from a free-agent read: out players left out, a waiver claim available
+        the day after its waivers clear."""
         out: list[PoolPlayer] = []
-        for fa in resp.data or []:
+        for fa in free_agents:
             if _is_out(fa.injury_status):
                 continue
             available_on = None

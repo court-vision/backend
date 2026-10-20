@@ -156,12 +156,29 @@ def test_an_add_without_a_drop_on_a_full_roster_gets_the_rules_drop(what_if):
     what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
     out = project([{"add": 2001, "day": 1}], team_=team(slots=3))
     (move,) = out["moves"]
-    # From day 1: A 30 x 3 = 90, B 20 x 3 = 60, Hurt 40 x 4 = 160 (injured, but his games are his): B goes.
+    # From day 1: A 30 x 3 = 90, B 20 x 3 = 60; Hurt is on IR, so dropping him frees nothing: B goes.
     assert move["drop"] == "B" and move["drop_chosen"].startswith("the rule's drop: 3 game(s) left at 20.0")
     assert out["after"]["you"] == 100 + 90 + 25 * 3
     # With a seat open nobody is dropped.
     out = project([{"add": 2001, "day": 1}], team_=team(slots=4))
     assert out["moves"][0]["drop"] is None and any("open roster spot" in a for a in out["assumes"])
+
+
+@pytest.mark.unit
+def test_an_ir_player_is_never_the_rules_drop_and_dropping_him_frees_no_spot(what_if):
+    cheap_ir = (103, 1003, "Hurt", "BOS", 1.0, "IR")
+    what_if.resp = matchup([roster_player(*A), roster_player(*B), roster_player(*cheap_ir, injured=True)])
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
+    out = project([{"add": 2001, "day": 1}], team_=team(slots=3))
+    assert out["moves"][0]["drop"] == "B"                                    # Hurt's 4 games at 1.0 would be cheapest
+    with pytest.raises(AppError, match="frees no active spot"):
+        project([{"add": 2001, "drop": 1003, "day": 1}], team_=team(slots=3))
+    # Dropping him on his own opens nothing either: the add the next day still needs the rule's drop.
+    out = project([{"drop": 1003, "day": 1}, {"add": 2001, "day": 2}], team_=team(slots=3))
+    assert [(m["drop"], m["add"]) for m in out["moves"]] == [("Hurt", None), ("B", "FA")]
+    # With an active spot open, the add takes it and the IR drop is just a drop.
+    out = project([{"add": 2001, "drop": 1003, "day": 1}], team_=team(slots=4))
+    assert out["moves"][0]["drop"] == "Hurt" and any("frees none" in a for a in out["assumes"])
 
 
 @pytest.mark.unit
@@ -329,7 +346,7 @@ def fa(pid, nba_team, *, value, positions=("PG", "G"), pos=1):
 @pytest.fixture
 def lanes(monkeypatch):
     st = SimpleNamespace(board=BOARD, pool=[fa(10, "LAL", value=22), fa(11, "LAL", value=35)], transactions=True,
-                         scoring=POINTS, category_values={}, matchup=None, pending=[])
+                         scoring=POINTS, category_values={}, matchup=None, pending=[], named_pool=[], named_asked=None)
 
     async def direct(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -346,8 +363,14 @@ def lanes(monkeypatch):
     async def get_matchup(user_id, team_id, window="season"):
         return st.matchup
 
+    async def named_pool(league_info, espn_ids):
+        st.named_asked = espn_ids
+        return st.named_pool
+
     monkeypatch.setattr(fantasy, "run_db", direct)
     monkeypatch.setattr(fantasy, "run_cpu", direct)
+    monkeypatch.setattr(fantasy, "_named_pool", named_pool)
+    monkeypatch.setattr(fantasy, "_identities", lambda ids: {i: fantasy._Identity(i, f"P{i}", i - 1000, "LAL") for i in ids})
     monkeypatch.setattr(fantasy, "get_provider_adapter", lambda provider: SimpleNamespace(
         capabilities=lambda li: SimpleNamespace(transactions=st.transactions), read_lineup=read_lineup))
     monkeypatch.setattr(fantasy, "_days", lambda start, end, base, base_date: [DAYS[p] for p in range(start, end + 1)])
@@ -395,6 +418,35 @@ def test_named_holders_and_candidates(lanes):
         plan(holders=[1099])
     with pytest.raises(AppError, match="on IR"):
         plan(holders=[1004])
+
+
+@pytest.mark.unit
+def test_a_candidate_named_outside_the_market_read_is_read_by_id(lanes):
+    """The pool read is ESPN's most-owned free agents; a little-owned specialist the user names is
+    read by his id and joins the pool. One the read does not return stays unavailable."""
+    lanes.named_pool = [fa(50, "LAL", value=40)]
+    out = plan(candidates=[1050, 1060])
+    assert lanes.named_asked == [50, 60]
+    assert (out["switches"][0]["add_player_id"], out["switches"][0]["add_name"]) == (1050, "FA 50")
+    assert [n for n in out["notes"] if "not a free agent" in n] == [
+        "Player 1060 is not a free agent the plan can take (rostered, out, or unknown)."]
+    assert out["candidates_considered"] == 3 and out["projected_value"] == 80.0
+
+
+@pytest.mark.unit
+def test_a_holder_listed_out_keeps_his_games_in_the_rule(lanes):
+    """Guard is out today with his one game left: the rule still weighs that game (30), so the big's
+    empty spot goes first, as in the projection's drop rule; named, the plan counts him for nothing."""
+    lanes.board = BOARD.model_copy(update={"players": [
+        board_player(HOLDER, "Holder", UT, "MIA", eligible=(PG, UT, BE), avg=15, pos=1),
+        board_player(GUARD, "Guard", PG, "DEN", eligible=(PG, UT, BE), avg=30, pos=1, injury="OUT"),
+        board_player(BIG, "Big", C, "BOS", eligible=(C, UT, BE), avg=25, pos=5),
+    ]})
+    out = plan()
+    assert out["holders"][0]["player_id"] == 1003 and out["notes"] == []
+    out = plan(holders=[1002])
+    assert out["holders"][0]["games_left"] == 1 and any("listed OUT today" in n for n in out["notes"])
+    assert out["plan"][0]["value"] == 0.0                                    # his game today counts for nothing
 
 
 @pytest.mark.unit
