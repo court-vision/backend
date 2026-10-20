@@ -172,3 +172,145 @@ def test_a_callback_for_the_app_map_account_stores_nothing(client, configured, y
     assert r.status_code in (302, 307)
     assert r.headers["location"].endswith("/account?yahoo_error=read_only")
     assert yahoo_flow == []
+
+
+# ---- The upload: the workflow stores the map it crawled, behind its own token ----
+
+MAP_URL = "/v1/internal/app-map/maps/{build}"
+BUILD = "21a5238c0ffee21a5238c0ffee21a5238c0ffee2"
+
+
+def _map(**overrides):
+    return {
+        "version": 1, "build": BUILD, "crawledAt": "2026-10-20T07:00:00Z",
+        "desks": [{"id": "week", "label": "Week", "href": "/week", "note": "Your team's matchup week",
+                   "keywords": ["market"], "needs": "account", "keys": None}],
+        "screens": [{"id": "week", "desk": "week", "title": "Week", "trail": [], "url": "/week", "link": "/week",
+                     "linkVaries": [], "tree": "- button \"Market P\"", "fingerprint": "ab12", "signedIn": True}],
+        "copy": [{"file": "src/components/week/Market.tsx", "desk": "week", "seen": ["Market"], "unseen": ["No free agents"]}],
+        "findings": [],
+        **overrides,
+    }
+
+
+@pytest.fixture
+def upload_configured(monkeypatch):
+    monkeypatch.setattr(settings, "app_map_upload_token", SecretStr("upload-token"))
+
+
+@pytest.fixture
+def stored(monkeypatch):
+    calls = []
+
+    async def fake_store(upload, raw, size):
+        calls.append((upload, raw, size))
+        stats = app_map.app_maps.stats_of(upload, size)
+        return True, stats, 2
+
+    monkeypatch.setattr(app_map.app_maps, "store", fake_store)
+    return calls
+
+
+def _put(client, body, build=BUILD, token="upload-token", **kwargs):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if isinstance(body, (dict, list)):
+        return client.put(MAP_URL.format(build=build), headers=headers, json=body, **kwargs)
+    return client.put(MAP_URL.format(build=build), headers={**headers, "Content-Type": "application/json"}, content=body, **kwargs)
+
+
+@pytest.mark.api
+def test_upload_is_off_until_its_token_is_set(client, configured, stored):
+    # The sign-in route's settings don't turn the upload on
+    r = _put(client, _map())
+    assert r.status_code == 503
+    assert r.json()["error_code"] == "APP_MAP_UPLOAD_DISABLED"
+    assert stored == []
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("token,code", [(None, "AUTH_REQUIRED"), ("nope", "INVALID_TOKEN"), ("map-token", "INVALID_TOKEN")])
+def test_upload_takes_only_its_own_token(client, configured, upload_configured, stored, token, code):
+    # The crawl's sign-in token is not enough to replace the map
+    r = _put(client, _map(), token=token)
+    assert r.status_code == 401
+    assert r.json()["error_code"] == code
+    assert stored == []
+
+
+@pytest.mark.api
+def test_the_upload_token_gets_no_sign_in(client, configured, upload_configured, clerk):
+    r = client.post(URL, headers={"Authorization": "Bearer upload-token"})
+    assert r.status_code == 401
+    assert clerk == []
+
+
+@pytest.mark.api
+def test_a_map_is_stored(client, upload_configured, stored):
+    r = _put(client, _map())
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["build"] == BUILD and data["stored"] is True and data["pruned"] == 2
+    assert data["stats"]["screens"] == 1 and data["stats"]["signed_in_screens"] == 1 and data["stats"]["unseen_copy"] == 1
+    upload, raw, size = stored[0]
+    # Stored as uploaded, extra fields and all
+    assert raw["screens"][0]["fingerprint"] == "ab12"
+    assert size == data["stats"]["bytes"] > 0
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("build", ["main", "21A5238", "21a52", "21a5238c0ffee21a5238c0ffee21a5238c0ffee21a5"])
+def test_build_must_be_a_commit(client, upload_configured, stored, build):
+    r = _put(client, _map(build=build), build=build)
+    assert r.status_code == 422
+    assert stored == []
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("body,code", [
+    (b"not json", "APP_MAP_INVALID"),
+    ([], "APP_MAP_INVALID"),
+    (_map(screens=[]), "APP_MAP_INVALID"),
+    (_map(desks=[{"id": "week"}]), "APP_MAP_INVALID"),
+    (_map(screens=[{"id": "week", "desk": "week"}]), "APP_MAP_INVALID"),
+    (_map(version=2), "APP_MAP_VERSION"),
+    (_map(build="0" * 40), "APP_MAP_BUILD_MISMATCH"),
+])
+def test_anything_but_this_builds_map_is_refused(client, upload_configured, stored, body, code):
+    r = _put(client, body)
+    assert r.status_code == 400
+    assert r.json()["error_code"] == code
+    assert stored == []
+
+
+@pytest.mark.api
+def test_a_map_over_the_cap_is_refused(client, upload_configured, stored, monkeypatch):
+    monkeypatch.setattr(app_map, "MAX_MAP_BYTES", 1000)
+    big = _map(findings=[{"kind": "x", "desk": "week", "detail": "y" * 2000}])
+    r = _put(client, big)
+    assert r.status_code == 413
+    assert r.json()["error_code"] == "APP_MAP_TOO_LARGE"
+    assert stored == []
+
+
+@pytest.mark.api
+def test_a_body_with_no_length_is_cut_at_the_cap(monkeypatch):
+    """A chunked body declares no length: it is read only up to the cap."""
+    import asyncio
+
+    from core.errors import AppError
+
+    monkeypatch.setattr(app_map, "MAX_MAP_BYTES", 10)
+    read = []
+
+    class Chunked:
+        headers = {}
+
+        async def stream(self):
+            for chunk in (b"12345", b"67890", b"overflow", b"never read"):
+                read.append(chunk)
+                yield chunk
+
+    with pytest.raises(AppError) as e:
+        asyncio.run(app_map._body(Chunked()))
+    assert e.value.status_code == 413
+    assert read == [b"12345", b"67890", b"overflow"]
