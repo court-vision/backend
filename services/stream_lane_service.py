@@ -423,9 +423,13 @@ def _open_lanes(team_id: int) -> list:
 def _insert_lane(lane_fields: dict, event_fields: dict):
     """The new lane and its first event; refused when its spot already has an open lane, or the
     team has `MAX_LANES`."""
+    from db.models.teams import Team
     Lane, Event = _models()
     try:
         with db.atomic():
+            # Two starts for different spots at once would each count the others' lanes out: the team's
+            # row lock makes the count and the insert one step per team.
+            Team.select(Team.team_id).where(Team.team_id == lane_fields["team"]).for_update().first()
             open_ = Lane.select().where((Lane.team == lane_fields["team"]) & (Lane.status.in_((ACTIVE, PAUSED))))
             if open_.count() >= MAX_LANES:
                 raise StreamLaneLimit()
@@ -714,7 +718,10 @@ class StreamLaneService:
         days = await run_db("lane.days", _days, start_period, end_period, base_period, base_date)
         deciding = set(lane_ids)
         pending = [p for p in await run_db("lane.pending", _pending_pickups, team_id) if p.lane_id not in deciding]
-        pool = await StreamLaneService._pool(league_info, adapter, team_id)
+        # An open lane's holder stays its own even off the roster (a paused lane's can be dropped): a
+        # lane taking him would collide with it on the spot index.
+        reserved = {lane.holder_player_id for lane in await run_db("lane.open", _open_lanes, team_id)}
+        pool = [f for f in await StreamLaneService._pool(league_info, adapter, team_id) if f.player_id not in reserved]
         acq = board.acquisitions
         first_day_adds = None
         if acq is not None and acq.per == "day" and acq.limit is not None and board.espn_team_id is not None:

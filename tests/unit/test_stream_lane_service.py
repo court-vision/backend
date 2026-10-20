@@ -287,6 +287,15 @@ def test_a_switch_schedules_the_pickup_and_the_next_decision(h):
 
 
 @pytest.mark.unit
+def test_a_paused_lanes_holder_off_the_roster_is_not_picked_up(h):
+    """The free agent is another lane's holder, dropped while it was paused: he stays that lane's."""
+    h.open_lanes = [lane(), lane(id=8, status="paused", holder_player_id=FA, holder_name="Free Agent")]
+    decide(h, lane(), tuesday(h))
+    (rec,) = h.recorded
+    assert rec.pickup is None and [e["action"] for e in rec.events] == ["keep"]
+
+
+@pytest.mark.unit
 def test_a_keep_records_the_day_and_moves_on(h):
     h.pool = []
     decide(h, lane(), tuesday(h))

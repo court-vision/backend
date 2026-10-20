@@ -2,7 +2,7 @@
 Integration: migrations 0030 and 0037 against the real schema.
 
 The unit layer decides what each decision does; here the tables decide what may be stored
-and claimed: one open lane per spot and four per team, the CHECKs, the lane id on scheduled
+and claimed: one open lane per spot and four per team (two starts at once included), the CHECKs, the lane id on scheduled
 pickups, and the repository functions the service runs through `run_db` — the claim lease
 (a team's due lanes together) and the writes-off release, a decision's writes landing
 together and only for the claim that made it, a user's change fencing out a running
@@ -13,6 +13,7 @@ rollbacks.
 
 import asyncio
 import json
+import threading
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -101,6 +102,46 @@ def test_four_open_lanes_per_team(user, team):
     assert StreamLane.select().count() == svc.MAX_LANES
     StreamLane.update(status="ended", ended_at=NOW).where(StreamLane.holder_player_id == 1).execute()
     _new_lane(user, team, 99)
+
+
+def test_two_starts_at_once_still_stop_at_four(user, team, monkeypatch):
+    """Two starts for different spots while the team has three lanes: the second waits for the first
+    to commit, counts four and is refused, instead of both counting three and making five."""
+    for holder in range(1, svc.MAX_LANES):
+        _new_lane(user, team, holder)
+    created, go = threading.Event(), threading.Event()
+    real_create = StreamLane.create.__func__
+
+    def create(cls, **fields):
+        lane = real_create(cls, **fields)
+        if threading.current_thread().name == "first":
+            created.set()
+            go.wait(5)                                              # hold the transaction open
+        return lane
+    monkeypatch.setattr(StreamLane, "create", classmethod(create))
+    outcome = {}
+
+    def start(name, holder):
+        try:
+            outcome[name] = _new_lane(user, team, holder).id
+        except Exception as exc:
+            outcome[name] = exc
+        finally:
+            if not db.is_closed():
+                db.close()
+    first = threading.Thread(target=start, args=("first", 10), name="first")
+    first.start()
+    assert created.wait(5)
+    second = threading.Thread(target=start, args=("second", 11), name="second")
+    second.start()
+    second.join(0.5)
+    blocked = second.is_alive()                                     # waiting on the team's lock
+    go.set()
+    first.join(5)
+    second.join(5)
+    assert blocked
+    assert isinstance(outcome["first"], int) and isinstance(outcome["second"], svc.StreamLaneLimit)
+    assert StreamLane.select().count() == svc.MAX_LANES
 
 
 @pytest.mark.parametrize("field, value", [("status", "stopped"), ("notify", "sms")])
