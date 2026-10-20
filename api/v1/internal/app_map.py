@@ -80,7 +80,9 @@ async def _body(request: Request) -> bytes:
     response_model=AppMapUploadResp,
     dependencies=[Security(verify_app_map_upload_token)],
     openapi_extra={"requestBody": {"required": True, "content": {"application/json": {"schema": {
-        "type": "object", "description": "The crawler's map for this build (frontend src/lib/app-map/map.ts)",
+        # additionalProperties: openapi-typescript types a bare object as an empty one; the shape is checked below
+        "type": "object", "additionalProperties": True,
+        "description": "The crawler's map for this build (frontend src/lib/app-map/map.ts)",
     }}}}},
 )
 async def upload_app_map(request: Request, build: str = Path(pattern=BUILD_PATTERN)):
