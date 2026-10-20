@@ -1,5 +1,5 @@
 """
-Integration: the app map's storage against the real schema (migration 0037).
+Integration: the app map's storage against the real schema (migration 0039).
 
 One row per build, replaced by a later crawl of it unless that crawl couldn't
 sign in (an older crawl that finishes last never replaces it); maps over 30 days old pruned at each upload with the newest kept; and

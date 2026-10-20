@@ -1,5 +1,5 @@
 """
-usr.ai_app_maps — the app map of each crawled frontend build (migration 0037,
+usr.ai_app_maps — the app map of each crawled frontend build (migration 0039,
 docs/APP_MAP_PLAN.md § 4): what CV AI reads to answer "where in the app can I…".
 
 Written only by the App Map workflow's upload (`services.ai.app_map.store`),

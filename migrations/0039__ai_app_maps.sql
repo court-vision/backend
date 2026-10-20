@@ -1,4 +1,4 @@
--- Migration 0037: the app map, CV AI's map of the website (docs/APP_MAP_PLAN.md § 4).
+-- Migration 0039: the app map, CV AI's map of the website (docs/APP_MAP_PLAN.md § 4).
 --
 -- One row per crawled frontend build: the frontend's App Map workflow crawls
 -- each commit on main (and once a night during games) and uploads the map to
