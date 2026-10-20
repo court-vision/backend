@@ -139,14 +139,18 @@ def init_tracing(sink: RequestSink, *, service_name: str, version: str, database
 
     trace.set_tracer_provider(provider)
     if database is not None:
-        _trace_queries(database)
+        trace_queries(database)
     _trace_redis()
     _installed = True
     return True
 
 
-def _trace_queries(database: Any) -> None:
-    """One span per Peewee query (every query goes through `execute_sql`)."""
+def trace_queries(database: Any) -> None:
+    """One span per Peewee query (every query goes through `execute_sql`).
+
+    `init_tracing` wraps the main pool; a second pool (the AI stats reader's)
+    wraps itself when it is built.
+    """
     execute_sql = database.execute_sql
 
     def traced_execute_sql(sql, *args, **kwargs):

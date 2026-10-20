@@ -32,6 +32,7 @@ from playhouse.pool import PooledPostgresqlExtDatabase
 from core.errors import AppError, DatabaseUnavailableError
 from core.logging import get_logger
 from core.settings import settings
+from core.tracing import trace_queries
 from db.base import db, run_db
 
 log = get_logger("ai.stats")
@@ -78,6 +79,8 @@ class StatsReader:
                 ),
                 **parsed,
             )
+            # Its queries count as Postgres calls in the request timings, as the main pool's do.
+            trace_queries(self._db)
         self._announced = False
         self._lock = threading.Lock()
 
