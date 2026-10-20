@@ -32,7 +32,7 @@ class RosterMove(BaseModel):
     team = ForeignKeyField(Team, on_delete="CASCADE", backref="roster_moves")
     nba_date = DateField()
     scoring_period_id = IntegerField(null=True)
-    source = CharField(max_length=10)          # manual | auto | scheduled
+    source = CharField(max_length=16)          # manual | auto | scheduled | availability
     kind = CharField(max_length=12, default="lineup")   # lineup | transaction
     status = CharField(max_length=20)          # applied | applied_unverified | rejected | failed | noop
     # lineup rows: [{player_id, from_slot_id, to_slot_id, role, note}]
@@ -41,6 +41,7 @@ class RosterMove(BaseModel):
     provider_status = IntegerField(null=True)  # ESPN's HTTP status, when a write was attempted
     error = TextField(null=True)
     idempotency_key = CharField(max_length=96, null=True)
+    trigger_player_id = IntegerField(null=True)  # availability rows: the NBA id whose verdict changed
     created_at = DateTimeField(default=datetime.utcnow)
 
     class Meta:
