@@ -123,7 +123,7 @@ LABELS: dict[str, str] = {
     "drop_team": "Drop team", "drop_games": "Drop games", "drop_chosen": "Drop by rule",
     "projected_you_after": "Proj you after", "leader_after": "Leader after", "flips": "Flips",
     "spot": "Spot", "value": "Value", "switch": "Switch", "value_per_game": "Per game", "chosen_by": "Chosen by",
-    "margin": "Margin", "weight": "Weight", "drop_name": "Drop", "add_name": "Add",
+    "margin": "Margin", "weight": "Weight", "drop_name": "Drop", "add_name": "Add", "availability": "Available",
 }
 
 

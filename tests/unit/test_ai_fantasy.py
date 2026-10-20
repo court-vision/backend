@@ -26,10 +26,11 @@ from schemas.matchup import (
 )
 from services.ai import fantasy
 from services.daily_actions_service import DropEvidence
+from services.espn_service import PoolEntry
 from services.player_value_service import PlayerValueService
 from services.scoring.models import StatLine
 from services.scoring.resolver import resolve_scoring
-from services.stream_lane_service import LaneDay, PoolPlayer, StreamLaneService, active_slots
+from services.stream_lane_service import LaneDay, PendingPickup, PoolPlayer, StreamLaneService, active_slots
 
 ESPN = LeagueInfo(provider=FantasyProvider.ESPN, league_id=555, team_name="T", year=2027, espn_s2="s2", swid="{swid}")
 POINTS = resolve_scoring(None)
@@ -78,6 +79,7 @@ def matchup(roster, *, scoring_format="points", current=100.0, projected=250.0, 
 A = (101, 1001, "A", "DEN", 30.0, "PG")
 B = (102, 1002, "B", "LAL", 20.0, "UT")
 HURT = (103, 1003, "Hurt", "BOS", 40.0, "IR")
+X = (104, 1004, "X", "BOS", 10.0, "BE")
 
 
 @pytest.fixture
@@ -85,7 +87,7 @@ def what_if(monkeypatch):
     """Stubbed reads: the matchup, the calendar, the first open day, the adds' identities and values."""
     st = SimpleNamespace(
         resp=matchup([roster_player(*A), roster_player(*B), roster_player(*HURT, injured=True)]),
-        first_open=1, scoring=POINTS, evidence=None,
+        first_open=1, scoring=POINTS, evidence=None, entries={}, asked=None,
         players={2001: fantasy._Identity(2001, "FA", 201, "LAL"), 2002: fantasy._Identity(2002, "Nobody", None, None)},
         values={2001: (25.0, "rolling", StatLine(pts=15))},
     )
@@ -100,6 +102,10 @@ def what_if(monkeypatch):
     async def evidence_for(league_info, espn_ids):
         return st.evidence
 
+    async def availability(league_info, espn_ids):
+        st.asked = espn_ids
+        return st.entries
+
     monkeypatch.setattr(fantasy, "run_db", direct)
     monkeypatch.setattr(fantasy.MatchupService, "get_matchup_by_team_id", staticmethod(get_matchup))
     monkeypatch.setattr(fantasy.schedule_service, "get_nba_today", lambda: date(2026, 10, 21))
@@ -110,6 +116,7 @@ def what_if(monkeypatch):
     monkeypatch.setattr(fantasy, "_add_values",
                         lambda scoring, adds: {a.nba_id: st.values.get(a.nba_id, (None, None, None)) for a in adds})
     monkeypatch.setattr(fantasy, "_evidence_for", evidence_for)
+    monkeypatch.setattr(fantasy, "_availability", availability)
     return st
 
 
@@ -155,6 +162,55 @@ def test_an_add_without_a_drop_on_a_full_roster_gets_the_rules_drop(what_if):
     # With a seat open nobody is dropped.
     out = project([{"add": 2001, "day": 1}], team_=team(slots=4))
     assert out["moves"][0]["drop"] is None and any("open roster spot" in a for a in out["assumes"])
+
+
+@pytest.mark.unit
+def test_an_empty_ir_slot_is_not_an_open_spot(what_if):
+    """Three active players fill the three active slots; the empty IR slot is no room for a healthy add,
+    so the rule drops someone. A player on IR takes no active seat either."""
+    what_if.resp = matchup([roster_player(*A), roster_player(*B), roster_player(*X)])
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 104: 7}, projected={})
+    out = project([{"add": 2001, "day": 1}], team_=team(slots=4))
+    # From day 1: A 30 x 3 = 90, B 20 x 3 = 60, X 10 x 4 (BOS days 2, 3, 5, 6) = 40: X goes.
+    assert out["moves"][0]["drop"] == "X"
+    assert fantasy._roster_room(team(slots=4), what_if.resp.data.your_team.roster) == 0
+    assert fantasy._roster_room(team(slots=4), [roster_player(*A), roster_player(*B), roster_player(*HURT)]) == 1
+    assert fantasy._roster_room(SimpleNamespace(league=SimpleNamespace(roster_slots={})), []) == 0
+
+
+@pytest.mark.unit
+def test_an_adds_availability_is_reported_not_refused(what_if):
+    what_if.players[2003] = fantasy._Identity(2003, "Claim", 203, "BOS")
+    what_if.values[2003] = (10.0, "rolling", None)
+    what_if.players[2004] = fantasy._Identity(2004, "Free", 204, "BOS")
+    what_if.values[2004] = (10.0, "rolling", None)
+    what_if.entries = {
+        201: PoolEntry(201, "ONTEAM", 2, False, "FA", "LAL"),
+        203: PoolEntry(203, "WAIVERS", 0, False, "Claim", "BOS", waivers_until=date(2026, 10, 22)),
+        204: PoolEntry(204, "FREEAGENT", 0, False, "Free", "BOS"),
+    }
+    out = project([{"add": 2001, "drop": 1002, "day": 1}, {"add": 2003, "drop": 1001, "day": 2},
+                   {"add": 2004, "day": 3}, {"add": 2002, "day": 4}], team_=team(slots=9))
+    assert sorted(what_if.asked) == [201, 203, 204]                           # Nobody has no ESPN id
+    assert [m["availability"] for m in out["moves"]] == [
+        "on another team's roster", "on waivers until 2026-10-22", "free agent", None]
+    assert any(a.startswith("FA is on another team's roster") for a in out["assumes"])
+    assert any(a.startswith("Claim is on waivers until 2026-10-22") for a in out["assumes"])
+    assert not any(a.startswith("Free is") for a in out["assumes"])
+    assert fantasy.LABELS["availability"] == "Available"
+    assert fantasy._availability_of(PoolEntry(201, "ONTEAM", 1, False, "FA", "LAL"), 1) == "on your roster"
+    assert fantasy._availability_of(PoolEntry(201, None, 0, False, "FA", "LAL"), 1) is None
+
+
+@pytest.mark.unit
+def test_availability_is_espn_only_and_never_a_failure(monkeypatch):
+    yahoo = LeagueInfo(provider=FantasyProvider.YAHOO, league_id=1, team_name="T", year=2027)
+    assert run(fantasy._availability(yahoo, [201])) == {} and run(fantasy._availability(ESPN, [])) == {}
+
+    async def boom(league_info, player_ids, *, scoring_period_id=None):
+        raise RuntimeError("espn down")
+    monkeypatch.setattr(fantasy.EspnService, "get_player_pool_entries", staticmethod(boom))
+    assert run(fantasy._availability(ESPN, [201])) == {}
 
 
 @pytest.mark.unit
@@ -273,7 +329,7 @@ def fa(pid, nba_team, *, value, positions=("PG", "G"), pos=1):
 @pytest.fixture
 def lanes(monkeypatch):
     st = SimpleNamespace(board=BOARD, pool=[fa(10, "LAL", value=22), fa(11, "LAL", value=35)], transactions=True,
-                         scoring=POINTS, category_values={}, matchup=None)
+                         scoring=POINTS, category_values={}, matchup=None, pending=[])
 
     async def direct(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -295,7 +351,7 @@ def lanes(monkeypatch):
     monkeypatch.setattr(fantasy, "get_provider_adapter", lambda provider: SimpleNamespace(
         capabilities=lambda li: SimpleNamespace(transactions=st.transactions), read_lineup=read_lineup))
     monkeypatch.setattr(fantasy, "_days", lambda start, end, base, base_date: [DAYS[p] for p in range(start, end + 1)])
-    monkeypatch.setattr(fantasy, "_pending_pickups", lambda team_id: [])
+    monkeypatch.setattr(fantasy, "_pending_pickups", lambda team_id: st.pending)
     monkeypatch.setattr(StreamLaneService, "_pool", staticmethod(pool))
     monkeypatch.setattr(fantasy, "nba_ids_by_espn_id", lambda ids: {e: 1000 + e for e in ids})
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda li, team_id=None: st.scoring))
@@ -339,6 +395,19 @@ def test_named_holders_and_candidates(lanes):
         plan(holders=[1099])
     with pytest.raises(AppError, match="on IR"):
         plan(holders=[1004])
+
+
+@pytest.mark.unit
+def test_a_player_a_scheduled_pickup_drops_is_not_a_holder(lanes):
+    """A pickup already scheduled drops the big on day 1: his spot is that pickup's, so the rule skips him
+    (Holder 15 x 2 and Guard 30 x 1 tie at 30; the fewer games left go first) and naming him is refused."""
+    lanes.pending = [PendingPickup(1, 29, date(2026, 11, 17), 10, BIG)]
+    out = plan()
+    (holder,) = out["holders"]
+    assert (holder["player_id"], holder["name"]) == (1002, "Guard")
+    assert out["switches"][0]["add_player_id"] == 1011                        # FA 10 is the pickup's, not the plan's
+    with pytest.raises(AppError, match="scheduled to be dropped on 2026-11-17"):
+        plan(holders=[1003])
 
 
 @pytest.mark.unit
@@ -393,3 +462,7 @@ def test_the_pool_is_capped_to_the_best_under_the_value_plus_the_named(lanes, mo
     monkeypatch.setattr(fantasy, "plan_spots", plan_spots)
     plan(candidates=[1199])
     assert len(seen["pool"]) == fantasy.POOL_CAP + 1 and seen["pool"][-1] == 199 and seen["pool"][0] == 100
+    # A player a scheduled pickup brings in stays in the pool too: the plan's roster-to-be needs his games.
+    lanes.pending = [PendingPickup(1, 29, date(2026, 11, 17), 198, None)]
+    plan(candidates=[1199])
+    assert len(seen["pool"]) == fantasy.POOL_CAP + 2 and seen["pool"][-2:] == [198, 199]

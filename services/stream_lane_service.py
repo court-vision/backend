@@ -198,6 +198,7 @@ class PendingPickup:
 class Budget:
     adds: Optional[int]              # adds the lane may plan with; None = no limit
     switchable: tuple[bool, ...]     # per day: may a switch take effect
+    day_adds: Optional[tuple[Optional[int], ...]] = None   # per day: adds left under a per-day limit; None = no such limit
 
 
 @dataclass(frozen=True)
@@ -241,13 +242,16 @@ def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pendin
         rooms.append(room - len(pending))
     adds = max(0, min(rooms)) if rooms else None
     switchable = [True] * n
+    day_adds: Optional[list[int]] = None
     if acq.per == "day" and acq.limit is not None:
+        day_adds = []
         for i, day in enumerate(days):
             used = sum(1 for p in pending if p.period == day.period)
             if i == 0 and first_day_adds:
                 used += first_day_adds
-            switchable[i] = used < acq.limit
-    return Budget(adds, tuple(switchable))
+            day_adds.append(max(0, acq.limit - used))
+            switchable[i] = day_adds[i] > 0
+    return Budget(adds, tuple(switchable), tuple(day_adds) if day_adds is not None else None)
 
 
 # ESPN's combo slots, from the base positions the pool keeps.
@@ -379,7 +383,8 @@ def plan_spots(board: LineupState, holder_ids: Sequence[int], pool: Sequence[Poo
     """The joint plan for the spots `holder_ids` hold over `days` (`services.multi_stream_planner`),
     from the same inputs as `plan_lane`: the rest of the roster per day with the pending pickups
     made, the free agents not on the roster or scheduled, and per position and day the room ESPN's
-    limit leaves the spots. The budget's closed days close every spot that day (`day_limits`)."""
+    limit leaves the spots. A per-day add limit caps the switches that take effect that day across
+    every spot (`day_limits`: the adds left, or none on a day the budget closes)."""
     slots = slot_counts_of(board)
     holders = [next(p for p in board.players if p.player_id == hid) for hid in holder_ids]
     roster_day, pool_day, rest_by_day, limits, held_by_day = _plan_inputs(board, holder_ids, pool, days, pending, values)
@@ -401,8 +406,9 @@ def plan_spots(board: LineupState, holder_ids: Sequence[int], pool: Sequence[Poo
             continue
         candidates.append(streamer(f.player_id, [pool_day(f, d) for d in days], start, f.default_position_id))
     room = {pos: [limits[pos] - n for n in held] for pos, held in held_by_day.items()}
-    plan = plan_streams(spots, candidates, rest_by_day, slots, adds=budget.adds,
-                        day_limits=[None if open_ else 0 for open_ in budget.switchable],
+    day_limits = (list(budget.day_adds) if budget.day_adds is not None
+                  else [None if open_ else 0 for open_ in budget.switchable])
+    plan = plan_streams(spots, candidates, rest_by_day, slots, adds=budget.adds, day_limits=day_limits,
                         rehold_after=rehold_after, position_room=room or None)
     return SpotsPlan(plan, per_day, frozenset(c.player_id for c in candidates))
 

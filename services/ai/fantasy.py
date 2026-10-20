@@ -41,6 +41,7 @@ from schemas.common import FantasyProvider, LeagueInfo
 from services import schedule_service
 from services.acquisitions import adds_for_day
 from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
+from services.espn_service import EspnService, PoolEntry
 from services.lineup_editor_service import _roster_slots
 from services.lineup_planner import IR_SLOT_ID, OUT_STATUSES
 from services.matchup_projection import (
@@ -228,7 +229,7 @@ LABELS: dict[str, str] = {
     "projected_you_after": "Proj you after", "leader_after": "Leader after", "flips": "Flips",
     "spot": "Spot", "value": "Value", "switch": "Switch", "games_left": "Games left",
     "value_per_game": "Per game", "chosen_by": "Chosen by", "margin": "Margin", "weight": "Weight",
-    "drop_name": "Drop", "add_name": "Add",
+    "drop_name": "Drop", "add_name": "Add", "availability": "Available",
 }
 
 
@@ -290,11 +291,40 @@ async def _evidence_for(league_info: LeagueInfo, espn_ids: list[int]) -> Optiona
         return None
 
 
-def _roster_room(team: Any, roster_size: int) -> int:
-    """Open roster spots: the league's slots less the roster; none when the slots are unknown."""
+# The injury slots, which a healthy add can't take: ESPN's IR, Yahoo's IL and IL+.
+INJURY_SLOTS = ("IR", "IL", "IL+")
+
+
+def _roster_room(team: Any, roster: Sequence[Any]) -> int:
+    """Open active roster spots: the league's slots less the injury ones, less the players not in one;
+    none when the slots are unknown."""
     slots = _roster_slots(team)
-    total = sum(int(n or 0) for n in slots.values())
-    return max(0, total - roster_size) if total else 0
+    total = sum(int(n or 0) for name, n in slots.items() if str(name).upper() not in INJURY_SLOTS)
+    active = sum(1 for p in roster if (p.lineup_slot or "").upper() not in INJURY_SLOTS)
+    return max(0, total - active) if total else 0
+
+
+async def _availability(league_info: LeagueInfo, espn_ids: list[int]) -> dict[int, PoolEntry]:
+    """How the provider's pool sees the adds right now (ESPN); {} when unknown, never a failure."""
+    if league_info.provider != FantasyProvider.ESPN or not espn_ids:
+        return {}
+    try:
+        return await EspnService.get_player_pool_entries(league_info, espn_ids)
+    except Exception as exc:
+        log.warning("ai_add_availability_unavailable", error=str(exc))
+        return {}
+
+
+def _availability_of(entry: Optional[PoolEntry], own_team_id: int) -> Optional[str]:
+    if entry is None or entry.status is None:
+        return None
+    if entry.status == "FREEAGENT":
+        return "free agent"
+    if entry.status == "WAIVERS":
+        return f"on waivers until {entry.waivers_until}" if entry.waivers_until else "on waivers"
+    if entry.on_team_id == own_team_id:
+        return "on your roster"
+    return "on another team's roster"
 
 
 def _player(p: Optional[SidePlayer]) -> Optional[dict[str, Any]]:
@@ -375,7 +405,9 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
     if missing:
         raise AppError("PLAYER_NOT_FOUND", f"No NBA player with id {missing[0]}")
     valued = await run_db("ai.add_values", _add_values, scoring, list(identities.values())) if identities else {}
+    entries = await _availability(league_info, [who.espn_id for who in identities.values() if who.espn_id is not None])
     adds: dict[int, SidePlayer] = {}
+    availability: dict[int, Optional[str]] = {}
     assumes: list[str] = [
         "Every counting player (off IR, not injured) starts every game he has, as in the matchup projection.",
     ]
@@ -387,12 +419,18 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
             assumes.append(f"Court Vision has no per-game value for {who.name}; he is projected at 0 per game.")
         adds[pid] = SidePlayer(pid, who.name, who.team or "", float(value or 0.0),
                                _game_days(week, who.team, today_index), True, line)
+        status = _availability_of(entries.get(who.espn_id) if who.espn_id is not None else None, md.your_team.team_id)
+        availability[pid] = status
+        if status == "on another team's roster":
+            assumes.append(f"{who.name} is on another team's roster: this is a what-if, not a move you can make.")
+        elif status is not None and status.startswith("on waivers"):
+            assumes.append(f"{who.name} is {status}: he can be claimed, not added outright.")
     if adds:
         assumes.append("Added players are assumed healthy and starting; check get_player_status before relying on one.")
 
     # The moves in day order, the drop chosen where an add has none and the roster is full
     evidence = await _evidence_for(league_info, [espn_ids[pid] for pid in by_nba if pid in espn_ids])
-    room = _roster_room(team, len(md.your_team.roster))
+    room = _roster_room(team, md.your_team.roster)
     holdings: dict[int, SidePlayer] = dict(by_nba)
     weighed: dict[int, Optional[DropValue]] = {}
     for pid, p in by_nba.items():
@@ -461,6 +499,7 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
             "add_player_id": applied.add.player_id if applied.add else None,
             "add_team": applied.add.team if applied.add else None,
             "add_games": applied.add_games,
+            "availability": availability.get(applied.add.player_id) if applied.add else None,
             "drop": applied.drop.name if applied.drop else None,
             "drop_player_id": applied.drop.player_id if applied.drop else None,
             "drop_team": applied.drop.team if applied.drop else None,
@@ -629,7 +668,9 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
         team_ = normalize_nba_abbrev(p.team) if p.team else None
         return 0 if _is_out(p.injury_status) else sum(1 for d in days if team_ in d.teams)
 
-    # The holders: named, or the drop rule's
+    # The holders: named, or the drop rule's. A player a scheduled pickup already drops leaves on its day,
+    # so his spot is that pickup's to fill, not the plan's.
+    leaving = {pk.drop_player_id: pk.nba_date for pk in pending if pk.drop_player_id is not None}
     holders: list[Any] = []
     chosen_by: dict[int, str] = {}
     if args.holders:
@@ -640,11 +681,13 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
                 raise AppError("AI_NOT_ON_ROSTER", f"Player {nba} is not on this roster")
             if p.lineup_slot_id == IR_SLOT_ID:
                 raise AppError("AI_NOT_ON_ROSTER", f"{p.name} is on IR; a streamed spot is an active one")
+            if p.player_id in leaving:
+                raise AppError("AI_NOT_ON_ROSTER", f"{p.name} is already scheduled to be dropped on {leaving[p.player_id]}")
             if p.player_id not in chosen_by:
                 holders.append(p)
                 chosen_by[p.player_id] = "named"
     else:
-        candidates = [p for p in board.players if p.lineup_slot_id != IR_SLOT_ID]
+        candidates = [p for p in board.players if p.lineup_slot_id != IR_SLOT_ID and p.player_id not in leaving]
         evidence = await _evidence_for(league_info, [p.player_id for p in candidates])
         ranked = []
         for p in candidates:
@@ -669,7 +712,6 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
             notes.append(f"Only {len(holders)} roster player(s) can be dropped by the rule; the plan streams that many spots.")
     holder_ids = [h.player_id for h in holders]
 
-    # The pool the planner sees: the best under the value, plus the candidates named
     named: set[int] = set()
     for nba in args.candidates:
         eid = espn_ids.get(nba)
@@ -677,8 +719,11 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
             notes.append(f"Player {nba} is not a free agent the plan can take (rostered, out, or unknown).")
         else:
             named.add(eid)
+    # The pool the planner sees: the best under the value, plus the candidates named and the players
+    # scheduled pickups bring in (the plan's roster-to-be needs their games and positions).
+    keep = named | {pk.add_player_id for pk in pending}
     ranked_pool = sorted(pool, key=lambda f: (-value_of(f.player_id, f.value), f.player_id))
-    kept = ranked_pool[:POOL_CAP] + [f for f in ranked_pool[POOL_CAP:] if f.player_id in named]
+    kept = ranked_pool[:POOL_CAP] + [f for f in ranked_pool[POOL_CAP:] if f.player_id in keep]
 
     spots_plan = await run_cpu("ai.plan_spots", plan_spots, board, holder_ids, kept, days, pending, budget, rehold, values)
     plan = spots_plan.plan

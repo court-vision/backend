@@ -90,8 +90,18 @@ def test_a_per_day_limit_closes_days_already_spent():
     days = [day(i, "DEN") for i in range(3)]
     daily = acq(per="day", limit=1, matchup_used=0)
     budget = lane_budget(daily, days, [pending(29)], first_day_adds=1)
-    assert budget.adds is None and budget.switchable == (False, False, True)
+    assert budget.adds is None and budget.switchable == (False, False, True) and budget.day_adds == (0, 0, 1)
     assert lane_budget(daily, days, []).switchable == (True, True, True)       # unread: ESPN decides
+    assert lane_budget(daily, days, []).day_adds == (1, 1, 1)
+
+
+@pytest.mark.unit
+def test_a_per_day_limit_counts_the_adds_left_each_day():
+    """A limit above one leaves a day open with fewer adds than the limit: the count goes to the planner."""
+    days = [day(i, "DEN") for i in range(3)]
+    budget = lane_budget(acq(per="day", limit=2, matchup_used=0), days, [pending(28)])
+    assert budget.day_adds == (1, 2, 2) and budget.switchable == (True, True, True) and budget.adds is None
+    assert lane_budget(acq(), days, []).day_adds is None                       # a matchup limit has no per-day count
 
 
 @pytest.mark.unit
@@ -267,10 +277,10 @@ def test_values_stand_in_for_the_boards_and_the_pools_and_a_player_left_out_is_w
 
 
 def spots(holder_ids, pool, *, pending_=(), adds=None, limits=None, rehold=2, switchable=(True, True, True),
-          roster=ROSTER, values=None):
+          roster=ROSTER, values=None, day_adds=None):
     from services.stream_lane_service import Budget, plan_spots
-    return plan_spots(board(roster, limits=limits), holder_ids, pool, DAYS, list(pending_), Budget(adds, switchable),
-                      rehold, values)
+    return plan_spots(board(roster, limits=limits), holder_ids, pool, DAYS, list(pending_),
+                      Budget(adds, switchable, day_adds), rehold, values)
 
 
 @pytest.mark.unit
@@ -283,6 +293,29 @@ def test_two_spots_are_planned_together_from_the_same_inputs():
     assert sp.values[11] == (0.0, 35.0, 35.0) and sp.values[GUARD] == (30.0, 0.0, 0.0)
     assert sp.considered == {10, 11}
     assert sp.plan.value == (15 + 30) + 35 + (15 + 35) and sp.plan.hold_value == 15 + 30 + 15
+
+
+@pytest.mark.unit
+def test_a_per_day_add_count_caps_the_switches_across_the_spots(monkeypatch):
+    """Two spots would both switch on day 1 (the free agents' first game); one add left that day sends
+    the holder's switch to day 0 instead. The count reaches the planner as is, not as open or closed."""
+    import services.stream_lane_service as lane_service
+    seen, original = {}, lane_service.plan_streams
+
+    def plan_streams(*args, **kwargs):
+        seen["day_limits"] = kwargs["day_limits"]
+        return original(*args, **kwargs)
+    monkeypatch.setattr(lane_service, "plan_streams", plan_streams)
+    pool = [fa(10, "LAL", value=22), fa(11, "LAL", value=35, positions=("PG", "G"), pos=1)]
+    sp = spots([HOLDER, GUARD], pool)
+    assert seen["day_limits"] == [None, None, None]
+    assert [sw.day for sw in sp.plan.switches] == [1, 1] and sp.plan.value == (15 + 30) + (22 + 35) + (22 + 35)
+    sp = spots([HOLDER, GUARD], pool, day_adds=(2, 1, 2))
+    assert seen["day_limits"] == [2, 1, 2]
+    assert [sw.day for sw in sp.plan.switches] == [0, 1] and sp.plan.adds == 2
+    assert sp.plan.value == 30 + (22 + 35) + (22 + 35)                          # one spot gives up its day 0
+    sp = spots([HOLDER, GUARD], pool, switchable=(True, False, True))
+    assert seen["day_limits"] == [None, 0, None]                               # no per-day count: open or closed
 
 
 @pytest.mark.unit
