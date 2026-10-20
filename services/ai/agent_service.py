@@ -105,7 +105,8 @@ class AgentService:
             raise NotFoundError("AI_CONVERSATION_NOT_FOUND", "Conversation not found")
 
     @staticmethod
-    async def start_turn(conversation_id: int, user_id: int, message: str) -> agent.Emitter:
+    async def start_turn(conversation_id: int, user_id: int, message: str,
+                         build: Optional[str] = None) -> agent.Emitter:
         """Check everything a turn needs, claim the conversation, and start the turn.
         Errors raised here are ordinary HTTP errors: nothing has streamed yet."""
         ensure_access(user_id)
@@ -128,7 +129,7 @@ class AgentService:
             await conversations.release(conversation_id)
             raise
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
-                          reservation_id=reservation_id)
+                          reservation_id=reservation_id, build=build)
         return agent.start(turn, header_line)
 
     @staticmethod

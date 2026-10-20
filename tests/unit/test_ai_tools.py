@@ -455,7 +455,7 @@ class TestMarketMovement:
 
 @pytest.mark.unit
 class TestQueryStats:
-    def test_it_is_the_last_agent_tool_and_mirrors_the_spec(self):
+    def test_it_follows_the_read_tools_and_mirrors_the_spec(self):
         from services.ai.stats.catalog import METRIC_NAMES
         from services.ai.stats.compiler import GAME_METRICS, StatsSpec
 
@@ -506,8 +506,8 @@ class TestFantasyTools:
     """The step 4 tools (services/ai/fantasy.py): appended after the stats query, so the cached
     prefix every earlier request built stays intact, and reached through the owned-team check."""
 
-    def test_they_come_last_and_take_nba_ids_only(self):
-        assert [t["name"] for t in tools.AGENT_TOOLS[-5:]] == ["project_matchup", "plan_streams", "propose_move",
+    def test_they_follow_the_stats_query_and_take_nba_ids_only(self):
+        assert [t["name"] for t in tools.AGENT_TOOLS[-6:-1]] == ["project_matchup", "plan_streams", "propose_move",
                                                               "get_lineup", "propose_lineup"]
         assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
         assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
@@ -552,11 +552,11 @@ class TestFantasyTools:
 
 @pytest.mark.unit
 class TestProposeMove:
-    """The step 5 tool (services/ai/proposals.py): appended last, reached through the owned-team
+    """The step 5 tool (services/ai/proposals.py): appended after the fantasy tools, reached through the owned-team
     check, and tied to the conversation the turn belongs to."""
 
     def test_the_definition_takes_nba_ids_and_a_reason(self):
-        tool = tools.AGENT_TOOLS[-3]
+        tool = tools.AGENT_TOOLS[-4]
         assert tool["name"] == "propose_move" and tool["input_schema"]["additionalProperties"] is False
         assert set(tool["input_schema"]["properties"]) == {"team_id", "add", "drop", "day", "reason"}
         assert tool["input_schema"]["required"] == ["team_id", "reason"]
@@ -610,7 +610,7 @@ class TestLineupTools:
     propose_move, reached through the owned-team check; the proposal needs a conversation."""
 
     def test_the_definitions_take_nba_ids_slot_names_and_a_reason(self):
-        read, propose = tools.AGENT_TOOLS[-2], tools.AGENT_TOOLS[-1]
+        read, propose = tools.AGENT_TOOLS[-3], tools.AGENT_TOOLS[-2]
         assert read["name"] == "get_lineup" and set(read["input_schema"]["properties"]) == {"team_id", "day"}
         assert propose["name"] == "propose_lineup" and propose["input_schema"]["additionalProperties"] is False
         assert set(propose["input_schema"]["properties"]) == {"team_id", "day", "moves", "fill", "reason"}
@@ -665,3 +665,87 @@ class TestLineupTools:
         assert out.is_error and "unknown slot" in out.content
         out = asyncio.run(tools.run_tool("get_lineup", {"team_id": 7}))
         assert out.is_error and "signed-in user" in out.content
+
+
+# ---- find_in_app: the app map ----
+
+APP_BUILD = "21a5238c0ffee21a5238c0ffee21a5238c0ffee2"
+
+
+def _app_map():
+    from datetime import datetime, timezone
+
+    from schemas.app_map import AppMapUpload
+    from services.ai.app_map import LoadedMap
+
+    def screen(id, desk, trail, tree, link=None):
+        return {"id": id, "desk": desk, "title": id, "trail": [{"role": "button", "name": n} for n in trail],
+                "url": f"/{desk}", "link": link, "tree": tree, "signedIn": False}
+
+    upload = AppMapUpload.model_validate({
+        "version": 1, "build": APP_BUILD, "crawledAt": "2026-10-20T07:00:00Z",
+        "desks": [
+            {"id": "week", "label": "Week", "href": "/week", "note": "Your team's matchup week",
+             "keywords": ["market", "streamers"], "needs": "account", "keys": "P market"},
+            {"id": "account", "label": "Account", "href": "/account", "note": "Teams, connections and alerts",
+             "keywords": ["settings"], "needs": "account", "keys": None},
+        ],
+        "screens": [
+            screen("week", "week", [], "- button \"Market P\"", link="/week"),
+            screen("week/market-p", "week", ["Market P"], "- radio \"ONE DAY\"\n- text: Free agents to pick up"),
+            screen("account/connect-espn", "account", ["Connect ESPN…"], "- dialog \"Connect ESPN\""),
+        ],
+        "copy": [{"file": "src/components/week/Market.tsx", "desk": "week",
+                  "seen": ["Market", "ONE DAY", "Free agents to pick up"], "unseen": []}],
+        "findings": [],
+    })
+    return LoadedMap(build=APP_BUILD, crawled_at=datetime(2026, 10, 20, 7, tzinfo=timezone.utc), map=upload)
+
+
+@pytest.mark.unit
+class TestFindInApp:
+    @pytest.fixture
+    def loads(self, monkeypatch):
+        asked = []
+        loaded = _app_map()
+
+        async def load(build):
+            asked.append(build)
+            return loaded
+        monkeypatch.setattr(tools.app_map, "load", load)
+        return asked
+
+    def _find(self, raw, build=APP_BUILD):
+        return asyncio.run(tools.run_tool("find_in_app", raw, ctx=tools.ToolContext(user_id=42, build=build),
+                                          allowed=tools.AGENT_TOOL_NAMES))
+
+    def test_it_is_the_agent_s_alone_and_appended_last(self):
+        assert tools.AGENT_TOOLS[-1]["name"] == "find_in_app"
+        assert "find_in_app" not in tools.ASK_TOOL_NAMES | tools.ROUTER_TOOL_NAMES
+
+    def test_it_searches_the_map_of_the_build_the_user_has_open(self, loads):
+        out = self._find({"query": "free agents market"})
+        assert not out.is_error
+        data = json.loads(out.content)
+        assert loads == [APP_BUILD]
+        assert data["matches_build"] is True
+        assert data["screens"][0]["id"] == "week/market-p" and data["screens"][0]["steps"] == "Week › Market P"
+        assert [d["id"] for d in data["desks"]] == ["week", "account"]
+
+    @pytest.mark.parametrize("build", ["0" * 40, None])
+    def test_another_build_s_map_says_so(self, loads, build):
+        data = json.loads(self._find({"query": "market"}, build=build).content)
+        assert loads == [build] and data["matches_build"] is False
+
+    def test_a_desk_narrows_it_and_an_unknown_desk_names_the_real_ones(self, loads):
+        data = json.loads(self._find({"query": "connect market", "desk": "account"}).content)
+        assert [s["id"] for s in data["screens"]] == ["account/connect-espn"]
+        out = self._find({"query": "market", "desk": "draft"})
+        assert out.is_error and "No desk 'draft'" in out.content and "week, account" in out.content
+
+    def test_without_a_map_the_model_is_told_to_say_so(self, monkeypatch):
+        async def none(build):
+            return None
+        monkeypatch.setattr(tools.app_map, "load", none)
+        out = self._find({"query": "market"})
+        assert out.is_error and "isn't available yet" in out.content

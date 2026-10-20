@@ -192,6 +192,9 @@ class AiTurnReq(ApiModel):
     """Body for POST /v1/internal/ai/conversations/{conversation_id}/turns."""
 
     message: str = Field(..., min_length=1, max_length=AGENT_MESSAGE_MAX, pattern=NO_NUL)
+    build: Optional[str] = Field(None, pattern=r"^[0-9a-f]{7,40}$",
+                                 description="The frontend build the user has open, its commit SHA: CV AI reads that "
+                                             "build's app map, or the newest when it has none yet")
 
 
 class AiTableColumn(ApiModel):
@@ -301,7 +304,20 @@ class AiProposal(AiProposalChip):
     id: str = Field(..., description="Unique within its turn, e.g. 'p1'")
 
 
-AiBlock = Annotated[Union[AiTable, AiChart, AiProposal], Field(discriminator="type")]
+class AiPlace(ApiModel):
+    """A place in the app, from the app map: the server builds its steps and link, the model never types them."""
+
+    type: Literal["place"] = "place"
+    id: str = Field(..., description="Unique within its turn, e.g. 'pl1' (a proposal's are p1, p2, ...)")
+    screen_id: str = Field(..., description="The app map's id of the screen")
+    desk: str = Field(..., description="The desk's name, e.g. 'Week'")
+    steps: str = Field(..., description="The clicks from the desk's front, e.g. 'Week › Market P › ONE DAY'")
+    href: str = Field(..., description="A path in the app: the screen's own link, or its desk's when it has none")
+    direct: bool = Field(..., description="href opens the screen itself; otherwise the steps lead there from href")
+    matches_build: bool = Field(..., description="The map is of the build the user has open")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace], Field(discriminator="type")]
 
 
 class AiTextPart(ApiModel):

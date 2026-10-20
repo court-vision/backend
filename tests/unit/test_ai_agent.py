@@ -7,7 +7,7 @@ What is pinned here is the envelope, not answer quality:
 - history is replayed verbatim and only a finished turn becomes history;
 - the turn's bounds (model calls, tool calls, its spend ceiling) hold, and the
   last call can't use tools;
-- tables and charts are built from stored results, never from model-typed values;
+- tables, charts and places are built from stored results, never from model-typed values;
 - every turn is written and priced, failed or not, and the stream always ends
   with `done`;
 - access, the claim and the monthly caps run before any model call, and a
@@ -550,6 +550,61 @@ def test_the_header_ends_with_what_became_of_the_conversation_s_proposals(monkey
     assert asyncio.run(agent.header(42, None, conversation_id=7)).endswith("The user has no teams yet.]")
 
 
+FOUND = {
+    "build": "21a5238", "crawled_at": "2026-10-20T07:00:00+00:00", "matches_build": True,
+    "desks": [{"id": "week", "label": "Week", "href": "/week", "note": "Your team's matchup week", "keys": "P market",
+               "needs": "account", "views": []}],
+    "screens": [
+        {"id": "week/market-p", "desk": "week", "steps": "Week › Market P", "link": None, "signed_in": True,
+         "tree": "- radio \"ONE DAY\"\n- text: Free agents to pick up\n- row \"Sample Player 31.5\""},
+        {"id": "week", "desk": "week", "steps": "Week", "link": "/week", "signed_in": False, "tree": "- button \"Market P\""},
+    ],
+    "not_in_demo": [],
+}
+
+
+@pytest.mark.unit
+class TestFindInApp:
+    def test_a_place_is_found_then_shown_from_the_result(self, agent_on, recorded, monkeypatch):
+        seen = []
+
+        async def fake(name, raw, *, ctx=None, allowed=None):
+            seen.append((name, ctx.user_id, ctx.build))
+            return ToolOutcome(json.dumps(FOUND), is_error=False)
+        monkeypatch.setattr(agent, "run_tool", fake)
+        _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "find_in_app", {"query": "pick up free agents"})),
+            msg("tool_use", tool_use("tu2", "show_place", {"screen_id": "week/market-p"})),
+            msg("end_turn", text("Open **Market P** in Week and pick **ONE DAY**.")),
+        ])
+        turn = _turn(message="Where do I pick up a free agent?")
+        turn.build = "21a5238"
+
+        events = _run(turn)
+
+        # The lookup reads the map of the build the user has open
+        assert seen == [("find_in_app", 42, "21a5238")]
+        block = next(e[1] for e in events if e[0] == "block")
+        assert block == {"type": "place", "id": "pl1", "screen_id": "week/market-p", "desk": "Week",
+                         "steps": "Week › Market P", "href": "/week", "direct": False, "matches_build": True}
+        assert ("status", {"text": "Looking through the app", "kind": "tool", "tool": "find_in_app"}) in events
+        row = recorded.rows[0]
+        assert row["outcome"] == "ok" and [p["kind"] for p in row["parts"]] == ["block", "text"]
+
+    def test_a_number_from_a_crawled_screen_is_not_a_source(self, agent_on, recorded, monkeypatch):
+        _tools(monkeypatch, {"find_in_app": FOUND})
+        _client(monkeypatch, [msg("tool_use", tool_use("tu1", "find_in_app", {"query": "free agents"})),
+                              msg("end_turn", text("He scores 31.5 a night; find him under **Free agents**."))])
+        logged = []
+        monkeypatch.setattr(agent, "_log_turn", lambda *a, **kw: logged.append(a))
+
+        _run(_turn())
+
+        # 31.5 is only in the crawl's sample data, so it counts; the bolded name is in the result, so it doesn't
+        assert recorded.rows[0]["ungrounded_numbers"] == 1
+        assert logged[0][5] == 0  # ungrounded_places
+
+
 # ---- the made-up-number check ----
 
 @pytest.mark.unit
@@ -565,6 +620,21 @@ class TestUngroundedNumbers:
         text = "On 2026-10-21 the 76ers play the Lvl. 3 Goblins."
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins"}) == 1  # "76" from 76ers still counts
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins", "76ers"}) == 0
+
+
+@pytest.mark.unit
+class TestUngroundedPlaces:
+    def test_a_ui_name_in_no_find_in_app_result_counts(self):
+        text = 'Open **Market P**, then tap "Stream now" and **Save**.'
+        assert agent.ungrounded_places(text, [FOUND], []) == 2
+
+    def test_data_and_the_user_s_words_are_not_places(self):
+        text = 'Pick up **Walker Kessler** for "blocks", as you asked about **the late games**.'
+        assert agent.ungrounded_places(text, [], [MATCHUP, "which free agent helps my blocks in the late games?"]) == 0
+
+    def test_long_spans_and_numbers_are_not_names(self):
+        text = '**I would add him today before his game tonight against Boston** for **31.5**.'
+        assert agent.ungrounded_places(text, [], []) == 0
 
 
 # ---- display ----
@@ -751,6 +821,35 @@ class TestShowChart:
             display.show_chart({"result_ids": ["r1"], "kind": "bar", "x": "n", "y": ["v"], "title": "x"}, empty, "c1")
         with pytest.raises(display.DisplayError, match="Invalid input"):
             display.show_chart({"result_ids": ["r1"], "kind": "pie", "x": "name", "y": ["v"], "title": "x"}, RESULTS, "c1")
+
+
+@pytest.mark.unit
+class TestShowPlace:
+    def _results(self, *found):
+        return {f"r{i + 1}": {"tool": "find_in_app", "input": {}, "data": f} for i, f in enumerate(found)}
+
+    def test_a_screen_with_its_own_link_opens_directly(self):
+        shown = display.show_place({"screen_id": "week"}, self._results(FOUND), "p1")
+        assert shown.block["href"] == "/week" and shown.block["direct"] is True
+        assert "p1" in shown.summary
+
+    def test_the_newest_result_with_the_screen_wins(self):
+        newer = {**FOUND, "matches_build": False,
+                 "screens": [{**FOUND["screens"][1], "link": "/week?v=1"}]}
+        shown = display.show_place({"screen_id": "week"}, self._results(FOUND, newer), "p1")
+        assert shown.block["href"] == "/week?v=1" and shown.block["matches_build"] is False
+
+    def test_only_screens_a_find_in_app_result_returned(self):
+        with pytest.raises(display.DisplayError, match="call find_in_app first"):
+            display.show_place({"screen_id": "week"}, RESULTS, "p1")
+        with pytest.raises(display.DisplayError, match="Their screens: week, week/market-p"):
+            display.show_place({"screen_id": "draft/room"}, self._results(FOUND), "p1")
+
+    @pytest.mark.parametrize("href", ["//evil.example/week", "https://evil.example", "javascript:alert(1)", "/week now"])
+    def test_a_link_that_leaves_the_app_is_refused(self, href):
+        bad = {**FOUND, "screens": [{**FOUND["screens"][1], "link": href}]}
+        with pytest.raises(display.DisplayError, match="no link into the app"):
+            display.show_place({"screen_id": "week"}, self._results(bad), "p1")
 
 
 # ---- spend ----

@@ -14,7 +14,7 @@ A turn is the router's bounded loop grown up:
   `tool_choice: none`, so a turn always ends in an answer.
 - **Streaming.** Prose streams as the model writes it; tool calls and the
   model's progress notes become status lines; display tools become blocks (a
-  table or a chart) once the server has built them. Events go on a queue the route drains as SSE.
+  table, a chart or a place in the app) once the server has built them. Events go on a queue the route drains as SSE.
 - **Detached.** The turn runs in its own task. A client that disconnects stops
   hearing it, not running it: the tokens are already being spent, and the turn
   must still be written so the conversation stays whole.
@@ -43,7 +43,9 @@ from core.tracing import timed
 from schemas.ai import AiToolCall
 from services.ai import conversations, proposals, spend
 from services.ai.client import get_client
-from services.ai.display import DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_TABLE, DisplayError, show_chart, show_table
+from services.ai.display import (
+    DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_PLACE, SHOW_TABLE, DisplayError, show_chart, show_place, show_table,
+)
 from services.ai.prompts import AGENT_PROMPT
 from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
@@ -59,7 +61,7 @@ BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
-TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART]
+TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE]
 ALLOWED = AGENT_TOOL_NAMES
 
 # What the user sees while a tool runs
@@ -84,8 +86,10 @@ STATUS: dict[str, str] = {
     "propose_move": "Checking the move",
     "get_lineup": "Reading your lineup",
     "propose_lineup": "Checking the lineup",
+    "find_in_app": "Looking through the app",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
+    "show_place": "Pointing out where",
 }
 
 
@@ -97,6 +101,8 @@ class Turn:
     user_id: int
     message: str
     history: conversations.History
+    # The frontend build the user has open (find_in_app reads its app map)
+    build: Optional[str] = None
     # The spend reserved for this turn (usr.ai_spend), settled when it is written
     reservation_id: Optional[int] = None
     run: _Run = field(default_factory=_Run)
@@ -110,6 +116,7 @@ class Turn:
     tables: int = 0
     charts: int = 0
     chips: int = 0
+    places: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -223,23 +230,24 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
     name, raw = block.name, block.input
     emit("status", {"text": STATUS.get(name, "Working"), "kind": "tool", "tool": name})
     if name in DISPLAY_TOOL_NAMES:
-        chart = name == SHOW_CHART["name"]
         try:
-            if chart:
+            if name == SHOW_CHART["name"]:
                 shown = show_chart(raw, turn.all_results(), f"c{turn.charts + 1}")
+                turn.charts += 1
+            elif name == SHOW_PLACE["name"]:
+                shown = show_place(raw, turn.all_results(), f"pl{turn.places + 1}")
+                turn.places += 1
             else:
                 shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")
+                turn.tables += 1
         except DisplayError as exc:
             return {"type": "tool_result", "tool_use_id": block.id, "content": str(exc), "is_error": True}
-        if chart:
-            turn.charts += 1
-        else:
-            turn.tables += 1
         turn.parts.append({"kind": "block", "block": shown.block})
         emit("block", shown.block)
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
 
-    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id),
+    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id,
+                                                        build=turn.build),
                              allowed=ALLOWED)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}
@@ -325,6 +333,34 @@ def ungrounded_numbers(text: str, sources: list[Any], names: set[str] = frozense
     return sum(1 for n in _numbers(text) if not supported(n))
 
 
+# ---- the made-up-place check ----
+
+FIND_IN_APP = "find_in_app"
+# What an answer names in the app: a bold or quoted span of a few words
+_NAMED = re.compile(r"\*\*([^*\n]{1,60})\*\*|\"([^\"\n]{1,60})\"|“([^”\n]{1,60})”")
+_MAX_NAME_WORDS = 6
+
+
+def _text_of(value: Any) -> str:
+    return (value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)).casefold()
+
+
+def ungrounded_places(text: str, app: list[Any], others: list[Any]) -> int:
+    """UI names the answer bolds or quotes that appear in no find_in_app result of
+    the conversation (docs/APP_MAP_PLAN.md § 5): a button or screen the model made
+    up. A span the other lookups or the user's own words contain (a player's name,
+    a category) is data, not a place. Logged, not blocked; the eval is where it fails."""
+    known = [_text_of(v) for v in [*app, *others]]
+    count = 0
+    for match in _NAMED.finditer(text):
+        name = next(g for g in match.groups() if g is not None).strip().strip(".,:;!?").casefold()
+        if not name or len(name.split()) > _MAX_NAME_WORDS or not re.search(r"[^\W\d_]", name):
+            continue
+        if not any(name in k for k in known):
+            count += 1
+    return count
+
+
 # ---- the turn ----
 
 async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
@@ -334,6 +370,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
     outcome = "INTERNAL_ERROR"
     turn_id: Optional[int] = None
     ungrounded: Optional[int] = None
+    places: Optional[int] = None
     user_content = f"{header_line}\n\n{turn.message}"
     turn.messages.append({"role": "user", "content": user_content})
     try:
@@ -371,16 +408,23 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 if final or response.stop_reason != "tool_use" or not tool_uses:
                     break
                 turn.messages.append({"role": "user", "content": await _run_tools(turn, tool_uses, emit)})
-        if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips:
+        if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips \
+                and not turn.places:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
+        user_texts = [user_content, *(m["content"] for m in turn.history.messages
+                                      if m["role"] == "user" and isinstance(m["content"], str))]
+        app = [r["data"] for r in turn.all_results().values() if r["tool"] == FIND_IN_APP]
         ungrounded = ungrounded_numbers(
             turn.answer_text(),
-            [r["data"] for r in turn.all_results().values()]
+            # A number in a crawled screen is sample data, never a source for the user's stats
+            [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
             + [r["input"] for r in turn.results.values()]
-            + [user_content, *(m["content"] for m in turn.history.messages
-                               if m["role"] == "user" and isinstance(m["content"], str))],
+            + user_texts,
             turn.run.names,
         )
+        places = ungrounded_places(turn.answer_text(), app,
+                                   [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
+                                   + user_texts)
         outcome = "ok"
     except TimeoutError:
         outcome = "AI_TIMEOUT"
@@ -428,7 +472,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             get_logger().exception("ai_turn_record_failed", conversation_id=turn.conversation_id, cost_micros=turn.cost)
             await _settle_quietly(turn)
             await _release_quietly(turn.conversation_id)
-        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id)
+        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id, places)
         try:
             month = await spend.month_spend(turn.user_id)
             spent = {"month_usd": month.user / 1e6, "cap_usd": month.user_cap / 1e6}
@@ -461,7 +505,8 @@ async def _release_quietly(conversation_id: int) -> None:
         get_logger().exception("ai_conversation_release_failed", conversation_id=conversation_id)
 
 
-def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[int], turn_id: Optional[int]) -> None:
+def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[int], turn_id: Optional[int],
+              places: Optional[int] = None) -> None:
     run = turn.run
     get_logger().info(
         "ai_turn",
@@ -476,6 +521,7 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         tool_errors=sum(call.is_error for call in run.tool_calls),
         tables=turn.tables,
         charts=turn.charts,
+        places=turn.places,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
         cache_read_input_tokens=run.cache_read_input_tokens,
@@ -487,6 +533,7 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         stop_reason=run.stop_reason,
         duration_ms=duration_ms,
         ungrounded_numbers=ungrounded,
+        ungrounded_places=places,
         prior_turns=turn.history.turns,
         request_ids=run.request_ids,
     )

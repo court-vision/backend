@@ -203,7 +203,8 @@ async def _events(emit: Emitter) -> AsyncIterator[str]:
         "`note` for the agent's own progress note, `step` for the start of each step after the "
         "first, when whatever the last status said is done);\n"
         "- `text` `{delta}`: the answer's prose, as it is written;\n"
-        "- `block` (an `AiTable` or `AiChart`): a table or chart the server built from the agent's lookups;\n"
+        "- `block` (an `AiTable`, `AiChart` or `AiPlace`): a table, chart or place in the app the server "
+        "built from the agent's lookups;\n"
         "- `error` `{code, message}`: the turn failed (AI_DECLINED, AI_TIMEOUT, AI_INCOMPLETE, AI_BUSY, ...);\n"
         "- `done` `{turn_id, outcome, cost_usd, model_calls, duration_ms, spend}`: always last.\n\n"
         "Text and blocks arrive in the order the user should see them. Lines starting with `:` are "
@@ -223,7 +224,7 @@ async def send_turn(
     conversation_id: int = Path(..., gt=0),
     user: UserContext = Depends(get_db_user),
 ) -> StreamingResponse:
-    emit = await AgentService.start_turn(conversation_id, user.user_id, req.message)
+    emit = await AgentService.start_turn(conversation_id, user.user_id, req.message, build=req.build)
     return StreamingResponse(
         _events(emit),
         media_type="text/event-stream",
