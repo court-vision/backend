@@ -242,6 +242,17 @@ class Settings(BaseSettings):
     sentry_environment: Optional[str] = None  # defaults to the Railway environment name, else "development"
     sentry_traces_sample_rate: float = 0.0
 
+    # Request timing (core/tracing.py, services/request_timings.py): every
+    # request's time, split into ESPN, Postgres, our own code and the rest, is
+    # written to ops.request_timings for the data-platform dashboard's Latency
+    # page. Rows are inserted in batches every flush interval and kept for the
+    # retention period. Off: no spans, no rows (Railway tracing then sees only
+    # its own edge spans).
+    request_timings_enabled: bool = True
+    request_timings_flush_seconds: float = 10.0
+    request_timings_retention_days: int = 30
+    request_timings_queue_max: int = 5000
+
     # Event-loop watchdog: exit the process (Railway restarts it) when the loop has not
     # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).
     loop_watchdog_stall_s: float = 45.0

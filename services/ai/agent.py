@@ -39,6 +39,7 @@ from core.errors import AppError, ProviderError
 from core.logging import get_logger
 from core.nba_calendar import EASTERN, nba_date_et
 from core.settings import settings
+from core.tracing import timed
 from schemas.ai import AiToolCall
 from services.ai import conversations, spend
 from services.ai.client import get_client
@@ -162,37 +163,38 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
 async def _stream_call(turn: Turn, emit: Emitter, *, final: bool, messages: list[dict[str, Any]]) -> Any:
     notes: dict[int, str] = {}
     try:
-        async with get_client().beta.messages.stream(
-            model=settings.ai_agent_model,
-            max_tokens=MAX_TOKENS,
-            # The fixed prefix (tools + system) gets its own breakpoint, shared by
-            # every conversation; the top-level one caches each conversation so far.
-            system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            tools=TOOLS,
-            messages=messages,
-            thinking=THINKING,
-            output_config={"effort": settings.ai_agent_effort},
-            cache_control={"type": "ephemeral"},
-            betas=[FALLBACK_BETA, UPDATES_BETA, BINDING_BETA],
-            fallbacks="default",
-            **({"tool_choice": {"type": "none"}} if final else {}),
-        ) as stream:
-            async for event in stream:
-                if event.type == "content_block_start" and event.content_block.type == "text":
-                    # A new text block (the answer after a lookup) starts a new paragraph
-                    if turn.answer_text() and not turn.answer_text().endswith("\n"):
-                        turn.add_text("\n\n")
-                        emit("text", {"delta": "\n\n"})
-                elif event.type == "content_block_delta":
-                    delta = event.delta
-                    if delta.type == "text_delta" and delta.text:
-                        turn.add_text(delta.text)
-                        emit("text", {"delta": delta.text})
-                    elif delta.type == "thinking_delta" and delta.thinking:
-                        notes[event.index] = notes.get(event.index, "") + delta.thinking
-                elif event.type == "content_block_stop" and notes.get(event.index, "").strip():
-                    emit("status", {"text": notes.pop(event.index).strip(), "kind": "note"})
-            return await stream.get_final_message()
+        with timed("claude", "POST claude messages (stream)"):
+            async with get_client().beta.messages.stream(
+                model=settings.ai_agent_model,
+                max_tokens=MAX_TOKENS,
+                # The fixed prefix (tools + system) gets its own breakpoint, shared by
+                # every conversation; the top-level one caches each conversation so far.
+                system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                tools=TOOLS,
+                messages=messages,
+                thinking=THINKING,
+                output_config={"effort": settings.ai_agent_effort},
+                cache_control={"type": "ephemeral"},
+                betas=[FALLBACK_BETA, UPDATES_BETA, BINDING_BETA],
+                fallbacks="default",
+                **({"tool_choice": {"type": "none"}} if final else {}),
+            ) as stream:
+                async for event in stream:
+                    if event.type == "content_block_start" and event.content_block.type == "text":
+                        # A new text block (the answer after a lookup) starts a new paragraph
+                        if turn.answer_text() and not turn.answer_text().endswith("\n"):
+                            turn.add_text("\n\n")
+                            emit("text", {"delta": "\n\n"})
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta" and delta.text:
+                            turn.add_text(delta.text)
+                            emit("text", {"delta": delta.text})
+                        elif delta.type == "thinking_delta" and delta.thinking:
+                            notes[event.index] = notes.get(event.index, "") + delta.thinking
+                    elif event.type == "content_block_stop" and notes.get(event.index, "").strip():
+                        emit("status", {"text": notes.pop(event.index).strip(), "kind": "note"})
+                return await stream.get_final_message()
     except anthropic.AnthropicError as exc:
         raise map_sdk_error(exc) from exc
 
