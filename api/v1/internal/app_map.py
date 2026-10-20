@@ -88,14 +88,19 @@ async def upload_app_map(request: Request, build: str = Path(pattern=BUILD_PATTE
     body = await _body(request)
     try:
         raw = json.loads(body)
-        upload = AppMapUpload.model_validate(raw)
-    except (ValueError, ValidationError) as e:
-        # Only the first error's location: the message reaches the workflow's log, not a user
-        where = ".".join(map(str, e.errors()[0]["loc"])) if isinstance(e, ValidationError) else "not JSON"
-        raise BadRequestError("APP_MAP_INVALID", f"Not an app map: {where}", log_level="warning") from None
-    if upload.version not in MAP_VERSIONS:
-        raise BadRequestError("APP_MAP_VERSION", f"Map version {upload.version} is not one this backend reads",
+    except ValueError:
+        raise BadRequestError("APP_MAP_INVALID", "Not an app map: not JSON", log_level="warning") from None
+    # The version before the shape: a newer version's map may not have this one's shape
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if isinstance(version, int) and version not in MAP_VERSIONS:
+        raise BadRequestError("APP_MAP_VERSION", f"Map version {version} is not one this backend reads",
                               log_level="warning")
+    try:
+        upload = AppMapUpload.model_validate(raw)
+    except ValidationError as e:
+        # Only the first error's location: the message reaches the workflow's log, not a user
+        where = ".".join(map(str, e.errors()[0]["loc"]))
+        raise BadRequestError("APP_MAP_INVALID", f"Not an app map: {where}", log_level="warning") from None
     if upload.build != build:
         raise BadRequestError("APP_MAP_BUILD_MISMATCH", "The map is of another build", log_level="warning")
 
