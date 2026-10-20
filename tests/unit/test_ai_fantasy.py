@@ -201,6 +201,20 @@ def test_a_chain_is_read_as_a_whole_before_the_rule_drops_anyone(what_if):
 
 
 @pytest.mark.unit
+def test_a_player_dropped_and_brought_back_is_the_rules_to_drop_first(what_if):
+    """A drop and return: X in for A today, A back for X on day 4, A out on day 6. The day-6 drop is of
+    the re-added A, so it reserves nothing, and the rule drops A (the cheapest) on day 1 as before."""
+    what_if.resp = matchup([roster_player(101, 1001, "A", "DEN", 10.0, "PG"), roster_player(*B),
+                            roster_player(*HURT, injured=True)])
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
+    what_if.players[1001] = fantasy._Identity(1001, "A", 101, "DEN")
+    what_if.values[1001] = (10.0, "rolling", None)
+    out = project([{"add": 2001, "day": 1}, {"add": 1001, "drop": 2001, "day": 4}, {"drop": 1001, "day": 6}],
+                  team_=team(slots=3))
+    assert [(m["day"], m["add"], m["drop"]) for m in out["moves"]] == [(1, "FA", "A"), (4, "A", "FA"), (6, None, "A")]
+
+
+@pytest.mark.unit
 def test_an_empty_ir_slot_is_not_an_open_spot(what_if):
     """Three active players fill the three active slots; the empty IR slot is no room for a healthy add,
     so the rule drops someone. A player on IR takes no active seat either."""

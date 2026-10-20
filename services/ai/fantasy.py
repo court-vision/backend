@@ -454,6 +454,18 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
     chosen: dict[int, str] = {}
     claimed: set[int] = set()        # the pure drops an add listed earlier the same day takes the spot of
 
+    def spoken_for(i: int) -> set[int]:
+        """The holdings a later move drops itself, so the rule leaves them be. A drop that comes after
+        a re-add of the same player is of that re-add, not of the holding."""
+        out: set[int] = set()
+        re_added: set[int] = set()
+        for _, later in planned[i + 1:]:
+            if later.drop is not None and later.drop not in re_added:
+                out.add(later.drop)
+            if later.add is not None:
+                re_added.add(later.add)
+        return out
+
     def room_later(i: int, day: int) -> bool:
         """A drop of an active player listed later the same day opens a spot this add can take."""
         for j in range(i + 1, len(planned)):
@@ -481,10 +493,10 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
                 assumes.append(f"{add.name} takes the spot a drop later on day {day} opens.")
             else:
                 # The rule picks among the active players no later move drops itself
-                spoken_for = {later.drop for _, later in planned[i + 1:] if later.drop is not None}
+                reserved = spoken_for(i)
                 candidates = []
                 for pid, p in holdings.items():
-                    if pid in on_ir or pid in spoken_for:
+                    if pid in on_ir or pid in reserved:
                         continue
                     w = weighed.get(pid)
                     candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected)))
