@@ -31,6 +31,7 @@ from typing import Optional
 from core.errors import AppError, AuthenticationError, AuthorizationError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
+from core.tracing import timed
 
 log = get_logger("auth")
 
@@ -104,7 +105,8 @@ def _fetch_jwks() -> dict[str, rsa.RSAPublicKey]:
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
-        response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
+        with timed("clerk", "GET clerk jwks"):
+            response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
         jwks = response.json()
     except requests.RequestException as e:  # includes a body that is not JSON
@@ -226,14 +228,15 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         return None
 
     try:
-        response = _clerk_http.get(
-            f"https://api.clerk.com/v1/users/{clerk_user_id}",
-            headers={
-                "Authorization": f"Bearer {CLERK_SECRET_KEY}",
-                "Content-Type": "application/json"
-            },
-            timeout=10
-        )
+        with timed("clerk", "GET clerk user"):
+            response = _clerk_http.get(
+                f"https://api.clerk.com/v1/users/{clerk_user_id}",
+                headers={
+                    "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
         response.raise_for_status()
         user_data = response.json()
 
@@ -278,12 +281,13 @@ def create_sign_in_token(clerk_user_id: str, expires_in_seconds: int) -> str:
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
-        response = _clerk_http.post(
-            "https://api.clerk.com/v1/sign_in_tokens",
-            headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
-            json={"user_id": clerk_user_id, "expires_in_seconds": expires_in_seconds},
-            timeout=10,
-        )
+        with timed("clerk", "POST clerk sign_in_tokens"):
+            response = _clerk_http.post(
+                "https://api.clerk.com/v1/sign_in_tokens",
+                headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
+                json={"user_id": clerk_user_id, "expires_in_seconds": expires_in_seconds},
+                timeout=10,
+            )
         response.raise_for_status()
         body = response.json()
     except requests.RequestException as e:  # includes a body that is not JSON
