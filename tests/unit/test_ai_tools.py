@@ -459,8 +459,8 @@ class TestQueryStats:
         from services.ai.stats.catalog import METRIC_NAMES
         from services.ai.stats.compiler import GAME_METRICS, StatsSpec
 
-        tool = tools.AGENT_TOOLS[-1]
-        assert tool["name"] == "query_stats" and tool is tools.AGENT_STATS_TOOLS[0]
+        tool = next(t for t in tools.AGENT_TOOLS if t["name"] == "query_stats")
+        assert tool is tools.AGENT_STATS_TOOLS[0]
         assert tools._REGISTRY["query_stats"].input_model is StatsSpec
         assert "query_stats" not in tools.ASK_TOOL_NAMES and "query_stats" not in tools.ROUTER_TOOL_NAMES
         props = tool["input_schema"]["properties"]
@@ -499,3 +499,51 @@ class TestQueryStats:
         monkeypatch.setattr(tools, "run_query_stats", refuse)
         out = _agent("query_stats", {"players": [1], "grain": "game", "metrics": ["pts"], "seasons": ["2001-02"]})
         assert out.is_error and out.content.startswith("Court Vision's game history covers")
+
+
+@pytest.mark.unit
+class TestFantasyTools:
+    """The step 4 tools (services/ai/fantasy.py): appended after the stats query, so the cached
+    prefix every earlier request built stays intact, and reached through the owned-team check."""
+
+    def test_they_come_last_and_take_nba_ids_only(self):
+        assert [t["name"] for t in tools.AGENT_TOOLS[-2:]] == ["project_matchup", "plan_streams"]
+        assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
+        assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
+        moves = tools.AGENT_FANTASY_TOOLS[0]["input_schema"]["properties"]["moves"]
+        assert moves["items"]["additionalProperties"] is False and set(moves["items"]["properties"]) == {"add", "drop", "day"}
+        value = tools.AGENT_FANTASY_TOOLS[1]["input_schema"]["properties"]["value"]
+        assert value["enum"][:2] == ["league", "matchup"] and "fg_pct" not in value["enum"]
+
+    def test_the_handlers_check_the_team_is_the_users_and_pass_the_validated_args(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def project(user_id, team, league_info, args):
+            seen["project"] = (user_id, team.team_id, args)
+            return {"before": {"you": 1.0}}
+
+        async def plan(user_id, team, league_info, args):
+            seen["plan"] = (user_id, team.team_id, args)
+            return {"plan": []}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "project_matchup", project)
+        monkeypatch.setattr(tools, "plan_streams", plan)
+        ctx = SimpleNamespace(user_id=42)
+
+        out = asyncio.run(tools.run_tool("project_matchup", {"team_id": 7, "moves": [{"add": 1, "day": 2}]}, ctx=ctx))
+        assert not out.is_error and seen["owned"] == (42, 7)
+        assert seen["project"][2].moves[0].add == 1 and seen["project"][2].moves[0].day == 2
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7, "value": "blk", "holders": [1, 2]}, ctx=ctx))
+        assert not out.is_error and seen["plan"][2].value == "blk" and seen["plan"][2].holders == [1, 2]
+
+    def test_a_move_needs_an_add_or_a_drop_and_the_tools_need_a_user(self):
+        out = asyncio.run(tools.run_tool("project_matchup", {"team_id": 7, "moves": [{"day": 2}]}, ctx=SimpleNamespace(user_id=1)))
+        assert out.is_error and "add, a drop, or both" in out.content
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7, "value": "fg_pct"}, ctx=SimpleNamespace(user_id=1)))
+        assert out.is_error and "Invalid input" in out.content
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7}))
+        assert out.is_error and "signed-in user" in out.content

@@ -316,3 +316,18 @@ def test_matchup_rosters_carry_resolved_nba_player_ids(matchup):
     ours = {p.player_id: p.nba_player_id for p in resp.data.your_team.roster}
     assert ours == {1: 2544, 2: 203999, 3: None}
     assert resp.data.opponent_team.roster[0].nba_player_id == 201142
+
+
+@pytest.mark.unit
+def test_matchup_rosters_keep_the_projections_inputs_for_the_what_if(matchup):
+    """services.matchup_projection re-runs the projection with moves applied, from each player's
+    per-game line and where his value came from; both ride along off the wire."""
+    matchup["values"] = {3: ValueResult(18.0, "baseline")}
+
+    resp = asyncio.run(EspnService.get_matchup_data(LEAGUE, scoring=POINTS))
+
+    by_id = {p.player_id: p for p in resp.data.your_team.roster}
+    assert by_id[1]._value_source == "provider" and by_id[1]._avg_line.pts == 20.0 and by_id[1]._avg_line.fga == 16.0
+    assert by_id[2]._value_source == "provider" and by_id[2]._avg_line.pts == 10.0
+    assert by_id[3]._value_source == "baseline"
+    assert "_avg_line" not in by_id[1].model_dump() and "_value_source" not in resp.model_dump_json()

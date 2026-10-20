@@ -50,6 +50,13 @@ from services.game_context import GameContext
 from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
+from services.ai.fantasy import (
+    AGENT_FANTASY_TOOLS,
+    PlanStreamsInput,
+    ProjectMatchupInput,
+    plan_streams,
+    project_matchup,
+)
 from services.ai.stats.catalog import METRIC_NAMES, describe as describe_metrics
 from services.ai.stats.compiler import (
     DEFAULT_MIN_GAMES, GAME_METRICS, MAX_METRICS, MAX_PLAYERS, MAX_SEASONS, MAX_TOP, StatsSpec,
@@ -723,6 +730,16 @@ async def _get_scheduled_pickups(args: TeamInput, ctx: ToolContext | None) -> di
     }
 
 
+async def _project_matchup(args: ProjectMatchupInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, league_info = await _owned(ctx, args.team_id)
+    return await project_matchup(ctx.user_id, team, league_info, args)
+
+
+async def _plan_streams(args: PlanStreamsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, league_info = await _owned(ctx, args.team_id)
+    return await plan_streams(ctx.user_id, team, league_info, args)
+
+
 AGENT_GET_MY_TEAMS: dict[str, Any] = {
     **GET_MY_TEAMS,
     "description": (
@@ -1056,11 +1073,11 @@ AGENT_STATS_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-# Stats and status (step 0), name lookup, the user's teams, their leagues, then
-# the stats query. The order is part of every request's cached prefix: append,
-# never reorder.
+# Stats and status (step 0), name lookup, the user's teams, their leagues, the
+# stats query, then the fantasy logic (step 4). The order is part of every
+# request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
-    *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS,
+    *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
@@ -1092,6 +1109,8 @@ _REGISTRY: dict[str, _Tool] = {
     "get_draft_rooms": _Tool(MyTeamsInput, _get_draft_rooms),
     "get_draft_room": _Tool(DraftRoomInput, _get_draft_room),
     "query_stats": _Tool(StatsSpec, _query_stats),
+    "project_matchup": _Tool(ProjectMatchupInput, _project_matchup),
+    "plan_streams": _Tool(PlanStreamsInput, _plan_streams),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

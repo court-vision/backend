@@ -642,10 +642,14 @@ class EspnService:
                 ours = our_values.get(player_id)
                 if ours is not None and ours.value is not None and (scoring.is_categories or not avg_points):
                     avg_points = ours.value
+                    value_source = ours.source
                 elif not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
                     # Last resort (no stored stats for this player): value the player with the
                     # league's point weights (default formula) over ESPN's raw averages.
                     avg_points = round(scoring.points.score(avg_line), 2)
+                    value_source = "provider"
+                else:
+                    value_source = "provider" if avg_points else None
 
                 # Calculate games remaining for this player using schedule service
                 games_remaining = get_remaining_games(team_abbrev)
@@ -656,7 +660,7 @@ class EspnService:
                     projected_total += avg_points * games_remaining
                 proj_inputs.append((avg_line, games_remaining, counts_toward_projection))
 
-                players.append(MatchupPlayerResp(
+                player = MatchupPlayerResp(
                     player_id=player_id,
                     name=name,
                     team=team_abbrev,
@@ -667,7 +671,12 @@ class EspnService:
                     games_remaining=games_remaining,
                     injured=injured,
                     injury_status=injury_status
-                ))
+                )
+                # The what-if projection re-runs this projection with moves applied, from
+                # the same inputs (services.matchup_projection)
+                player._avg_line = avg_line
+                player._value_source = value_source
+                players.append(player)
 
             return players, projected_total, proj_inputs
 

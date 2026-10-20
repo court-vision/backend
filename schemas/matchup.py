@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from pydantic import BaseModel, Field, PrivateAttr
+from typing import Any, Literal, Optional
 from .common import ApiModel, BaseRequest, BaseResponse, LeagueInfo
 
 
@@ -51,6 +51,12 @@ class MatchupPlayerResp(ApiModel):
     games_remaining: int                   # Games left in matchup period
     injured: bool
     injury_status: Optional[str] = None
+    # The projection's own inputs for this player, kept off the wire for the what-if
+    # projection (services.matchup_projection): the per-game StatLine his category
+    # projection was made from, and where avg_points came from (rolling | recent |
+    # baseline | provider | None when nothing is known). Set by the provider builds.
+    _avg_line: Optional[Any] = PrivateAttr(default=None)
+    _value_source: Optional[str] = PrivateAttr(default=None)
 
 
 class MatchupTeamResp(ApiModel):

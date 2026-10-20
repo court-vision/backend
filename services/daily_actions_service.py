@@ -124,8 +124,9 @@ def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool]) -> list
             and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
 
 
-def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[DropValue]:
-    """What the swap weighs a drop candidate at; None = unknown, so never the drop.
+def weigh_drop(player_id: int, avg_points: float, value_source: Optional[str],
+               evidence: Optional[DropEvidence]) -> Optional[DropValue]:
+    """What a drop candidate is weighed at; None = unknown, so never the drop.
 
     Last season's line (`baseline`) already rests on a real sample. A recent
     average on fewer than MIN_SAMPLE_GAMES games counts at the higher of itself
@@ -133,17 +134,25 @@ def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[Dr
     couple of quiet games never make a player look worse than projected. No value
     at all (0.0 on the board) is the projection, and without one a thin or empty
     sample is unknown. If the lookup failed (`evidence` None) the board's averages
-    stand, but an empty one still never makes a player the weakest."""
-    if p.value_source == "baseline":
-        return DropValue(p.avg_points, False)
-    if p.value_source is not None and (evidence is None or evidence.games.get(p.player_id, 0) >= MIN_SAMPLE_GAMES):
-        return DropValue(p.avg_points, False)
-    prior = evidence.projected.get(p.player_id) if evidence is not None else None
+    stand, but an empty one still never makes a player the weakest.
+
+    The rule the what-if projection's drop choice shares (`services.matchup_projection`);
+    `player_id` is the key `evidence` is read by (the ESPN id on a board)."""
+    if value_source == "baseline":
+        return DropValue(avg_points, False)
+    if value_source is not None and (evidence is None or evidence.games.get(player_id, 0) >= MIN_SAMPLE_GAMES):
+        return DropValue(avg_points, False)
+    prior = evidence.projected.get(player_id) if evidence is not None else None
     if prior is None:
         return None
-    if p.value_source is not None and p.avg_points >= prior:
-        return DropValue(p.avg_points, False)
+    if value_source is not None and avg_points >= prior:
+        return DropValue(avg_points, False)
     return DropValue(prior, True)
+
+
+def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[DropValue]:
+    """What the swap weighs a drop candidate at (`weigh_drop` over a board player)."""
+    return weigh_drop(p.player_id, p.avg_points, p.value_source, evidence)
 
 
 def suggest_transaction(

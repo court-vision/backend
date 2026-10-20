@@ -138,9 +138,11 @@ def fa(pid, team, *, value=22.0, positions=("SF", "F"), pos=3, available_on=None
     return PoolPlayer(pid, f"FA {pid}", team, active_slots([*positions, "UT1"]), value, pos, available_on)
 
 
-def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, switchable=(True, True, True), roster=ROSTER):
+def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, switchable=(True, True, True), roster=ROSTER,
+         values=None):
     from services.stream_lane_service import Budget
-    return plan_lane(board(roster, limits=limits), HOLDER, pool, DAYS, list(pending_), Budget(adds, switchable), rehold)
+    return plan_lane(board(roster, limits=limits), HOLDER, pool, DAYS, list(pending_), Budget(adds, switchable), rehold,
+                     values)
 
 
 @pytest.mark.unit
@@ -247,3 +249,66 @@ def test_a_decision_compared_with_the_projection_before_it():
     assert compare_to_projection(shown, 28, 10, HOLDER, frozenset({10}))[1] == "replanned"   # kept, now switches
     assert compare_to_projection(None, 29, 10, HOLDER, frozenset()) == (None, None)
     assert compare_to_projection(shown, 31, 10, HOLDER, frozenset()) == (None, None)
+
+
+# ---- the value function and the joint plan ------------------------------------------------
+
+
+@pytest.mark.unit
+def test_values_stand_in_for_the_boards_and_the_pools_and_a_player_left_out_is_worth_nothing():
+    """Under a value function (blocks, the matchup), the plan reads each player's worth from it: the
+    free agent worth 22 on the board is worth 3 to it, the holder 1, and the guard nothing at all."""
+    values = {HOLDER: 1.0, 10: 3.0, BIG: 2.0}
+    lp = plan([fa(10, "LAL")], adds=1, values=values)
+    assert lp.values[HOLDER] == (1.0, 0.0, 1.0) and lp.values[10] == (0.0, 3.0, 3.0)
+    assert lp.plan.holders == (HOLDER, 10, 10) and lp.plan.value == 1 + 3 + 3
+    # A free agent the function leaves out never takes the spot.
+    assert plan([fa(10, "LAL")], adds=1, values={HOLDER: 1.0}).plan.holders == (HOLDER,) * 3
+
+
+def spots(holder_ids, pool, *, pending_=(), adds=None, limits=None, rehold=2, switchable=(True, True, True),
+          roster=ROSTER, values=None):
+    from services.stream_lane_service import Budget, plan_spots
+    return plan_spots(board(roster, limits=limits), holder_ids, pool, DAYS, list(pending_), Budget(adds, switchable),
+                      rehold, values)
+
+
+@pytest.mark.unit
+def test_two_spots_are_planned_together_from_the_same_inputs():
+    """The holder and the guard stream together with one add: the guard (30 on day 0, no game after) gives
+    his spot to the 35-point guard from day 1, and the holder keeps his day 2."""
+    sp = spots([HOLDER, GUARD], [fa(10, "LAL", value=22), fa(11, "LAL", value=35, positions=("PG", "G"), pos=1)], adds=1)
+    assert sp.plan.holder_ids == (HOLDER, GUARD) and sp.plan.adds == 1
+    assert sp.plan.spots == ((HOLDER, HOLDER, HOLDER), (GUARD, 11, 11))
+    assert sp.values[11] == (0.0, 35.0, 35.0) and sp.values[GUARD] == (30.0, 0.0, 0.0)
+    assert sp.considered == {10, 11}
+    assert sp.plan.value == (15 + 30) + 35 + (15 + 35) and sp.plan.hold_value == 15 + 30 + 15
+
+
+@pytest.mark.unit
+def test_the_joint_plan_takes_the_value_function_and_the_closed_days():
+    values = {HOLDER: 1.0, GUARD: 1.0, 10: 9.0}
+    sp = spots([HOLDER, GUARD], [fa(10, "LAL")], values=values, switchable=(True, False, True))
+    # Day 1 is closed to every spot, so the free agent (9 on days 1 and 2 under the function) comes in today.
+    assert (10, 10, 10) in sp.plan.spots and sp.plan.adds == 1
+    assert sp.values[10] == (0.0, 9.0, 9.0) and sp.values[HOLDER] == (1.0, 0.0, 1.0)
+    # Today closed too: he comes in for day 2 only.
+    sp = spots([HOLDER, GUARD], [fa(10, "LAL")], values=values, switchable=(False, False, True))
+    assert any(spot[2] == 10 and spot[1] != 10 for spot in sp.plan.spots) and sp.plan.adds == 1
+
+
+@pytest.mark.unit
+def test_the_joint_plan_leaves_the_spots_the_positions_room():
+    """One C allowed and the big holds it: a C free agent can only replace the big, never the holder."""
+    big_fa = fa(12, "LAL", value=50, positions=("C",), pos=5)
+    sp = spots([HOLDER, BIG], [big_fa], limits={"5": 1})
+    assert sp.plan.spots[0] == (HOLDER, HOLDER, HOLDER) and sp.plan.spots[1] == (BIG, 12, 12)
+    # With room for two Cs, the holder's spot takes him too... but he holds one spot at a time.
+    sp = spots([HOLDER, BIG], [big_fa], limits={"5": 2})
+    assert sum(12 in spot for spot in sp.plan.spots) == 1
+
+
+@pytest.mark.unit
+def test_a_scheduled_pickup_and_the_roster_are_never_candidates_for_the_joint_plan():
+    sp = spots([HOLDER], [fa(GUARD, "LAL", value=99), fa(900, "LAL", value=99)], pending_=[pending(29)])
+    assert sp.considered == set()

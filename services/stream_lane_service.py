@@ -101,6 +101,7 @@ from services.scheduled_pickup_service import (
     et_at,
     rollover_at,
 )
+from services.multi_stream_planner import MultiStreamPlan, Streamer, plan_streams
 from services.stream_planner import (
     EPS,
     MAX_REHOLD_AFTER,
@@ -269,37 +270,73 @@ def _is_out(injury_status: Optional[str]) -> bool:
     return (injury_status or "ACTIVE").upper() in OUT_STATUSES
 
 
-def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
-              pending: Sequence[PendingPickup], budget: Budget, rehold_after: int) -> LanePlan:
-    """The plan for the spot `holder_id` holds over `days`. The rest of the roster is the board's
-    (IR aside) with the pending pickups made on their days; a free agent on the roster or already
-    scheduled is not a candidate, nor one ESPN would refuse under its position limits. Those are
-    counted each day with the pending pickups made: a free agent may take the spot only from a
-    day from which his position has room through the last day."""
-    slots = slot_counts_of(board)
-    holder = next(p for p in board.players if p.player_id == holder_id)
+def _value_of(values: Optional[Mapping[int, float]], player_id: int, default: float) -> float:
+    """A player's per-game value to the plan: the board's (`default`) unless `values` answers for the
+    plan (the stream value function, `services.stream_value`), in which case a player it leaves out
+    is worth nothing to it."""
+    return default if values is None else float(values.get(player_id, 0.0))
+
+
+def _plan_inputs(board: LineupState, spot_ids: Sequence[int], pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
+                 pending: Sequence[PendingPickup], values: Optional[Mapping[int, float]]):
+    """What both planners read off a board: each player's `DayPlayer` per day, the rest of the roster
+    per day (the spots' players left out, the pending pickups made on their days), and per limited
+    position and day whether the roster (IR included, the spots left out) is at ESPN's limit."""
     by_id = {f.player_id: f for f in pool}
+    spots = set(spot_ids)
 
     def plays(team: Optional[str], day: LaneDay) -> bool:
         return bool(team) and normalize_nba_abbrev(team) in day.teams
 
     def roster_day(p: LineupPlayer, day: LaneDay) -> DayPlayer:
-        value = p.avg_points if plays(p.team, day) and not _is_out(p.injury_status) else 0.0
+        value = _value_of(values, p.player_id, p.avg_points) if plays(p.team, day) and not _is_out(p.injury_status) else 0.0
         return DayPlayer(p.player_id, value, frozenset(s for s in p.eligible_slot_ids if s in ACTIVE_SLOT_IDS))
 
     def pool_day(f: PoolPlayer, day: LaneDay) -> DayPlayer:
-        return DayPlayer(f.player_id, f.value if plays(f.team, day) else 0.0, f.eligible)
+        return DayPlayer(f.player_id, _value_of(values, f.player_id, f.value) if plays(f.team, day) else 0.0, f.eligible)
 
     rest_by_day: list[list[DayPlayer]] = []
     for day in days:
         rest = [roster_day(p, day) for p in board.players
-                if p.player_id != holder_id and p.lineup_slot_id != IR_SLOT_ID]
+                if p.player_id not in spots and p.lineup_slot_id != IR_SLOT_ID]
         for pk in pending:
             if pk.period <= day.period:
                 rest = [r for r in rest if r.player_id != pk.drop_player_id]
                 if pk.add_player_id in by_id:
                     rest.append(pool_day(by_id[pk.add_player_id], day))
         rest_by_day.append(rest)
+    limits = {int(k): int(v) for k, v in board.position_limits.items() if int(v) > 0}
+    # Each day's roster (IR included, the spots left out) by position, the pending pickups made on their days.
+    position = {f.player_id: f.default_position_id for f in pool}
+    position.update({p.player_id: p.default_position_id for p in board.players})
+    held_by_day: dict[int, list[int]] = {pos: [] for pos in limits}
+    for day in days:
+        ids = {p.player_id for p in board.players if p.player_id not in spots}
+        for pk in sorted(pending, key=lambda pk: (pk.period, pk.pickup_id)):
+            if pk.period <= day.period:
+                ids.discard(pk.drop_player_id)
+                ids.add(pk.add_player_id)
+        held = Counter(position.get(pid) for pid in ids)
+        for pos in limits:
+            held_by_day[pos].append(held[pos])
+    return roster_day, pool_day, rest_by_day, limits, held_by_day
+
+
+def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
+              pending: Sequence[PendingPickup], budget: Budget, rehold_after: int,
+              values: Optional[Mapping[int, float]] = None) -> LanePlan:
+    """The plan for the spot `holder_id` holds over `days`. The rest of the roster is the board's
+    (IR aside) with the pending pickups made on their days; a free agent on the roster or already
+    scheduled is not a candidate, nor one ESPN would refuse under its position limits. Those are
+    counted each day with the pending pickups made: a free agent may take the spot only from a
+    day from which his position has room through the last day.
+
+    `values` is the value function: each player's worth per game to this plan, in place of the
+    board's and the pool's (a player it leaves out is worth nothing). The lanes plan with the
+    board's values; the agent's planner asks for a category, or the matchup (`services.stream_value`)."""
+    slots = slot_counts_of(board)
+    holder = next(p for p in board.players if p.player_id == holder_id)
+    roster_day, pool_day, rest_by_day, limits, held_by_day = _plan_inputs(board, [holder_id], pool, days, pending, values)
     bases = [best_lineup_value(rest, slots) for rest in rest_by_day]
 
     def values_of(day_players: list[DayPlayer]) -> tuple[float, ...]:
@@ -307,21 +344,8 @@ def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], da
 
     holder_values = values_of([roster_day(holder, d) for d in days])
     taken = {p.player_id for p in board.players} | {pk.add_player_id for pk in pending}
-    limits = {int(k): int(v) for k, v in board.position_limits.items() if int(v) > 0}
-    # Each day's roster (IR included, the spot left out) by position, the pending pickups made on their days.
-    position = {f.player_id: f.default_position_id for f in pool}
-    position.update({p.player_id: p.default_position_id for p in board.players})
-    full: dict[int, list[bool]] = {pos: [] for pos in limits}
-    for day in days:
-        ids = {p.player_id for p in board.players if p.player_id != holder_id}
-        for pk in sorted(pending, key=lambda pk: (pk.period, pk.pickup_id)):
-            if pk.period <= day.period:
-                ids.discard(pk.drop_player_id)
-                ids.add(pk.add_player_id)
-        held = Counter(position.get(pid) for pid in ids)
-        for pos, limit in limits.items():
-            full[pos].append(held[pos] >= limit)
-    values: dict[int, tuple[float, ...]] = {holder_id: holder_values}
+    full = {pos: [n >= limits[pos] for n in held] for pos, held in held_by_day.items()}
+    spot_values_by_id: dict[int, tuple[float, ...]] = {holder_id: holder_values}
     candidates: list[Candidate] = []
     for f in pool:
         if f.player_id in taken:
@@ -335,11 +359,52 @@ def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], da
         vals = values_of([pool_day(f, d) for d in days])
         if all(v <= EPS for v in vals[start:]):
             continue
-        values[f.player_id] = vals
+        spot_values_by_id[f.player_id] = vals
         candidates.append(Candidate(f.player_id, vals, start))
     plan = plan_stream(Candidate(holder_id, holder_values), candidates, adds=budget.adds,
                        switchable=budget.switchable, rehold_after=rehold_after)
-    return LanePlan(plan, values, frozenset(c.player_id for c in candidates))
+    return LanePlan(plan, spot_values_by_id, frozenset(c.player_id for c in candidates))
+
+
+@dataclass(frozen=True)
+class SpotsPlan:
+    plan: MultiStreamPlan
+    values: Mapping[int, tuple[float, ...]]   # each player's value per day when he plays (0 with no game, or out)
+    considered: frozenset[int]                # the free agents the plan could take
+
+
+def plan_spots(board: LineupState, holder_ids: Sequence[int], pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
+               pending: Sequence[PendingPickup], budget: Budget, rehold_after: int,
+               values: Optional[Mapping[int, float]] = None) -> SpotsPlan:
+    """The joint plan for the spots `holder_ids` hold over `days` (`services.multi_stream_planner`),
+    from the same inputs as `plan_lane`: the rest of the roster per day with the pending pickups
+    made, the free agents not on the roster or scheduled, and per position and day the room ESPN's
+    limit leaves the spots. The budget's closed days close every spot that day (`day_limits`)."""
+    slots = slot_counts_of(board)
+    holders = [next(p for p in board.players if p.player_id == hid) for hid in holder_ids]
+    roster_day, pool_day, rest_by_day, limits, held_by_day = _plan_inputs(board, holder_ids, pool, days, pending, values)
+    taken = {p.player_id for p in board.players} | {pk.add_player_id for pk in pending}
+    per_day: dict[int, tuple[float, ...]] = {}
+
+    def streamer(player_id: int, day_players: list[DayPlayer], available_from: int, position: Optional[int]) -> Streamer:
+        vals = tuple(d.value for d in day_players)
+        per_day[player_id] = vals
+        return Streamer(player_id, vals, day_players[0].eligible, available_from, position)
+
+    spots = [streamer(h.player_id, [roster_day(h, d) for d in days], 0, h.default_position_id) for h in holders]
+    candidates: list[Streamer] = []
+    for f in pool:
+        if f.player_id in taken:
+            continue
+        start = 0 if f.available_on is None else max(0, (f.available_on - days[0].nba_date).days)
+        if start >= len(days):
+            continue
+        candidates.append(streamer(f.player_id, [pool_day(f, d) for d in days], start, f.default_position_id))
+    room = {pos: [limits[pos] - n for n in held] for pos, held in held_by_day.items()}
+    plan = plan_streams(spots, candidates, rest_by_day, slots, adds=budget.adds,
+                        day_limits=[None if open_ else 0 for open_ in budget.switchable],
+                        rehold_after=rehold_after, position_room=room or None)
+    return SpotsPlan(plan, per_day, frozenset(c.player_id for c in candidates))
 
 
 def projection_of(lane_plan: LanePlan, days: Sequence[LaneDay], players: Mapping[int, LanePlayer], *,
