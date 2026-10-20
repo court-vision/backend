@@ -452,7 +452,20 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
     planned.sort(key=lambda dm: dm[0])
     moves: list[Move] = []
     chosen: dict[int, str] = {}
-    for day, m in planned:
+    claimed: set[int] = set()        # the pure drops an add listed earlier the same day takes the spot of
+
+    def room_later(i: int, day: int) -> bool:
+        """A drop of an active player listed later the same day opens a spot this add can take."""
+        for j in range(i + 1, len(planned)):
+            later_day, later = planned[j]
+            if later_day != day:
+                break
+            if later.add is None and later.drop is not None and later.drop not in on_ir and j not in claimed:
+                claimed.add(j)
+                return True
+        return False
+
+    for i, (day, m) in enumerate(planned):
         add = adds.get(m.add) if m.add is not None else None
         drop_id = m.drop
         if drop_id is not None and drop_id not in holdings:
@@ -464,10 +477,14 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
             if room > 0:
                 room -= 1
                 assumes.append(f"{add.name} takes an open roster spot on day {day}; nobody is dropped.")
+            elif room_later(i, day):
+                assumes.append(f"{add.name} takes the spot a drop later on day {day} opens.")
             else:
+                # The rule picks among the active players no later move drops itself
+                spoken_for = {later.drop for _, later in planned[i + 1:] if later.drop is not None}
                 candidates = []
                 for pid, p in holdings.items():
-                    if pid in on_ir:
+                    if pid in on_ir or pid in spoken_for:
                         continue
                     w = weighed.get(pid)
                     candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected)))
@@ -485,12 +502,15 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
             if room > 0:
                 room -= 1
                 assumes.append(f"{add.name} takes an open roster spot on day {day}; dropping {dropped} from IR frees none.")
+            elif room_later(i, day):
+                assumes.append(f"{add.name} takes the spot a drop later on day {day} opens; "
+                               f"dropping {dropped} from IR frees none.")
             else:
                 raise AppError("AI_MOVE_INVALID", f"{dropped} is on IR, so dropping him frees no active spot for "
                                                   f"{add.name}; name an active player to drop")
         if drop_id is not None:
             holdings.pop(drop_id)
-            if add is None and drop_id not in on_ir:
+            if add is None and drop_id not in on_ir and i not in claimed:
                 room += 1
         if add is not None:
             holdings[add.player_id] = add

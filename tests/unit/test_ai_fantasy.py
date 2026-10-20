@@ -182,6 +182,25 @@ def test_an_ir_player_is_never_the_rules_drop_and_dropping_him_frees_no_spot(wha
 
 
 @pytest.mark.unit
+def test_a_chain_is_read_as_a_whole_before_the_rule_drops_anyone(what_if):
+    """A drop listed later the same day opens the spot for an add listed first (with or without an IR
+    drop of its own), and a player a later move drops is spoken for: the rule picks someone else."""
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
+    out = project([{"add": 2001, "day": 1}, {"drop": 1001, "day": 1}], team_=team(slots=3))
+    assert [(m["add"], m["drop"]) for m in out["moves"]] == [("FA", None), (None, "A")]
+    assert any("a drop later on day 1 opens" in a for a in out["assumes"])
+    out = project([{"add": 2001, "drop": 1003, "day": 1}, {"drop": 1001, "day": 1}], team_=team(slots=3))
+    assert [(m["add"], m["drop"]) for m in out["moves"]] == [("FA", "Hurt"), (None, "A")]
+    out = project([{"add": 2001, "day": 1}, {"drop": 1002, "day": 3}], team_=team(slots=3))
+    assert [(m["day"], m["add"], m["drop"]) for m in out["moves"]] == [(1, "FA", "A"), (3, None, "B")]
+    # A spot opened by one drop is taken once: the second add that day still needs the rule.
+    what_if.players[2003] = fantasy._Identity(2003, "Second", 203, "BOS")
+    what_if.values[2003] = (10.0, "rolling", None)
+    out = project([{"add": 2001, "day": 1}, {"add": 2003, "day": 1}, {"drop": 1001, "day": 1}], team_=team(slots=3))
+    assert [(m["add"], m["drop"]) for m in out["moves"]] == [("FA", None), ("Second", "B"), (None, "A")]
+
+
+@pytest.mark.unit
 def test_an_empty_ir_slot_is_not_an_open_spot(what_if):
     """Three active players fill the three active slots; the empty IR slot is no room for a healthy add,
     so the rule drops someone. A player on IR takes no active seat either."""
