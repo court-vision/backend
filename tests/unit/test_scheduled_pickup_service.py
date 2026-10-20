@@ -102,7 +102,7 @@ def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
-                        claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
+                        claimed=[], released=[], held=True, settle_crashes=False, lane_holders=set(),
                         lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
@@ -174,7 +174,7 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
-    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_holders", lambda team_id: h.lane_holders)   # no lane unless a test sets one
     monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
 
     async def no_lanes_due(now, limit):
@@ -928,7 +928,7 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
 
 @pytest.mark.unit
 def test_schedule_refuses_to_drop_a_stream_lanes_holder(scheduling):
-    scheduling.lane_holder = EDWARDS
+    scheduling.lane_holders = {EDWARDS}
     with pytest.raises(svc.ScheduledPickupInvalid) as exc:
         schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
     assert exc.value.data["reason"] == "drop_is_lane_holder" and scheduling.inserted == []

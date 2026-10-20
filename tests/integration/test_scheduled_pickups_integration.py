@@ -299,9 +299,12 @@ def test_window_reads_the_schedule(user, team):
 def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_restores_it(user, team):
     forward = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0028__scheduled_pickups.rollback.sql").read_text()
-    # 0030 (stream lanes) references the table: yoyo rolls it back first, and applies it again after.
-    lanes_forward = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.sql").read_text()
-    lanes_rollback = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.rollback.sql").read_text()
+    # 0030 (stream lanes, its index changed by 0037) references the table: yoyo rolls them back first,
+    # and applies them again after.
+    lanes_forward = (Path(MIGRATIONS_DIR) / "0030__stream_lanes.sql").read_text() \
+        + (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.sql").read_text()
+    lanes_rollback = (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.rollback.sql").read_text() \
+        + (Path(MIGRATIONS_DIR) / "0030__stream_lanes.rollback.sql").read_text()
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None

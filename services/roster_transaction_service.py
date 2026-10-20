@@ -83,10 +83,10 @@ def _invalid(reason: str, message: str, player_id: Optional[int] = None) -> Rost
 # ------------------------------- shapes ------------------------------- #
 
 
-def _lane_holder(team_id: int) -> Optional[int]:
-    """The player an active stream lane holds its spot with, whom the desk may not drop."""
-    from db.models.stream_lanes import active_lane_holder
-    return active_lane_holder(team_id)
+def _lane_holders(team_id: int) -> set[int]:
+    """The players active stream lanes hold their spots with, whom the desk may not drop."""
+    from db.models.stream_lanes import active_lane_holders
+    return active_lane_holders(team_id)
 
 
 def _scheduled_drop(team_id: int, player_id: int):
@@ -147,8 +147,8 @@ class RosterTransactionService:
 
         add, drop = req.add_player_id, req.drop_player_id
         holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
-        if drop is not None and holder is not None and await run_db("txn.lane_holder", _lane_holder,
-                                                                    team.team_id) == drop:
+        if drop is not None and holder is not None and drop in await run_db("txn.lane_holder", _lane_holders,
+                                                                            team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
                                                   "stop the lane to drop them", drop)
         if drop is not None and holder is not None:
