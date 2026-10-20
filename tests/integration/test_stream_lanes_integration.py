@@ -4,7 +4,7 @@ Integration: migrations 0030 and 0037 against the real schema.
 The unit layer decides what each decision does; here the tables decide what may be stored
 and claimed: one open lane per spot and four per team (two starts at once included), the CHECKs, the lane id on scheduled
 pickups, and the repository functions the service runs through `run_db` — the claim lease
-(a team's due lanes together) and the writes-off release, a decision's writes landing
+(a team's due lanes together, none while its decisions run) and the writes-off release, a decision's writes landing
 together and only for the claim that made it, a user's change fencing out a running
 decision, other lanes' projections written only for an unclaimed lane, a settled lane
 pickup moving the holder, the guard's lookup, the listing, the schedule read — plus the
@@ -191,6 +191,24 @@ def test_the_claim_takes_a_teams_due_lanes_together(user, team):
     claimed = svc._claim_due_lanes(NOW, 1)                         # one lane's team: both its due lanes
     assert sorted(r.id for r in claimed) == [first.id, second.id] and later.id not in {r.id for r in claimed}
     assert [r.team_id for r in svc._claim_due_lanes(NOW, 1)] == [other_team.team_id]
+
+
+def test_a_team_whose_decisions_are_running_is_left_alone_until_they_land(user, team):
+    running = _lane(user, team)
+    (claimed,) = svc._claim_due_lanes(NOW, 10)
+    started = _lane(user, team, holder_player_id=FA)                # started meanwhile, due at once
+    other_team = Team.create(user_id=user.user_id, team_identifier="x2", league_info="{}")
+    elsewhere = _lane(user, other_team)
+    later = NOW + timedelta(minutes=1)
+    assert [r.id for r in svc._claim_due_lanes(later, 10)] == [elsewhere.id]
+    svc._record_decision(running.id, claimed.attempts, later,
+                         dict(next_period=30, next_decision_at=NOW + timedelta(days=1), reason=None), [], None)
+    assert [r.id for r in svc._claim_due_lanes(later, 10)] == [started.id]
+    # A run that dies mid-decision holds the team only until its lease runs out.
+    third = _lane(user, team, holder_player_id=FA2)
+    assert svc._claim_due_lanes(later + timedelta(minutes=1), 10) == []
+    reclaimed = svc._claim_due_lanes(later + svc.LEASE, 10)
+    assert {r.id for r in reclaimed if r.team_id == team.team_id} == {started.id, third.id}
 
 
 def test_writes_off_push_due_decisions_back(user, team):

@@ -296,6 +296,25 @@ def test_a_paused_lanes_holder_off_the_roster_is_not_picked_up(h):
 
 
 @pytest.mark.unit
+def test_a_paused_lanes_holder_a_pickup_brings_back_is_the_rosters_from_its_day(h, monkeypatch):
+    """The user scheduled the dropped holder's return for Tuesday, for the guard: the plan finds his
+    values there, and still can't take him."""
+    h.open_lanes = [lane(), lane(id=8, status="paused", holder_player_id=FA, holder_name="Free Agent")]
+    h.pending = [svc.PendingPickup(90, 29, TUE, FA, GUARD)]
+    pools, real = [], svc.plan_lanes
+
+    def plan_lanes(board_, holder_ids, pool, *args):
+        pools.append({f.player_id for f in pool})
+        return real(board_, holder_ids, pool, *args)
+
+    monkeypatch.setattr(svc, "plan_lanes", plan_lanes)
+    decide(h, lane(), tuesday(h))
+    assert pools == [{FA}]
+    (rec,) = h.recorded
+    assert rec.pickup is None and [e["action"] for e in rec.events] == ["keep"]
+
+
+@pytest.mark.unit
 def test_a_keep_records_the_day_and_moves_on(h):
     h.pool = []
     decide(h, lane(), tuesday(h))
@@ -524,7 +543,7 @@ def test_a_day_that_fails_leaves_the_teams_other_days_to_decide(h, monkeypatch):
 def test_a_lane_started_beside_one_deciding_the_same_day_is_planned_with_it(h, monkeypatch):
     now, _ = two_spots(h, used=2)
     monkeypatch.setattr(svc, "datetime", _clock(now))
-    other = lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=29, attempts=2)
+    other = lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=29, attempts=2, reason=None)
     h.open_lanes = [other]
     plan = run(svc.StreamLaneService.plan(TEAM, LEAGUE, StreamLanePlanReq(player_id=HOLDER))).data
     assert plan.projection.lanes == 2 and [o.lane_id for o in plan.others] == [5]
@@ -534,6 +553,17 @@ def test_a_lane_started_beside_one_deciding_the_same_day_is_planned_with_it(h, m
     assert fields["projection"]["lanes"] == 2
     ((lane_id, attempts, projection),) = h.projections
     assert (lane_id, attempts, projection["lanes"]) == (5, 2, 2)
+
+
+@pytest.mark.unit
+def test_a_lane_whose_decision_is_running_is_not_planned_with(h, monkeypatch):
+    """Its decision writes its own projection, under the claim a start would fence on: the start
+    plans alone and leaves it be."""
+    now, _ = two_spots(h, used=2)
+    monkeypatch.setattr(svc, "datetime", _clock(now))
+    h.open_lanes = [lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=29, reason="in_progress")]
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
+    assert h.inserted[0][0]["projection"]["lanes"] == 1 and h.projections == []
 
 
 @pytest.mark.unit

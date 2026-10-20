@@ -341,7 +341,10 @@ def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequen
           rest_by_day: Sequence[Sequence[DayPlayer]], seats: Mapping[int, int], *, optimal: bool,
           considered: frozenset[int]) -> MultiStreamPlan:
     """The plan from who holds a spot each day, its values recomputed from the lineups. A spot whose
-    player leaves takes one who arrives that day, lowest id first."""
+    player leaves takes one who arrives that day at the same position when there is one, then the
+    lowest id first. ESPN checks its position limits switch by switch, in whatever order a day's are
+    made: paired like for like, the day's other switches never both add to a position and drop from
+    it, so no position holds more partway through the day than the plan leaves it with."""
     by_id = {p.player_id: p for p in players}
     bases = [best_lineup_value(rest, seats) for rest in rest_by_day]
 
@@ -355,9 +358,17 @@ def _plan(holders: Sequence[Streamer], players: Sequence[Streamer], held: Sequen
     switches: list[Switch] = []
     for d, ids in enumerate(held):
         leaving = [k for k, pid in enumerate(now) if pid not in ids]
-        for k, pid in zip(leaving, sorted(ids - set(now)), strict=True):
-            switches.append(Switch(d, k, now[k], pid))
-            now[k] = pid
+        arriving = sorted(ids - set(now))
+        takes: dict[int, int] = {}
+        for k in leaving:
+            same = next((pid for pid in arriving if by_id[pid].position == by_id[now[k]].position), None)
+            if same is not None:
+                takes[k] = same
+                arriving.remove(same)
+        takes.update(zip((k for k in leaving if k not in takes), arriving, strict=True))
+        for k in leaving:
+            switches.append(Switch(d, k, now[k], takes[k]))
+            now[k] = takes[k]
         rows.append(tuple(now))
     day_values = [worth(d, ids) for d, ids in enumerate(held)]
     runs_by_spot: list[tuple[Stretch, ...]] = []

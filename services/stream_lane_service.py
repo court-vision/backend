@@ -26,10 +26,11 @@ is not a failure: the plan picks again.
 Together. A team's lanes deciding the same day are planned as one: they share the
 adds (the budget, a per-day limit) and the lineup's seats, and a free agent goes to
 one of them. Their decisions fall due together (the same day's window), and a run
-claims all of a team's due lanes at once. A lane that has already decided the day
-(started after the others decided it, or waiting on its pickup) is part of the
-roster as it stands for the others, with its pending pickup made on its day; from
-the next day it decides with them.
+claims all of a team's due lanes at once (none while another run is still deciding
+the team's). A lane that has already decided the day (started after the others
+decided it, or waiting on its pickup) is part of the roster as it stands for the
+others, with its pending pickup made on its day; from the next day it decides with
+them.
 
 Holder. An executed lane pickup makes the added player the lane's holder
 (`note_pickup_settled`, from the pickup executor's settle). If the holder leaves
@@ -451,9 +452,14 @@ def _set_projections(projections: Sequence[tuple[int, int, dict]], now: datetime
 def _claim_due_lanes(now: datetime, limit: int) -> list:
     """Lease the due decisions of up to `limit` lanes' teams to this run (soonest first), every due
     lane of a team at once: bump attempts, push the due time by the lease, mark the decision
-    running. A concurrent run sees nothing until it ends."""
+    running. A concurrent run sees nothing until it ends, and leaves the team alone until then: a
+    lane started meanwhile would plan with the adds those decisions are about to spend."""
     Lane, _ = _models()
-    due = (Lane.status == ACTIVE) & Lane.next_decision_at.is_null(False) & (Lane.next_decision_at <= now)
+    Running = Lane.alias()
+    running = Running.select(Running.team).where((Running.status == ACTIVE) & (Running.reason == IN_PROGRESS)
+                                                 & (Running.next_decision_at > now))
+    due = ((Lane.status == ACTIVE) & Lane.next_decision_at.is_null(False) & (Lane.next_decision_at <= now)
+           & Lane.team.not_in(running))
     first = list(Lane.select(Lane.id, Lane.team).where(due).order_by(Lane.next_decision_at, Lane.id).limit(limit))
     if not first:
         return []
@@ -719,8 +725,10 @@ class StreamLaneService:
         deciding = set(lane_ids)
         pending = [p for p in await run_db("lane.pending", _pending_pickups, team_id) if p.lane_id not in deciding]
         # An open lane's holder stays its own even off the roster (a paused lane's can be dropped): a
-        # lane taking him would collide with it on the spot index.
+        # lane taking him would collide with it on the spot index. One a pending pickup brings back
+        # stays in the pool, which is where the plan finds his values from that day.
         reserved = {lane.holder_player_id for lane in await run_db("lane.open", _open_lanes, team_id)}
+        reserved -= {p.add_player_id for p in pending}
         pool = [f for f in await StreamLaneService._pool(league_info, adapter, team_id) if f.player_id not in reserved]
         acq = board.acquisitions
         first_day_adds = None
@@ -756,12 +764,13 @@ class StreamLaneService:
                         open_lanes: Sequence) -> list:
         """The open lanes a lane started now decides its first day with: active, deciding that day
         too, their holder on the board, and no pickup of theirs pending (such a lane decides once it
-        settles, and its pickup is part of the roster meanwhile)."""
+        settles, and its pickup is part of the roster meanwhile). Nor one whose decision is running:
+        it writes its own projection, and the claim it runs under is the one a start would fence on."""
         on_board = {p.player_id for p in board.players}
         waiting = {p.lane_id for p in await run_db("lane.pending", _pending_pickups, team_id) if p.lane_id}
         return [lane for lane in open_lanes
-                if lane.status == ACTIVE and lane.next_period <= start_period and lane.end_period == end_period
-                and lane.holder_player_id in on_board and lane.id not in waiting]
+                if lane.status == ACTIVE and lane.reason != IN_PROGRESS and lane.next_period <= start_period
+                and lane.end_period == end_period and lane.holder_player_id in on_board and lane.id not in waiting]
 
     @staticmethod
     async def _setup(team, league_info: LeagueInfo, player_id: int, now: datetime):
