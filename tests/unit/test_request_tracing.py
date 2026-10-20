@@ -129,7 +129,7 @@ def test_each_query_is_a_postgres_span_with_its_statement_and_no_values(finished
             return ("ran", sql, params)
 
     database = FakeDatabase()
-    tracing._trace_queries(database)
+    tracing.trace_queries(database)
     app = FastAPI()
     app.add_middleware(RequestSpanMiddleware)
 
@@ -145,6 +145,30 @@ def test_each_query_is_a_postgres_span_with_its_statement_and_no_values(finished
     assert span.name == "SELECT" and span.attributes[BUCKET_ATTR] == "postgres"
     assert span.attributes["db.query.text"] == 'select "id" from "nba"."players" where "id" = %s'
     assert "5" not in str(dict(span.attributes))
+    assert _rows([(server, spans)])[0]["calls"] == {"postgres": 1}
+
+
+@pytest.mark.unit
+def test_the_ai_stats_readers_own_pool_is_traced_too(finished, monkeypatch):
+    from playhouse.pool import PooledPostgresqlExtDatabase
+
+    from services.ai.stats.reader import StatsReader
+
+    monkeypatch.setattr(PooledPostgresqlExtDatabase, "execute_sql", lambda self, sql, params=None: ("ran", sql))
+    reader = StatsReader("postgresql://ask_reader:secret@db.example:5432/cv")
+    app = FastAPI()
+    app.add_middleware(RequestSpanMiddleware)
+
+    @app.get("/v1/ai/stats")
+    def stats():
+        assert reader.pool.execute_sql("select 1 from nba.ask_player_games")[0] == "ran"
+        return {}
+
+    TestClient(app).get("/v1/ai/stats")
+
+    [(server, spans)] = finished()
+    [span] = spans
+    assert span.name == "SELECT" and span.attributes[BUCKET_ATTR] == "postgres"
     assert _rows([(server, spans)])[0]["calls"] == {"postgres": 1}
 
 
