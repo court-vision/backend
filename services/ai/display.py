@@ -115,7 +115,7 @@ SHOW_PLACE: dict[str, Any] = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "screen_id": {"type": "string", "description": "A screen's id from a find_in_app result, e.g. 'week/market'"},
+            "screen_id": {"type": "string", "description": "A screen's id from a find_in_app result"},
         },
         "required": ["screen_id"],
         "additionalProperties": False,
