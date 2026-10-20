@@ -1,5 +1,5 @@
 """
-One API request's timing (migrations/0037__request_timings.sql).
+One API request's timing (migrations/0038__request_timings.sql).
 
 Written in batches by services/request_timings.py; read by data-platform's
 Latency page. `parts` splits `duration_ms` into buckets (core/request_timing.py

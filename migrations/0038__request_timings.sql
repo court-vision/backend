@@ -1,4 +1,4 @@
--- Migration 0037: one row per API request, with where its time went.
+-- Migration 0038: one row per API request, with where its time went.
 --
 -- ops is a new schema for the services' own operational data. The backend
 -- writes ops.request_timings in batches (services/request_timings.py) and
