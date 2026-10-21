@@ -343,14 +343,35 @@ class LineupSnapshotService:
         ESPN read of that day. A side with neither is simply absent — the
         caller shows today's roster for it, labelled as such.
         """
+        days = await LineupSnapshotService.rosters_for_matchup_days(league_info, sides, [target])
+        return days.get(target, {})
+
+    @staticmethod
+    async def rosters_for_matchup_days(league_info: LeagueInfo, sides: dict[int, str], targets: list[date]
+                                       ) -> dict[date, dict[int, LineupSnapshot]]:
+        """Both matchup sides' rosters on each of several finished days, keyed
+        by day, then provider team id.
+
+        Every stored snapshot comes from one read. ESPN's history is read live
+        for the latest day only (one league read, both sides): that is the day
+        the nightly capture may not have reached yet. An older day with no row
+        means the capture can't read the league, and a read per such day on
+        every week load would cost more than the day is worth, so its sides
+        stay absent and the caller shows today's roster for them.
+        """
+        if not targets:
+            return {}
         ref = league_ref(league_info)
         team_ids = [tid for tid in sides if tid is not None]
-        stored = await run_db("lineup_snapshots.matchup", _load_snapshots, ref, team_ids, [target])
-        found = {tid: snap for (tid, _), snap in stored.items()}
-        missing = {tid: name for tid, name in sides.items() if tid is not None and tid not in found}
+        stored = await run_db("lineup_snapshots.matchup", _load_snapshots, ref, team_ids, list(targets))
+        found: dict[date, dict[int, LineupSnapshot]] = {d: {} for d in targets}
+        for (tid, day), snap in stored.items():
+            found.setdefault(day, {})[tid] = snap
+        latest = max(targets)
+        missing = {tid: name for tid, name in sides.items() if tid is not None and tid not in found[latest]}
         if missing:
             try:
-                found.update(await _history_from_espn(league_info, target, missing))
+                found[latest].update(await _history_from_espn(league_info, latest, missing))
             except Exception as exc:  # a failed history read must not take the day down
-                log.warning("lineup_history_read_failed", date=str(target), error=str(exc))
+                log.warning("lineup_history_read_failed", date=str(latest), error=str(exc))
         return found

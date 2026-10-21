@@ -91,6 +91,11 @@ async def get_weekly_matchup(
     Makes one ESPN/Yahoo API call and returns per-day player data for every
     day in the matchup period. Use this instead of N parallel getDailyMatchup
     calls when rendering the matchup bar chart.
+
+    Today is ESPN's own current day (the team's lineup board's), so the day
+    ESPN rolled past at ~2 AM ET is past at once. Past days carry both sides'
+    lineups as they stood (stored nightly; ESPN's history read live for last
+    night when it isn't stored yet), and their totals count the active slots.
     """
     return await MatchupService.get_weekly_matchup(team.user_id, team.team_id)
 

@@ -85,6 +85,25 @@ def fantasy_today() -> date:
     return schedule_service.get_nba_today()
 
 
+def matchup_today(md: Any, fallback: Callable[[], date] = fantasy_today) -> date:
+    """The day a matchup read calls today: ESPN's own current day when it said.
+
+    ESPN's `latestScoringPeriod` (`md.scoring_period_id`, source "provider") is
+    the day its lineup board is on, so a week built on it never names a
+    different today than the board does: from ESPN's ~2 AM ET rollover the day
+    just played is past, even before the 6 AM game-date turn, and while ESPN's
+    batch runs late the day stays today. Without a provider day (Yahoo, the
+    preseason's 0) it is `fallback`, the 2 AM fantasy day.
+    """
+    period = getattr(md, "scoring_period_id", None)
+    if getattr(md, "scoring_period_source", None) == "provider" and period is not None and period >= 1:
+        try:
+            return schedule_service.date_for_espn_scoring_period(period)
+        except Exception:  # no calendar for the season: the clock rule still answers
+            pass
+    return fallback()
+
+
 def make_nba_id_resolver(all_roster: Iterable[Any]) -> Callable[[Any], Optional[int]]:
     """Resolve fantasy roster players to nba.players ids: ESPN id first, normalized name second."""
     from db.models.nba.players import Player
