@@ -22,7 +22,7 @@ from core import public_read_cache as caches
 from core.errors import NotFoundError
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
-from schemas.games import GamesOnDateResp
+from schemas.games import GameDetailResp, GamesOnDateResp
 from schemas.market import PlayerProjectionResp
 from schemas.player import PlayerOwnershipResp, PlayerPercentilesResp, PlayerStatsResp, PlayerStatusResp
 from schemas.player_profiles import PlayerProfileResp
@@ -119,6 +119,30 @@ GAMES = GamesOnDateResp.model_validate({
 })
 
 # (url, service module, class, method, envelope, cache)
+GAME_DETAIL = GameDetailResp.model_validate({
+    "status": "success", "message": "LAL at DEN, 2026-03-02",
+    "data": {
+        "game": {"game_id": "0022500900", "game_date": "2026-03-02", "home_team": "DEN", "away_team": "LAL",
+                 "home_score": 121, "away_score": 117, "status": "final", "arena": "Ball Arena", "period": 4,
+                 "game_clock": None, "start_time_et": "21:00"},
+        "home_periods": [30, 28, 33, 30], "away_periods": [27, 31, 29, 30],
+        "score_history": [{"captured_at": "2026-03-03T02:11:01.123456", "period": 1, "game_clock": "PT07M20.00S",
+                           "home_score": 9, "away_score": 8, "game_status": 2}],
+        "lines": [{"player_id": 203999, "espn_id": 3112335, "player_name": "Nikola Jokić", "team": "DEN", "min": 37,
+                   "fpts": 70, "pts": 31, "reb": 14, "ast": 11, "stl": 2, "blk": 1, "tov": 4, "fgm": 12, "fga": 19,
+                   "fg3m": 2, "fg3a": 4, "ftm": 5, "fta": 6, "plus_minus": None}],
+        "lines_source": "settled",
+    },
+})
+
+
+def game_detail(**game) -> GameDetailResp:
+    """GAME_DETAIL with its game (and, for a period line, `home_periods`) changed."""
+    periods = game.pop("home_periods", GAME_DETAIL.data.home_periods)
+    data = GAME_DETAIL.data.model_copy(update={"game": GAME_DETAIL.data.game.model_copy(update=game), "home_periods": periods})
+    return GAME_DETAIL.model_copy(update={"data": data})
+
+
 ROUTES = [
     ("/v1/players/203999/profile", "player_profile_service", "PlayerProfileService", "get_profile", PROFILE, "PLAYER_PROFILE"),
     ("/v1/players/203999/projection", "public_market_service", "PublicMarketService", "get_projection", PROJECTION, "PLAYER_PROJECTION"),
@@ -130,6 +154,7 @@ ROUTES = [
     ("/v1/teams/DEN/stats", "nba_team_stats_service", "NBATeamStatsService", "get_team_stats", TEAM_STATS, "TEAM_STATS"),
     ("/v1/teams/DEN/roster", "nba_team_roster_service", "NBATeamRosterService", "get_team_roster", ROSTER, "TEAM_ROSTER"),
     ("/v1/games/2026-03-04", "games_service", "GamesService", "get_games_on_date", GAMES, "GAMES_SETTLED"),
+    ("/v1/games/2026-03-02/0022500900", "game_detail_service", "GameDetailService", "get_game", GAME_DETAIL, "GAME_DETAIL_SETTLED"),
 ]
 ROUTE_IDS = [r[0] for r in ROUTES]
 
@@ -504,6 +529,52 @@ def test_a_cached_date_is_not_served_once_it_becomes_today(client, monkeypatch, 
 
     assert "x-cache" not in today.headers
     assert service.await_count == 2
+
+
+# ---- one game: kept once it is over and whole -------------------------------
+
+
+@pytest.mark.parametrize("day,cache", [
+    ("2026-03-04", "GAME_DETAIL"),          # tonight, already final
+    ("2026-03-03", "GAME_DETAIL"),          # last night: its game log may still be landing
+    ("2026-03-02", "GAME_DETAIL_SETTLED"),  # two nights back
+    ("2013-01-15", "GAME_DETAIL_SETTLED"),
+])
+def test_a_final_game_is_cached_by_how_settled_its_night_is(client, monkeypatch, frozen_nba_date, day, cache):
+    stub(monkeypatch, "game_detail_service", "GameDetailService", "get_game", GAME_DETAIL)
+    frozen_nba_date(date(2026, 3, 4))
+
+    res = client.get(f"/v1/games/{day}/0022500900")
+
+    assert res.headers["x-cache"] == "MISS"
+    assert getattr(caches, cache).stats()["entries"] == 1
+
+
+@pytest.mark.parametrize("response", [
+    game_detail(status="in_progress", period=3, game_clock="PT04M10.00S"),
+    game_detail(status="scheduled", home_score=None, away_score=None),
+    game_detail(home_periods=[]),   # final, but the league feed gave no period line: ask again
+], ids=["in-progress", "scheduled", "final-without-periods"])
+def test_a_game_still_moving_or_missing_its_period_line_is_not_cached(client, monkeypatch, frozen_nba_date, response):
+    service = stub(monkeypatch, "game_detail_service", "GameDetailService", "get_game", response)
+    frozen_nba_date(date(2026, 3, 4))
+
+    first, second = client.get("/v1/games/2026-03-04/0022500900"), client.get("/v1/games/2026-03-04/0022500900")
+
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert service.await_count == 2
+    assert not {"cache-control", "etag", "x-cache"} & set(first.headers)
+    assert caches.GAME_DETAIL.stats()["entries"] == caches.GAME_DETAIL_SETTLED.stats()["entries"] == 0
+
+
+def test_game_keys_separate_games_and_nights(client, monkeypatch, frozen_nba_date):
+    service = stub(monkeypatch, "game_detail_service", "GameDetailService", "get_game", GAME_DETAIL)
+
+    for url in ("/v1/games/2026-03-02/0022500900", "/v1/games/2026-03-02/0022500901", "/v1/games/2026-03-01/0022500900"):
+        assert client.get(url).headers["x-cache"] == "MISS"
+    assert client.get("/v1/games/2026-03-02/0022500900").headers["x-cache"] == "HIT"
+    assert service.await_count == 3
 
 
 # ---- what stays uncached ----------------------------------------------------

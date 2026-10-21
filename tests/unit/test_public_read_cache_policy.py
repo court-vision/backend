@@ -19,7 +19,7 @@ def test_every_cache_is_bounded_by_entries_and_bytes():
         assert cache.max_entries > 0 and cache.max_bytes is not None and cache.max_bytes > 0, cache.name
 
     total = sum(cache.max_bytes for cache in caches.ALL_CACHES)
-    assert total == pytest.approx(22.3 * caches.MB, rel=0.01)   # what the module docstring promises
+    assert total == pytest.approx(29.3 * caches.MB, rel=0.01)   # what the module docstring promises
 
 
 def test_every_cache_is_listed_once_for_clearing():
@@ -31,9 +31,11 @@ def test_every_cache_is_listed_once_for_clearing():
 
 def test_ttls_follow_the_data_cadence():
     daily = [caches.PLAYER_STATS, caches.PLAYER_PROFILE, caches.PLAYER_PROJECTION, caches.PLAYER_PERCENTILES,
-             caches.PLAYER_TRENDS, caches.TEAM_SCHEDULE, caches.TEAM_STATS, caches.TEAM_ROSTER, caches.GAMES]
+             caches.PLAYER_TRENDS, caches.TEAM_SCHEDULE, caches.TEAM_STATS, caches.TEAM_ROSTER, caches.GAMES,
+             caches.GAME_DETAIL]
     assert {c.ttl_seconds for c in daily} == {300.0}
-    assert caches.GAMES_SETTLED.ttl_seconds == caches.SCHEDULE_WEEKS.ttl_seconds == 3600.0
+    settled = [caches.GAMES_SETTLED, caches.GAME_DETAIL_SETTLED, caches.SCHEDULE_WEEKS]
+    assert {c.ttl_seconds for c in settled} == {3600.0}
 
 
 def test_the_kill_switch_builds_disabled_caches(monkeypatch):
