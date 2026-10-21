@@ -16,6 +16,8 @@ from schemas.ai import (
     AiFeedbackData,
     AiFeedbackReq,
     AiFeedbackResp,
+    AiProposalDismissResp,
+    AiProposalResp,
     AiTurnCommentData,
     AiTurnCommentReq,
     AiTurnCommentResp,
@@ -262,3 +264,37 @@ async def turn_comment(
     stored = await AgentService.comment(turn_id, user.user_id, req.comment)
     return AiTurnCommentResp(status=ApiStatus.SUCCESS, message="Note saved",
                              data=AiTurnCommentData(turn_id=turn_id, comment=stored))
+
+
+@router.get(
+    "/proposals/{proposal_id}",
+    response_model=AiProposalResp,
+    summary="One of the agent's proposed moves, checked again",
+    description="The chip as it stands and a fresh check against the board and the player pool: what the "
+                "desk reads before it stages the chip into the tray. `problems` says why it can't be staged.",
+    responses={**_AGENT_ERRORS, 404: {"description": "No such proposal for this caller (AI_PROPOSAL_NOT_FOUND)"}},
+)
+async def get_proposal(
+    proposal_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiProposalResp:
+    data = await AgentService.proposal(proposal_id, user.user_id)
+    return AiProposalResp(status=ApiStatus.SUCCESS, message="Proposal", data=data)
+
+
+@router.post(
+    "/proposals/{proposal_id}/dismiss",
+    response_model=AiProposalDismissResp,
+    summary="Let one of the agent's proposed moves go",
+    description="The chip leaves the tray for good; a move that was already sent can't be dismissed (409 "
+                "AI_PROPOSAL_SENT). Sending a chip is the Week desk's roster transaction / scheduled pickup "
+                "with `proposal_id` on the request, never a route here.",
+    responses={**_AGENT_ERRORS, 404: {"description": "No such proposal for this caller (AI_PROPOSAL_NOT_FOUND)"},
+               409: {"description": "Already sent (AI_PROPOSAL_SENT)"}},
+)
+async def dismiss_proposal(
+    proposal_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiProposalDismissResp:
+    chip = await AgentService.dismiss_proposal(proposal_id, user.user_id)
+    return AiProposalDismissResp(status=ApiStatus.SUCCESS, message="Proposal dismissed", data=chip)

@@ -158,6 +158,12 @@ class RosterTransactionService:
                                                     f"on {_day_label(pickup.nba_date)} — cancel that pickup to "
                                                     "drop them now", drop)
 
+        if req.proposal_id is not None:
+            # An AI desk chip: the same move it shows, still proposed, before ESPN is asked
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.TRANSACTION,
+                                     add=add, drop=drop)
+
         names = {p.player_id: p.name for p in state.players}
         if pool_entry is not None:
             names[pool_entry.player_id] = pool_entry.name
@@ -165,6 +171,9 @@ class RosterTransactionService:
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
             add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
         )
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
 
         added = _player(add, pool_entry.name, pool_entry.pro_team) if add is not None and pool_entry is not None else None
         dropped = _player(drop, holder.name, holder.team) if drop is not None and holder is not None else None

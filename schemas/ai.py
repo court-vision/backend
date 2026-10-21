@@ -7,7 +7,7 @@ block makes each request's token spend visible to the caller as well as to
 the `ai_request` log line.
 """
 
-from datetime import datetime
+from datetime import date as date_type, datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import Field
@@ -237,7 +237,49 @@ class AiChart(ApiModel):
     total_rows: int = Field(..., description="X values before the chart's limit")
 
 
-AiBlock = Annotated[Union[AiTable, AiChart], Field(discriminator="type")]
+AiProposalState = Literal["proposed", "sent", "dismissed", "expired"]
+AiProposalKind = Literal["transaction", "scheduled"]
+
+
+class AiProposalPlayer(ApiModel):
+    espn_id: int = Field(..., description="ESPN player id: what the roster transaction / scheduled pickup takes")
+    nba_player_id: Optional[int] = Field(None, description="nba.players.id when known (Scout, headshot)")
+    name: str
+    team: Optional[str] = Field(None, description="NBA tricode")
+
+
+class AiProposalChip(ApiModel):
+    """A roster move the agent proposed and the server checked: the chip the AI desk shows. Staged,
+    it goes into the Week desk's tray (rendered in the AI desk) and is sent by its slider through
+    the roster transaction (`kind` transaction, today) or the scheduled pickup (`kind` scheduled, a
+    later day) with `proposal_id` on the request; the route marks it sent. Never executed from here."""
+
+    proposal_id: int
+    state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, or expired")
+    kind: AiProposalKind
+    team_id: int
+    day: int = Field(..., description="Matchup day index, 0 = the matchup's first day")
+    date: date_type = Field(..., description="The NBA date the move is for")
+    dow: str = Field(..., description="Mon, Tue, ...")
+    scoring_period_id: int = Field(..., description="ESPN's day for the move (the scheduled pickup's day)")
+    add: Optional[AiProposalPlayer] = None
+    drop: Optional[AiProposalPlayer] = None
+    summary: str = Field(..., description="One sentence: the move, its day, and what sending does")
+    reason: str = Field(..., description="The agent's reason, as it wrote it")
+    change: Optional[float] = Field(None, description="Projected change for the matchup (points, or category wins)")
+    scoring: Optional[str] = Field(None, description="The league's scoring format the change is in")
+    expires_at: datetime = Field(..., description="When the chip stops being stageable (the day's first tip, or its rollover)")
+    sent_at: Optional[datetime] = None
+
+
+class AiProposal(AiProposalChip):
+    """The chip as a block in a turn's parts."""
+
+    type: Literal["proposal"] = "proposal"
+    id: str = Field(..., description="Unique within its turn, e.g. 'p1'")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart, AiProposal], Field(discriminator="type")]
 
 
 class AiTextPart(ApiModel):
@@ -317,6 +359,23 @@ class AiTurnCommentData(ApiModel):
 
 class AiTurnCommentResp(BaseResponse):
     data: Optional[AiTurnCommentData] = None
+
+
+class AiProposalCheckData(ApiModel):
+    chip: AiProposalChip
+    problems: list[str] = Field(..., description="Why the chip can't be staged now; empty when it can")
+
+
+class AiProposalResp(BaseResponse):
+    """Response for GET /v1/internal/ai/proposals/{proposal_id}."""
+
+    data: Optional[AiProposalCheckData] = None
+
+
+class AiProposalDismissResp(BaseResponse):
+    """Response for POST /v1/internal/ai/proposals/{proposal_id}/dismiss."""
+
+    data: Optional[AiProposalChip] = None
 
 
 class AiTurnFeedbackResp(BaseResponse):

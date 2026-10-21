@@ -35,6 +35,7 @@ class SchedulePickupReq(ApiModel):
     add_player_id: int = Field(gt=0)                           # ESPN player id to pick up
     drop_player_id: Optional[int] = Field(default=None, gt=0)  # ESPN player id to release; omit for an open seat
     scoring_period_id: int = Field(gt=0)                       # the ESPN day the pickup is for (after today)
+    proposal_id: Optional[int] = Field(default=None, gt=0)     # the AI desk's chip this schedules (see RosterTransactionReq)
 
 
 class ScheduledPickupPlayer(ApiModel):

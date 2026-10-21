@@ -997,6 +997,38 @@ def test_schedule_refuses_a_player_on_another_team_or_unknown(scheduling):
 
 
 @pytest.mark.unit
+def test_schedule_checks_an_ai_chip_before_storing_and_marks_it_sent_after(scheduling, monkeypatch):
+    from core.errors import AppError
+    from services.ai import proposals
+    h = scheduling
+    seen = SimpleNamespace(for_send=[], sent=[], refuse=None)
+
+    async def for_send(proposal_id, user_id, team_id, *, kind, add, drop, scoring_period_id=None, now=None):
+        seen.for_send.append((proposal_id, user_id, team_id, kind, add, drop, scoring_period_id, len(h.inserted)))
+        if seen.refuse:
+            raise seen.refuse
+
+    async def mark_sent(proposal_id, *, audit_id=None, pickup_id=None, now=None):
+        seen.sent.append((proposal_id, audit_id, pickup_id))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+
+    resp = schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+
+    assert resp.data.id == 7
+    assert seen.for_send == [(31, 11, 21, "scheduled", KAWHI, EDWARDS, 3, 0)]     # checked before the row was stored
+    assert seen.sent == [(31, None, 7)]
+
+    seen.refuse = AppError("AI_PROPOSAL_MISMATCH", "The move being sent is not the one this chip proposes", status_code=422)
+    with pytest.raises(AppError):
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+    assert len(h.inserted) == 1 and len(seen.sent) == 1
+
+    schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert len(seen.for_send) == 2 and len(seen.sent) == 1 and len(h.inserted) == 2
+
+
+@pytest.mark.unit
 def test_schedule_surfaces_a_duplicate_as_409(scheduling, monkeypatch):
     def dup(**fields):
         raise svc.ScheduledPickupDuplicate()

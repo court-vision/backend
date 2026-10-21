@@ -507,7 +507,7 @@ class TestFantasyTools:
     prefix every earlier request built stays intact, and reached through the owned-team check."""
 
     def test_they_come_last_and_take_nba_ids_only(self):
-        assert [t["name"] for t in tools.AGENT_TOOLS[-2:]] == ["project_matchup", "plan_streams"]
+        assert [t["name"] for t in tools.AGENT_TOOLS[-3:]] == ["project_matchup", "plan_streams", "propose_move"]
         assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
         assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
         moves = tools.AGENT_FANTASY_TOOLS[0]["input_schema"]["properties"]["moves"]
@@ -547,3 +547,57 @@ class TestFantasyTools:
         assert out.is_error and "Invalid input" in out.content
         out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7}))
         assert out.is_error and "signed-in user" in out.content
+
+
+@pytest.mark.unit
+class TestProposeMove:
+    """The step 5 tool (services/ai/proposals.py): appended last, reached through the owned-team
+    check, and tied to the conversation the turn belongs to."""
+
+    def test_the_definition_takes_nba_ids_and_a_reason(self):
+        tool = tools.AGENT_TOOLS[-1]
+        assert tool["name"] == "propose_move" and tool["input_schema"]["additionalProperties"] is False
+        assert set(tool["input_schema"]["properties"]) == {"team_id", "add", "drop", "day", "reason"}
+        assert tool["input_schema"]["required"] == ["team_id", "reason"]
+        assert "propose_move" in tools.AGENT_TOOL_NAMES and "propose_move" not in tools.ASK_TOOL_NAMES
+
+    def test_the_handler_checks_the_team_and_passes_the_conversation(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def propose(user_id, conversation_id, team, league_info, args):
+            seen["propose"] = (user_id, conversation_id, team.team_id, args)
+            return {"proposal_id": 31, "chip": {"proposal_id": 31}}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "propose_move", propose)
+
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "drop": 2, "day": 3, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert not out.is_error and seen["owned"] == (42, 7)
+        user_id, conversation_id, team_id, args = seen["propose"]
+        assert (user_id, conversation_id, team_id) == (42, 9, 7)
+        assert (args.add, args.drop, args.day, args.reason) == (1, 2, 3, "4 games")
+        assert json.loads(out.content)["chip"] == {"proposal_id": 31}
+
+    def test_it_needs_a_conversation_a_user_and_a_move(self, monkeypatch):
+        async def owned(ctx, team_id):
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+        monkeypatch.setattr(tools, "_owned", owned)
+
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42)))
+        assert out.is_error and "inside a conversation" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "4 games"}))
+        assert out.is_error and "signed-in user" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "add, a drop, or both" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "drop": 1, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "same player" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "x" * 201},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "reason" in out.content

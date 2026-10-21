@@ -13,17 +13,19 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional
 
-from api.deps import ensure_team_owned
+from api.deps import ensure_team_owned, load_owned_league_info
 from core.errors import AuthorizationError, ConflictError, NotFoundError
 from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
     AiConversationDetail,
     AiConversationSummary,
+    AiProposalCheckData,
+    AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, conversations, guards, spend
+from services.ai import agent, conversations, guards, proposals, spend
 
 
 def has_access(user_id: int) -> bool:
@@ -47,12 +49,12 @@ def _summary(row, turns: int) -> AiConversationSummary:
     )
 
 
-def _turn_view(row) -> AiTurnView:
+def _turn_view(row, parts) -> AiTurnView:
     return AiTurnView(
         id=row.id,
         created_at=row.created_at,
         message=row.message,
-        parts=row.parts or [],
+        parts=parts,
         outcome=row.outcome,
         feedback=row.feedback,
         comment=row.comment,
@@ -88,10 +90,12 @@ class AgentService:
         row = await _conversation(conversation_id, user_id)
         turns = await conversations.turns_of(conversation_id, user_id)
         history = await conversations.history(conversation_id, user_id)
+        # The chips are shown as they stand now, not as the turn stored them
+        parts = await proposals.refresh_history([t.parts or [] for t in turns], conversation_id, user_id)
         return AiConversationDetail(
             **_summary(row, len(turns)).model_dump(),
             full=history.full,
-            history=[_turn_view(t) for t in turns],
+            history=[_turn_view(t, p) for t, p in zip(turns, parts)],
         )
 
     @staticmethod
@@ -116,7 +120,7 @@ class AgentService:
             if history.full:
                 raise ConflictError("AI_CONVERSATION_FULL", "This conversation is full; start a new one")
             reservation_id = await spend.reserve(user_id)
-            header_line = await agent.header(user_id, row.team_id_id)
+            header_line = await agent.header(user_id, row.team_id_id, conversation_id=conversation_id)
         except BaseException:
             # Nothing has been spent: hand back the reservation and the claim
             if reservation_id is not None:
@@ -126,6 +130,24 @@ class AgentService:
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
                           reservation_id=reservation_id)
         return agent.start(turn, header_line)
+
+    @staticmethod
+    async def proposal(proposal_id: int, user_id: int) -> AiProposalCheckData:
+        """One chip as it stands, checked again against the board and the pool: what the
+        desk reads before it stages the chip into the tray."""
+        ensure_access(user_id)
+        row = await proposals.get(proposal_id, user_id)
+        team = await run_db("ai.owned_team", ensure_team_owned, proposals.team_of(row), user_id)
+        if team is None:
+            raise NotFoundError("AI_PROPOSAL_NOT_FOUND", "Proposal not found")
+        league_info = await load_owned_league_info(team)
+        chip, problems = await proposals.check(proposal_id, user_id, team, league_info)
+        return AiProposalCheckData(chip=AiProposalChip(**chip), problems=problems)
+
+    @staticmethod
+    async def dismiss_proposal(proposal_id: int, user_id: int) -> AiProposalChip:
+        ensure_access(user_id)
+        return AiProposalChip(**await proposals.dismiss(proposal_id, user_id))
 
     @staticmethod
     async def usage(user_id: int) -> AiUsageData:
