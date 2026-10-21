@@ -407,6 +407,17 @@ def test_a_drop_candidate_is_worth_his_average_only_on_a_real_sample(value, sour
 
 
 @pytest.mark.unit
+def test_weigh_drop_is_the_rule_by_id_value_and_source():
+    """The what-if projection's drop choice weighs roster players through the same rule, keyed by
+    whatever id its evidence is keyed by."""
+    ev = evidence({11: 1}, {11: 35.0})
+    assert svc.weigh_drop(11, 6.0, "rolling", ev) == svc.DropValue(35.0, True)
+    assert svc.weigh_drop(11, 6.0, "baseline", ev) == svc.DropValue(6.0, False)
+    assert svc.weigh_drop(12, 0.0, None, ev) is None
+    assert svc.weigh_drop(12, 9.0, "provider", None) == svc.DropValue(9.0, False)
+
+
+@pytest.mark.unit
 def test_without_evidence_the_board_stands_except_for_an_empty_average():
     assert svc.drop_value(player(11, "P11", BE, game=False, value=6.0), None) == svc.DropValue(6.0, False)
     assert svc.drop_value(returning(11, "Tyrese Haliburton"), None) is None

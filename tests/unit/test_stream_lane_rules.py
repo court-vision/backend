@@ -140,10 +140,10 @@ def fa(pid, team, *, value=22.0, positions=("SF", "F"), pos=3, available_on=None
 
 
 def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, day_limits=(None, None, None), roster=ROSTER,
-         holders=(HOLDER,)):
+         holders=(HOLDER,), values=None):
     from services.stream_lane_service import Budget
     return plan_lanes(board(roster, limits=limits), list(holders), pool, DAYS, list(pending_), Budget(adds, day_limits),
-                      rehold)
+                      rehold, values)
 
 
 @pytest.mark.unit
@@ -240,6 +240,50 @@ def test_two_spots_with_adds_to_spare_each_stream():
     roster = [ROSTER[0], ROSTER[1], ROSTER[2].model_copy(update={"team": "DEN"})]
     p = plan([fa(10, "LAL"), fa(11, "LAL", positions=("C",), pos=5)], roster=roster, holders=(HOLDER, BIG), adds=2)
     assert p.adds == 2 and {p.spots[0][1], p.spots[1][1]} == {10, 11}
+
+
+# ---- the value function ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_values_stand_in_for_the_boards_and_the_pools_and_a_player_left_out_is_worth_nothing():
+    """Under a value function (blocks, the matchup), the plan reads each player's worth from it: the
+    free agent worth 22 on the board is worth 3 to it, the holder 1, and the guard nothing at all."""
+    values = {HOLDER: 1.0, 10: 3.0, BIG: 2.0}
+    p = plan([fa(10, "LAL")], adds=1, values=values)
+    assert p.spots == ((HOLDER, 10, 10),) and p.marginals == ((1.0, 3.0, 3.0),) and p.value == 1 + 3 + 3
+    assert p.hold_value == 1 + 0 + 1 and p.considered == {10}
+    # A free agent the function leaves out never takes the spot.
+    p = plan([fa(10, "LAL")], adds=1, values={HOLDER: 1.0})
+    assert p.spots == ((HOLDER,) * 3,) and p.considered == set()
+
+
+@pytest.mark.unit
+def test_the_joint_plan_takes_the_value_function_and_the_closed_days():
+    values = {HOLDER: 1.0, GUARD: 1.0, 10: 9.0}
+    p = plan([fa(10, "LAL")], holders=(HOLDER, GUARD), values=values, day_limits=(None, 0, None))
+    # Day 1 is closed to every spot, so the free agent (9 on days 1 and 2 under the function) comes in today.
+    assert (10, 10, 10) in p.spots and p.adds == 1 and p.value == 1 + 9 + 9
+    # Today closed too: he comes in for day 2 only.
+    p = plan([fa(10, "LAL")], holders=(HOLDER, GUARD), values=values, day_limits=(0, 0, None))
+    assert any(spot[2] == 10 and spot[1] != 10 for spot in p.spots) and p.adds == 1
+
+
+@pytest.mark.unit
+def test_the_joint_plan_leaves_the_spots_the_positions_room():
+    """One C allowed and the big holds it: a C free agent can only replace the big, never the holder."""
+    big_fa = fa(12, "LAL", value=50, positions=("C",), pos=5)
+    p = plan([big_fa], holders=(HOLDER, BIG), limits={"5": 1})
+    assert p.spots == ((HOLDER, HOLDER, HOLDER), (BIG, 12, 12))
+    # With room for two Cs, the holder's spot could take him too... but he holds one spot at a time.
+    p = plan([big_fa], holders=(HOLDER, BIG), limits={"5": 2})
+    assert sum(12 in spot for spot in p.spots) == 1
+
+
+@pytest.mark.unit
+def test_a_scheduled_pickup_and_the_roster_are_never_candidates_for_the_joint_plan():
+    p = plan([fa(GUARD, "LAL", value=99), fa(900, "LAL", value=99)], pending_=[pending(29)])
+    assert p.considered == set() and p.spots == ((HOLDER,) * 3,)
 
 
 # ---- the projection --------------------------------------------------------------------------

@@ -270,13 +270,25 @@ def _is_out(injury_status: Optional[str]) -> bool:
     return (injury_status or "ACTIVE").upper() in OUT_STATUSES
 
 
+def _value_of(values: Optional[Mapping[int, float]], player_id: int, default: float) -> float:
+    """A player's per-game value to the plan: the board's (`default`) unless `values` answers for the
+    plan (the stream value function, `services.stream_value`), in which case a player it leaves out
+    is worth nothing to it."""
+    return default if values is None else float(values.get(player_id, 0.0))
+
+
 def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
-               pending: Sequence[PendingPickup], budget: Budget, rehold_after: int) -> MultiStreamPlan:
+               pending: Sequence[PendingPickup], budget: Budget, rehold_after: int,
+               values: Optional[Mapping[int, float]] = None) -> MultiStreamPlan:
     """The plan for the spots `holder_ids` hold over `days`, together: they share the adds and
     the lineup's seats. The rest of the roster is the board's (IR aside) with the pending pickups
     made on their days; a free agent on the roster or already scheduled is not a candidate. ESPN's
     position limits are counted each day the same way (IR included): the spots' players at a
-    limited position fit the room the rest of the roster leaves."""
+    limited position fit the room the rest of the roster leaves.
+
+    `values` is the value function: each player's worth per game to this plan, in place of the
+    board's and the pool's (a player it leaves out is worth nothing). The lanes plan with the
+    board's values; the agent's planner asks for a category, or the matchup (`services.stream_value`)."""
     slots = slot_counts_of(board)
     spot_ids = set(holder_ids)
     on_board = {p.player_id: p for p in board.players}
@@ -286,13 +298,13 @@ def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[Poo
         return bool(team) and normalize_nba_abbrev(team) in day.teams
 
     def roster_value(p: LineupPlayer, day: LaneDay) -> float:
-        return p.avg_points if plays(p.team, day) and not _is_out(p.injury_status) else 0.0
+        return _value_of(values, p.player_id, p.avg_points) if plays(p.team, day) and not _is_out(p.injury_status) else 0.0
 
     def roster_slots(p: LineupPlayer) -> frozenset[int]:
         return frozenset(s for s in p.eligible_slot_ids if s in ACTIVE_SLOT_IDS)
 
     def pool_value(f: PoolPlayer, day: LaneDay) -> float:
-        return f.value if plays(f.team, day) else 0.0
+        return _value_of(values, f.player_id, f.value) if plays(f.team, day) else 0.0
 
     rest_by_day: list[list[DayPlayer]] = []
     for day in days:
@@ -681,13 +693,18 @@ class StreamLaneService:
 
     @staticmethod
     async def _pool(league_info: LeagueInfo, adapter, team_id: int) -> list[PoolPlayer]:
-        """The free agents the lane may take: the pool as the market reads it, out players left
-        out, a waiver claim available the day after its waivers clear."""
+        """The free agents the lane may take: the pool as the market reads it (`_pool_players`)."""
         resp = await adapter.get_free_agents(league_info, FA_COUNT, team_id=team_id)
         if resp.status != ApiStatus.SUCCESS:
             raise RuntimeError(resp.message or "could not read the free-agent pool")
+        return StreamLaneService._pool_players(resp.data or [])
+
+    @staticmethod
+    def _pool_players(free_agents: Sequence[Any]) -> list[PoolPlayer]:
+        """Pool players from a free-agent read: out players left out, a waiver claim available
+        the day after its waivers clear."""
         out: list[PoolPlayer] = []
-        for fa in resp.data or []:
+        for fa in free_agents:
             if _is_out(fa.injury_status):
                 continue
             available_on = None

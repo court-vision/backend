@@ -118,6 +118,12 @@ LABELS: dict[str, str] = {
     "season": "Season", "season_type": "Type", "game_no": "Game", "series": "Series", "won": "Won",
     "gp": "GP", "first_date": "From", "last_date": "To", "fg_pct": "FG%", "ft_pct": "FT%", "fg3_pct": "3P%",
     "oreb": "OREB", "dreb": "DREB", "pf": "PF", "plus_minus": "+/-", "dd2": "DD2", "td3": "TD3", "usg_pct": "USG%",
+    # project_matchup and plan_streams rows
+    "day": "Day", "add": "Add", "add_team": "Add team", "add_games": "Add games", "drop": "Drop",
+    "drop_team": "Drop team", "drop_games": "Drop games", "drop_chosen": "Drop by rule",
+    "projected_you_after": "Proj you after", "leader_after": "Leader after", "flips": "Flips",
+    "spot": "Spot", "value": "Value", "switch": "Switch", "value_per_game": "Per game", "chosen_by": "Chosen by",
+    "margin": "Margin", "weight": "Weight", "drop_name": "Drop", "add_name": "Add", "availability": "Available",
 }
 
 
