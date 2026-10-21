@@ -24,9 +24,12 @@ ids, and the chip the frontend gets (`CHIP_KEY`, popped off the result by the
 turn loop) carries the ESPN ids the writes take.
 
 States: `proposed` (stageable), `sent`, `dismissed`; `expired` is read off
-`expires_at` -- the day's first tip-off, or the rollover into the next day when
-the day has no games -- never stored. A refused send leaves the row proposed for
-a retry from the tray.
+`expires_at` -- for a move today the day's first tip-off (or the rollover into
+the next day when the day has no games), for a scheduled move the rollover into
+its day, when scheduling for it closes -- never stored. A refused send leaves the
+row proposed for a retry from the tray. A dismiss can't overtake a send: once
+the write is with ESPN the move is made, so `mark_sent` wins the race and
+`dismiss` only ever moves a row that is still proposed.
 """
 
 from __future__ import annotations
@@ -156,9 +159,13 @@ def summary_of(kind: str, add_name: Optional[str], drop_name: Optional[str], nba
 
 
 def expires_at_for(kind: str, nba_date: date, first_tip: Optional[time], now: datetime) -> datetime:
-    """When the chip stops being sendable: the day's first tip-off (after it a move counts for the
-    next day, which is not what the chip says), or the rollover into the next day when the day has
-    no games or its tip has passed."""
+    """When the chip stops being sendable. A move today: the day's first tip-off (after it a move
+    counts for the next day, which is not what the chip says), or the rollover into the next day
+    when the day has no games or its tip has passed. A scheduled move: the rollover into its day,
+    when ESPN's day begins and a pickup can no longer be scheduled for it (the scheduled pickup
+    route refuses the day as `not_future`; the move is then a transaction, which is another chip)."""
+    if kind == SCHEDULED:
+        return rollover_at(nba_date)
     if first_tip is not None:
         tip = et_at(nba_date, first_tip)
         if tip > now:
@@ -250,19 +257,27 @@ def _of_conversation(conversation_id: int, user_id: int) -> list[AiProposal]:
 
 @db_operation("ai.proposal_dismiss")
 def _dismiss(proposal_id: int, user_id: int, now: datetime) -> Optional[AiProposal]:
+    """The user's row, moved to dismissed if it is still proposed: one conditional write, so a send
+    that marked it in between stands and the row comes back as it then is. None when it isn't theirs."""
     row = AiProposal.get_or_none(AiProposal.id == proposal_id, AiProposal.user_id == user_id)
     if row is None:
         return None
     if row.state == PROPOSED:
-        AiProposal.update(state=DISMISSED, updated_at=now).where(AiProposal.id == proposal_id).execute()
-        row.state = DISMISSED
+        moved = (AiProposal.update(state=DISMISSED, updated_at=now)
+                 .where(AiProposal.id == proposal_id, AiProposal.state == PROPOSED).execute())
+        if moved:
+            row.state = DISMISSED
+        else:
+            row = AiProposal.get_or_none(AiProposal.id == proposal_id)
     return row
 
 
 @db_operation("ai.proposal_sent")
 def _mark_sent(proposal_id: int, now: datetime, audit_id: Optional[int], pickup_id: Optional[int]) -> bool:
+    """Record the send on a row not already sent. A dismiss that landed while the write was with
+    ESPN is overtaken: the move was made, and the chip has to say so. A second send never is."""
     return (AiProposal.update(state=SENT, sent_at=now, updated_at=now, audit_id=audit_id, pickup_id=pickup_id)
-            .where(AiProposal.id == proposal_id, AiProposal.state == PROPOSED).execute()) > 0
+            .where(AiProposal.id == proposal_id, AiProposal.state != SENT).execute()) > 0
 
 
 def _pending_pickup_of(team_id: int, add_player_id: int):
@@ -297,6 +312,11 @@ async def _problems(team: Any, league_info: LeagueInfo, state: LineupState, kind
     problems: list[str] = []
     if not state.can_write:
         problems.append(f"Roster changes are blocked for this team ({state.write_blocked_reason or 'unknown reason'}).")
+    if kind == SCHEDULED and nba_date <= date.fromisoformat(state.nba_date):
+        # The scheduled pickup route's own first refusal (`not_future`): ESPN's day has reached the
+        # chip's; a move for today is a transaction, another chip. The expiry normally gets here first.
+        problems.append(f"{_day_label(nba_date)} has begun on ESPN, so a pickup can no longer be scheduled for it; "
+                        "ask for the move again.")
     try:
         await RosterTransactionService._validate(league_info, state, add.espn_id if add else None,
                                                  drop.espn_id if drop else None, for_future_day=kind == SCHEDULED)
@@ -476,7 +496,10 @@ async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, a
                    now: Optional[datetime] = None) -> AiProposal:
     """The proposal a Week desk write says it is sending, checked before the write: the caller's,
     this team's, still proposed and unexpired, and the same move (ESPN ids, kind, day) the request
-    carries. A mismatch is refused so a chip can never send a different move than it shows."""
+    carries. A mismatch is refused so a chip can never send a different move than it shows.
+    The state is read, not claimed: a dismiss that lands while the write is with ESPN is overtaken
+    by `mark_sent` (the move is made either way), and a second send of the same chip is stopped by
+    the write itself (the board's version, or the pickup already pending)."""
     now = now or datetime.now(timezone.utc)
     row = await _owned(proposal_id, user_id)
     if team_of(row) != team_id:

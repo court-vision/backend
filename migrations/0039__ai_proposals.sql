@@ -10,9 +10,11 @@
 -- audit id or the pickup's id. Nothing is ever executed from the AI desk itself.
 --
 -- `state`: proposed (the chip can be staged), sent, dismissed (the user let it
--- go). "Expired" is read off `expires_at` (the day's first tip-off, or the
--- rollover into the next day), never stored. A refused send leaves the row
--- proposed, for a retry from the tray. Player ids are ESPN's (what the writes
+-- go). "Expired" is read off `expires_at` (a move today: the day's first tip-off,
+-- or the rollover into the next day; a scheduled move: the rollover into its day,
+-- when scheduling for it closes), never stored. A refused send leaves the row
+-- proposed, for a retry from the tray; a send always wins over a dismiss that
+-- raced it, since the move was made. Player ids are ESPN's (what the writes
 -- take) with the NBA id beside each; `day` is the matchup day index the tools
 -- count (0 = the matchup's first day). `turn_id` is filled when the turn that
 -- made the proposal is written.

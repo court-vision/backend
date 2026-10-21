@@ -102,7 +102,9 @@ def test_a_chip_expires_at_the_day_s_first_tip_or_the_rollover_after_it():
     assert mod.expires_at_for("transaction", TODAY, time(19, 0), NOW) == tip
     # Past the tip (or a day with no games), the chip lasts until the day rolls over
     assert mod.expires_at_for("transaction", TODAY, time(19, 0), tip) == mod.rollover_at(TODAY + timedelta(days=1))
-    assert mod.expires_at_for("scheduled", date(2026, 10, 23), None, NOW) == mod.rollover_at(date(2026, 10, 24))
+    assert mod.expires_at_for("transaction", date(2026, 10, 23), None, NOW) == mod.rollover_at(date(2026, 10, 24))
+    # A scheduled move lasts until its day begins on ESPN, when a pickup can no longer be scheduled for it
+    assert mod.expires_at_for("scheduled", date(2026, 10, 23), time(19, 0), NOW) == mod.rollover_at(date(2026, 10, 23))
 
 
 @pytest.mark.unit
@@ -225,7 +227,17 @@ def test_a_clean_move_has_no_problems_and_a_scheduled_one_is_checked_for_a_futur
         "The roster is full: name a player to drop for Kawhi Leonard (project_matchup picks one by the rule when the move names none)."]
     assert checks.validate_args == (KAWHI, None, True)
     # An open seat makes an add alone fine
-    assert run(mod._problems(TEAM, LEAGUE, state(board(), counts={"11": 1, "12": 2}), "scheduled", ADD, None, TODAY)) == []
+    assert run(mod._problems(TEAM, LEAGUE, state(board(), counts={"11": 1, "12": 2}), "scheduled", ADD, None, date(2026, 10, 22))) == []
+
+
+@pytest.mark.unit
+def test_a_scheduled_move_for_a_day_espn_has_reached_can_no_longer_be_scheduled(checks):
+    begun = "Wed Oct 21 has begun on ESPN, so a pickup can no longer be scheduled for it; ask for the move again."
+    open_seat = state(board(), counts={"11": 1, "12": 2})
+    assert run(mod._problems(TEAM, LEAGUE, open_seat, "scheduled", ADD, None, TODAY)) == [begun]
+    assert run(mod._problems(TEAM, LEAGUE, state(board(), counts={"11": 1, "12": 2}, nba_date="2026-10-22"), "scheduled", ADD, None, TODAY)) == [begun]
+    # A move for today is a transaction, and today is its day
+    assert run(mod._problems(TEAM, LEAGUE, open_seat, "transaction", ADD, None, TODAY)) == []
 
 
 @pytest.mark.unit
@@ -322,7 +334,7 @@ def test_a_move_for_a_later_day_is_scheduled_for_that_espn_day(proposing):
 
     f = proposing.inserted[0]
     assert (f["kind"], f["day"], f["scoring_period_id"], f["nba_date"]) == ("scheduled", 4, 4, date(2026, 10, 23))
-    assert f["expires_at"] == mod.rollover_at(date(2026, 10, 24))
+    assert f["expires_at"] == mod.rollover_at(date(2026, 10, 23))      # when ESPN's Friday begins, scheduling for it closes
     assert f["summary"] == "Add Kawhi Leonard, drop Anthony Edwards, Fri 10/23. Scheduled: made for you ahead of Friday's games."
     assert out["kind"] == "scheduled" and out[mod.CHIP_KEY]["scoring_period_id"] == 4
     assert proposing.validate_args == (KAWHI, EDWARDS, True)
@@ -389,7 +401,7 @@ def stored(monkeypatch):
 
     async def mark_sent(proposal_id, now, audit_id, pickup_id):
         r = h.rows.get(proposal_id)
-        if r is None or r.state != "proposed":
+        if r is None or r.state == "sent":
             return False
         r.state, r.sent_at, r.audit_id, r.pickup_id = "sent", now, audit_id, pickup_id
         h.sent.append(proposal_id)
@@ -435,7 +447,12 @@ def test_mark_sent_records_the_write_and_never_raises(stored, monkeypatch):
     run(mod.mark_sent(31, audit_id=9, now=NOW))
     assert stored.sent == [31] and stored.rows[31].audit_id == 9 and stored.rows[31].sent_at == NOW
     run(mod.mark_sent(31, pickup_id=4, now=NOW))        # already sent: logged, nothing raised
+    assert stored.rows[31].audit_id == 9 and stored.rows[31].pickup_id is None
     run(mod.mark_sent(99, pickup_id=4, now=NOW))
+    # A dismiss that landed while the write was with ESPN is overtaken: the move was made
+    stored.rows[31] = row(state="dismissed")
+    run(mod.mark_sent(31, audit_id=10, now=NOW))
+    assert stored.rows[31].state == "sent" and stored.rows[31].audit_id == 10
 
     async def broken(*args):
         raise RuntimeError("db")
