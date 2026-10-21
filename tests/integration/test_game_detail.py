@@ -95,10 +95,25 @@ def test_a_past_game_is_the_settled_game_log_with_the_box_scores_period_line(mon
     assert (data.home_periods, data.away_periods) == ([24, 21, 32, 44], [23, 35, 23, 32])
     assert data.lines_source == "settled"
     # By fantasy points, then points.
-    assert [(l.player_name, l.team, l.fpts, l.min) for l in data.lines] == [
+    assert [(line.player_name, line.team, line.fpts, line.min) for line in data.lines] == [
         ("Paul George", "BOS", 72, 30), ("Jaylen Brown", "BOS", 40, 30), ("A Rookie", "DET", 40, 30),
     ]
     assert data.lines[0].plus_minus == -4 and data.lines[0].espn_id == 9001
+
+
+def test_a_settled_line_stored_before_its_game_was_is_placed_by_its_date_and_team(monkeypatch):
+    box_score(monkeypatch)
+    NBATeam.get_or_create(id="NYK", defaults={"name": "NYK", "city": "NYK", "conference": "East", "division": "Atlantic"})
+    Player.create(id=4, espn_id=9004, name="Elsewhere Guard", name_normalized="elsewhere guard", position="G")
+    settled_line(1, "BOS", fpts=72, pts=38)
+    PlayerGameStats.create(player=3, team="DET", game=None, game_date=NIGHT, **STATS, fpts=40, min=30)
+    PlayerGameStats.create(player=4, team="NYK", game=None, game_date=NIGHT, **STATS, fpts=50, min=30)  # another game
+    PlayerGameStats.create(player=2, team="BOS", game=None, game_date=NIGHT - timedelta(days=2), **STATS, fpts=60, min=30)
+
+    data = get().data
+
+    assert data.lines_source == "settled"
+    assert [(line.player_id, line.team) for line in data.lines] == [(1, "BOS"), (3, "DET")]
 
 
 def test_before_the_game_log_lands_the_live_read_stands_in_with_its_team_from_the_box_score(monkeypatch):
@@ -112,8 +127,8 @@ def test_before_the_game_log_lands_the_live_read_stands_in_with_its_team_from_th
     data = get().data
 
     assert data.lines_source == "live"
-    assert [(l.player_id, l.team) for l in data.lines] == [(1, "BOS"), (2, "BOS"), (3, "DET")]
-    assert all(l.plus_minus is None for l in data.lines)
+    assert [(line.player_id, line.team) for line in data.lines] == [(1, "BOS"), (2, "BOS"), (3, "DET")]
+    assert all(line.plus_minus is None for line in data.lines)
 
 
 def test_without_the_box_score_the_lines_still_come_and_the_period_line_is_empty(monkeypatch):
@@ -127,7 +142,7 @@ def test_without_the_box_score_the_lines_still_come_and_the_period_line_is_empty
     assert resp.status == ApiStatus.SUCCESS
     assert (resp.data.home_periods, resp.data.away_periods) == ([], [])
     assert resp.data.game.status == "scheduled"   # what nba.games says, until the post-game run
-    assert [(l.player_id, l.team) for l in resp.data.lines] == [(2, "BOS"), (3, None)]
+    assert [(line.player_id, line.team) for line in resp.data.lines] == [(2, "BOS"), (3, None)]
 
 
 def test_score_history_starts_at_the_tip_and_keeps_only_the_ends_of_each_unchanged_run(monkeypatch):

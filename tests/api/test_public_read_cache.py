@@ -137,9 +137,9 @@ GAME_DETAIL = GameDetailResp.model_validate({
 
 
 def game_detail(**game) -> GameDetailResp:
-    """GAME_DETAIL with its game (and, for a period line, `home_periods`) changed."""
-    periods = game.pop("home_periods", GAME_DETAIL.data.home_periods)
-    data = GAME_DETAIL.data.model_copy(update={"game": GAME_DETAIL.data.game.model_copy(update=game), "home_periods": periods})
+    """GAME_DETAIL with its game (and, for a period line, `home_periods`/`away_periods`) changed."""
+    periods = {side: game.pop(side, getattr(GAME_DETAIL.data, side)) for side in ("home_periods", "away_periods")}
+    data = GAME_DETAIL.data.model_copy(update={"game": GAME_DETAIL.data.game.model_copy(update=game), **periods})
     return GAME_DETAIL.model_copy(update={"data": data})
 
 
@@ -554,7 +554,8 @@ def test_a_final_game_is_cached_by_how_settled_its_night_is(client, monkeypatch,
     game_detail(status="in_progress", period=3, game_clock="PT04M10.00S"),
     game_detail(status="scheduled", home_score=None, away_score=None),
     game_detail(home_periods=[]),   # final, but the league feed gave no period line: ask again
-], ids=["in-progress", "scheduled", "final-without-periods"])
+    game_detail(away_periods=[]),   # or gave only one side's
+], ids=["in-progress", "scheduled", "final-without-periods", "final-with-one-sides-periods"])
 def test_a_game_still_moving_or_missing_its_period_line_is_not_cached(client, monkeypatch, frozen_nba_date, response):
     service = stub(monkeypatch, "game_detail_service", "GameDetailService", "get_game", response)
     frozen_nba_date(date(2026, 3, 4))

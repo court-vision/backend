@@ -5,7 +5,8 @@ knows tonight. Once a night is over this is the same game, frozen where it
 stood at the final buzzer:
 
 - **Lines** come from the game log the post-game run writes
-  (`nba.player_game_stats`), the settled record. Until it lands, the live
+  (`nba.player_game_stats`, by game, or by date and team for a line stored
+  before its game was), the settled record. Until it lands, the live
   pipeline's last read of the box score (`nba.live_player_stats`) stands in;
   those rows last until the next night's first live run.
 - **Score history** is the live pipeline's score snapshots, which data-platform
@@ -129,7 +130,17 @@ class GameDetailService:
         settled = list(
             PlayerGameStats.select(PlayerGameStats, Player)
             .join(Player)
-            .where(PlayerGameStats.game == game_id)
+            .where(
+                (PlayerGameStats.game == game_id)
+                # A line written before its game reached nba.games is stored
+                # with no game (PlayerGameStats.upsert_game_stats); its date and
+                # team still place it, as a team plays once a night.
+                | (
+                    PlayerGameStats.game.is_null()
+                    & (PlayerGameStats.game_date == game.game_date)
+                    & PlayerGameStats.team.in_((game.home_team_id, game.away_team_id))
+                )
+            )
         )
         live = [] if settled else list(
             LivePlayerStats.select(LivePlayerStats, Player)

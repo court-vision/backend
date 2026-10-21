@@ -82,7 +82,7 @@ async def get_game(
         # Kept only once the game is over and whole: tonight's games move, and
         # a final whose period line the league feed did not give is asked again.
         game = resp.data.game if resp.status == ApiStatus.SUCCESS and resp.data else None
-        if game is None or game.status != "final" or not resp.data.home_periods:
+        if game is None or game.status != "final" or not (resp.data.home_periods and resp.data.away_periods):
             raise Uncacheable(resp)
         return serialize_model(resp)
 
