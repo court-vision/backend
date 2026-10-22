@@ -83,6 +83,17 @@ def test_applied_transaction_returns_the_board_and_both_players(authed_client, o
 
 
 @pytest.mark.api
+def test_an_ai_chip_s_id_rides_the_request(authed_client, owned, monkeypatch):
+    _league(monkeypatch, ESPN)
+    calls = _stub(monkeypatch, OK)
+
+    assert authed_client.post("/v1/internal/teams/7/roster/transactions", json={**BODY, "proposal_id": 31}).status_code == 200
+    assert calls[0][2].proposal_id == 31
+    assert authed_client.post("/v1/internal/teams/7/roster/transactions", json={**BODY, "proposal_id": 0}).status_code == 422
+    assert RosterTransactionReq(**BODY).proposal_id is None
+
+
+@pytest.mark.api
 def test_unowned_team_is_404(authed_client, owned, monkeypatch):
     from api import deps
     monkeypatch.setattr(deps, "ensure_team_owned", lambda team_id, user_id: None)

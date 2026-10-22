@@ -121,8 +121,9 @@ def recorded(monkeypatch):
     """The rows the turns write, and the conversations released."""
     rows, released, settled = [], [], []
 
-    async def record(conversation_id, row, *, title=None, reservation_id=None):
-        rows.append({"conversation_id": conversation_id, "title": title, "reservation_id": reservation_id, **row})
+    async def record(conversation_id, row, *, title=None, reservation_id=None, proposal_ids=None):
+        rows.append({"conversation_id": conversation_id, "title": title, "reservation_id": reservation_id,
+                     "proposal_ids": proposal_ids, **row})
         return 900 + len(rows)
 
     async def release(conversation_id):
@@ -274,6 +275,56 @@ class TestTurn:
         assert [p["kind"] for p in row["parts"]] == ["text", "block"]
         # user, assistant(tool), user(results), assistant(table), user(shown), assistant(end)
         assert [m["role"] for m in row["messages"]] == ["user", "assistant", "user", "assistant", "user", "assistant"]
+
+    def test_a_proposal_s_chip_is_the_user_s_block_and_never_the_model_s_result(self, agent_on, recorded, monkeypatch):
+        chip = {"proposal_id": 31, "state": "proposed", "kind": "transaction", "team_id": 22, "day": 2,
+                "date": "2026-10-22", "dow": "Thu", "scoring_period_id": 3,
+                "add": {"espn_id": 6450, "nba_player_id": 202695, "name": "Kawhi Leonard", "team": "LAC"},
+                "drop": {"espn_id": 4594268, "nba_player_id": 1630162, "name": "Anthony Edwards", "team": "MIN"},
+                "summary": "Add Kawhi Leonard, drop Anthony Edwards, today. Goes to ESPN when you send it.",
+                "reason": "4 games left", "change": 1.0, "scoring": "categories",
+                "expires_at": "2026-10-22T23:00:00+00:00", "sent_at": None}
+        view = {"proposal_id": 31, "state": "proposed", "kind": "transaction", "day": 2, "date": "2026-10-22",
+                "add": {"player_id": 202695, "name": "Kawhi Leonard", "team": "LAC"},
+                "drop": {"player_id": 1630162, "name": "Anthony Edwards", "team": "MIN"},
+                "summary": chip["summary"], "reason": "4 games left", "projection": None,
+                "expires_at": chip["expires_at"], "notes": []}
+        calls = _tools(monkeypatch, {"propose_move": {**view, "chip": chip}})
+        fake = _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "propose_move", {"team_id": 22, "add": 202695, "drop": 1630162,
+                                                             "reason": "4 games left"})),
+            msg("end_turn", text("Kawhi for Edwards, if you want it.")),
+        ])
+
+        events = _run(_turn())
+
+        assert calls[0][0] == "propose_move"
+        # The model gets the proposal (NBA ids) with a result id, and no chip
+        result = json.loads(fake.calls[1]["messages"][-1]["content"][0]["content"])
+        assert result == {"result_id": "r1", **view}
+        assert "espn_id" not in json.dumps(result)
+        # The user gets the chip as a block, in the stream and in the stored parts
+        block = next(e[1] for e in events if e[0] == "block")
+        assert block == {"type": "proposal", "id": "p1", **chip}
+        assert ("status", {"text": "Checking the move", "kind": "tool", "tool": "propose_move"}) in events
+        row = recorded.rows[0]
+        assert row["outcome"] == "ok" and row["proposal_ids"] == [31]
+        assert [p["kind"] for p in row["parts"]] == ["block", "text"]
+        assert row["parts"][0]["block"]["proposal_id"] == 31
+        assert row["results"]["r1"]["data"] == view
+
+    def test_a_chip_alone_is_an_answer(self, agent_on, recorded, monkeypatch):
+        chip = {"proposal_id": 5, "state": "proposed"}
+        _tools(monkeypatch, {"propose_move": {"proposal_id": 5, "state": "proposed", "chip": chip}})
+        _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "propose_move", {"team_id": 22, "add": 1, "reason": "why not"})),
+            msg("end_turn"),
+        ])
+
+        events = _run(_turn())
+
+        assert _names(events) == ["status", "block", "status", "done", "<closed>"]
+        assert recorded.rows[0]["outcome"] == "ok" and recorded.rows[0]["proposal_ids"] == [5]
 
     def test_result_ids_continue_from_the_history(self, agent_on, recorded, monkeypatch):
         history = conversations.History(results={"r1": {"tool": "get_matchup", "input": {}, "data": MATCHUP},
@@ -466,6 +517,37 @@ def test_the_header_lists_teams_by_id_and_format_only(monkeypatch):
     assert "team_id 22 (espn, categories scoring, 2027)" in line
     assert "Pinned team: team_id 22." in line
     assert "Ignore" not in line
+    assert line.endswith("Pinned team: team_id 22.]")
+
+
+@pytest.mark.unit
+def test_the_header_ends_with_what_became_of_the_conversation_s_proposals(monkeypatch):
+    from services.ai import proposals
+
+    async def teams(user_id):
+        return []
+
+    async def season():
+        return "NBA season: 2026-27 starts 2026-10-20."
+
+    async def chips(conversation_id, user_id, now=None):
+        return {7: "Your earlier proposals in this conversation: #31 add Kawhi Leonard (Thu 2026-10-22): sent."}.get(
+            conversation_id, "")
+    monkeypatch.setattr(agent, "list_my_teams", teams)
+    monkeypatch.setattr(agent, "_season_line", season)
+    monkeypatch.setattr(proposals, "header_line", chips)
+
+    line = asyncio.run(agent.header(42, None, conversation_id=7))
+    assert line.endswith("The user has no teams yet. Your earlier proposals in this conversation: "
+                         "#31 add Kawhi Leonard (Thu 2026-10-22): sent.]")
+    assert line.count("[") == 1
+    # A conversation without proposals, or one whose proposals can't be read, gets the plain header
+    assert asyncio.run(agent.header(42, None, conversation_id=8)).endswith("The user has no teams yet.]")
+
+    async def broken(conversation_id, user_id, now=None):
+        raise RuntimeError("db")
+    monkeypatch.setattr(proposals, "header_line", broken)
+    assert asyncio.run(agent.header(42, None, conversation_id=7)).endswith("The user has no teams yet.]")
 
 
 # ---- the made-up-number check ----
@@ -749,10 +831,10 @@ def service_stubs(agent_on, monkeypatch):
     async def cancel(reservation_id):
         state.cancelled.append(reservation_id)
 
-    async def header(user_id, pinned):
+    async def header(user_id, pinned, now=None, *, conversation_id=None):
         if state.header_error:
             raise state.header_error
-        return f"[pinned {pinned}]"
+        return f"[pinned {pinned} in {conversation_id}]"
 
     def start(turn, header_line):
         state.started.append((turn, header_line))
@@ -778,7 +860,7 @@ class TestStartTurn:
     def test_starts_with_the_pinned_team_in_the_header(self, service_stubs):
         _start()
         turn, line = service_stubs.started[0]
-        assert (turn.conversation_id, turn.user_id, turn.message, line) == (7, 42, "hello", "[pinned 22]")
+        assert (turn.conversation_id, turn.user_id, turn.message, line) == (7, 42, "hello", "[pinned 22 in 7]")
         assert turn.reservation_id == 77
         assert service_stubs.released == [] and service_stubs.cancelled == []
 

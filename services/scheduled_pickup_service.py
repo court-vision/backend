@@ -514,6 +514,11 @@ class ScheduledPickupService:
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             raise _invalid("acquisition_limit", blocked)
+        if req.proposal_id is not None:
+            # An AI desk chip: the same move it shows, still proposed, before the pickup is stored
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.SCHEDULED,
+                                     add=add, drop=drop, scoring_period_id=day)
 
         window = await run_db("pickup.window", _window_for, nba_date)
         now = datetime.now(timezone.utc)
@@ -528,6 +533,9 @@ class ScheduledPickupService:
         log.info("scheduled_pickup_created", team_id=team.team_id, pickup_id=row.id, add=add, drop=drop,
                  day=day, nba_date=nba_date.isoformat(), rule=window.rule,
                  not_before_at=window.not_before_at.isoformat())
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, pickup_id=row.id)
         when = window.not_before_at.astimezone(EASTERN).strftime("%a %b %-d, %-I:%M %p ET")
         return ScheduledPickupResp(
             status=ApiStatus.SUCCESS,

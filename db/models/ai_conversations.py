@@ -1,6 +1,7 @@
 """
-usr.ai_conversations and usr.ai_turns — the AI agent's chats — and usr.ai_spend,
-the ledger its monthly caps sum (migration 0032, docs/AI_AGENT_PLAN.md § 1, § 6).
+usr.ai_conversations and usr.ai_turns — the AI agent's chats — usr.ai_spend,
+the ledger its monthly caps sum (migration 0032, the CV AI plan § 1, § 6), and
+usr.ai_proposals, the roster moves the agent proposed as chips (migration 0039).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -10,7 +11,9 @@ these tables.
 
 from datetime import datetime, timezone
 
-from peewee import BigAutoField, BigIntegerField, BooleanField, DateTimeField, ForeignKeyField, IntegerField, TextField
+from peewee import (
+    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, IntegerField, TextField,
+)
 from playhouse.postgres_ext import BinaryJSONField
 
 from db.base import BaseModel
@@ -80,4 +83,43 @@ class AiSpend(BaseModel):
 
     class Meta:
         table_name = "ai_spend"
+        schema = "usr"
+
+
+class AiProposal(BaseModel):
+    """One roster move the agent proposed (`propose_move`), shown as a chip. Player ids are
+    ESPN's, as the writes take them, with the NBA id beside each. `state` is proposed, sent or
+    dismissed; expired is read off `expires_at`. The send route fills `sent_at` and the write's
+    `audit_id` (a transaction) or `pickup_id` (a scheduled pickup)."""
+
+    id = BigAutoField(primary_key=True)
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", on_delete="CASCADE")
+    turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
+    team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
+    kind = TextField()                      # transaction | scheduled
+    day = IntegerField()                    # matchup day index, 0 = the matchup's first day
+    scoring_period_id = IntegerField()
+    nba_date = DateField()
+    add_player_id = IntegerField(null=True)   # ESPN
+    add_nba_id = IntegerField(null=True)
+    add_name = TextField(null=True)
+    add_team = TextField(null=True)
+    drop_player_id = IntegerField(null=True)  # ESPN
+    drop_nba_id = IntegerField(null=True)
+    drop_name = TextField(null=True)
+    drop_team = TextField(null=True)
+    reason = TextField()
+    summary = TextField()
+    projection = BinaryJSONField(null=True)
+    state = TextField(default="proposed")
+    expires_at = DateTimeField()
+    created_at = DateTimeField(default=_now)
+    updated_at = DateTimeField(default=_now)
+    sent_at = DateTimeField(null=True)
+    audit_id = IntegerField(null=True)
+    pickup_id = IntegerField(null=True)
+
+    class Meta:
+        table_name = "ai_proposals"
         schema = "usr"

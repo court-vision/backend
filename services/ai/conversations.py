@@ -25,7 +25,7 @@ from peewee import fn
 
 from core.settings import settings
 from db.base import db, db_operation
-from db.models.ai_conversations import AiConversation, AiTurn
+from db.models.ai_conversations import AiConversation, AiProposal, AiTurn
 from services.ai import spend
 
 TITLE_LENGTH = 80
@@ -141,11 +141,17 @@ def history(conversation_id: int, user_id: int) -> History:
 
 
 @db_operation("ai.record_turn")
-def _insert(conversation_id: int, row: dict[str, Any], title: Optional[str], reservation_id: Optional[int]) -> int:
+def _insert(conversation_id: int, row: dict[str, Any], title: Optional[str], reservation_id: Optional[int],
+            proposal_ids: Optional[list[int]] = None) -> int:
     with db.atomic():
         turn_id = AiTurn.insert(conversation_id=conversation_id, **row).execute()
         if reservation_id is not None:
             spend.settle_sync(reservation_id, row.get("cost_micros", 0), turn_id)
+        if proposal_ids:
+            # The chips this turn made belong to its row (usr.ai_proposals.turn_id)
+            (AiProposal.update(turn_id=turn_id)
+             .where(AiProposal.id.in_(proposal_ids), AiProposal.conversation_id == conversation_id)
+             .execute())
         AiConversation.update(updated_at=_now(), busy_until=None).where(AiConversation.id == conversation_id).execute()
         if title:
             # The first message names the conversation; a later one never renames it
@@ -156,11 +162,11 @@ def _insert(conversation_id: int, row: dict[str, Any], title: Optional[str], res
 
 
 async def record(conversation_id: int, row: dict[str, Any], *, title: Optional[str] = None,
-                 reservation_id: Optional[int] = None) -> int:
-    """Write one turn, settle its spend reservation to its cost, and release the
-    conversation, together: the next turn must not start until this one's
-    messages are part of the history."""
-    return await _insert(conversation_id, storable(row), title, reservation_id)
+                 reservation_id: Optional[int] = None, proposal_ids: Optional[list[int]] = None) -> int:
+    """Write one turn, settle its spend reservation to its cost, tie the proposals
+    it made to it, and release the conversation, together: the next turn must not
+    start until this one's messages are part of the history."""
+    return await _insert(conversation_id, storable(row), title, reservation_id, proposal_ids)
 
 
 @db_operation("ai.turn_comment")

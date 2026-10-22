@@ -170,7 +170,7 @@ class TestRosterWriteContracts:
 
     def test_transaction_request_and_data_shapes(self, schemas):
         req = schemas["RosterTransactionReq"]["properties"]
-        assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version"}
+        assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version", "proposal_id"}
         assert set(schemas["RosterTransactionReq"]["required"]) == {"expected_scoring_period_id", "roster_version"}
         data = schemas["RosterTransactionData"]["properties"]
         assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id"}

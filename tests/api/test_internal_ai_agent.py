@@ -136,3 +136,74 @@ def test_bad_messages_are_refused_before_anything_runs(authed_client, user, invi
     monkeypatch.setattr(AgentService, "start_turn", staticmethod(never))
 
     assert authed_client.post(f"{BASE}/conversations/3/turns", json=body).status_code == 422
+
+
+CHIP = {
+    "proposal_id": 31, "state": "proposed", "kind": "transaction", "team_id": 22, "day": 2, "date": "2026-10-22",
+    "dow": "Thu", "scoring_period_id": 3,
+    "add": {"espn_id": 6450, "nba_player_id": 202695, "name": "Kawhi Leonard", "team": "LAC"},
+    "drop": {"espn_id": 4594268, "nba_player_id": 1630162, "name": "Anthony Edwards", "team": "MIN"},
+    "summary": "Add Kawhi Leonard, drop Anthony Edwards, today. Goes to ESPN when you send it.",
+    "reason": "4 games left", "change": 1.0, "scoring": "categories",
+    "expires_at": "2026-10-22T23:00:00Z", "sent_at": None,
+}
+
+
+@pytest.mark.api
+def test_a_proposal_is_read_back_with_a_fresh_check(authed_client, user, invited, monkeypatch):
+    from schemas.ai import AiProposalCheckData, AiProposalChip
+    seen = []
+
+    async def proposal(proposal_id, user_id):
+        seen.append((proposal_id, user_id))
+        return AiProposalCheckData(chip=AiProposalChip(**CHIP), problems=["Kawhi Leonard is on waivers until Thu"])
+    monkeypatch.setattr(AgentService, "proposal", staticmethod(proposal))
+
+    r = authed_client.get(f"{BASE}/proposals/31")
+
+    assert r.status_code == 200 and seen == [(31, 42)]
+    data = r.json()["data"]
+    assert data["problems"] == ["Kawhi Leonard is on waivers until Thu"]
+    assert data["chip"]["add"] == CHIP["add"] and data["chip"]["state"] == "proposed" and data["chip"]["date"] == "2026-10-22"
+    assert "type" not in data["chip"]
+
+
+@pytest.mark.api
+def test_a_proposal_is_dismissed_and_a_sent_one_refuses(authed_client, user, invited, monkeypatch):
+    from schemas.ai import AiProposalChip
+    seen = []
+
+    async def dismiss(proposal_id, user_id):
+        seen.append((proposal_id, user_id))
+        if proposal_id == 32:
+            raise ConflictError("AI_PROPOSAL_SENT", "This move was already sent")
+        return AiProposalChip(**{**CHIP, "state": "dismissed"})
+    monkeypatch.setattr(AgentService, "dismiss_proposal", staticmethod(dismiss))
+
+    r = authed_client.post(f"{BASE}/proposals/31/dismiss")
+    assert r.status_code == 200 and r.json()["data"]["state"] == "dismissed"
+    r = authed_client.post(f"{BASE}/proposals/32/dismiss")
+    assert (r.status_code, r.json()["error_code"]) == (409, "AI_PROPOSAL_SENT")
+    assert seen == [(31, 42), (32, 42)]
+    assert authed_client.get(f"{BASE}/proposals/0").status_code == 422
+
+
+@pytest.mark.api
+def test_a_turn_s_chip_is_a_block_in_the_conversation(authed_client, user, invited, monkeypatch):
+    from schemas.ai import AiTurnView
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    async def detail(conversation_id, user_id):
+        turn = AiTurnView(id=9, created_at=now, message="Who should I add?", outcome="ok", cost_usd=0.01,
+                          parts=[{"kind": "block", "block": {"type": "proposal", "id": "p1", **CHIP, "state": "sent",
+                                                            "sent_at": "2026-10-21T20:00:00Z"}},
+                                 {"kind": "text", "text": "Kawhi for Edwards."}])
+        return AiConversationDetail(id=5, title="Who should I add?", team_id=22, created_at=now, updated_at=now,
+                                    turns=1, full=False, history=[turn])
+    monkeypatch.setattr(AgentService, "detail", staticmethod(detail))
+
+    parts = authed_client.get(f"{BASE}/conversations/5").json()["data"]["history"][0]["parts"]
+
+    assert parts[0]["block"]["type"] == "proposal" and parts[0]["block"]["id"] == "p1"
+    assert parts[0]["block"]["state"] == "sent" and parts[0]["block"]["drop"]["espn_id"] == 4594268
+    assert parts[1] == {"kind": "text", "text": "Kawhi for Edwards."}

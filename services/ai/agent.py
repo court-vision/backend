@@ -41,10 +41,11 @@ from core.nba_calendar import EASTERN, nba_date_et
 from core.settings import settings
 from core.tracing import timed
 from schemas.ai import AiToolCall
-from services.ai import conversations, spend
+from services.ai import conversations, proposals, spend
 from services.ai.client import get_client
 from services.ai.display import DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_TABLE, DisplayError, show_chart, show_table
 from services.ai.prompts import AGENT_PROMPT
+from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
 from services.ai.tools import AGENT_TOOL_NAMES, AGENT_TOOLS, ToolContext, list_my_teams, run_tool
 
@@ -80,6 +81,7 @@ STATUS: dict[str, str] = {
     "query_stats": "Computing stats",
     "project_matchup": "Projecting the matchup",
     "plan_streams": "Planning streams",
+    "propose_move": "Checking the move",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
 }
@@ -99,10 +101,13 @@ class Turn:
     messages: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, Any] = field(default_factory=dict)
     parts: list[dict[str, Any]] = field(default_factory=list)
+    # The proposals (usr.ai_proposals ids) this turn made, to be tied to its row
+    proposals: list[int] = field(default_factory=list)
     cost: int = 0
     context_tokens: int = 0
     tables: int = 0
     charts: int = 0
+    chips: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -147,9 +152,11 @@ def _team_facts(teams: list[dict[str, Any]], pinned: Optional[int]) -> str:
     return line
 
 
-async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = None) -> str:
+async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = None, *,
+                 conversation_id: Optional[int] = None) -> str:
     """Today, the season, and the user's teams, by ID and format only: names are
-    league data, and the model can read them with get_my_teams."""
+    league data, and the model can read them with get_my_teams. In a conversation,
+    what became of its earlier proposals (sent, dismissed, expired) comes last."""
     today = nba_date_et() if now is None else now.astimezone(EASTERN).date()
     try:
         teams = await list_my_teams(user_id)
@@ -157,7 +164,14 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
         get_logger().warning("ai_turn_header_teams_failed", user_id=user_id)
         teams = []
     season = await _season_line()
-    return f"[Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}]"
+    chips = ""
+    if conversation_id is not None:
+        try:
+            chips = await proposals.header_line(conversation_id, user_id, now)
+        except Exception:
+            get_logger().warning("ai_turn_header_proposals_failed", conversation_id=conversation_id)
+    line = f"Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}"
+    return f"[{line} {chips}]" if chips else f"[{line}]"
 
 
 # ---- one model call, streamed ----
@@ -223,11 +237,20 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         emit("block", shown.block)
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
 
-    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id), allowed=ALLOWED)
+    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id),
+                             allowed=ALLOWED)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}
     result_id = turn.next_result_id()
     data = json.loads(outcome.content)
+    chip = data.pop(CHIP_KEY, None)
+    if chip is not None:
+        # A proposal: the chip (ESPN ids and all) is the user's block, never the model's result
+        turn.chips += 1
+        shown = {"type": "proposal", "id": f"p{turn.chips}", **chip}
+        turn.parts.append({"kind": "block", "block": shown})
+        turn.proposals.append(chip["proposal_id"])
+        emit("block", shown)
     turn.results[result_id] = {"tool": name, "input": raw if isinstance(raw, dict) else {}, "data": data}
     turn.run.names |= _names_in(outcome.content)
     return {"type": "tool_result", "tool_use_id": block.id,
@@ -346,7 +369,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 if final or response.stop_reason != "tool_use" or not tool_uses:
                     break
                 turn.messages.append({"role": "user", "content": await _run_tools(turn, tool_uses, emit)})
-        if not turn.answer_text().strip() and not turn.tables and not turn.charts:
+        if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
         ungrounded = ungrounded_numbers(
             turn.answer_text(),
@@ -394,6 +417,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 },
                 title=conversations.title_of(turn.message),
                 reservation_id=turn.reservation_id,
+                proposal_ids=turn.proposals,
             )
         except Exception:
             # The spend is real even when the row isn't: settle it on its own (or,

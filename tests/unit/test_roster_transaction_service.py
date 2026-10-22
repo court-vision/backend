@@ -344,6 +344,47 @@ def test_add_and_drop_are_one_transaction_verified_by_the_reread(harness):
 
 
 @pytest.mark.unit
+def test_an_ai_chip_is_checked_before_the_write_and_marked_sent_after_it(harness, monkeypatch):
+    from core.errors import ConflictError
+    from services.ai import proposals
+    seen = SimpleNamespace(for_send=[], sent=[], refuse=None)
+
+    async def for_send(proposal_id, user_id, team_id, *, kind, add, drop, scoring_period_id=None, now=None):
+        seen.for_send.append((proposal_id, user_id, team_id, kind, add, drop, scoring_period_id, len(harness.writer_calls)))
+        if seen.refuse:
+            raise seen.refuse
+
+    async def mark_sent(proposal_id, *, audit_id=None, pickup_id=None, now=None):
+        seen.sent.append((proposal_id, audit_id, pickup_id))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+    after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(after, version="v2")]
+    harness.pool = {KAWHI: pool()}
+
+    resp = apply(RosterTransactionReq(add_player_id=KAWHI, drop_player_id=EDWARDS, expected_scoring_period_id=1,
+                                      roster_version="v1", proposal_id=31))
+
+    assert resp.data.verified is True and resp.data.audit_id == 1
+    # Checked before ESPN was asked (no writer call yet), marked with the audit row after
+    assert seen.for_send == [(31, 11, 21, "transaction", KAWHI, EDWARDS, None, 0)]
+    assert seen.sent == [(31, 1, None)]
+
+    # A chip that isn't this move (or isn't pending any more) stops the write before ESPN
+    seen.refuse = ConflictError("AI_PROPOSAL_NOT_PENDING", "This move was already sent", data={"state": "sent"})
+    harness.reads = [state(board())]
+    with pytest.raises(ConflictError):
+        apply(RosterTransactionReq(add_player_id=KAWHI, drop_player_id=EDWARDS, expected_scoring_period_id=1,
+                                   roster_version="v1", proposal_id=31))
+    assert len(harness.writer_calls) == 1 and len(seen.sent) == 1
+
+    # The Week desk's own moves never touch the proposals
+    harness.reads = [state(board()), state(after, version="v2")]
+    apply(req(add=KAWHI, drop=EDWARDS))
+    assert len(seen.for_send) == 2 and len(seen.sent) == 1
+
+
+@pytest.mark.unit
 def test_add_only(harness):
     harness.reads = [state(board()), state(board() + [player(KAWHI, "Kawhi Leonard", BE, team="LAC")], version="v2")]
     harness.pool = {KAWHI: pool()}

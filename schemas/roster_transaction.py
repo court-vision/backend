@@ -25,6 +25,9 @@ class RosterTransactionReq(ApiModel):
     drop_player_id: Optional[int] = Field(default=None, gt=0)     # ESPN player id to release
     expected_scoring_period_id: int = Field(gt=0)
     roster_version: str = Field(min_length=1, max_length=64)
+    # The AI desk's chip this move sends (usr.ai_proposals.id): checked to be the same move before
+    # the write, marked sent after it. Omitted for the Week desk's own moves.
+    proposal_id: Optional[int] = Field(default=None, gt=0)
 
 
 class RosterTransactionPlayer(ApiModel):
