@@ -26,6 +26,7 @@ from schemas.teams import (
     TopPerformer,
     InjuredPlayer,
 )
+from services.game_detail_service import score_history as score_history_for
 from services.providers.blocking import run_blocking_provider
 
 
@@ -140,19 +141,7 @@ class NBATeamLiveGameService:
         if game["game_id"] and status in ("in_progress", "final"):
             home_performers = _live_top_performers(game["game_id"], _get_team_player_ids(game["home_team"]))
             away_performers = _live_top_performers(game["game_id"], _get_team_player_ids(game["away_team"]))
-        score_history: list[GameScoreSnapshot] = []
-        if game["game_id"]:
-            score_history = [
-                GameScoreSnapshot(
-                    captured_at=row.captured_at.isoformat(),
-                    period=row.period,
-                    game_clock=row.game_clock,
-                    home_score=row.home_score,
-                    away_score=row.away_score,
-                    game_status=row.game_status,
-                )
-                for row in LiveGameScoreSnapshot.get_snapshots_for_game(game["game_id"])
-            ]
+        score_history: list[GameScoreSnapshot] = score_history_for(game["game_id"]) if game["game_id"] else []
         return {
             "home_performers": home_performers,
             "away_performers": away_performers,

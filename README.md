@@ -273,6 +273,7 @@ No authentication required. Rate-limited to **100 requests/minute per endpoint p
 | `GET` | `/v1/players/{player_id}/status` | Injury/availability status |
 | `GET` | `/v1/players/{player_id}/ownership` | Fantasy ownership percentage + trend |
 | `GET` | `/v1/games/{game_date}` | NBA games on a specific date (with live overlay for today) |
+| `GET` | `/v1/games/{game_date}/{game_id}` | One game: score by period, score history and every line; a finished game as it stood at the final buzzer |
 | `GET` | `/v1/teams/{team_abbrev}/schedule` | NBA team schedule |
 | `GET` | `/v1/teams/{team_abbrev}/stats` | Latest NBA team statistics |
 | `GET` | `/v1/teams/{team_abbrev}/roster` | Last known season-stat roster, including inactive players |
