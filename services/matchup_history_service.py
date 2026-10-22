@@ -30,7 +30,7 @@ log = get_logger("matchup_history")
 
 
 def _matchup_today(md) -> date_type:
-    """ESPN's own day for this matchup read, else the 2 AM ET fantasy day."""
+    """ESPN's own day for this matchup read, else the 3 AM ET fantasy day."""
     return matchup_today(md, _fantasy_today)
 
 
@@ -89,7 +89,7 @@ class MatchupHistoryService:
         """Box scores by (nba id, game date) for days already played (or on).
 
         The post-game run's row first. A night it has not written yet (from
-        ESPN's ~2 AM rollover until that run, the day is past but its rows may
+        ESPN's 3 AM ET rollover until that run, the day is past but its rows may
         not be there) keeps the live pipeline's rows, which stay until the next
         night's games start writing; today's games are only ever live rows.
         """
@@ -187,7 +187,7 @@ class MatchupHistoryService:
                 data=None,
             )
         # Which day is today, and so whose roster a day shows, is ESPN's
-        # question: once ESPN has rolled past a day (~2 AM ET) the current
+        # question: once ESPN has rolled past a day (3 AM ET) the current
         # roster is already the next day's, so the day's own lineup is used and
         # the day is past. Its box scores are last night's live rows until the
         # post-game run writes them (`_stat_rows`).

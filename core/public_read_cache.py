@@ -21,7 +21,7 @@ TTL follows how often the data behind a route can change:
   300 s: the post-game run that writes its final scores can still be retrying
   after the 6 AM ET date flip.
 - **3600 s** for schedule weeks, keyed by the fantasy day and never held by a
-  client past the 2 AM ET rollover that moves `current_week` and `season_day`.
+  client past the 3 AM ET rollover that moves `current_week` and `season_day`.
 
 Never cached: today's games (the live scoreboard overlay), injury status,
 ownership, the live endpoints, and anything resolved from the caller.

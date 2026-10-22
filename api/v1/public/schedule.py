@@ -40,7 +40,7 @@ router = APIRouter(prefix="/schedule", tags=["Schedule"])
 @limiter.limit(PUBLIC_RATE_LIMIT)
 async def get_schedule_weeks(request: Request) -> ScheduleWeeksResp:
     """Get all schedule weeks with dates, the current week, and season info."""
-    # The static calendar plus today's fantasy day (2 AM ET rule): one entry per
+    # The static calendar plus today's fantasy day (3 AM ET rule): one entry per
     # day, built from that day, and never held by a client past the rollover.
     today = get_nba_today()
 

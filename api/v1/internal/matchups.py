@@ -93,7 +93,7 @@ async def get_weekly_matchup(
     calls when rendering the matchup bar chart.
 
     Today is ESPN's own current day (the team's lineup board's), so the day
-    ESPN rolled past at ~2 AM ET is past at once. Past days carry both sides'
+    ESPN rolled past at 3 AM ET is past at once. Past days carry both sides'
     lineups as they stood (stored nightly; ESPN's history read live for last
     night when it isn't stored yet), and their totals count the active slots.
     """

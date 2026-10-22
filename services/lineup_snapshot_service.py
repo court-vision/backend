@@ -14,8 +14,8 @@ read another team in the SAME league — the opponent — and nothing else: the
 query always carries the owner's league key, and a foreign team id is simply
 not found.
 
-A day is finished once ESPN has rolled past it, at ~2 AM ET
-(`matchup_days.fantasy_today`), not at the 6 AM ET game-date turn: from 2 AM
+A day is finished once ESPN has rolled past it, at 3 AM ET
+(`matchup_days.fantasy_today`), not at the 6 AM ET game-date turn: from 3 AM
 the current roster is already the next day's. ESPN's own `latestScoringPeriod`
 stays the final word for the live history read.
 """
