@@ -213,6 +213,10 @@ class Settings(BaseSettings):
     # user; CI never holds the Clerk secret or the account's password.
     app_map_clerk_user_id: Optional[str] = None
     app_map_token: Optional[SecretStr] = None
+    # The bearer the workflow's upload step presents to
+    # PUT /v1/internal/app-map/maps/{build}. A token of its own: it can replace
+    # the map CV AI reads, so only the upload step holds it, never the crawl.
+    app_map_upload_token: Optional[SecretStr] = None
 
     # Yahoo OAuth Configuration
     yahoo_client_id: Optional[str] = None
