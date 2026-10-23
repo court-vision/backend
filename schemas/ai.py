@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 from pydantic import Field
 
 from schemas.common import ApiModel, BaseResponse
+from schemas.lineup_editor import MoveRole
 
 # Postgres text and jsonb cannot hold a NUL, so a string carrying one could
 # never be logged; it is refused before any quota or model call is spent on it
@@ -238,7 +239,7 @@ class AiChart(ApiModel):
 
 
 AiProposalState = Literal["proposed", "sent", "dismissed", "expired"]
-AiProposalKind = Literal["transaction", "scheduled"]
+AiProposalKind = Literal["transaction", "scheduled", "lineup"]
 
 
 class AiProposalPlayer(ApiModel):
@@ -248,11 +249,29 @@ class AiProposalPlayer(ApiModel):
     team: Optional[str] = Field(None, description="NBA tricode")
 
 
+class AiProposalMove(ApiModel):
+    """One slot move of a lineup chip, as the lineup write takes it (`LineupMoveReq`: espn_id,
+    from_slot_id, to_slot_id) and the tray shows it."""
+
+    espn_id: int = Field(..., description="ESPN player id: `LineupMoveReq.player_id`")
+    nba_player_id: Optional[int] = Field(None, description="nba.players.id when known (Scout, headshot)")
+    name: str
+    team: Optional[str] = Field(None, description="NBA tricode")
+    from_slot_id: int = Field(..., description="The slot he is in on the chip's board")
+    from_slot: str = Field(..., description="Its name (PG, UT, BE, IR, ...)")
+    to_slot_id: int
+    to_slot: str
+    role: MoveRole = Field("shift", description="start (bench to active), bench (to the bench), shift (the rest)")
+    note: Optional[str] = Field(None, description="The planner's note: his game, 'no game today', 'OUT'")
+
+
 class AiProposalChip(ApiModel):
-    """A roster move the agent proposed and the server checked: the chip the AI desk shows. Staged,
-    it goes into the Week desk's tray (rendered in the AI desk) and is sent by its slider through
-    the roster transaction (`kind` transaction, today) or the scheduled pickup (`kind` scheduled, a
-    later day) with `proposal_id` on the request; the route marks it sent. Never executed from here."""
+    """A move the agent proposed and the server checked: the chip the AI desk shows. Staged, it goes
+    into the Week desk's tray (rendered in the AI desk) and is sent by its slider through the Week
+    desk's own write with `proposal_id` on the request, which marks it sent: the roster transaction
+    (`kind` transaction: `add` / `drop`, today), the scheduled pickup (`kind` scheduled: `add` / `drop`,
+    a later day) or the lineup write (`kind` lineup: `moves`, one day's board, today's or a later
+    day's, written at once). Never executed from here."""
 
     proposal_id: int
     state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, or expired")
@@ -261,12 +280,15 @@ class AiProposalChip(ApiModel):
     day: int = Field(..., description="Matchup day index, 0 = the matchup's first day")
     date: date_type = Field(..., description="The NBA date the move is for")
     dow: str = Field(..., description="Mon, Tue, ...")
-    scoring_period_id: int = Field(..., description="ESPN's day for the move (the scheduled pickup's day)")
+    scoring_period_id: int = Field(..., description="ESPN's day for the move (the scheduled pickup's day; "
+                                                    "a lineup chip's board, `ApplyLineupMovesReq.expected_scoring_period_id`)")
     add: Optional[AiProposalPlayer] = None
     drop: Optional[AiProposalPlayer] = None
+    moves: list[AiProposalMove] = Field(default_factory=list, description="A lineup chip's slot moves; empty otherwise")
     summary: str = Field(..., description="One sentence: the move, its day, and what sending does")
     reason: str = Field(..., description="The agent's reason, as it wrote it")
-    change: Optional[float] = Field(None, description="Projected change for the matchup (points, or category wins)")
+    change: Optional[float] = Field(None, description="Projected change for the matchup (points, or category wins); "
+                                                      "for a lineup chip the day's change in points, if a points league")
     scoring: Optional[str] = Field(None, description="The league's scoring format the change is in")
     expires_at: datetime = Field(..., description="When the chip stops being stageable (the day's first tip, or its rollover)")
     sent_at: Optional[datetime] = None

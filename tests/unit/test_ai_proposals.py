@@ -63,8 +63,8 @@ def row(**kw):
                   add_name="Kawhi Leonard", add_team="LAC", drop_player_id=EDWARDS, drop_nba_id=NBA_EDWARDS,
                   drop_name="Anthony Edwards", drop_team="MIN", reason="4 games left", summary="Add Kawhi Leonard, drop Anthony Edwards, today. Goes to ESPN when you send it.",
                   projection={"scoring": "categories", "before": {}, "after": {}, "change": 1}, state="proposed",
-                  expires_at=datetime(2026, 10, 21, 23, 0, tzinfo=timezone.utc), created_at=NOW, updated_at=NOW,
-                  sent_at=None, audit_id=None, pickup_id=None)
+                  moves=None, expires_at=datetime(2026, 10, 21, 23, 0, tzinfo=timezone.utc), created_at=NOW,
+                  updated_at=NOW, sent_at=None, audit_id=None, pickup_id=None)
     fields.update(kw)
     return SimpleNamespace(**fields)
 
@@ -507,3 +507,310 @@ def test_check_re_reads_the_board_for_a_proposed_chip_and_names_the_state_otherw
     stored.rows[31] = row()
     assert run(mod.check(31, 11, TEAM, LEAGUE, NOW + timedelta(days=1)))[1] == ["This chip expired: the day it was for has started."]
     assert reads == [21, 21]
+
+
+# ---- lineup chips (get_lineup, propose_lineup) ----------------------------------------------
+
+
+def lplayer(pid, name, slot, *, nba_id, team="DEN", game=True, locked=False, eligible=(PG, UT, BE), value=40.0,
+            status=None, injured=False, value_kind="fpts"):
+    return LineupPlayer(
+        player_id=pid, name=name, team=team, lineup_slot_id=slot, lineup_slot=mod._slot_name(slot), nba_player_id=nba_id,
+        eligible_slot_ids=list(eligible), eligible_slots=[mod._slot_name(s) for s in eligible], injured=injured,
+        injury_status=status, lineup_locked=locked, has_game_today=game, opponent="vs LAL" if game else None,
+        game_time_et="19:30" if game else None, game_started=False, locked=locked, playable=game and status != "OUT",
+        avg_points=value, value_kind=value_kind, value_source="rolling",
+    )
+
+
+def lineup_board(*, jokic_plays=False, edwards_locked=False, value_kind="fpts"):
+    """Jokic idle at UT, Edwards on the bench with a game: the one fill on the board is the swap."""
+    return [lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=jokic_plays, value=55.0, value_kind=value_kind),
+            lplayer(EDWARDS, "Anthony Edwards", BE, nba_id=NBA_EDWARDS, team="MIN", value=42.5, locked=edwards_locked,
+                    value_kind=value_kind)]
+
+
+SWAP_MOVES = [mod.Move(EDWARDS, BE, UT, "start", "vs LAL · 7:30 PM"), mod.Move(JOKIC, UT, BE, "bench", "no game today")]
+SWAP_JSON = [
+    {"espn_id": EDWARDS, "nba_player_id": NBA_EDWARDS, "name": "Anthony Edwards", "team": "MIN",
+     "from_slot_id": BE, "from_slot": "BE", "to_slot_id": UT, "to_slot": "UT", "role": "start", "note": "vs LAL · 7:30 PM"},
+    {"espn_id": JOKIC, "nba_player_id": NBA_JOKIC, "name": "Nikola Jokic", "team": "DEN",
+     "from_slot_id": UT, "from_slot": "UT", "to_slot_id": BE, "to_slot": "BE", "role": "bench", "note": "no game today"},
+]
+SWAP_INPUT = [{"player_id": NBA_EDWARDS, "to_slot": "UT"}, {"player_id": NBA_JOKIC, "to_slot": "BE"}]
+
+
+def lineup_row(**kw):
+    """A usr.ai_proposals row of kind lineup: no add or drop, the swap as `moves`."""
+    fields = dict(kind="lineup", add_player_id=None, add_nba_id=None, add_name=None, add_team=None, drop_player_id=None,
+                  drop_nba_id=None, drop_name=None, drop_team=None, moves=SWAP_JSON,
+                  reason="Edwards plays tonight; Jokic sits idle",
+                  summary="Start Anthony Edwards, bench Nikola Jokic, today. Goes to ESPN when you send it.",
+                  projection={"scoring": "points", "change": 42.5, "basis": "day"},
+                  expires_at=mod.rollover_at(date(2026, 10, 22)))
+    fields.update(kw)
+    return row(**fields)
+
+
+@pytest.mark.unit
+def test_the_lineup_input_names_moves_or_fill_once_each_and_known_slots():
+    ok = mod.ProposeLineupInput(team_id=21, moves=[{"player_id": NBA_EDWARDS, "to_slot": "ut"}], reason="plays tonight")
+    assert (ok.moves[0].to_slot, ok.fill, ok.day) == ("UT", False, None)
+    assert mod.ProposeLineupInput(team_id=21, fill=True, reason="set it").moves is None
+    with pytest.raises(ValueError, match="name the moves, or set fill"):
+        mod.ProposeLineupInput(team_id=21, reason="set it")
+    with pytest.raises(ValueError, match="name the moves, or set fill"):
+        mod.ProposeLineupInput(team_id=21, fill=True, moves=[{"player_id": 1, "to_slot": "BE"}], reason="set it")
+    with pytest.raises(ValueError, match="at most one move"):
+        mod.ProposeLineupInput(team_id=21, moves=[{"player_id": 1, "to_slot": "BE"}, {"player_id": 1, "to_slot": "UT"}], reason="set it")
+    with pytest.raises(ValueError, match="unknown slot 'QB'"):
+        mod.ProposeLineupInput(team_id=21, moves=[{"player_id": 1, "to_slot": "QB"}], reason="set it")
+    with pytest.raises(ValueError):
+        mod.ProposeLineupInput(team_id=21, moves=[{"player_id": i, "to_slot": "BE"} for i in range(1, mod.MOVES_MAX + 2)], reason="set it")
+    with pytest.raises(ValueError):
+        mod.GetLineupInput(team_id=21, day=14)
+    assert mod.SLOT_IDS == {"PG": 0, "SG": 1, "SF": 2, "PF": 3, "C": 4, "G": 5, "F": 6, "SG/SF": 7, "G/F": 8,
+                            "PF/C": 9, "F/C": 10, "UT": 11, "BE": 12, "IR": 13}
+
+
+@pytest.mark.unit
+def test_lineup_roles_words_summary_and_expiry():
+    assert (mod.role_of(BE, UT), mod.role_of(UT, BE), mod.role_of(PG, UT), mod.role_of(UT, 13), mod.role_of(13, BE)) == \
+        ("start", "bench", "shift", "shift", "bench")
+    moves = [*SWAP_JSON, {"name": "Jalen Green", "role": "shift", "to_slot": "IR"}]
+    assert mod.lineup_words(moves) == "start Anthony Edwards, bench Nikola Jokic, Jalen Green to IR"
+    assert mod.lineup_summary(moves, TODAY, True) == \
+        "Start Anthony Edwards, bench Nikola Jokic, Jalen Green to IR, today. Goes to ESPN when you send it."
+    assert mod.lineup_summary(SWAP_JSON[:1], date(2026, 10, 23), False) == \
+        "Start Anthony Edwards, Fri 10/23. Sets Friday's lineup on ESPN when you send it."
+    # A lineup is edited until its day turns; the day's tip is no end for it
+    assert mod.expires_at_for("lineup", TODAY, time(19, 0), NOW) == mod.rollover_at(date(2026, 10, 22))
+    assert mod.expires_at_for("lineup", date(2026, 10, 23), None, NOW) == mod.rollover_at(date(2026, 10, 24))
+
+
+@pytest.mark.unit
+def test_the_day_s_change_counts_playable_players_entering_and_leaving_active_slots():
+    # Jokic has no game: benching him costs nothing, and Edwards' night counts in full
+    assert mod.lineup_change(state(lineup_board()), SWAP_MOVES) == {"scoring": "points", "change": 42.5, "basis": "day"}
+    # A starter with a game who sits costs his points; a shift between active slots changes nothing
+    both = state(lineup_board(jokic_plays=True))
+    assert mod.lineup_change(both, SWAP_MOVES)["change"] == -12.5
+    assert mod.lineup_change(both, [mod.Move(JOKIC, UT, PG, "shift")])["change"] == 0.0
+    # A category board's value is a rank score, not a total: the chip shows no change
+    assert mod.lineup_change(state(lineup_board(value_kind="cat_value")), SWAP_MOVES) is None
+    assert mod.lineup_change(state(lineup_board()), []) is None
+
+
+@pytest.mark.unit
+def test_a_lineup_row_is_shown_two_ways_and_an_add_drop_row_carries_no_moves():
+    r = lineup_row()
+    view = mod.view_of(r, NOW)
+    assert (view["kind"], view["add"], view["drop"], view["summary"]) == ("lineup", None, None, r.summary)
+    assert view["moves"] == [
+        {"player_id": NBA_EDWARDS, "name": "Anthony Edwards", "team": "MIN", "from_slot": "BE", "to_slot": "UT",
+         "role": "start", "note": "vs LAL · 7:30 PM"},
+        {"player_id": NBA_JOKIC, "name": "Nikola Jokic", "team": "DEN", "from_slot": "UT", "to_slot": "BE",
+         "role": "bench", "note": "no game today"},
+    ]
+    assert "espn" not in str(view)
+    chip = mod.chip_of(r, NOW)
+    assert chip["moves"] == SWAP_JSON and chip["add"] is None and chip["drop"] is None
+    assert (chip["kind"], chip["change"], chip["scoring"], chip["scoring_period_id"]) == ("lineup", 42.5, "points", 2)
+    assert mod.chip_of(row(), NOW)["moves"] == [] and mod.view_of(row(), NOW)["moves"] == []
+    assert mod.row_moves(r) == SWAP_MOVES and mod.row_moves(row()) == []
+
+
+@pytest.mark.unit
+def test_the_header_line_says_a_lineup_chip_s_moves(monkeypatch):
+    async def of_conversation(conversation_id, user_id):
+        return [lineup_row(id=40, state="sent")]
+    monkeypatch.setattr(mod, "_of_conversation", of_conversation)
+    assert run(mod.header_line(7, 11, NOW)) == ("Your earlier proposals in this conversation: #40 lineup: start Anthony "
+                                                "Edwards, bench Nikola Jokic (Wed 2026-10-21): sent.")
+
+
+@pytest.fixture
+def boards(monkeypatch):
+    """Today's board and any later day's, read by ESPN scoring period; the insert is recorded."""
+    h = SimpleNamespace(today=state(lineup_board()), later={}, reads=[], inserted=[])
+    blank = dict(add_player_id=None, add_nba_id=None, add_name=None, add_team=None,
+                 drop_player_id=None, drop_nba_id=None, drop_name=None, drop_team=None)
+
+    async def read_board(team, league_info, scoring_period_id=None):
+        h.reads.append(scoring_period_id)
+        return h.today if scoring_period_id is None else h.later[scoring_period_id]
+
+    async def insert(**fields):
+        h.inserted.append(fields)
+        return row(**{**blank, **fields, "id": 40})
+
+    monkeypatch.setattr(mod, "_board", read_board)
+    monkeypatch.setattr(mod.schedule_service, "get_nba_today", lambda: TODAY)
+    monkeypatch.setattr(mod.schedule_service, "get_current_matchup", lambda today: dict(WEEK))
+    monkeypatch.setattr(mod, "_insert", insert)
+    return h
+
+
+@pytest.mark.unit
+def test_get_lineup_lists_the_board_with_eligibility_game_lock_and_the_fill(boards):
+    boards.today = state([*lineup_board(), lplayer(KAWHI, "Kawhi Leonard", BE, nba_id=NBA_KAWHI, team="LAC", status="OUT",
+                                                   injured=True, eligible=(PG, UT, BE, 13), value=30.0)])
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21)))
+
+    assert (out["team_id"], out["day"], out["date"], out["today"], out["scoring_period_id"], out["can_write"]) == \
+        (21, 2, "2026-10-21", True, 2, True)
+    assert out["slots"] == [{"slot": "UT", "count": 1}, {"slot": "BE", "count": 1}]
+    jokic, edwards, kawhi = out["players"]
+    assert jokic == {"player_id": NBA_JOKIC, "name": "Nikola Jokic", "team": "DEN", "slot": "UT",
+                     "eligible_slots": ["PG", "UT", "BE"], "game": None, "locked": False, "injury": None,
+                     "avg_value": 55.0, "value_kind": "fpts"}
+    assert (edwards["slot"], edwards["game"], edwards["eligible_slots"]) == ("BE", "vs LAL · 7:30 PM", ["PG", "UT", "BE"])
+    # IR is listed only for a player ESPN would let on it
+    assert (kawhi["injury"], kawhi["eligible_slots"]) == ("OUT", ["PG", "UT", "BE", "IR"])
+    assert out["fill"]["moves"] == [
+        {"player_id": NBA_EDWARDS, "name": "Anthony Edwards", "from_slot": "BE", "to_slot": "UT", "role": "start", "note": "vs LAL · 7:30 PM"},
+        {"player_id": NBA_JOKIC, "name": "Nikola Jokic", "from_slot": "UT", "to_slot": "BE", "role": "bench", "note": "no game today"},
+    ]
+    assert out["fill"]["summary"] == "2 move(s): start Anthony Edwards, bench Nikola Jokic (no game today)"
+    assert out["notes"] == [] and "espn" not in str(out) and boards.reads == [None]
+
+
+@pytest.mark.unit
+def test_get_lineup_for_a_later_day_reads_that_day_s_board(boards):
+    boards.later[4] = state(lineup_board(edwards_locked=True), period=4, nba_date="2026-10-23")
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21, day=4)))
+    assert (out["day"], out["date"], out["today"], out["scoring_period_id"]) == (4, "2026-10-23", False, 4)
+    assert out["players"][1]["locked"] is True and out["fill"]["moves"] == []
+    assert boards.reads == [None, 4]
+    with pytest.raises(AppError, match="after the matchup's last day"):
+        run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21, day=7)))
+    with pytest.raises(AppError, match="Day 1 has passed"):
+        run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21, day=1)))
+
+
+def propose_lineup(**kw):
+    args = mod.ProposeLineupInput(team_id=21, reason="Edwards plays tonight; Jokic sits idle", **kw)
+    return run(mod.propose_lineup(11, 7, TEAM, LEAGUE, args, NOW))
+
+
+@pytest.mark.unit
+def test_propose_lineup_resolves_the_moves_against_the_board_and_stores_one_chip(boards):
+    out = propose_lineup(moves=SWAP_INPUT)
+
+    f = boards.inserted[0]
+    assert (f["user_id"], f["conversation_id"], f["team_id"], f["kind"], f["day"], f["scoring_period_id"], f["nba_date"]) == \
+        (11, 7, 21, "lineup", 2, 2, TODAY)
+    assert f["moves"] == SWAP_JSON and "add_player_id" not in f
+    assert f["summary"] == "Start Anthony Edwards, bench Nikola Jokic, today. Goes to ESPN when you send it."
+    assert f["projection"] == {"scoring": "points", "change": 42.5, "basis": "day"}
+    assert f["expires_at"] == mod.rollover_at(date(2026, 10, 22)) and f["state"] == "proposed"
+    assert f["reason"] == "Edwards plays tonight; Jokic sits idle"
+    # The model's view (NBA ids, slot names), and the chip beside it for the turn loop to lift off
+    assert out["proposal_id"] == 40 and out["kind"] == "lineup" and out["notes"] == []
+    assert out["moves"][0] == {"player_id": NBA_EDWARDS, "name": "Anthony Edwards", "team": "MIN", "from_slot": "BE",
+                               "to_slot": "UT", "role": "start", "note": "vs LAL · 7:30 PM"}
+    assert out["projection"]["change"] == 42.5
+    assert "espn" not in str({k: v for k, v in out.items() if k != mod.CHIP_KEY})
+    chip = out[mod.CHIP_KEY]
+    assert (chip["kind"], chip["moves"], chip["add"], chip["drop"], chip["change"]) == ("lineup", SWAP_JSON, None, None, 42.5)
+    assert boards.reads == [None]
+
+
+@pytest.mark.unit
+def test_propose_lineup_with_fill_proposes_the_server_s_plan_and_refuses_a_set_lineup(boards):
+    out = propose_lineup(fill=True)
+    assert boards.inserted[0]["moves"] == SWAP_JSON and out[mod.CHIP_KEY]["moves"] == SWAP_JSON
+    # Jokic plays too: Edwards can't displace an equal, so there is nothing to fill
+    boards.today = state(lineup_board(jokic_plays=True))
+    with pytest.raises(AppError, match="Nothing to fill: .* \\(Wed Oct 21\\)"):
+        propose_lineup(fill=True)
+    assert len(boards.inserted) == 1
+
+
+@pytest.mark.unit
+def test_propose_lineup_for_a_later_day_is_for_that_day_s_board(boards):
+    boards.later[4] = state(lineup_board(), period=4, nba_date="2026-10-23")
+    out = propose_lineup(day=4, fill=True)
+    f = boards.inserted[0]
+    assert (f["day"], f["scoring_period_id"], f["nba_date"]) == (4, 4, date(2026, 10, 23))
+    assert f["summary"] == "Start Anthony Edwards, bench Nikola Jokic, Fri 10/23. Sets Friday's lineup on ESPN when you send it."
+    assert f["expires_at"] == mod.rollover_at(date(2026, 10, 24))
+    assert out[mod.CHIP_KEY]["scoring_period_id"] == 4 and out["date"] == "2026-10-23"
+    assert boards.reads == [None, 4]
+
+
+@pytest.mark.unit
+def test_propose_lineup_refuses_what_the_week_desk_would_and_stores_nothing(boards):
+    with pytest.raises(AppError, match="No player with id 999 is on this roster"):
+        propose_lineup(moves=[{"player_id": 999, "to_slot": "UT"}])
+    with pytest.raises(AppError, match="Anthony Edwards isn't eligible at C"):
+        propose_lineup(moves=[{"player_id": NBA_EDWARDS, "to_slot": "C"}])
+    with pytest.raises(AppError, match="Anthony Edwards is already in that slot"):
+        propose_lineup(moves=[{"player_id": NBA_EDWARDS, "to_slot": "BE"}])
+    with pytest.raises(AppError, match="can't go on IR"):
+        propose_lineup(moves=[{"player_id": NBA_EDWARDS, "to_slot": "IR"}])
+    # Starting him without benching Jokic overfills the one UT slot: the Week desk's capacity check
+    with pytest.raises(AppError, match=r"Slot 11 would hold 2 players \(limit 1\)"):
+        propose_lineup(moves=[{"player_id": NBA_EDWARDS, "to_slot": "UT"}])
+    boards.today = state(lineup_board(edwards_locked=True))
+    with pytest.raises(AppError, match="Anthony Edwards is locked"):
+        propose_lineup(moves=SWAP_INPUT)
+    boards.today = state(lineup_board(), can_write=False, reason="no_credentials")
+    with pytest.raises(AppError, match=r"blocked for this team \(no_credentials\)"):
+        propose_lineup(moves=SWAP_INPUT)
+    with pytest.raises(AppError, match="Day 1 has passed"):
+        propose_lineup(day=1, moves=SWAP_INPUT)
+    for err in (
+        pytest.raises(AppError, match="after the matchup's last day"),
+    ):
+        with err:
+            propose_lineup(day=7, fill=True)
+    assert boards.inserted == []
+
+
+@pytest.mark.unit
+def test_for_send_matches_a_lineup_chip_s_moves_and_day(stored):
+    stored.rows[40] = lineup_row(id=40)
+    swap = [(EDWARDS, BE, UT), (JOKIC, UT, BE)]
+    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW)).id == 40
+    # The order is the client's
+    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=list(reversed(swap)), now=NOW)).id == 40
+    for kw in ({"moves": swap[:1]}, {"moves": [(EDWARDS, BE, PG), (JOKIC, UT, BE)]}, {"scoring_period_id": 3},
+               {"kind": "transaction"}):
+        with pytest.raises(AppError) as err:
+            run(mod.for_send(40, 11, 21, now=NOW, **{"kind": "lineup", "scoring_period_id": 2, "moves": swap, **kw}))
+        assert (err.value.error_code, err.value.status_code) == ("AI_PROPOSAL_MISMATCH", 422)
+    # An add / drop chip can't be sent as a lineup
+    with pytest.raises(AppError, match="not the one this chip proposes"):
+        run(mod.for_send(31, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW))
+    stored.rows[40] = lineup_row(id=40, expires_at=NOW)
+    with pytest.raises(ConflictError) as err:
+        run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW))
+    assert err.value.data == {"state": "expired"}
+
+
+@pytest.mark.unit
+def test_check_reads_the_chip_s_own_day_s_board_for_a_lineup_chip(stored, monkeypatch):
+    h = SimpleNamespace(today=state(lineup_board()), friday=state(lineup_board(), period=4, nba_date="2026-10-23"), reads=[])
+
+    async def read_board(team, league_info, scoring_period_id=None):
+        h.reads.append(scoring_period_id)
+        return h.friday if scoring_period_id == 4 else h.today
+    monkeypatch.setattr(mod, "_board", read_board)
+
+    stored.rows[40] = lineup_row(id=40)
+    chip, problems = run(mod.check(40, 11, TEAM, LEAGUE, NOW))
+    assert (chip["kind"], chip["moves"], problems, h.reads) == ("lineup", SWAP_JSON, [], [None])
+    # A later day's chip is checked against that day's board
+    stored.rows[41] = lineup_row(id=41, day=4, scoring_period_id=4, nba_date=date(2026, 10, 23),
+                                 expires_at=mod.rollover_at(date(2026, 10, 24)))
+    assert run(mod.check(41, 11, TEAM, LEAGUE, NOW))[1] == [] and h.reads == [None, None, 4]
+    # The board moved on since the chip was made: its from-slots are stale, as the Week desk would say
+    h.today = state([lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False),
+                     lplayer(EDWARDS, "Anthony Edwards", PG, nba_id=NBA_EDWARDS, team="MIN")], counts={"0": 1, "11": 1, "12": 1})
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["Anthony Edwards is no longer in that slot — refresh the lineup"]
+    h.today = state(lineup_board(edwards_locked=True), can_write=False, reason="writes_disabled")
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["Roster changes are blocked for this team (writes_disabled).",
+                                                            "Anthony Edwards is locked (game started)"]
+    stored.rows[40] = lineup_row(id=40, state="sent")
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["This move was already sent."]

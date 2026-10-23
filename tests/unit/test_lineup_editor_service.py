@@ -106,9 +106,9 @@ def harness(monkeypatch):
     return h
 
 
-def manual(moves, *, version="v1", period=12):
+def manual(moves, *, version="v1", period=12, proposal_id=None):
     return ApplyLineupMovesReq(moves=[LineupMoveReq(player_id=p, from_slot_id=a, to_slot_id=b) for p, a, b in moves],
-                               expected_scoring_period_id=period, roster_version=version)
+                               expected_scoring_period_id=period, roster_version=version, proposal_id=proposal_id)
 
 
 SWAP = [(11, BE, UT), (8, UT, BE)]
@@ -134,6 +134,45 @@ def test_manual_apply_writes_verifies_and_audits(harness):
     assert harness.audits[0]["source"] == "manual" and harness.audits[0]["nba_date"] == date(2026, 10, 20)
     assert harness.updates == [(1, "applied", 200, None)]
     assert harness.read_periods == [None, None]                 # today's board, today's re-read
+
+
+@pytest.mark.unit
+def test_an_ai_chip_s_moves_are_checked_before_the_write_and_marked_sent_after(harness, monkeypatch):
+    """A lineup chip from the AI desk sends through this route with `proposal_id`: the proposals
+    module checks it is the same moves on the same day before ESPN is asked, and records the send
+    with the write's audit id after. A chip that isn't this move stops the write."""
+    from core.errors import AppError
+    from services.ai import proposals
+    seen = {"for_send": [], "sent": []}
+
+    async def for_send(proposal_id, user_id, team_id, **kw):
+        seen["for_send"].append((proposal_id, user_id, team_id, kw))
+        if proposal_id == 99:
+            raise AppError("AI_PROPOSAL_MISMATCH", "The move being sent is not the one this chip proposes", status_code=422)
+        return SimpleNamespace(id=proposal_id)
+
+    async def mark_sent(proposal_id, **kw):
+        seen["sent"].append((proposal_id, kw))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+
+    harness.reads = [state(board()), state(after_swap(), version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, proposal_id=40)))
+    assert resp.data.verified is True and resp.data.audit_id == 1
+    assert seen["for_send"] == [(40, 11, 21, {"kind": "lineup", "scoring_period_id": 12,
+                                              "moves": [(11, BE, UT), (8, UT, BE)]})]
+    assert seen["sent"] == [(40, {"audit_id": 1})]
+
+    harness.reads = [state(board())]
+    with pytest.raises(AppError) as err:
+        asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, proposal_id=99)))
+    assert err.value.error_code == "AI_PROPOSAL_MISMATCH"
+    assert len(harness.writer_calls) == 1 and len(seen["sent"]) == 1      # nothing more went to ESPN
+
+    # The Week desk's own moves never touch the proposals module
+    harness.reads = [state(board()), state(after_swap(), version="v2")]
+    asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+    assert len(seen["for_send"]) == 2 and len(seen["sent"]) == 1
 
 
 @pytest.mark.unit
