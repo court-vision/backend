@@ -13,7 +13,7 @@ and "who should I stream", over the projection and the planners the Week desk us
   a value function of the agent's choosing (`services.stream_value`): the league's
   own measure, one category, or the matchup's close categories.
 
-Timing (the ESPN rules the lanes follow): the fantasy day rolls over at 02:00 ET; a
+Timing (the ESPN rules the lanes follow): the fantasy day rolls over at 3 AM ET; a
 move made after the day's first tip-off counts from the next day. Every id the
 tools take or return is an NBA player id; provider ids never leave the server.
 

@@ -371,7 +371,7 @@ def test_a_locked_add_the_day_before_is_still_sent(h):
 
 @pytest.mark.unit
 def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h):
-    # 2:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
+    # 3:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN",
                                                                        game=True, started=True)])
@@ -381,7 +381,7 @@ def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h
 
 @pytest.mark.unit
 def test_the_day_before_waits_for_tonights_first_tip_on_the_fresh_board(h):
-    # Scheduled while the schedule showed no games tonight (a 2:00 AM window); they have landed since.
+    # Scheduled while the schedule showed no games tonight (a 3:00 AM window); they have landed since.
     # Sent now it would be same-day business on ESPN, and Edwards would lose his game tonight.
     arrange_day_before(h, drop_game=True)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),

@@ -11,7 +11,7 @@ Timing. ESPN counts a transaction for the day it is made only before that day's
 first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
 (the player dropped plays out D-1) and takes effect for D. So the first attempt
 for day D is the first tip-off of D-1, TIP_MARGIN after it and checked again on
-the board it is sent from (the rollover into D-1, 02:00 ET, when D-1 has no
+the board it is sent from (the rollover into D-1, 3 AM ET, when D-1 has no
 games), and the add and the drop go out as one transaction. On that attempt
 today's locks are ESPN's business, not ours: the pre-checks skip them and
 an ESPN refusal other than a full roster or a position limit gets one more try
@@ -109,6 +109,7 @@ from services.lineup_read_service import LineupReadService
 from services.providers import get_provider_adapter, unavailable_message
 from services.providers.identity import nba_ids_by_espn_id
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService, _moves_json
+from services.schedule_service import FANTASY_DAY_ROLLOVER_ET
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("scheduled_pickup")
@@ -118,7 +119,7 @@ DEFERRED = "deferred"
 IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt runs
 
 EASTERN = pytz.timezone("US/Eastern")
-ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
+ROLLOVER_ET = FANTASY_DAY_ROLLOVER_ET   # 3 AM ET: the ESPN fantasy day starts here, as schedule_service.get_nba_today counts it
 RETRY = timedelta(minutes=10)
 TIP_MARGIN = timedelta(minutes=2)   # the day-before swap waits this long past the first tip, clear of ESPN's cutoff
 WAIVER_RETRY = timedelta(minutes=60)
@@ -188,7 +189,7 @@ def et_at(d: date, t: time) -> datetime:
 
 
 def rollover_at(d: date) -> datetime:
-    """When the ESPN fantasy day `d` begins (02:00 ET), as UTC."""
+    """When the ESPN fantasy day `d` begins (3 AM ET, `schedule_service.FANTASY_DAY_ROLLOVER_ET`), as UTC."""
     return et_at(d, ROLLOVER_ET)
 
 

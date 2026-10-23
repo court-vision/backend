@@ -47,7 +47,7 @@ def test_first_attempt_is_the_previous_days_first_tip():
 def test_no_games_the_day_before_means_the_rollover_into_that_day():
     w = window(tips={D: time(19, 30)})
     assert w.rule == "rollover_into_prev"
-    assert w.not_before_at == utc(2026, 11, 11, 7, 0)      # 2 AM EST Wed
+    assert w.not_before_at == utc(2026, 11, 11, 8, 0)      # 3 AM EST Wed
 
 
 @pytest.mark.unit
@@ -62,8 +62,8 @@ def test_rollover_crosses_both_dst_switches_without_raising():
     fall = svc.rollover_at(date(2026, 11, 1))
     spring = svc.rollover_at(date(2027, 3, 14))
     assert fall.tzinfo is timezone.utc and spring.tzinfo is timezone.utc
-    assert fall == utc(2026, 11, 1, 7, 0)                  # 2 AM EST (the clocks just fell back)
-    assert abs((spring - utc(2027, 3, 14, 7, 0)).total_seconds()) <= 3600
+    assert fall == utc(2026, 11, 1, 8, 0)                  # 3 AM EST (the clocks just fell back)
+    assert spring == utc(2027, 3, 14, 7, 0)                # 3 AM EDT (the clocks just sprang forward)
 
 
 @pytest.mark.unit
