@@ -15,12 +15,22 @@ chain, so a client that handles lineup moves already handles everything here
 or the pool refuses before ESPN is asked. Roster capacity and acquisition
 limits are deliberately NOT pre-checked: ESPN is the authority, and its
 refusal arrives as ROSTER_WRITE_REJECTED carrying ESPN's own sentence.
+
+After today's first tip-off an add is next-day business on ESPN: it goes out
+now, and ESPN puts the player on tomorrow's roster (the player dropped with
+him plays out today). So an add sent then skips today's locks, as the pickup
+executor's swap the day before does, and is checked against tomorrow's board;
+the response still carries today's, which the add leaves as it was, and
+`counts_from` names the day it counts from. A drop on its own keeps today's
+rules.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
+
+import pytz
 
 from core.errors import AppError, ProviderAuthError
 from utils.constants import PROVIDER_AUTH_MESSAGES
@@ -59,6 +69,11 @@ from services.providers.writers import espn_transaction_payload
 
 log = get_logger("roster_transaction")
 
+EASTERN = pytz.timezone("US/Eastern")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class RosterTransactionInvalid(AppError):
@@ -101,6 +116,21 @@ def _scheduled_drop(team_id: int, player_id: int):
 
 def _day_label(d: date) -> str:
     return f"{d:%a %b} {d.day}"
+
+
+def next_day_period(state: LineupState, now: datetime) -> Optional[int]:
+    """The ESPN day an add sent at `now` counts for when that is tomorrow, else None (today).
+    ESPN takes a transaction made after the day's first tip-off as next-day business (the
+    scheduled pickup executor's swap the day before relies on it). None too on a day without
+    games, before the tip, and on the season's last day, which has no tomorrow."""
+    if not state.nba_date or not state.first_game_time_et or state.scoring_period_id is None:
+        return None
+    final = state.final_scoring_period_id
+    if final is not None and state.scoring_period_id >= final:
+        return None
+    tip = EASTERN.localize(datetime.combine(date.fromisoformat(state.nba_date),
+                                            time.fromisoformat(state.first_game_time_et)))
+    return state.scoring_period_id + 1 if now >= tip else None
 
 
 def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: Optional[int]) -> str:
@@ -146,7 +176,11 @@ class RosterTransactionService:
             raise RosterStale(data={"lineup": state.model_dump(mode="json")})
 
         add, drop = req.add_player_id, req.drop_player_id
-        holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop)
+        # Past today's first tip an add (and the drop that rides on it) lands on tomorrow's
+        # roster, so today's locks don't apply to it; ESPN's own answer still does.
+        next_day = next_day_period(state, _now()) if add is not None else None
+        holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
+                                                                      check_locks=next_day is None)
         if drop is not None and holder is not None and drop in await run_db("txn.lane_holder", _lane_holders,
                                                                             team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
@@ -170,10 +204,23 @@ class RosterTransactionService:
         fresh, verified, audit_id = await RosterTransactionService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
             add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
+            verify_scoring_period_id=next_day,
         )
         if req.proposal_id is not None:
             from services.ai import proposals
             await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
+
+        today = date.fromisoformat(state.nba_date)
+        counts_from = today
+        if next_day is not None:
+            # `fresh` is tomorrow's board; the caller keeps today's, read again (ESPN may have
+            # taken an add sent right at the tip for today after all).
+            counts_from = today + timedelta(days=1)
+            try:
+                fresh = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
+            except Exception as exc:
+                log.warning("roster_transaction_today_reread_failed", team_id=team.team_id, error=str(exc))
+                fresh = state
 
         added = _player(add, pool_entry.name, pool_entry.pro_team) if add is not None and pool_entry is not None else None
         dropped = _player(drop, holder.name, holder.team) if drop is not None and holder is not None else None
@@ -182,9 +229,11 @@ class RosterTransactionService:
         return RosterTransactionResp(
             status=ApiStatus.SUCCESS,
             message=", ".join(parts) + f" — sent to {provider_name(league_info.provider)}"
+                    + (f", counts from {_day_label(counts_from)}" if next_day is not None else "")
                     + ("" if verified else ", not yet confirmed"),
             data=RosterTransactionData(lineup=fresh, added=added, dropped=dropped, verified=verified,
-                                       audit_id=audit_id, scoring_period_id=fresh.scoring_period_id),
+                                       audit_id=audit_id, scoring_period_id=fresh.scoring_period_id,
+                                       counts_from=counts_from.isoformat()),
         )
 
     # ---- validation ----
