@@ -883,15 +883,15 @@ async def dismiss(proposal_id: int, user_id: int, now: Optional[datetime] = None
 
 async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, add: Optional[int] = None,
                    drop: Optional[int] = None, scoring_period_id: Optional[int] = None,
-                   moves: Optional[Sequence[tuple[int, int]]] = None,
+                   moves: Optional[Sequence[tuple[int, int]]] = None, board: Optional[LineupState] = None,
                    now: Optional[datetime] = None) -> AiProposal:
     """The proposal a Week desk write says it is sending, checked before the write: the caller's,
     this team's, still proposed and unexpired, and the same move (ESPN ids, kind, day; for a lineup
-    the chip's (player, to-slot) moves on the same day's board) the request carries. A mismatch
-    is refused so a chip can never send a different move than it shows.
-    A lineup's `moves` are (player, to-slot) pairs: where a player starts from is the board's as
-    the client read it to send (`live_moves`), and a move the board already shows is left out, so
-    the request sends some of the chip's moves, at least one, and nothing the chip doesn't propose.
+    the chip's moves on the same day's board) the request carries. A mismatch is refused so a chip
+    can never send a different move than it shows, nor a part of one and be marked sent whole.
+    A lineup's `moves` are (player, to-slot) pairs and `board` the day's board the write read: the
+    request must carry every move the chip still needs on it (`live_moves`: each player from the
+    slot the board has him in, less what it already shows), and nothing else.
     The state is read, not claimed: a dismiss that lands while the write is with ESPN is overtaken
     by `mark_sent` (the move is made either way), and a second send of the same chip is stopped by
     the write itself (the board's version, or the pickup already pending)."""
@@ -906,9 +906,10 @@ async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, a
                              EXPIRED: "This chip expired: the day it was for has started"}[state],
                             data={"state": state})
     if kind == LINEUP:
-        proposed = {(m.player_id, m.to_slot_id) for m in row_moves(row)}
+        # Without the board nothing is known to be needed, and nothing matches
+        needed = {(m.player_id, m.to_slot_id) for m in live_moves(board, row)} if board is not None and row.kind == LINEUP else set()
         same = (row.kind == LINEUP and row.scoring_period_id == scoring_period_id
-                and bool(moves) and set(moves) <= proposed)
+                and bool(needed) and set(moves or []) == needed)
     else:
         same = (row.kind == kind and row.add_player_id == add and row.drop_player_id == drop
                 and (scoring_period_id is None or row.scoring_period_id == scoring_period_id))

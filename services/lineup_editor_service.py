@@ -271,12 +271,12 @@ class LineupEditorService:
                 MoveErrorResp(player_id=e.player_id, code=e.code, message=e.message).model_dump() for e in errors]})
 
         if req.proposal_id is not None:
-            # An AI desk chip: moves it proposes (each player to the slot it names) on the same day's board,
-            # still proposed, before ESPN is asked. Where a player starts from is this board's, checked above.
+            # An AI desk chip: every move it still needs on this board (each player to the slot it names,
+            # from wherever the board has him) and nothing else, still proposed, before ESPN is asked
             from services.ai import proposals  # the proposals module checks moves with this one
             await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.LINEUP,
                                      scoring_period_id=req.expected_scoring_period_id,
-                                     moves=[(m.player_id, m.to_slot_id) for m in moves])
+                                     moves=[(m.player_id, m.to_slot_id) for m in moves], board=state)
 
         fresh, verified, audit_id = await LineupEditorService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,

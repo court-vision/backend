@@ -769,26 +769,39 @@ def test_propose_lineup_refuses_what_the_week_desk_would_and_stores_nothing(boar
 
 
 @pytest.mark.unit
-def test_for_send_matches_a_lineup_chip_s_moves_and_day(stored):
+def test_for_send_matches_a_lineup_chip_s_moves_still_needed_on_the_board_and_its_day(stored):
     stored.rows[40] = lineup_row(id=40)
     swap = [(EDWARDS, UT), (JOKIC, BE)]
-    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW)).id == 40
-    # The order is the client's, and a move the board already shows is left out (where a player
-    # starts from is the board's, not the chip's: the write checks that)
-    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=list(reversed(swap)), now=NOW)).id == 40
-    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap[1:], now=NOW)).id == 40
-    # Nothing at all, another slot, a player the chip doesn't move, another day, another kind
-    for kw in ({"moves": []}, {"moves": [(EDWARDS, PG), (JOKIC, BE)]}, {"moves": [*swap, (KAWHI, BE)]},
-               {"scoring_period_id": 3}, {"kind": "transaction"}):
+    made_on = state(lineup_board())
+    send = lambda **kw: run(mod.for_send(40, 11, 21, now=NOW, **{"kind": "lineup", "scoring_period_id": 2,
+                                                                 "moves": swap, "board": made_on, **kw}))
+    assert send().id == 40
+    # The order is the client's; where a player starts from is the board's, not the chip's (the write checks that)
+    assert send(moves=list(reversed(swap))).id == 40
+    # Nothing at all, a part of the chip (the rest would never go, marked sent whole), another slot, a
+    # player the chip doesn't move, another day, another kind, no board
+    for kw in ({"moves": []}, {"moves": swap[1:]}, {"moves": [(EDWARDS, PG), (JOKIC, BE)]},
+               {"moves": [*swap, (KAWHI, BE)]}, {"scoring_period_id": 3}, {"kind": "transaction"}, {"board": None}):
         with pytest.raises(AppError) as err:
-            run(mod.for_send(40, 11, 21, now=NOW, **{"kind": "lineup", "scoring_period_id": 2, "moves": swap, **kw}))
+            send(**kw)
         assert (err.value.error_code, err.value.status_code) == ("AI_PROPOSAL_MISMATCH", 422)
+    # Edwards is at UT already (an earlier day's write carried forward): the chip now needs Jokic's move alone
+    half_done = state([lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False),
+                       lplayer(EDWARDS, "Anthony Edwards", UT, nba_id=NBA_EDWARDS, team="MIN")], counts={"11": 2, "12": 1})
+    assert send(board=half_done, moves=swap[1:]).id == 40
+    with pytest.raises(AppError, match="not the one this chip proposes"):
+        send(board=half_done)
+    # All of it done: nothing is needed, so nothing matches
+    done = state([lplayer(JOKIC, "Nikola Jokic", BE, nba_id=NBA_JOKIC, game=False),
+                  lplayer(EDWARDS, "Anthony Edwards", UT, nba_id=NBA_EDWARDS, team="MIN")])
+    with pytest.raises(AppError, match="not the one this chip proposes"):
+        send(board=done, moves=swap[1:])
     # An add / drop chip can't be sent as a lineup
     with pytest.raises(AppError, match="not the one this chip proposes"):
-        run(mod.for_send(31, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW))
+        run(mod.for_send(31, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, board=made_on, now=NOW))
     stored.rows[40] = lineup_row(id=40, expires_at=NOW)
     with pytest.raises(ConflictError) as err:
-        run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW))
+        send()
     assert err.value.data == {"state": "expired"}
 
 
