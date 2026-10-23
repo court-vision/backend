@@ -24,7 +24,7 @@ under either reading, and `is_limit_refusal` recognises the refusal by its words
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 import pytz
@@ -37,7 +37,6 @@ log = get_logger("acquisitions")
 
 ACQUIRING_TYPES = frozenset({"FREEAGENT", "WAIVER"})
 EASTERN = pytz.timezone("US/Eastern")
-ROLLOVER_ET = time(2, 0)       # an ESPN fantasy day starts here
 
 
 def _limit(value: Any) -> Optional[int]:
@@ -145,7 +144,7 @@ def is_limit_refusal(code: Optional[str], message: Optional[str]) -> bool:
 
 
 def season_start_ms() -> Optional[int]:
-    """When the season's first ESPN day began (its 02:00 ET rollover), as epoch ms; None when the
+    """When the season's first ESPN day began (its 3 AM ET rollover), as epoch ms; None when the
     calendar can't say."""
     from services import schedule_service
 
@@ -154,7 +153,7 @@ def season_start_ms() -> Optional[int]:
     except Exception as exc:  # no calendar: count every add, as ESPN would once the season runs
         log.warning("acquisitions_season_start_unknown", error=str(exc))
         return None
-    start = EASTERN.localize(datetime.combine(opening, ROLLOVER_ET)).astimezone(timezone.utc)
+    start = EASTERN.localize(datetime.combine(opening, schedule_service.FANTASY_DAY_ROLLOVER_ET)).astimezone(timezone.utc)
     return int(start.timestamp() * 1000)
 
 

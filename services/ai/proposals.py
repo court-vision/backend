@@ -24,9 +24,9 @@ ids, and the chip the frontend gets (`CHIP_KEY`, popped off the result by the
 turn loop) carries the ESPN ids the writes take.
 
 States: `proposed` (stageable), `sent`, `dismissed`; `expired` is read off
-`expires_at` -- for a move today the day's first tip-off (or the rollover into
-the next day when the day has no games), for a scheduled move the rollover into
-its day, when scheduling for it closes -- never stored. A refused send leaves the
+`expires_at` -- for a move today the day's first tip-off (or the 3 AM ET turn
+into the next day when the day has no games), for a scheduled move the turn into
+its day, when ESPN reaches it and scheduling for it closes -- never stored. A refused send leaves the
 row proposed for a retry from the tray. A dismiss can't overtake a send: once
 the write is with ESPN the move is made, so `mark_sent` wins the race and
 `dismiss` only ever moves a row that is still proposed.
@@ -161,9 +161,10 @@ def summary_of(kind: str, add_name: Optional[str], drop_name: Optional[str], nba
 def expires_at_for(kind: str, nba_date: date, first_tip: Optional[time], now: datetime) -> datetime:
     """When the chip stops being sendable. A move today: the day's first tip-off (after it a move
     counts for the next day, which is not what the chip says), or the rollover into the next day
-    when the day has no games or its tip has passed. A scheduled move: the rollover into its day,
-    when ESPN's day begins and a pickup can no longer be scheduled for it (the scheduled pickup
-    route refuses the day as `not_future`; the move is then a transaction, which is another chip)."""
+    (3 AM ET, `rollover_at`, the moment `get_nba_today` and ESPN's own scoring period turn) when the
+    day has no games or its tip has passed. A scheduled move: the rollover into its day, when ESPN's
+    day begins and a pickup can no longer be scheduled for it (the scheduled pickup route refuses
+    the day as `not_future`; the move is then a transaction, which is another chip)."""
     if kind == SCHEDULED:
         return rollover_at(nba_date)
     if first_tip is not None:
