@@ -24,9 +24,9 @@ ids, and the chip the frontend gets (`CHIP_KEY`, popped off the result by the
 turn loop) carries the ESPN ids the writes take.
 
 States: `proposed` (stageable), `sent`, `dismissed`; `expired` is read off
-`expires_at` -- for a move today the day's first tip-off (or the rollover into
-the next day when the day has no games), for a scheduled move the rollover into
-its day, when scheduling for it closes -- never stored. A refused send leaves the
+`expires_at` -- for a move today the day's first tip-off (or the 3 AM ET turn
+into the next day when the day has no games), for a scheduled move the turn into
+its day, when ESPN reaches it and scheduling for it closes -- never stored. A refused send leaves the
 row proposed for a retry from the tray. A dismiss can't overtake a send: once
 the write is with ESPN the move is made, so `mark_sent` wins the race and
 `dismiss` only ever moves a row that is still proposed.
@@ -59,7 +59,7 @@ from services.roster_transaction_service import (
     _lane_holders,
     _scheduled_drop,
 )
-from services.scheduled_pickup_service import et_at, rollover_at
+from services.scheduled_pickup_service import et_at
 
 log = get_logger("ai.proposals")
 
@@ -158,19 +158,27 @@ def summary_of(kind: str, add_name: Optional[str], drop_name: Optional[str], nba
     return f"{move}, {when}. Scheduled: made for you ahead of {nba_date:%A}'s games."
 
 
+def day_begins_at(d: date) -> datetime:
+    """When ESPN's fantasy day `d` begins, as UTC: 3 AM ET (`schedule_service.FANTASY_DAY_ROLLOVER_ET`),
+    the moment `get_nba_today` and ESPN's own current scoring period turn. Not the scheduled pickup
+    service's `rollover_at` (02:00 ET, the executor's clock), which runs an hour ahead of ESPN's day:
+    a chip lives by the day as the routes read it, and one made in that hour was born expired."""
+    return et_at(d, schedule_service.FANTASY_DAY_ROLLOVER_ET)
+
+
 def expires_at_for(kind: str, nba_date: date, first_tip: Optional[time], now: datetime) -> datetime:
     """When the chip stops being sendable. A move today: the day's first tip-off (after it a move
-    counts for the next day, which is not what the chip says), or the rollover into the next day
-    when the day has no games or its tip has passed. A scheduled move: the rollover into its day,
-    when ESPN's day begins and a pickup can no longer be scheduled for it (the scheduled pickup
-    route refuses the day as `not_future`; the move is then a transaction, which is another chip)."""
+    counts for the next day, which is not what the chip says), or the turn into the next day when
+    the day has no games or its tip has passed. A scheduled move: the turn into its day, when ESPN's
+    day begins and a pickup can no longer be scheduled for it (the scheduled pickup route refuses
+    the day as `not_future`; the move is then a transaction, which is another chip)."""
     if kind == SCHEDULED:
-        return rollover_at(nba_date)
+        return day_begins_at(nba_date)
     if first_tip is not None:
         tip = et_at(nba_date, first_tip)
         if tip > now:
             return tip
-    return rollover_at(nba_date + timedelta(days=1))
+    return day_begins_at(nba_date + timedelta(days=1))
 
 
 def _first_tip(d: date) -> Optional[time]:

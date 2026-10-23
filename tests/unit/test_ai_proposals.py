@@ -100,11 +100,23 @@ def test_the_summary_says_the_move_the_day_and_what_sending_does():
 def test_a_chip_expires_at_the_day_s_first_tip_or_the_rollover_after_it():
     tip = mod.et_at(TODAY, time(19, 0))
     assert mod.expires_at_for("transaction", TODAY, time(19, 0), NOW) == tip
-    # Past the tip (or a day with no games), the chip lasts until the day rolls over
-    assert mod.expires_at_for("transaction", TODAY, time(19, 0), tip) == mod.rollover_at(TODAY + timedelta(days=1))
-    assert mod.expires_at_for("transaction", date(2026, 10, 23), None, NOW) == mod.rollover_at(date(2026, 10, 24))
+    # Past the tip (or a day with no games), the chip lasts until ESPN's next day begins
+    assert mod.expires_at_for("transaction", TODAY, time(19, 0), tip) == mod.day_begins_at(TODAY + timedelta(days=1))
+    assert mod.expires_at_for("transaction", date(2026, 10, 23), None, NOW) == mod.day_begins_at(date(2026, 10, 24))
     # A scheduled move lasts until its day begins on ESPN, when a pickup can no longer be scheduled for it
-    assert mod.expires_at_for("scheduled", date(2026, 10, 23), time(19, 0), NOW) == mod.rollover_at(date(2026, 10, 23))
+    assert mod.expires_at_for("scheduled", date(2026, 10, 23), time(19, 0), NOW) == mod.day_begins_at(date(2026, 10, 23))
+
+
+@pytest.mark.unit
+def test_a_chip_made_between_2_and_3_am_et_is_born_live():
+    # ESPN's day turns at 3 AM ET (schedule_service.get_nba_today), an hour after the pickup executor's
+    # 02:00 ET rollover_at: at 2:20 AM ET on Friday, Thursday is still today and a Friday pickup still
+    # schedules, so neither chip may expire before Friday begins (James's Friday chip arrived expired).
+    late = datetime(2026, 10, 23, 6, 20, tzinfo=timezone.utc)          # 2:20 AM EDT, Friday Oct 23
+    friday_begins = datetime(2026, 10, 23, 7, 0, tzinfo=timezone.utc)  # 3:00 AM EDT
+    assert mod.day_begins_at(date(2026, 10, 23)) == friday_begins
+    assert mod.expires_at_for("scheduled", date(2026, 10, 23), time(19, 0), late) == friday_begins
+    assert mod.expires_at_for("transaction", date(2026, 10, 22), time(19, 0), late) == friday_begins
 
 
 @pytest.mark.unit
@@ -334,7 +346,7 @@ def test_a_move_for_a_later_day_is_scheduled_for_that_espn_day(proposing):
 
     f = proposing.inserted[0]
     assert (f["kind"], f["day"], f["scoring_period_id"], f["nba_date"]) == ("scheduled", 4, 4, date(2026, 10, 23))
-    assert f["expires_at"] == mod.rollover_at(date(2026, 10, 23))      # when ESPN's Friday begins, scheduling for it closes
+    assert f["expires_at"] == mod.day_begins_at(date(2026, 10, 23))      # when ESPN's Friday begins, scheduling for it closes
     assert f["summary"] == "Add Kawhi Leonard, drop Anthony Edwards, Fri 10/23. Scheduled: made for you ahead of Friday's games."
     assert out["kind"] == "scheduled" and out[mod.CHIP_KEY]["scoring_period_id"] == 4
     assert proposing.validate_args == (KAWHI, EDWARDS, True)
