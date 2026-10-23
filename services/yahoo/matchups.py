@@ -263,7 +263,7 @@ class YahooMatchupService(YahooRosterService):
             projected_margin=projected_margin,
             # Yahoo exposes only week_start/week_end -- there is no day-granular
             # watermark to read. Derive it from our own calendar on the fantasy
-            # day (2 AM ET), which is when a provider's day flips; using the
+            # day (3 AM ET), which is when a provider's day flips; using the
             # 6 AM ET game-date rule here would report the previous day all
             # morning and make every Yahoo baseline look permanently stale.
             scoring_period_id=season_day(get_nba_today()),

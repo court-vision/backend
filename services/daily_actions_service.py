@@ -13,7 +13,7 @@ staged on its own; the client re-reads after any write. Never writes.
 The pickup row is a streaming move, not an upgrade engine: the player to drop is
 the lowest-value roster player with no game today, the pickup is the day's best
 free agent, and the value comparison only checks that the two are comparable.
-Two clocks say "today" — ESPN's scoring period for the board, the 2 AM ET rule
+Two clocks say "today" — ESPN's scoring period for the board, the 3 AM ET rule
 for the streamer pool — so the swap is offered only when both agree on the date.
 
 A drop candidate's value is the board's recent average only when that average

@@ -91,33 +91,33 @@ def utc(*args) -> datetime:
 
 
 @pytest.mark.parametrize("now,day,expected", [
-    (utc(2026, 3, 4, 6, 50), date(2026, 3, 3), 600),          # 1:50 AM EST: ten minutes left
-    (utc(2026, 3, 4, 7, 0), date(2026, 3, 4), 86_400),        # 2:00 AM EST: a fresh day
-    (utc(2026, 3, 4, 20, 0), date(2026, 3, 4), 11 * 3600),    # 3 PM EST
-    (utc(2026, 10, 14, 5, 30), date(2026, 10, 13), 1800),     # 1:30 AM EDT: still the 13th
+    (utc(2026, 3, 4, 7, 50), date(2026, 3, 3), 600),          # 2:50 AM EST: ten minutes left
+    (utc(2026, 3, 4, 8, 0), date(2026, 3, 4), 86_400),        # 3:00 AM EST: a fresh day
+    (utc(2026, 3, 4, 20, 0), date(2026, 3, 4), 12 * 3600),    # 3 PM EST
+    (utc(2026, 10, 14, 6, 30), date(2026, 10, 13), 1800),     # 2:30 AM EDT: still the 13th
 ])
-def test_seconds_left_counts_to_the_next_2am_eastern(now, day, expected):
+def test_seconds_left_counts_to_the_next_3am_eastern(now, day, expected):
     assert schedule_service.seconds_left_in_fantasy_day(day, now) == expected
 
 
 def test_seconds_left_across_the_spring_forward_night():
-    """2026-03-08: 2 AM EST never happens; the clock jumps to 3 AM EDT (07:00 UTC)."""
+    """2026-03-08: 2 AM EST never happens; the clock jumps to 3 AM EDT (07:00 UTC), and the day turns."""
     assert schedule_service.seconds_left_in_fantasy_day(date(2026, 3, 7), utc(2026, 3, 8, 6, 59)) == 60
 
 
 def test_seconds_left_across_the_fall_back_night():
-    """2026-11-01: 1 AM-2 AM repeats; the day turns at 2 AM EST (07:00 UTC), after both."""
-    assert schedule_service.seconds_left_in_fantasy_day(date(2026, 10, 31), utc(2026, 11, 1, 5, 30)) == 5400
+    """2026-11-01: 1 AM-2 AM repeats; the day turns at 3 AM EST (08:00 UTC), after both."""
+    assert schedule_service.seconds_left_in_fantasy_day(date(2026, 10, 31), utc(2026, 11, 1, 5, 30)) == 9000
 
 
 def test_a_day_already_over_has_one_second_left():
     """A body built a moment before the rollover and served after it is not kept."""
-    assert schedule_service.seconds_left_in_fantasy_day(date(2026, 3, 3), utc(2026, 3, 4, 7, 0, 5)) == 1
+    assert schedule_service.seconds_left_in_fantasy_day(date(2026, 3, 3), utc(2026, 3, 4, 8, 0, 5)) == 1
 
 
 @pytest.mark.parametrize("start", [
     "2026-03-04T15:00:00Z", "2026-03-08T06:30:00Z", "2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z",
-    "2026-12-31T06:59:00Z",
+    "2026-12-31T06:59:00Z", "2026-12-31T07:59:00Z",
 ])
 def test_the_rollover_is_exactly_when_get_nba_today_moves_on(start):
     with freeze_time(start):
