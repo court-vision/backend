@@ -551,9 +551,44 @@ def test_after_the_first_tip_tomorrows_board_unreadable_checks_the_add_on_todays
 
 
 @pytest.mark.unit
-def test_after_the_first_tip_a_drop_alone_keeps_todays_lock(harness, monkeypatch):
+def test_after_the_first_tip_a_drop_alone_goes_now_and_he_plays_out_today(harness, monkeypatch):
+    """James, 2026-10-23: drops behave as adds do. Jokic's game has started; dropped now, ESPN
+    takes him off tomorrow's roster and his game tonight still counts."""
     monkeypatch.setattr(svc, "_now", lambda: EVENING)
-    _invalid(harness, req(drop=JOKIC), "drop_locked", JOKIC)
+    today = board(locked=True)
+    harness.reads = [state(today), state(board(), period=2, nba_date="2026-10-21"),
+                     state([player(EDWARDS, "Anthony Edwards", BE, team="MIN")], period=2, nba_date="2026-10-21",
+                           version="t2"),
+                     state(today)]
+    resp = apply(req(drop=JOKIC))
+    d = resp.data
+    assert harness.read_days == [None, 2, 2, None]
+    assert d.verified is True and d.counts_from == "2026-10-21" and d.lineup.scoring_period_id == 1
+    assert harness.writer_calls[0]["scoring_period_id"] == 1
+    assert resp.message == "Dropped Nikola Jokic — sent to ESPN, counts from Wed Oct 21"
+
+
+@pytest.mark.unit
+def test_a_drop_espn_took_for_today_right_at_the_tip_counts_today(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 20, 23, 0, 30, tzinfo=timezone.utc))
+    left = [player(EDWARDS, "Anthony Edwards", BE, team="MIN")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(left, period=2, nba_date="2026-10-21"), state(left, version="v2")]
+    d = apply(req(drop=JOKIC)).data
+    assert d.verified is True and d.counts_from == "2026-10-20"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_dropping_a_player_added_tonight_counts_from_tomorrow(harness, monkeypatch):
+    # Kawhi came in for Edwards an hour ago: on tomorrow's roster only, so never on today's
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state([player(JOKIC, "Nikola Jokic")], period=2, nba_date="2026-10-21"), state(today)]
+    resp = apply(req(drop=KAWHI))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-21"
+    assert resp.message == "Dropped Kawhi Leonard — sent to ESPN, counts from Wed Oct 21"
 
 
 @pytest.mark.unit

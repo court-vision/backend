@@ -16,13 +16,13 @@ or the pool refuses before ESPN is asked. Roster capacity and acquisition
 limits are deliberately NOT pre-checked: ESPN is the authority, and its
 refusal arrives as ROSTER_WRITE_REJECTED carrying ESPN's own sentence.
 
-After today's first tip-off an add is next-day business on ESPN: it goes out
-now, and ESPN puts the player on tomorrow's roster (the player dropped with
-him plays out today). So an add sent then skips today's locks, as the pickup
-executor's swap the day before does, and is checked against tomorrow's board;
-the response still carries today's, which the add leaves as it was, and
-`counts_from` names the day it counts from. A drop on its own keeps today's
-rules.
+After today's first tip-off a transaction is next-day business on ESPN: it
+goes out now, and ESPN applies it to tomorrow's roster (an added player joins
+tomorrow, a dropped one plays out today). So one sent then skips today's locks,
+as the pickup executor's swap the day before does, and is checked against
+tomorrow's board; the response still carries today's, which the move leaves as
+it was, and `counts_from` names the day it counts from. Adds and drops alone
+behave the same (James, 2026-10-23).
 """
 
 from __future__ import annotations
@@ -119,13 +119,13 @@ def _day_label(d: date) -> str:
 
 
 def next_day_period(state: LineupState, now: datetime) -> Optional[int]:
-    """Tomorrow's ESPN day when an add sent at `now` may count from it, else None (today).
+    """Tomorrow's ESPN day when a move sent at `now` may count from it, else None (today).
     ESPN takes a transaction made after the day's first tip-off as next-day business (the
     scheduled pickup executor's swap the day before relies on it). Right at the tip ESPN may
     still take it for today, so the day it counts from is read off ESPN's boards after the
     write (`apply`). None too on a day without games, before the tip, on the season's last
     day, which has no tomorrow, and when ESPN reports no last day: tomorrow's board can't
-    then be read to check the add."""
+    then be read to check the move."""
     if not state.nba_date or not state.first_game_time_et or state.scoring_period_id is None:
         return None
     final = state.final_scoring_period_id
@@ -179,10 +179,10 @@ class RosterTransactionService:
             raise RosterStale(data={"lineup": state.model_dump(mode="json")})
 
         add, drop = req.add_player_id, req.drop_player_id
-        # Past today's first tip an add (and the drop that rides on it) lands on tomorrow's
-        # roster, so today's locks don't apply to it; ESPN's own answer still does (right at
-        # the tip it may still take the move for today, and refuse a locked drop itself).
-        next_day = next_day_period(state, _now()) if add is not None else None
+        # Past today's first tip a move (an add, the drop riding on it, or a drop alone) lands on
+        # tomorrow's roster, so today's locks don't apply to it; ESPN's own answer still does
+        # (right at the tip it may still take the move for today, and refuse a locked player itself).
+        next_day = next_day_period(state, _now())
         roster = state
         if next_day is not None:
             # ...and is checked against tomorrow's roster, which already holds tonight's earlier
@@ -227,14 +227,21 @@ class RosterTransactionService:
         counts_from = today
         if next_day is not None:
             # `fresh` is tomorrow's board, which holds the move whichever day ESPN took it for;
-            # the caller keeps today's, read again. It names the day: an add ESPN took right at
-            # the tip for today is on it, one for tomorrow (or an unreadable board) is not.
+            # the caller keeps today's, read again. It names the day: a move ESPN took right at
+            # the tip for today shows on it (the add there, the drop gone), one for tomorrow (or
+            # an unreadable board) does not. A player added tonight was never on today's, so
+            # dropping him counts from tomorrow either way.
             try:
                 fresh = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
             except Exception as exc:
                 log.warning("roster_transaction_today_reread_failed", team_id=team.team_id, error=str(exc))
                 fresh = state
-            if not any(p.player_id == add for p in fresh.players):
+            on_today = {p.player_id for p in fresh.players}
+            if add is not None:
+                took_today = add in on_today
+            else:
+                took_today = any(p.player_id == drop for p in state.players) and drop not in on_today
+            if not took_today:
                 counts_from = today + timedelta(days=1)
 
         added = _player(add, pool_entry.name, pool_entry.pro_team) if add is not None and pool_entry is not None else None
