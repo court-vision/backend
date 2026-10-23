@@ -519,6 +519,20 @@ def test_after_the_first_tip_todays_board_unreadable_hands_back_the_one_read_bef
 
 
 @pytest.mark.unit
+def test_an_add_across_espns_day_turn_counts_from_the_new_day(harness, monkeypatch):
+    # Sent just before 3 AM ET; read again just after, today's board is already Wednesday's, the add on it
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 21, 6, 59, 59, tzinfo=timezone.utc))
+    swapped = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21", version="w2")]
+    harness.pool = {KAWHI: pool()}
+    d = apply(req(add=KAWHI, drop=EDWARDS)).data
+    assert d.verified is True and d.counts_from == "2026-10-21"
+    assert d.lineup.roster_version == "w2"
+
+
+@pytest.mark.unit
 def test_after_the_first_tip_a_player_added_tonight_can_be_swapped_out_again(harness, monkeypatch):
     # Kawhi came in for Edwards an hour ago: he is on tomorrow's roster only, Edwards on today's only
     monkeypatch.setattr(svc, "_now", lambda: EVENING)

@@ -226,18 +226,21 @@ class RosterTransactionService:
         today = date.fromisoformat(state.nba_date)
         counts_from = today
         if next_day is not None:
-            # `fresh` is tomorrow's board, which holds the move whichever day ESPN took it for;
-            # the caller keeps today's, read again. It names the day: a move ESPN took right at
-            # the tip for today shows on it (the add there, the drop gone), one for tomorrow (or
-            # an unreadable board) does not. A player added tonight was never on today's, so
-            # dropping him counts from tomorrow either way.
+            # Tomorrow's board holds the move whichever day ESPN took it for, so today's, read
+            # again (`fresh`, which the caller keeps), names the day: a move ESPN took right at the
+            # tip for today shows on it (the add there, the drop gone), one for tomorrow (or an
+            # unreadable board) does not. A player added tonight was never on today's, so dropping
+            # him counts from tomorrow either way. Should ESPN's day turn under the write, `fresh`
+            # is the new day's board, and the move counts from that day.
             try:
                 fresh = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
             except Exception as exc:
                 log.warning("roster_transaction_today_reread_failed", team_id=team.team_id, error=str(exc))
                 fresh = state
             on_today = {p.player_id for p in fresh.players}
-            if add is not None:
+            if fresh.scoring_period_id != state.scoring_period_id:
+                took_today = False
+            elif add is not None:
                 took_today = add in on_today
             else:
                 took_today = any(p.player_id == drop for p in state.players) and drop not in on_today
