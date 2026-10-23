@@ -119,13 +119,13 @@ def _day_label(d: date) -> str:
 
 
 def next_day_period(state: LineupState, now: datetime) -> Optional[int]:
-    """The ESPN day an add sent at `now` counts for when that is tomorrow, else None (today).
+    """Tomorrow's ESPN day when an add sent at `now` may count from it, else None (today).
     ESPN takes a transaction made after the day's first tip-off as next-day business (the
-    scheduled pickup executor's swap the day before relies on it, TIP_MARGIN past the tip, clear
-    of ESPN's cutoff). None too on a day without games, before the tip and its margin, on the
-    season's last day, which has no tomorrow, and when ESPN reports no last day: tomorrow's
-    board can't then be read to check the add."""
-    from services.scheduled_pickup_service import TIP_MARGIN
+    scheduled pickup executor's swap the day before relies on it). Right at the tip ESPN may
+    still take it for today, so the day it counts from is read off ESPN's boards after the
+    write (`apply`). None too on a day without games, before the tip, on the season's last
+    day, which has no tomorrow, and when ESPN reports no last day: tomorrow's board can't
+    then be read to check the add."""
     if not state.nba_date or not state.first_game_time_et or state.scoring_period_id is None:
         return None
     final = state.final_scoring_period_id
@@ -133,7 +133,7 @@ def next_day_period(state: LineupState, now: datetime) -> Optional[int]:
         return None
     tip = EASTERN.localize(datetime.combine(date.fromisoformat(state.nba_date),
                                             time.fromisoformat(state.first_game_time_et)))
-    return state.scoring_period_id + 1 if now >= tip + TIP_MARGIN else None
+    return state.scoring_period_id + 1 if now >= tip else None
 
 
 def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: Optional[int]) -> str:
@@ -180,7 +180,8 @@ class RosterTransactionService:
 
         add, drop = req.add_player_id, req.drop_player_id
         # Past today's first tip an add (and the drop that rides on it) lands on tomorrow's
-        # roster, so today's locks don't apply to it; ESPN's own answer still does.
+        # roster, so today's locks don't apply to it; ESPN's own answer still does (right at
+        # the tip it may still take the move for today, and refuse a locked drop itself).
         next_day = next_day_period(state, _now()) if add is not None else None
         roster = state
         if next_day is not None:
@@ -225,14 +226,16 @@ class RosterTransactionService:
         today = date.fromisoformat(state.nba_date)
         counts_from = today
         if next_day is not None:
-            # `fresh` is tomorrow's board; the caller keeps today's, read again (ESPN may have
-            # taken an add sent right at the tip for today after all).
-            counts_from = today + timedelta(days=1)
+            # `fresh` is tomorrow's board, which holds the move whichever day ESPN took it for;
+            # the caller keeps today's, read again. It names the day: an add ESPN took right at
+            # the tip for today is on it, one for tomorrow (or an unreadable board) is not.
             try:
                 fresh = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
             except Exception as exc:
                 log.warning("roster_transaction_today_reread_failed", team_id=team.team_id, error=str(exc))
                 fresh = state
+            if not any(p.player_id == add for p in fresh.players):
+                counts_from = today + timedelta(days=1)
 
         added = _player(add, pool_entry.name, pool_entry.pro_team) if add is not None and pool_entry is not None else None
         dropped = _player(drop, holder.name, holder.team) if drop is not None and holder is not None else None
@@ -241,7 +244,7 @@ class RosterTransactionService:
         return RosterTransactionResp(
             status=ApiStatus.SUCCESS,
             message=", ".join(parts) + f" — sent to {provider_name(league_info.provider)}"
-                    + (f", counts from {_day_label(counts_from)}" if next_day is not None else "")
+                    + (f", counts from {_day_label(counts_from)}" if counts_from > today else "")
                     + ("" if verified else ", not yet confirmed"),
             data=RosterTransactionData(lineup=fresh, added=added, dropped=dropped, verified=verified,
                                        audit_id=audit_id, scoring_period_id=fresh.scoring_period_id,

@@ -459,8 +459,7 @@ def test_a_board_without_a_period_cannot_be_written(harness):
 @pytest.mark.parametrize("now, tip, final, expected", [
     (MORNING, "19:00", 5, None),                        # before the tip: today
     (EVENING, "19:00", 5, 2),                           # after it: tomorrow
-    (datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc), "19:00", 5, None),   # 19:00 ET on the dot: ESPN may not have cut off
-    (datetime(2026, 10, 20, 23, 2, tzinfo=timezone.utc), "19:00", 5, 2),      # TIP_MARGIN past it, as the executor waits
+    (datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc), "19:00", 5, 2),      # 19:00 ET on the dot
     (EVENING, None, 5, None),                           # a day without games: today until it turns
     (EVENING, "19:00", 1, None),                        # the season's last day has no tomorrow
     (EVENING, "19:00", None, None),                     # no last day reported: tomorrow's board can't be read
@@ -492,6 +491,20 @@ def test_an_add_after_the_first_tip_goes_now_and_is_checked_on_tomorrows_board(h
     assert harness.writer_calls[0]["scoring_period_id"] == 1                  # sent on today's board, as ESPN takes it
     assert harness.audits[0]["period"] == 1 and harness.updates == [(1, "applied", 200, None)]
     assert resp.message == "Added Kawhi Leonard, Dropped Anthony Edwards — sent to ESPN, counts from Wed Oct 21"
+
+
+@pytest.mark.unit
+def test_an_add_espn_took_for_today_right_at_the_tip_counts_today(harness, monkeypatch):
+    # Sent on the minute of the tip, before ESPN cut off: the swap is on today's board as well
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 20, 23, 0, 30, tzinfo=timezone.utc))
+    swapped = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21"), state(swapped, version="v2")]
+    harness.pool = {KAWHI: pool()}
+    resp = apply(req(add=KAWHI, drop=EDWARDS))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-20"
+    assert resp.data.lineup.roster_version == "v2"
+    assert resp.message == "Added Kawhi Leonard, Dropped Anthony Edwards — sent to ESPN"
 
 
 @pytest.mark.unit
