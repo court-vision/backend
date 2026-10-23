@@ -50,10 +50,11 @@ def player(pid, name, slot=UT, *, locked=False, team="DEN"):
     )
 
 
-def state(players, *, can_write=True, reason=None, version="v1", period=1, nba_date="2026-10-20"):
+def state(players, *, can_write=True, reason=None, version="v1", period=1, nba_date="2026-10-20", final=167):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
-        scoring_period_id=period, scoring_period_source="provider", first_game_time_et="19:00",
+        scoring_period_id=period, scoring_period_source="provider", final_scoring_period_id=final,
+        first_game_time_et="19:00",
         slot_counts=COUNTS, slots=[], lock_type="INDIVIDUAL_GAME", players=players,
         can_write=can_write, write_blocked_reason=reason, roster_version=version, fetched_at="now",
     )
@@ -456,12 +457,13 @@ def test_a_board_without_a_period_cannot_be_written(harness):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("now, tip, final, expected", [
-    (MORNING, "19:00", None, None),                     # before the tip: today
-    (EVENING, "19:00", None, 2),                        # after it: tomorrow
-    (datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc), "19:00", None, 2),   # 19:00 ET on the dot
-    (EVENING, None, None, None),                        # a day without games: today until it turns
+    (MORNING, "19:00", 5, None),                        # before the tip: today
+    (EVENING, "19:00", 5, 2),                           # after it: tomorrow
+    (datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc), "19:00", 5, None),   # 19:00 ET on the dot: ESPN may not have cut off
+    (datetime(2026, 10, 20, 23, 2, tzinfo=timezone.utc), "19:00", 5, 2),      # TIP_MARGIN past it, as the executor waits
+    (EVENING, None, 5, None),                           # a day without games: today until it turns
     (EVENING, "19:00", 1, None),                        # the season's last day has no tomorrow
-    (EVENING, "19:00", 5, 2),
+    (EVENING, "19:00", None, None),                     # no last day reported: tomorrow's board can't be read
 ])
 def test_next_day_period(now, tip, final, expected):
     b = state(board()).model_copy(update={"first_game_time_et": tip, "final_scoring_period_id": final})

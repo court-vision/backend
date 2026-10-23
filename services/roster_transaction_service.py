@@ -121,16 +121,19 @@ def _day_label(d: date) -> str:
 def next_day_period(state: LineupState, now: datetime) -> Optional[int]:
     """The ESPN day an add sent at `now` counts for when that is tomorrow, else None (today).
     ESPN takes a transaction made after the day's first tip-off as next-day business (the
-    scheduled pickup executor's swap the day before relies on it). None too on a day without
-    games, before the tip, and on the season's last day, which has no tomorrow."""
+    scheduled pickup executor's swap the day before relies on it, TIP_MARGIN past the tip, clear
+    of ESPN's cutoff). None too on a day without games, before the tip and its margin, on the
+    season's last day, which has no tomorrow, and when ESPN reports no last day: tomorrow's
+    board can't then be read to check the add."""
+    from services.scheduled_pickup_service import TIP_MARGIN
     if not state.nba_date or not state.first_game_time_et or state.scoring_period_id is None:
         return None
     final = state.final_scoring_period_id
-    if final is not None and state.scoring_period_id >= final:
+    if final is None or state.scoring_period_id >= final:
         return None
     tip = EASTERN.localize(datetime.combine(date.fromisoformat(state.nba_date),
                                             time.fromisoformat(state.first_game_time_et)))
-    return state.scoring_period_id + 1 if now >= tip else None
+    return state.scoring_period_id + 1 if now >= tip + TIP_MARGIN else None
 
 
 def idempotency_key(team_id: int, state: LineupState, add: Optional[int], drop: Optional[int]) -> str:
