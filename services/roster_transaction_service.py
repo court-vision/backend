@@ -182,8 +182,17 @@ class RosterTransactionService:
         # Past today's first tip an add (and the drop that rides on it) lands on tomorrow's
         # roster, so today's locks don't apply to it; ESPN's own answer still does.
         next_day = next_day_period(state, _now()) if add is not None else None
+        roster = state
+        if next_day is not None:
+            # ...and is checked against tomorrow's roster, which already holds tonight's earlier
+            # after-tip swaps (a player added an hour ago can be dropped again).
+            try:
+                roster = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots,
+                                                   scoring_period_id=next_day)
+            except Exception as exc:
+                log.warning("roster_transaction_tomorrow_read_failed", team_id=team.team_id, error=str(exc))
         holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                      check_locks=next_day is None)
+                                                                      check_locks=next_day is None, roster=roster)
         if drop is not None and holder is not None and drop in await run_db("txn.lane_holder", _lane_holders,
                                                                             team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
@@ -201,7 +210,7 @@ class RosterTransactionService:
             await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.TRANSACTION,
                                      add=add, drop=drop)
 
-        names = {p.player_id: p.name for p in state.players}
+        names = {p.player_id: p.name for p in [*state.players, *roster.players]}
         if pool_entry is not None:
             names[pool_entry.player_id] = pool_entry.name
         fresh, verified, audit_id = await RosterTransactionService._write(
@@ -244,6 +253,7 @@ class RosterTransactionService:
     @staticmethod
     async def _validate(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
                         *, for_future_day: bool = False, check_locks: bool = True,
+                        roster: Optional[LineupState] = None,
                         ) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
         """The board's answer for the drop and ESPN's pool answer for the add — or the
         first reason the request cannot go. Only the add needs the pool lookup.
@@ -253,14 +263,16 @@ class RosterTransactionService:
         roster / pool facts (on the board, in the league, on another team) count.
         `check_locks=False` is the executor's attempt on the day before: ESPN takes a
         swap made after the day's first tip as next-day business, so today's locks are
-        not consulted — ESPN's own answer is — while a waiver period still refuses."""
+        not consulted — ESPN's own answer is — while a waiver period still refuses.
+        `roster` is the board whose roster the move is checked against when that is not
+        `state`'s (tomorrow's, for an add after today's first tip); the pool stays today's."""
         skip_locks = for_future_day or not check_locks
         if add is None and drop is None:
             raise _invalid("nothing_to_do", "Choose a player to add or a player to drop")
         if add is not None and add == drop:
             raise _invalid("same_player", "The player to add and the player to drop are the same", add)
 
-        on_board = {p.player_id: p for p in state.players}
+        on_board = {p.player_id: p for p in (roster or state).players}
         holder: Optional[LineupPlayer] = None
         if drop is not None:
             holder = on_board.get(drop)

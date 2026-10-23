@@ -478,14 +478,15 @@ def test_an_add_after_the_first_tip_goes_now_and_is_checked_on_tomorrows_board(h
     monkeypatch.setattr(svc, "_now", lambda: EVENING)
     today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
     tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
-    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21", version="t2"),
-                     state(today, version="v1")]
+    harness.reads = [state(today), state(today, period=2, nba_date="2026-10-21"),
+                     state(tomorrow, period=2, nba_date="2026-10-21", version="t2"), state(today, version="v1")]
     harness.pool = {KAWHI: pool(locked=True)}
 
     resp = apply(req(add=KAWHI, drop=EDWARDS))
 
     d = resp.data
-    assert harness.read_days == [None, 2, None]          # the board, tomorrow's to verify, today's to hand back
+    assert harness.read_days == [None, 2, 2, None]       # the board, tomorrow's to check and to verify, today's to hand back
+    assert harness.pool_calls == [([KAWHI], 1)]          # the pool stays today's
     assert d.verified is True and d.counts_from == "2026-10-21"
     assert (d.lineup.scoring_period_id, d.lineup.nba_date, d.scoring_period_id) == (1, "2026-10-20", 1)
     assert harness.writer_calls[0]["scoring_period_id"] == 1                  # sent on today's board, as ESPN takes it
@@ -497,10 +498,43 @@ def test_an_add_after_the_first_tip_goes_now_and_is_checked_on_tomorrows_board(h
 def test_after_the_first_tip_todays_board_unreadable_hands_back_the_one_read_before(harness, monkeypatch):
     monkeypatch.setattr(svc, "_now", lambda: EVENING)
     tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
-    harness.reads = [state(board()), state(tomorrow, period=2, nba_date="2026-10-21"), ProviderTimeout("espn")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(tomorrow, period=2, nba_date="2026-10-21"), ProviderTimeout("espn")]
     harness.pool = {KAWHI: pool()}
     d = apply(req(add=KAWHI, drop=EDWARDS)).data
     assert d.verified is True and d.lineup.scoring_period_id == 1 and d.lineup.roster_version == "v1"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_a_player_added_tonight_can_be_swapped_out_again(harness, monkeypatch):
+    # Kawhi came in for Edwards an hour ago: he is on tomorrow's roster only, Edwards on today's only
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    after = [player(JOKIC, "Nikola Jokic"), player(EMBIID, "Joel Embiid", BE, team="PHI")]
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state(after, period=2, nba_date="2026-10-21"), state(today)]
+    harness.pool = {EMBIID: pool(EMBIID, name="Joel Embiid", team="PHI")}
+    resp = apply(req(add=EMBIID, drop=KAWHI))
+    assert resp.data.verified is True and resp.data.dropped.name == "Kawhi Leonard"
+    assert harness.audits[0]["moves"][1] == {"player_id": KAWHI, "action": "drop", "name": "Kawhi Leonard"}
+
+    # Edwards, gone from tomorrow's roster, can't be dropped a second time
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21")]
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        apply(req(add=EMBIID, drop=EDWARDS))
+    assert exc.value.data["reason"] == "drop_not_on_roster"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_tomorrows_board_unreadable_checks_the_add_on_todays(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), ProviderTimeout("espn"), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state(board())]
+    harness.pool = {KAWHI: pool()}
+    d = apply(req(add=KAWHI, drop=EDWARDS)).data
+    assert d.verified is True and d.dropped.name == "Anthony Edwards"
 
 
 @pytest.mark.unit
