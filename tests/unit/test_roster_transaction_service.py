@@ -12,7 +12,7 @@ unverified re-read, and the verify-read failure that still settles the audit.
 """
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +37,8 @@ LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=552315826, team_nam
                     espn_s2="s2", swid="{SWID}", espn_team_id=1)
 TEAM = SimpleNamespace(team_id=21, user_id=11, league_info_json="{}", league_id=None, league=None)
 JOKIC, EDWARDS, KAWHI, EMBIID = 3112335, 4594268, 6450, 3059318
+MORNING = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)      # 11 AM ET on the board's day, before its 19:00 tip
+EVENING = datetime(2026, 10, 21, 1, 30, tzinfo=timezone.utc)      # 9:30 PM ET, its games under way
 
 
 def player(pid, name, slot=UT, *, locked=False, team="DEN"):
@@ -48,10 +50,11 @@ def player(pid, name, slot=UT, *, locked=False, team="DEN"):
     )
 
 
-def state(players, *, can_write=True, reason=None, version="v1", period=1, nba_date="2026-10-20"):
+def state(players, *, can_write=True, reason=None, version="v1", period=1, nba_date="2026-10-20", final=167):
     return LineupState(
         provider=FantasyProvider.ESPN, team_name="GloatingSoap369", espn_team_id=1, nba_date=nba_date,
-        scoring_period_id=period, scoring_period_source="provider", first_game_time_et="19:00",
+        scoring_period_id=period, scoring_period_source="provider", final_scoring_period_id=final,
+        first_game_time_et="19:00",
         slot_counts=COUNTS, slots=[], lock_type="INDIVIDUAL_GAME", players=players,
         can_write=can_write, write_blocked_reason=reason, roster_version=version, fetched_at="now",
     )
@@ -73,10 +76,11 @@ def pickup(*, id=1, team_id=21, status="pending", drop=EDWARDS, add_name="Kawhi 
 
 @pytest.fixture
 def harness(monkeypatch):
-    h = SimpleNamespace(reads=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[], updates=[],
-                        lane_holders=set(), pickups=[], scheduled_calls=[])
+    h = SimpleNamespace(reads=[], read_days=[], pool={}, pool_calls=[], writer=[], writer_calls=[], audits=[],
+                        updates=[], lane_holders=set(), pickups=[], scheduled_calls=[])
 
     async def fake_read(team_id, league_info, **kwargs):
+        h.read_days.append(kwargs.get("scoring_period_id"))     # None: today's board
         nxt = h.reads.pop(0)
         if isinstance(nxt, Exception):
             raise nxt
@@ -119,6 +123,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(svc, "_audit_insert", audit_insert)
     monkeypatch.setattr(svc, "_audit_update", audit_update)
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
+    monkeypatch.setattr(svc, "_now", lambda: MORNING)                         # before the first tip unless a test moves it
     return h
 
 
@@ -323,6 +328,7 @@ def test_add_and_drop_are_one_transaction_verified_by_the_reread(harness):
 
     d = resp.data
     assert d.verified is True and d.lineup.roster_version == "v2" and d.audit_id == 1 and d.scoring_period_id == 1
+    assert d.counts_from == "2026-10-20" and harness.read_days == [None, None]   # before the tip it counts today
     assert (d.added.player_id, d.added.name, d.added.team) == (KAWHI, "Kawhi Leonard", "LAC")
     assert (d.dropped.player_id, d.dropped.name, d.dropped.team) == (EDWARDS, "Anthony Edwards", "MIN")
     assert resp.message == "Added Kawhi Leonard, Dropped Anthony Edwards — sent to ESPN"
@@ -444,6 +450,169 @@ def test_a_board_without_a_period_cannot_be_written(harness):
     harness.reads = [state(board(), period=None, nba_date=None)]
     with pytest.raises(svc.RosterStale):                                # the request names period 1; the board has none
         apply(req(drop=EDWARDS, period=1))
+
+
+# ---- after today's first tip: an add counts from tomorrow --------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("now, tip, final, expected", [
+    (MORNING, "19:00", 5, None),                        # before the tip: today
+    (EVENING, "19:00", 5, 2),                           # after it: tomorrow
+    (datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc), "19:00", 5, 2),      # 19:00 ET on the dot
+    (EVENING, None, 5, None),                           # a day without games: today until it turns
+    (EVENING, "19:00", 1, None),                        # the season's last day has no tomorrow
+    (EVENING, "19:00", None, None),                     # no last day reported: tomorrow's board can't be read
+])
+def test_next_day_period(now, tip, final, expected):
+    b = state(board()).model_copy(update={"first_game_time_et": tip, "final_scoring_period_id": final})
+    assert svc.next_day_period(b, now) == expected
+
+
+@pytest.mark.unit
+def test_an_add_after_the_first_tip_goes_now_and_is_checked_on_tomorrows_board(harness, monkeypatch):
+    """James, 2026-10-23: an add for tomorrow once today's games have started is a pickup made now,
+    not a scheduled one. ESPN keeps today's roster and puts the swap on tomorrow's: the player
+    dropped plays out tonight even with his game under way, and the add's own lock is today's."""
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(today), state(today, period=2, nba_date="2026-10-21"),
+                     state(tomorrow, period=2, nba_date="2026-10-21", version="t2"), state(today, version="v1")]
+    harness.pool = {KAWHI: pool(locked=True)}
+
+    resp = apply(req(add=KAWHI, drop=EDWARDS))
+
+    d = resp.data
+    assert harness.read_days == [None, 2, 2, None]       # the board, tomorrow's to check and to verify, today's to hand back
+    assert harness.pool_calls == [([KAWHI], 1)]          # the pool stays today's
+    assert d.verified is True and d.counts_from == "2026-10-21"
+    assert (d.lineup.scoring_period_id, d.lineup.nba_date, d.scoring_period_id) == (1, "2026-10-20", 1)
+    assert harness.writer_calls[0]["scoring_period_id"] == 1                  # sent on today's board, as ESPN takes it
+    assert harness.audits[0]["period"] == 1 and harness.updates == [(1, "applied", 200, None)]
+    assert resp.message == "Added Kawhi Leonard, Dropped Anthony Edwards — sent to ESPN, counts from Wed Oct 21"
+
+
+@pytest.mark.unit
+def test_an_add_espn_took_for_today_right_at_the_tip_counts_today(harness, monkeypatch):
+    # Sent on the minute of the tip, before ESPN cut off: the swap is on today's board as well
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 20, 23, 0, 30, tzinfo=timezone.utc))
+    swapped = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21"), state(swapped, version="v2")]
+    harness.pool = {KAWHI: pool()}
+    resp = apply(req(add=KAWHI, drop=EDWARDS))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-20"
+    assert resp.data.lineup.roster_version == "v2"
+    assert resp.message == "Added Kawhi Leonard, Dropped Anthony Edwards — sent to ESPN"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_todays_board_unreadable_hands_back_the_one_read_before(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(tomorrow, period=2, nba_date="2026-10-21"), ProviderTimeout("espn")]
+    harness.pool = {KAWHI: pool()}
+    d = apply(req(add=KAWHI, drop=EDWARDS)).data
+    assert d.verified is True and d.lineup.scoring_period_id == 1 and d.lineup.roster_version == "v1"
+
+
+@pytest.mark.unit
+def test_an_add_across_espns_day_turn_counts_from_the_new_day(harness, monkeypatch):
+    # Sent just before 3 AM ET; read again just after, today's board is already Wednesday's, the add on it
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 21, 6, 59, 59, tzinfo=timezone.utc))
+    swapped = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21"),
+                     state(swapped, period=2, nba_date="2026-10-21", version="w2")]
+    harness.pool = {KAWHI: pool()}
+    d = apply(req(add=KAWHI, drop=EDWARDS)).data
+    assert d.verified is True and d.counts_from == "2026-10-21"
+    assert d.lineup.roster_version == "w2"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_a_player_added_tonight_can_be_swapped_out_again(harness, monkeypatch):
+    # Kawhi came in for Edwards an hour ago: he is on tomorrow's roster only, Edwards on today's only
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    after = [player(JOKIC, "Nikola Jokic"), player(EMBIID, "Joel Embiid", BE, team="PHI")]
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state(after, period=2, nba_date="2026-10-21"), state(today)]
+    harness.pool = {EMBIID: pool(EMBIID, name="Joel Embiid", team="PHI")}
+    resp = apply(req(add=EMBIID, drop=KAWHI))
+    assert resp.data.verified is True and resp.data.dropped.name == "Kawhi Leonard"
+    assert harness.audits[0]["moves"][1] == {"player_id": KAWHI, "action": "drop", "name": "Kawhi Leonard"}
+
+    # Edwards, gone from tomorrow's roster, can't be dropped a second time
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21")]
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        apply(req(add=EMBIID, drop=EDWARDS))
+    assert exc.value.data["reason"] == "drop_not_on_roster"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_tomorrows_board_unreadable_checks_the_add_on_todays(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), ProviderTimeout("espn"), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state(board())]
+    harness.pool = {KAWHI: pool()}
+    d = apply(req(add=KAWHI, drop=EDWARDS)).data
+    assert d.verified is True and d.dropped.name == "Anthony Edwards"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_a_drop_alone_goes_now_and_he_plays_out_today(harness, monkeypatch):
+    """James, 2026-10-23: drops behave as adds do. Jokic's game has started; dropped now, ESPN
+    takes him off tomorrow's roster and his game tonight still counts."""
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = board(locked=True)
+    harness.reads = [state(today), state(board(), period=2, nba_date="2026-10-21"),
+                     state([player(EDWARDS, "Anthony Edwards", BE, team="MIN")], period=2, nba_date="2026-10-21",
+                           version="t2"),
+                     state(today)]
+    resp = apply(req(drop=JOKIC))
+    d = resp.data
+    assert harness.read_days == [None, 2, 2, None]
+    assert d.verified is True and d.counts_from == "2026-10-21" and d.lineup.scoring_period_id == 1
+    assert harness.writer_calls[0]["scoring_period_id"] == 1
+    assert resp.message == "Dropped Nikola Jokic — sent to ESPN, counts from Wed Oct 21"
+
+
+@pytest.mark.unit
+def test_a_drop_espn_took_for_today_right_at_the_tip_counts_today(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: datetime(2026, 10, 20, 23, 0, 30, tzinfo=timezone.utc))
+    left = [player(EDWARDS, "Anthony Edwards", BE, team="MIN")]
+    harness.reads = [state(board()), state(board(), period=2, nba_date="2026-10-21"),
+                     state(left, period=2, nba_date="2026-10-21"), state(left, version="v2")]
+    d = apply(req(drop=JOKIC)).data
+    assert d.verified is True and d.counts_from == "2026-10-20"
+
+
+@pytest.mark.unit
+def test_after_the_first_tip_dropping_a_player_added_tonight_counts_from_tomorrow(harness, monkeypatch):
+    # Kawhi came in for Edwards an hour ago: on tomorrow's roster only, so never on today's
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(today), state(tomorrow, period=2, nba_date="2026-10-21"),
+                     state([player(JOKIC, "Nikola Jokic")], period=2, nba_date="2026-10-21"), state(today)]
+    resp = apply(req(drop=KAWHI))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-21"
+    assert resp.message == "Dropped Kawhi Leonard — sent to ESPN, counts from Wed Oct 21"
+
+
+@pytest.mark.unit
+def test_on_the_seasons_last_day_an_add_after_the_tip_keeps_todays_locks(harness, monkeypatch):
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    harness.reads = [state(board(locked=True)).model_copy(update={"final_scoring_period_id": 1})]
+    harness.pool = {KAWHI: pool()}
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        apply(req(add=KAWHI, drop=JOKIC))
+    assert exc.value.data["reason"] == "drop_locked"
 
 
 # ---- the executor's day-before check ---------------------------------------------------

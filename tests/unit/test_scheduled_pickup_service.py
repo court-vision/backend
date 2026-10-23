@@ -1098,7 +1098,8 @@ def test_cancel_outcomes(h, monkeypatch):
 
 
 @pytest.mark.unit
-def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
+def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h, monkeypatch):
+    monkeypatch.setattr(txn, "_now", lambda: datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc))   # Wed 11 AM, before the tip
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
     from schemas.roster_transaction import RosterTransactionReq
@@ -1110,3 +1111,19 @@ def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
     run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
         add_player_id=KAWHI, expected_scoring_period_id=2, roster_version="v1")))
     assert h.audits[0]["source"] == "manual"
+
+
+@pytest.mark.unit
+def test_after_the_tip_the_manual_add_is_the_executors_next_day_swap(h, monkeypatch):
+    """The same swap made by hand after Wednesday's first tip: sent now, today's locks aside, and
+    checked on Thursday's board, as the executor's day-before attempt is."""
+    monkeypatch.setattr(txn, "_now", lambda: NOW)
+    monkeypatch.setattr(txn, "_lane_holders", lambda team_id: set())
+    monkeypatch.setattr(txn, "_scheduled_drop", lambda team_id, player_id: None)
+    arrange_day_before(h, drop_game=True, drop_started=True)
+    from schemas.roster_transaction import RosterTransactionReq
+    resp = run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
+        add_player_id=KAWHI, drop_player_id=EDWARDS, expected_scoring_period_id=2, roster_version="v1")))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-22"
+    assert resp.data.lineup.scoring_period_id == 2 and h.txn_calls[0]["scoring_period_id"] == 2
+    assert h.audits[0]["source"] == "manual" and h.updates[-1][1] == "applied"

@@ -37,12 +37,15 @@ class RosterTransactionPlayer(ApiModel):
 
 
 class RosterTransactionData(ApiModel):
-    lineup: LineupState                          # the board re-read after the write
+    lineup: LineupState                          # today's board, re-read after the write
     added: Optional[RosterTransactionPlayer] = None
     dropped: Optional[RosterTransactionPlayer] = None
     verified: bool                               # the re-read shows the add on the board and the drop gone
     audit_id: Optional[int] = None
     scoring_period_id: Optional[int] = None
+    # The NBA date (YYYY-MM-DD) the change counts from: today's, or tomorrow's for an add sent
+    # after today's first tip-off, which ESPN puts on tomorrow's roster.
+    counts_from: Optional[str] = None
 
 
 class RosterTransactionResp(BaseResponse):

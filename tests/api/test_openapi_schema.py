@@ -173,7 +173,7 @@ class TestRosterWriteContracts:
         assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version", "proposal_id"}
         assert set(schemas["RosterTransactionReq"]["required"]) == {"expected_scoring_period_id", "roster_version"}
         data = schemas["RosterTransactionData"]["properties"]
-        assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id"}
+        assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id", "counts_from"}
         assert data["lineup"]["$ref"].endswith("/LineupState")
         assert set(schemas["StreamerPlayerResp"]["properties"]) >= {"acquisition_status", "waivers_until"}
         assert set(schemas["StreamerData"]["properties"]) >= {"start_date", "end_date", "upcoming"}
