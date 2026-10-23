@@ -139,8 +139,9 @@ def test_manual_apply_writes_verifies_and_audits(harness):
 @pytest.mark.unit
 def test_an_ai_chip_s_moves_are_checked_before_the_write_and_marked_sent_after(harness, monkeypatch):
     """A lineup chip from the AI desk sends through this route with `proposal_id`: the proposals
-    module checks it is the same moves on the same day before ESPN is asked, and records the send
-    with the write's audit id after. A chip that isn't this move stops the write."""
+    module checks they are moves the chip proposes (each player and the slot he goes to; where he
+    starts from is this board's, checked here) on the same day before ESPN is asked, and records the
+    send with the write's audit id after. A chip that isn't this move stops the write."""
     from core.errors import AppError
     from services.ai import proposals
     seen = {"for_send": [], "sent": []}
@@ -160,7 +161,7 @@ def test_an_ai_chip_s_moves_are_checked_before_the_write_and_marked_sent_after(h
     resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, proposal_id=40)))
     assert resp.data.verified is True and resp.data.audit_id == 1
     assert seen["for_send"] == [(40, 11, 21, {"kind": "lineup", "scoring_period_id": 12,
-                                              "moves": [(11, BE, UT), (8, UT, BE)]})]
+                                              "moves": [(11, UT), (8, BE)]})]
     assert seen["sent"] == [(40, {"audit_id": 1})]
 
     harness.reads = [state(board())]

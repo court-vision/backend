@@ -771,12 +771,15 @@ def test_propose_lineup_refuses_what_the_week_desk_would_and_stores_nothing(boar
 @pytest.mark.unit
 def test_for_send_matches_a_lineup_chip_s_moves_and_day(stored):
     stored.rows[40] = lineup_row(id=40)
-    swap = [(EDWARDS, BE, UT), (JOKIC, UT, BE)]
+    swap = [(EDWARDS, UT), (JOKIC, BE)]
     assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap, now=NOW)).id == 40
-    # The order is the client's
+    # The order is the client's, and a move the board already shows is left out (where a player
+    # starts from is the board's, not the chip's: the write checks that)
     assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=list(reversed(swap)), now=NOW)).id == 40
-    for kw in ({"moves": swap[:1]}, {"moves": [(EDWARDS, BE, PG), (JOKIC, UT, BE)]}, {"scoring_period_id": 3},
-               {"kind": "transaction"}):
+    assert run(mod.for_send(40, 11, 21, kind="lineup", scoring_period_id=2, moves=swap[1:], now=NOW)).id == 40
+    # Nothing at all, another slot, a player the chip doesn't move, another day, another kind
+    for kw in ({"moves": []}, {"moves": [(EDWARDS, PG), (JOKIC, BE)]}, {"moves": [*swap, (KAWHI, BE)]},
+               {"scoring_period_id": 3}, {"kind": "transaction"}):
         with pytest.raises(AppError) as err:
             run(mod.for_send(40, 11, 21, now=NOW, **{"kind": "lineup", "scoring_period_id": 2, "moves": swap, **kw}))
         assert (err.value.error_code, err.value.status_code) == ("AI_PROPOSAL_MISMATCH", 422)
@@ -805,10 +808,24 @@ def test_check_reads_the_chip_s_own_day_s_board_for_a_lineup_chip(stored, monkey
     stored.rows[41] = lineup_row(id=41, day=4, scoring_period_id=4, nba_date=date(2026, 10, 23),
                                  expires_at=mod.rollover_at(date(2026, 10, 24)))
     assert run(mod.check(41, 11, TEAM, LEAGUE, NOW))[1] == [] and h.reads == [None, None, 4]
-    # The board moved on since the chip was made: its from-slots are stale, as the Week desk would say
+    # The board moved on since the chip was made (an earlier day's write carried forward, or an edit on
+    # ESPN): the chip's moves are checked from where each player is now, as the Week desk sends its own
     h.today = state([lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False),
                      lplayer(EDWARDS, "Anthony Edwards", PG, nba_id=NBA_EDWARDS, team="MIN")], counts={"0": 1, "11": 1, "12": 1})
-    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["Anthony Edwards is no longer in that slot — refresh the lineup"]
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == []
+    assert [(m.player_id, m.from_slot_id, m.to_slot_id, m.role) for m in mod.live_moves(h.today, stored.rows[40])] == \
+        [(EDWARDS, PG, UT, "shift"), (JOKIC, UT, BE, "bench")]
+    # Half of it is done already: only the rest is checked; all of it: nothing is left to send
+    h.today = state([lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False),
+                     lplayer(EDWARDS, "Anthony Edwards", UT, nba_id=NBA_EDWARDS, team="MIN")], counts={"0": 1, "11": 2, "12": 1})
+    assert [(m.player_id, m.from_slot_id, m.to_slot_id) for m in mod.live_moves(h.today, stored.rows[40])] == [(JOKIC, UT, BE)]
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == []
+    h.today = state([lplayer(JOKIC, "Nikola Jokic", BE, nba_id=NBA_JOKIC, game=False),
+                     lplayer(EDWARDS, "Anthony Edwards", UT, nba_id=NBA_EDWARDS, team="MIN")])
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["This lineup is already set on ESPN."]
+    # A player who left the roster is named, as the Week desk's own check would
+    h.today = state([lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False)])
+    assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["Player is not on this roster"]
     h.today = state(lineup_board(edwards_locked=True), can_write=False, reason="writes_disabled")
     assert run(mod.check(40, 11, TEAM, LEAGUE, NOW))[1] == ["Roster changes are blocked for this team (writes_disabled).",
                                                             "Anthony Edwards is locked (game started)"]

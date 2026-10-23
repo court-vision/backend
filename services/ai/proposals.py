@@ -405,6 +405,22 @@ def row_moves(row: Any) -> list[Move]:
             for m in (row.moves or [])]
 
 
+def live_moves(state: LineupState, row: Any) -> list[Move]:
+    """A lineup row's moves against the board as it is now, as the Week desk sends what it has
+    staged: each player from the slot he is in on this board, less the moves the board already
+    shows. The chip proposes where each player goes; where he starts from is the board's, and an
+    earlier day's write carries forward on ESPN (an edit there moves players too), so the stored
+    slots can be behind it. A player no longer on the board keeps his stored slot, and the check
+    names him."""
+    here = {p.player_id: p.lineup_slot_id for p in state.players}
+    out: list[Move] = []
+    for m in row_moves(row):
+        start = here.get(m.player_id, m.from_slot_id)
+        if start != m.to_slot_id:
+            out.append(Move(m.player_id, start, m.to_slot_id, role_of(start, m.to_slot_id), m.note))
+    return out
+
+
 def _moves_view(row: Any) -> list[dict[str, Any]]:
     """The model's view of a lineup row's moves: NBA ids and slot names only."""
     return [{"player_id": m.get("nba_player_id"), "name": m["name"], "team": m.get("team"),
@@ -837,7 +853,10 @@ async def check(proposal_id: int, user_id: int, team: Any, league_info: LeagueIn
         # The chip's own day's board: today's, or a later day's read as the Week desk's day tab does
         if board.scoring_period_id is not None and row.scoring_period_id > board.scoring_period_id:
             board = await _board(team, league_info, scoring_period_id=row.scoring_period_id)
-        return chip_of(row, now), _lineup_problems(board, row_moves(row))
+        moves = live_moves(board, row)
+        if not moves:
+            return chip_of(row, now), ["This lineup is already set on ESPN."]
+        return chip_of(row, now), _lineup_problems(board, moves)
     add = _Who(row.add_player_id, row.add_nba_id, row.add_name, row.add_team) if row.add_player_id else None
     drop = _Who(row.drop_player_id, row.drop_nba_id, row.drop_name, row.drop_team) if row.drop_player_id else None
     return chip_of(row, now), await _problems(team, league_info, board, row.kind, add, drop, row.nba_date)
@@ -864,12 +883,15 @@ async def dismiss(proposal_id: int, user_id: int, now: Optional[datetime] = None
 
 async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, add: Optional[int] = None,
                    drop: Optional[int] = None, scoring_period_id: Optional[int] = None,
-                   moves: Optional[Sequence[tuple[int, int, int]]] = None,
+                   moves: Optional[Sequence[tuple[int, int]]] = None,
                    now: Optional[datetime] = None) -> AiProposal:
     """The proposal a Week desk write says it is sending, checked before the write: the caller's,
     this team's, still proposed and unexpired, and the same move (ESPN ids, kind, day; for a lineup
-    the same (player, from, to) slot moves on the same day's board) the request carries. A mismatch
+    the chip's (player, to-slot) moves on the same day's board) the request carries. A mismatch
     is refused so a chip can never send a different move than it shows.
+    A lineup's `moves` are (player, to-slot) pairs: where a player starts from is the board's as
+    the client read it to send (`live_moves`), and a move the board already shows is left out, so
+    the request sends some of the chip's moves, at least one, and nothing the chip doesn't propose.
     The state is read, not claimed: a dismiss that lands while the write is with ESPN is overtaken
     by `mark_sent` (the move is made either way), and a second send of the same chip is stopped by
     the write itself (the board's version, or the pickup already pending)."""
@@ -884,8 +906,9 @@ async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, a
                              EXPIRED: "This chip expired: the day it was for has started"}[state],
                             data={"state": state})
     if kind == LINEUP:
+        proposed = {(m.player_id, m.to_slot_id) for m in row_moves(row)}
         same = (row.kind == LINEUP and row.scoring_period_id == scoring_period_id
-                and sorted(moves or []) == sorted((m.player_id, m.from_slot_id, m.to_slot_id) for m in row_moves(row)))
+                and bool(moves) and set(moves) <= proposed)
     else:
         same = (row.kind == kind and row.add_player_id == add and row.drop_player_id == drop
                 and (scoring_period_id is None or row.scoring_period_id == scoring_period_id))

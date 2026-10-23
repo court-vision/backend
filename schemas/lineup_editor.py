@@ -133,8 +133,9 @@ class ApplyLineupMovesReq(ApiModel):
     # later than today edits that day (ESPN's FUTURE_ROSTER).
     expected_scoring_period_id: int = Field(gt=0)
     roster_version: str = Field(min_length=1, max_length=64)
-    # The AI desk's lineup chip these moves send (usr.ai_proposals.id): checked to be the same
-    # moves on the same day before the write, marked sent after it. Omitted for the Week desk's own.
+    # The AI desk's lineup chip these moves send (usr.ai_proposals.id): checked before the write to
+    # be moves the chip proposes (each player to the slot it names, from wherever this board has him)
+    # on the same day, marked sent after it. Omitted for the Week desk's own.
     proposal_id: Optional[int] = Field(default=None, gt=0)
 
 
