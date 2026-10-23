@@ -507,7 +507,8 @@ class TestFantasyTools:
     prefix every earlier request built stays intact, and reached through the owned-team check."""
 
     def test_they_come_last_and_take_nba_ids_only(self):
-        assert [t["name"] for t in tools.AGENT_TOOLS[-3:]] == ["project_matchup", "plan_streams", "propose_move"]
+        assert [t["name"] for t in tools.AGENT_TOOLS[-5:]] == ["project_matchup", "plan_streams", "propose_move",
+                                                              "get_lineup", "propose_lineup"]
         assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
         assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
         moves = tools.AGENT_FANTASY_TOOLS[0]["input_schema"]["properties"]["moves"]
@@ -555,7 +556,7 @@ class TestProposeMove:
     check, and tied to the conversation the turn belongs to."""
 
     def test_the_definition_takes_nba_ids_and_a_reason(self):
-        tool = tools.AGENT_TOOLS[-1]
+        tool = tools.AGENT_TOOLS[-3]
         assert tool["name"] == "propose_move" and tool["input_schema"]["additionalProperties"] is False
         assert set(tool["input_schema"]["properties"]) == {"team_id", "add", "drop", "day", "reason"}
         assert tool["input_schema"]["required"] == ["team_id", "reason"]
@@ -601,3 +602,66 @@ class TestProposeMove:
         out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "x" * 201},
                                          ctx=tools.ToolContext(user_id=42, conversation_id=9)))
         assert out.is_error and "reason" in out.content
+
+
+@pytest.mark.unit
+class TestLineupTools:
+    """The lineup board read and the lineup chip (services/ai/proposals.py): appended after
+    propose_move, reached through the owned-team check; the proposal needs a conversation."""
+
+    def test_the_definitions_take_nba_ids_slot_names_and_a_reason(self):
+        read, propose = tools.AGENT_TOOLS[-2], tools.AGENT_TOOLS[-1]
+        assert read["name"] == "get_lineup" and set(read["input_schema"]["properties"]) == {"team_id", "day"}
+        assert propose["name"] == "propose_lineup" and propose["input_schema"]["additionalProperties"] is False
+        assert set(propose["input_schema"]["properties"]) == {"team_id", "day", "moves", "fill", "reason"}
+        assert propose["input_schema"]["required"] == ["team_id", "reason"]
+        move = propose["input_schema"]["properties"]["moves"]["items"]
+        assert move["additionalProperties"] is False and set(move["properties"]) == {"player_id", "to_slot"}
+        assert move["properties"]["to_slot"]["enum"][:3] == ["PG", "SG", "SF"] and "IR" in move["properties"]["to_slot"]["enum"]
+        assert {"get_lineup", "propose_lineup"} <= tools.AGENT_TOOL_NAMES
+        assert not {"get_lineup", "propose_lineup"} & tools.ASK_TOOL_NAMES
+
+    def test_the_handlers_check_the_team_and_the_proposal_needs_a_conversation(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            if ctx is None:
+                raise tools.AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def read(team, league_info, args):
+            seen["read"] = (team.team_id, args.day)
+            return {"team_id": team.team_id, "players": []}
+
+        async def propose(user_id, conversation_id, team, league_info, args):
+            seen["propose"] = (user_id, conversation_id, team.team_id, args)
+            return {"proposal_id": 40, "chip": {"proposal_id": 40}}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "get_lineup", read)
+        monkeypatch.setattr(tools, "propose_lineup", propose)
+
+        out = asyncio.run(tools.run_tool("get_lineup", {"team_id": 7, "day": 3}, ctx=tools.ToolContext(user_id=42)))
+        assert not out.is_error and seen["owned"] == (42, 7) and seen["read"] == (7, 3)
+
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "moves": [{"player_id": 1, "to_slot": "ut"}],
+                                                            "reason": "plays tonight"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert not out.is_error
+        user_id, conversation_id, team_id, args = seen["propose"]
+        assert (user_id, conversation_id, team_id, args.fill) == (42, 9, 7, False)
+        assert (args.moves[0].player_id, args.moves[0].to_slot) == (1, "UT")
+        assert json.loads(out.content)["chip"] == {"proposal_id": 40}
+
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "fill": True, "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42)))
+        assert out.is_error and "inside a conversation" in out.content
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "name the moves, or set fill" in out.content
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "moves": [{"player_id": 1, "to_slot": "QB"}],
+                                                            "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "unknown slot" in out.content
+        out = asyncio.run(tools.run_tool("get_lineup", {"team_id": 7}))
+        assert out.is_error and "signed-in user" in out.content

@@ -57,7 +57,20 @@ from services.ai.fantasy import (
     plan_streams,
     project_matchup,
 )
-from services.ai.proposals import PROPOSE_MOVE, PROPOSE_MOVE_NAME, ProposeMoveInput, propose_move
+from services.ai.proposals import (
+    GET_LINEUP,
+    GET_LINEUP_NAME,
+    PROPOSE_LINEUP,
+    PROPOSE_LINEUP_NAME,
+    PROPOSE_MOVE,
+    PROPOSE_MOVE_NAME,
+    GetLineupInput,
+    ProposeLineupInput,
+    ProposeMoveInput,
+    get_lineup,
+    propose_lineup,
+    propose_move,
+)
 from services.ai.stats.catalog import METRIC_NAMES, describe as describe_metrics
 from services.ai.stats.compiler import (
     DEFAULT_MIN_GAMES, GAME_METRICS, MAX_METRICS, MAX_PLAYERS, MAX_SEASONS, MAX_TOP, StatsSpec,
@@ -747,6 +760,20 @@ async def _propose_move(args: ProposeMoveInput, ctx: ToolContext | None) -> dict
     return await propose_move(ctx.user_id, ctx.conversation_id, team, league_info, args)
 
 
+async def _get_lineup(args: GetLineupInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, league_info = await _owned(ctx, args.team_id)
+    return await get_lineup(team, league_info, args)
+
+
+async def _propose_lineup(args: ProposeLineupInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if ctx.conversation_id is None:
+        raise AppError("AI_NO_CONVERSATION", "A lineup can only be proposed inside a conversation")
+    team, league_info = await _owned(ctx, args.team_id)
+    return await propose_lineup(ctx.user_id, ctx.conversation_id, team, league_info, args)
+
+
 async def _plan_streams(args: PlanStreamsInput, ctx: ToolContext | None) -> dict[str, Any]:
     team, league_info = await _owned(ctx, args.team_id)
     return await plan_streams(ctx.user_id, team, league_info, args)
@@ -1086,11 +1113,12 @@ AGENT_STATS_TOOLS: list[dict[str, Any]] = [
 ]
 
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
-# stats query, the fantasy logic (step 4), then the proposal (step 5). The order
-# is part of every request's cached prefix: append, never reorder.
+# stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
+# drop, then the lineup board and its moves). The order is part of every request's
+# cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
-    PROPOSE_MOVE,
+    PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
@@ -1125,6 +1153,8 @@ _REGISTRY: dict[str, _Tool] = {
     "project_matchup": _Tool(ProjectMatchupInput, _project_matchup),
     "plan_streams": _Tool(PlanStreamsInput, _plan_streams),
     PROPOSE_MOVE_NAME: _Tool(ProposeMoveInput, _propose_move),
+    GET_LINEUP_NAME: _Tool(GetLineupInput, _get_lineup),
+    PROPOSE_LINEUP_NAME: _Tool(ProposeLineupInput, _propose_lineup),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"
