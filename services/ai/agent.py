@@ -82,6 +82,8 @@ STATUS: dict[str, str] = {
     "project_matchup": "Projecting the matchup",
     "plan_streams": "Planning streams",
     "propose_move": "Checking the move",
+    "get_lineup": "Reading your lineup",
+    "propose_lineup": "Checking the lineup",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
 }

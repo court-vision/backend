@@ -87,17 +87,19 @@ class AiSpend(BaseModel):
 
 
 class AiProposal(BaseModel):
-    """One roster move the agent proposed (`propose_move`), shown as a chip. Player ids are
-    ESPN's, as the writes take them, with the NBA id beside each. `state` is proposed, sent or
-    dismissed; expired is read off `expires_at`. The send route fills `sent_at` and the write's
-    `audit_id` (a transaction) or `pickup_id` (a scheduled pickup)."""
+    """One move the agent proposed, shown as a chip: an add / drop (`propose_move`; `kind`
+    transaction or scheduled, the player columns) or a day's slot moves (`propose_lineup`; `kind`
+    lineup, `moves`). Player ids are ESPN's, as the writes take them, with the NBA id beside each.
+    `state` is proposed, sent or dismissed; expired is read off `expires_at`. The send route fills
+    `sent_at` and the write's `audit_id` (a transaction or lineup write) or `pickup_id` (a
+    scheduled pickup)."""
 
     id = BigAutoField(primary_key=True)
     user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
     conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", on_delete="CASCADE")
     turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
     team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
-    kind = TextField()                      # transaction | scheduled
+    kind = TextField()                      # transaction | scheduled | lineup
     day = IntegerField()                    # matchup day index, 0 = the matchup's first day
     scoring_period_id = IntegerField()
     nba_date = DateField()
@@ -112,6 +114,7 @@ class AiProposal(BaseModel):
     reason = TextField()
     summary = TextField()
     projection = BinaryJSONField(null=True)
+    moves = BinaryJSONField(null=True)      # lineup chips: the slot moves, as the lineup write takes them
     state = TextField(default="proposed")
     expires_at = DateTimeField()
     created_at = DateTimeField(default=_now)
