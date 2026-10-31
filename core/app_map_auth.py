@@ -1,11 +1,16 @@
 """
-The app map's bearer token (docs/APP_MAP_PLAN.md in court-vision/docs).
+The app map's bearer tokens (docs/APP_MAP_PLAN.md in court-vision/docs).
 
 The frontend's App Map workflow presents APP_MAP_TOKEN to get a one-time
 sign-in as the app map's account and nothing else: it is a token of its own,
 not the pipeline token, so the crawl can reach no other service route and
 cron-runner cannot sign in as anyone. Until both APP_MAP_TOKEN and
 APP_MAP_CLERK_USER_ID are set, its routes answer 503 APP_MAP_DISABLED.
+
+The workflow's upload step presents APP_MAP_UPLOAD_TOKEN to store the map. It
+is apart from the sign-in token because it writes what CV AI reads: a leak of
+the crawl's token can't replace the map. Unset, the upload answers 503
+APP_MAP_UPLOAD_DISABLED.
 """
 
 import hmac
@@ -21,13 +26,26 @@ from core.settings import settings
 security = HTTPBearer(auto_error=False)
 
 
+def _check(credentials: Optional[HTTPAuthorizationCredentials], expected: str) -> None:
+    if credentials is None or not credentials.credentials:
+        raise AuthenticationError("AUTH_REQUIRED", "Authentication required")
+    if not hmac.compare_digest(credentials.credentials.encode(), expected.encode()):
+        raise AuthenticationError("INVALID_TOKEN", "Invalid app map token")
+
+
 def verify_app_map_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
 ) -> None:
     expected = settings.app_map_token.get_secret_value() if settings.app_map_token else ""
     if not expected or not settings.app_map_clerk_user_id:
         raise ServiceUnavailableError("APP_MAP_DISABLED", "The app map account is not configured", log_level="warning")
-    if credentials is None or not credentials.credentials:
-        raise AuthenticationError("AUTH_REQUIRED", "Authentication required")
-    if not hmac.compare_digest(credentials.credentials.encode(), expected.encode()):
-        raise AuthenticationError("INVALID_TOKEN", "Invalid app map token")
+    _check(credentials, expected)
+
+
+def verify_app_map_upload_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+) -> None:
+    expected = settings.app_map_upload_token.get_secret_value() if settings.app_map_upload_token else ""
+    if not expected:
+        raise ServiceUnavailableError("APP_MAP_UPLOAD_DISABLED", "The app map upload is not configured", log_level="warning")
+    _check(credentials, expected)
