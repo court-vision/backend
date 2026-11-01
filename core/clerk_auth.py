@@ -18,6 +18,7 @@ here on every request cost about 100 ms alone and 300-480 ms in a desk-open
 burst (docs/PERF_AUDIT_2026-10.md, A1).
 """
 
+import re
 import threading
 from http.cookiejar import DefaultCookiePolicy
 
@@ -311,6 +312,14 @@ def _require_token(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
 # What the app map's account may do: read. CORS preflights never reach auth.
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
+# The reads that go as a POST (a search whose options are in the body), which
+# the app map's crawl sends from the Week desk. Each stores nothing. The crawl
+# sends exactly these (src/lib/app-map/reads.ts in the frontend); this is the wall.
+APP_MAP_READS = (
+    re.compile(r"/v1/internal/teams/\d+/streamers/find"),     # the market's search
+    re.compile(r"/v1/internal/teams/\d+/stream-lanes/plan"),  # a stream lane's dry run
+)
+
 
 def is_app_map_user(clerk_user_id: Optional[str]) -> bool:
     """Whether this is the app map's read-only account (settings.app_map_clerk_user_id)."""
@@ -321,14 +330,17 @@ def is_app_map_user(clerk_user_id: Optional[str]) -> bool:
 def _refuse_app_map_writes(clerk_user_id: Optional[str], request: Optional[Request]) -> None:
     """The app map's account only reads.
 
-    The crawler that signs in as it already aborts every request but a GET, so
-    this is the second wall: whatever reaches the API with its session, from
-    the crawl or from anyone else signed in as it, changes nothing. A change
-    that starts with a GET (connecting Yahoo) checks `is_app_map_user` itself.
+    The crawler that signs in as it already aborts every request but a GET and
+    the searches in `APP_MAP_READS`, so this is the second wall: whatever
+    reaches the API with its session, from the crawl or from anyone else
+    signed in as it, changes nothing. A change that starts with a GET
+    (connecting Yahoo) checks `is_app_map_user` itself.
     """
     if request is None or not is_app_map_user(clerk_user_id):
         return
     if request.method in _READ_METHODS:
+        return
+    if request.method == "POST" and any(r.fullmatch(request.url.path) for r in APP_MAP_READS):
         return
     log.info("app_map_write_refused", method=request.method, path=request.url.path)
     raise AuthorizationError("APP_MAP_READ_ONLY", "This account is read-only")
