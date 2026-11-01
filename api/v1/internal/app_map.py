@@ -25,7 +25,14 @@ from core.clerk_auth import create_sign_in_token
 from core.errors import AppError, BadRequestError
 from core.logging import get_logger
 from core.settings import settings
-from schemas.app_map import AppMapSignInData, AppMapSignInResp, AppMapUpload, AppMapUploadData, AppMapUploadResp
+from schemas.app_map import (
+    BUILD_PATTERN,
+    AppMapSignInData,
+    AppMapSignInResp,
+    AppMapUpload,
+    AppMapUploadData,
+    AppMapUploadResp,
+)
 from schemas.common import ApiStatus
 from services.ai import app_map as app_maps
 
@@ -59,7 +66,6 @@ def create_app_map_sign_in_token(response: Response):
 MAP_VERSIONS = {1}
 # A signed-out crawl of every desk is about 300 KB
 MAX_MAP_BYTES = 4 * 1024 * 1024
-BUILD_PATTERN = r"^[0-9a-f]{7,40}$"
 
 
 async def _body(request: Request) -> bytes:

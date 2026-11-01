@@ -550,8 +550,9 @@ def test_the_header_ends_with_what_became_of_the_conversation_s_proposals(monkey
     assert asyncio.run(agent.header(42, None, conversation_id=7)).endswith("The user has no teams yet.]")
 
 
+APP_BUILD = "21a5238c0ffee21a5238c0ffee21a5238c0ffee2"
 FOUND = {
-    "build": "21a5238", "crawled_at": "2026-10-20T07:00:00+00:00", "matches_build": True,
+    "build": APP_BUILD, "crawled_at": "2026-10-20T07:00:00+00:00", "matches_build": True,
     "desks": [{"id": "week", "label": "Week", "href": "/week", "note": "Your team's matchup week", "keys": "P market",
                "needs": "account", "views": []}],
     "screens": [
@@ -578,12 +579,12 @@ class TestFindInApp:
             msg("end_turn", text("Open **Market P** in Week and pick **ONE DAY**.")),
         ])
         turn = _turn(message="Where do I pick up a free agent?")
-        turn.build = "21a5238"
+        turn.build = APP_BUILD
 
         events = _run(turn)
 
         # The lookup reads the map of the build the user has open
-        assert seen == [("find_in_app", 42, "21a5238")]
+        assert seen == [("find_in_app", 42, APP_BUILD)]
         block = next(e[1] for e in events if e[0] == "block")
         assert block == {"type": "place", "id": "pl1", "screen_id": "week/market-p", "desk": "Week",
                          "steps": "Week › Market P", "href": "/week", "direct": False, "matches_build": True}
@@ -829,15 +830,21 @@ class TestShowPlace:
         return {f"r{i + 1}": {"tool": "find_in_app", "input": {}, "data": f} for i, f in enumerate(found)}
 
     def test_a_screen_with_its_own_link_opens_directly(self):
-        shown = display.show_place({"screen_id": "week"}, self._results(FOUND), "p1")
+        shown = display.show_place({"screen_id": "week"}, self._results(FOUND), "p1", build=APP_BUILD)
         assert shown.block["href"] == "/week" and shown.block["direct"] is True
+        assert shown.block["matches_build"] is True
         assert "p1" in shown.summary
 
     def test_the_newest_result_with_the_screen_wins(self):
-        newer = {**FOUND, "matches_build": False,
-                 "screens": [{**FOUND["screens"][1], "link": "/week?v=1"}]}
-        shown = display.show_place({"screen_id": "week"}, self._results(FOUND, newer), "p1")
-        assert shown.block["href"] == "/week?v=1" and shown.block["matches_build"] is False
+        newer = {**FOUND, "screens": [{**FOUND["screens"][1], "link": "/week?v=1"}]}
+        shown = display.show_place({"screen_id": "week"}, self._results(FOUND, newer), "p1", build=APP_BUILD)
+        assert shown.block["href"] == "/week?v=1"
+
+    @pytest.mark.parametrize("build", ["0" * 40, None])
+    def test_a_result_from_another_build_never_matches_the_one_open_now(self, build):
+        # An earlier turn's lookup matched the build open then; the user has another open now (or none)
+        shown = display.show_place({"screen_id": "week"}, self._results(FOUND), "p1", build=build)
+        assert FOUND["matches_build"] is True and shown.block["matches_build"] is False
 
     def test_only_screens_a_find_in_app_result_returned(self):
         with pytest.raises(display.DisplayError, match="call find_in_app first"):

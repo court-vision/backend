@@ -10,6 +10,10 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from schemas.common import ApiModel, BaseResponse
 
+# A build is its commit's full SHA. The crawl stores GITHUB_SHA and the frontend
+# sends VERCEL_GIT_COMMIT_SHA, both full, so a map is found by equality
+BUILD_PATTERN = r"^[0-9a-f]{40}$"
+
 
 class AppMapSignInData(ApiModel):
     """A one-time Clerk sign-in ticket for the app map's account."""

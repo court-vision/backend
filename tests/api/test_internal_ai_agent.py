@@ -107,7 +107,7 @@ def test_a_turn_streams_its_events_in_order(authed_client, user, invited, monkey
         return emit
     monkeypatch.setattr(AgentService, "start_turn", staticmethod(start))
 
-    r = authed_client.post(f"{BASE}/conversations/3/turns", json={"message": "How are my blocks?", "build": "dbe2069"})
+    r = authed_client.post(f"{BASE}/conversations/3/turns", json={"message": "How are my blocks?", "build": "dbe2069000000000000000000000000000000000"})
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -115,7 +115,7 @@ def test_a_turn_streams_its_events_in_order(authed_client, user, invited, monkey
     assert [name for name, _ in _sse(r.text)] == ["status", "text", "block", "done"]
     assert _sse(r.text)[2][1]["rows"] == [["Jalen Duren", 1.8]]
     # The build the user has open goes to the turn, for find_in_app's map
-    assert seen == [(3, 42, "How are my blocks?", "dbe2069")]
+    assert seen == [(3, 42, "How are my blocks?", "dbe2069000000000000000000000000000000000")]
 
 
 @pytest.mark.api
@@ -131,7 +131,9 @@ def test_errors_before_the_stream_are_json(authed_client, user, invited, monkeyp
 
 @pytest.mark.api
 @pytest.mark.parametrize("body", [{"message": ""}, {"message": "x" * 2001}, {"message": "a\x00b"}, {},
-                                  {"message": "hi", "build": "main"}, {"message": "hi", "build": "DBE2069"}])
+                                  {"message": "hi", "build": "main"}, {"message": "hi", "build": "DBE2069"},
+                                  # A short SHA: the maps are stored under full ones
+                                  {"message": "hi", "build": "dbe2069"}])
 def test_bad_messages_are_refused_before_anything_runs(authed_client, user, invited, monkeypatch, body):
     async def never(*a, **kw):
         raise AssertionError("must not start")

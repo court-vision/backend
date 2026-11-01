@@ -235,7 +235,7 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
                 shown = show_chart(raw, turn.all_results(), f"c{turn.charts + 1}")
                 turn.charts += 1
             elif name == SHOW_PLACE["name"]:
-                shown = show_place(raw, turn.all_results(), f"pl{turn.places + 1}")
+                shown = show_place(raw, turn.all_results(), f"pl{turn.places + 1}", build=turn.build)
                 turn.places += 1
             else:
                 shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")

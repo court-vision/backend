@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import Field
 
+from schemas.app_map import BUILD_PATTERN
 from schemas.common import ApiModel, BaseResponse
 from schemas.lineup_editor import MoveRole
 
@@ -192,9 +193,9 @@ class AiTurnReq(ApiModel):
     """Body for POST /v1/internal/ai/conversations/{conversation_id}/turns."""
 
     message: str = Field(..., min_length=1, max_length=AGENT_MESSAGE_MAX, pattern=NO_NUL)
-    build: Optional[str] = Field(None, pattern=r"^[0-9a-f]{7,40}$",
-                                 description="The frontend build the user has open, its commit SHA: CV AI reads that "
-                                             "build's app map, or the newest when it has none yet")
+    build: Optional[str] = Field(None, pattern=BUILD_PATTERN,
+                                 description="The frontend build the user has open, its commit's full SHA: CV AI reads "
+                                             "that build's app map, or the newest when it has none yet")
 
 
 class AiTableColumn(ApiModel):

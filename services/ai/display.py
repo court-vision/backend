@@ -418,8 +418,11 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
 _APP_PATH = re.compile(r"^/(?!/)[^\s\\]*$")
 
 
-def show_place(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
-    """Build one place block from the newest find_in_app result that has the screen, or raise DisplayError."""
+def show_place(raw_input: Any, results: dict[str, Any], next_id: str, build: Optional[str] = None) -> Shown:
+    """Build one place block from the newest find_in_app result that has the screen, or raise DisplayError.
+
+    `build` is the one the user has open now. A result from an earlier turn may be of a
+    map another build had open, so whether it matches is judged here, not copied."""
     args = _validate(_ShowPlaceInput, raw_input)
     found = [r for r in results.values() if isinstance(r, dict) and r.get("tool") == "find_in_app"]
     if not found:
@@ -443,7 +446,7 @@ def show_place(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
             "steps": str(screen.get("steps") or ""),
             "href": href,
             "direct": bool(link),
-            "matches_build": bool(data.get("matches_build")),
+            "matches_build": build is not None and data.get("build") == build,
         }
         json.dumps(block, default=str)
         how = "its link opens it" if link else f"its link opens {block['desk']}, then the steps lead there"

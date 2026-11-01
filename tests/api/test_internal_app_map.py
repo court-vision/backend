@@ -270,7 +270,7 @@ def test_a_kept_map_says_why(client, upload_configured, monkeypatch):
 
 
 @pytest.mark.api
-@pytest.mark.parametrize("build", ["main", "21A5238", "21a52", "21a5238c0ffee21a5238c0ffee21a5238c0ffee21a5"])
+@pytest.mark.parametrize("build", ["main", "21A5238", "21a52", "21a5238", "21a5238c0ffee21a5238c0ffee21a5238c0ffee21a5"])
 def test_build_must_be_a_commit(client, upload_configured, stored, build):
     r = _put(client, _map(build=build), build=build)
     assert r.status_code == 422
