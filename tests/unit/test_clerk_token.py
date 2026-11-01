@@ -253,6 +253,30 @@ def test_app_map_account_can_read(rsa_keys, trust_test_key, app_map_account, met
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/internal/teams/12/streamers/find", "/v1/internal/teams/12/stream-lanes/plan"])
+def test_app_map_account_can_run_the_searches_sent_as_post(rsa_keys, trust_test_key, app_map_account, path):
+    private_pem, _ = rsa_keys
+    user = clerk_auth.get_current_user(_app_map_credentials(private_pem), _request("POST", path))
+    assert user["clerk_user_id"] == APP_MAP_USER
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method,path", [
+    ("PUT", "/v1/internal/teams/12/streamers/find"),         # the search, by another method
+    ("POST", "/v1/internal/teams/12/stream-lanes"),          # starting a lane, beside its dry run
+    ("POST", "/v1/internal/teams/12/stream-lanes/plan/x"),
+    ("POST", "/v1/internal/teams/x/streamers/find"),
+    ("POST", "/v1/internal/streamers/find"),                 # the legacy search takes a league in its body
+    ("POST", "/prefix/v1/internal/teams/12/streamers/find"),
+])
+def test_app_map_account_runs_no_other_post(rsa_keys, trust_test_key, app_map_account, method, path):
+    private_pem, _ = rsa_keys
+    with pytest.raises(AuthorizationError) as exc:
+        clerk_auth.get_current_user(_app_map_credentials(private_pem), _request(method, path))
+    assert exc.value.error_code == "APP_MAP_READ_ONLY"
+
+
+@pytest.mark.unit
 def test_other_users_still_write(rsa_keys, trust_test_key, app_map_account):
     private_pem, _ = rsa_keys
     user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem, sub="user_abc"), _request("POST"))
