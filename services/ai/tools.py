@@ -50,6 +50,7 @@ from services.game_context import GameContext
 from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
+from services.ai import app_map
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -163,6 +164,11 @@ class DraftRoomInput(_Input):
     room_id: int = Field(..., gt=0, lt=2**31)
 
 
+class FindInAppInput(_Input):
+    query: str = Field(..., min_length=1, max_length=200)
+    desk: Optional[str] = Field(None, min_length=1, max_length=40)
+
+
 @dataclass(frozen=True)
 class ToolContext:
     """Who is asking. Team-scoped tools answer for this user and no one else;
@@ -170,6 +176,8 @@ class ToolContext:
 
     user_id: int
     conversation_id: Optional[int] = None
+    # The frontend build the user has open: find_in_app reads that build's app map
+    build: Optional[str] = None
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -1112,13 +1120,55 @@ AGENT_STATS_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+async def _find_in_app(args: FindInAppInput, ctx: ToolContext | None) -> dict[str, Any]:
+    build = ctx.build if ctx else None
+    loaded = await app_map.load(build)
+    if loaded is None:
+        raise AppError("APP_MAP_MISSING", "Court Vision's map of the app isn't available yet, so you can't check "
+                                          "where things are: say so rather than describing the app")
+    if args.desk is not None and args.desk not in {d.id for d in loaded.map.desks}:
+        raise AppError("APP_MAP_DESK", f"No desk '{args.desk}'. The desks are: "
+                                       + ", ".join(d.id for d in loaded.map.desks))
+    return loaded.find(args.query, args.desk, requested_build=build)
+
+
+# The app map (docs/APP_MAP_PLAN.md § 5): where things are in the website, from
+# a crawl of the build the user has open. Nothing about the app is written here
+# or in the prompt by hand; the result is the crawl's.
+AGENT_APP_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "find_in_app",
+        "description": (
+            "Where things are in the Court Vision website and how to do them, from a crawl of the build "
+            "the user has open. Call it whenever the user asks where something is, how to do something in "
+            "the app, or whether the app can do something, and before telling them to go anywhere in the "
+            "app. Query with their words and the app's likely words ('free agents market pickup "
+            "waivers'). Returns every desk (its address, what it is for, what it needs, its keys), the "
+            "screens that match best (the steps from the desk's front, the screen's own link when it has "
+            "one, and what it shows as an accessibility tree), and the app's copy that no crawled screen "
+            "showed (`not_in_demo`: the app has it, but the crawl couldn't reach it, so say less about "
+            "where it appears). The crawl used sample data: names and numbers in a screen are examples, "
+            "not the user's. matches_build false means the map is of another build, which may differ."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to find, in the user's words and the app's"},
+                "desk": {"type": "string", "description": "Search one desk only, by its id from an earlier result"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+]
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
-# drop, then the lineup board and its moves). The order is part of every request's
-# cached prefix: append, never reorder.
+# drop, then the lineup board and its moves), then the app map. The order is part
+# of every request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
-    PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP,
+    PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
@@ -1155,6 +1205,7 @@ _REGISTRY: dict[str, _Tool] = {
     PROPOSE_MOVE_NAME: _Tool(ProposeMoveInput, _propose_move),
     GET_LINEUP_NAME: _Tool(GetLineupInput, _get_lineup),
     PROPOSE_LINEUP_NAME: _Tool(ProposeLineupInput, _propose_lineup),
+    "find_in_app": _Tool(FindInAppInput, _find_in_app),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

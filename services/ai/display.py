@@ -13,6 +13,10 @@ A block can join several results of the same shape (one game log per player):
 their rows are concatenated, and each row can show its parent result's
 top-level fields (the player's `name` beside each of his games). A chart can
 then draw one series per player with `series_by`.
+
+`show_place` is the same rule for the app itself (docs/APP_MAP_PLAN.md § 5): the
+model names a screen from a find_in_app result, and the server copies its steps
+and link out of that result. The model never writes a path into the app.
 """
 
 from __future__ import annotations
@@ -100,7 +104,24 @@ SHOW_CHART: dict[str, Any] = {
         "additionalProperties": False,
     },
 }
-DISPLAY_TOOL_NAMES = frozenset({SHOW_TABLE["name"], SHOW_CHART["name"]})
+SHOW_PLACE: dict[str, Any] = {
+    "name": "show_place",
+    "description": (
+        "Show the user where a screen is in the app: one line with its desk, the steps from the desk's "
+        "front and an Open link, all copied by the server from the app map. Name the screen by its id "
+        "from a find_in_app result in this conversation. Call it whenever you tell the user where to go "
+        "in the app, once per place; never write a link or a path yourself."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "screen_id": {"type": "string", "description": "A screen's id from a find_in_app result"},
+        },
+        "required": ["screen_id"],
+        "additionalProperties": False,
+    },
+}
+DISPLAY_TOOL_NAMES = frozenset({SHOW_TABLE["name"], SHOW_CHART["name"], SHOW_PLACE["name"]})
 
 # Column headers for the keys the read tools return; anything else is shown as its key
 LABELS: dict[str, str] = {
@@ -152,6 +173,12 @@ class _ShowChartInput(BaseModel):
     descending: bool = True
     limit: Optional[int] = Field(None, ge=1, le=MAX_POINTS)
     title: str = Field(..., min_length=1, max_length=100)
+
+
+class _ShowPlaceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    screen_id: str = Field(..., min_length=1, max_length=200)
 
 
 class DisplayError(Exception):
@@ -383,3 +410,47 @@ def show_chart(raw_input: Any, results: dict[str, Any], next_id: str) -> Shown:
     left_out_note = f" Left out, no values: {', '.join(left_out)}." if left_out else ""
     return Shown(block=block, summary=f"Shown to the user as chart {next_id}: {args.kind} chart of {what} "
                                       f"over {len(categories)}{cut_note} x values.{left_out_note}")
+
+
+# ---- places in the app ----
+
+# A path inside the app: one leading slash, no scheme, host or whitespace
+_APP_PATH = re.compile(r"^/(?!/)[^\s\\]*$")
+
+
+def show_place(raw_input: Any, results: dict[str, Any], next_id: str, build: Optional[str] = None) -> Shown:
+    """Build one place block from the newest find_in_app result that has the screen, or raise DisplayError.
+
+    `build` is the one the user has open now. A result from an earlier turn may be of a
+    map another build had open, so whether it matches is judged here, not copied."""
+    args = _validate(_ShowPlaceInput, raw_input)
+    found = [r for r in results.values() if isinstance(r, dict) and r.get("tool") == "find_in_app"]
+    if not found:
+        raise DisplayError("No find_in_app result in this conversation yet: call find_in_app first, then "
+                           "show_place one of its screens")
+    for result in reversed(found):
+        data = result.get("data") or {}
+        screen = next((s for s in data.get("screens", []) if s.get("id") == args.screen_id), None)
+        if screen is None:
+            continue
+        desk = next((d for d in data.get("desks", []) if d.get("id") == screen.get("desk")), None)
+        link = screen.get("link")
+        href = link or (desk or {}).get("href")
+        if not isinstance(href, str) or not _APP_PATH.match(href):
+            raise DisplayError(f"Screen '{args.screen_id}' has no link into the app; describe its steps in prose")
+        block = {
+            "type": "place",
+            "id": next_id,
+            "screen_id": args.screen_id,
+            "desk": (desk or {}).get("label") or str(screen.get("desk")),
+            "steps": str(screen.get("steps") or ""),
+            "href": href,
+            "direct": bool(link),
+            "matches_build": build is not None and data.get("build") == build,
+        }
+        json.dumps(block, default=str)
+        how = "its link opens it" if link else f"its link opens {block['desk']}, then the steps lead there"
+        return Shown(block=block, summary=f"Shown to the user as place {next_id}: {block['steps']} ({how}).")
+    shown = sorted({s.get("id") for r in found for s in (r.get("data") or {}).get("screens", []) if s.get("id")})
+    raise DisplayError(f"No screen '{args.screen_id}' in this conversation's find_in_app results. "
+                       f"Their screens: {', '.join(shown) or 'none'}")
