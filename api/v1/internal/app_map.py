@@ -7,7 +7,10 @@ as an account of its own. It presents APP_MAP_TOKEN here and gets a one-time
 Clerk sign-in ticket for that account (APP_MAP_CLERK_USER_ID) and no other:
 the caller names no user. The crawler's browser redeems the ticket with Clerk
 itself, so the workflow never holds Clerk's secret key or the account's
-password, and the account is read-only on every route (`core.clerk_auth`).
+password. The crawl marks every request it sends the API, and the API refuses
+any write so marked (`core.clerk_auth.APP_MAP_CRAWL_HEADER`): the account
+itself writes like any other when a person or autopilot uses it. So a leaked
+APP_MAP_TOKEN signs in as an account that can write; keep it only where it is.
 
 Upload (step 3): the workflow's last step presents APP_MAP_UPLOAD_TOKEN and
 stores the map it crawled for its commit, which CV AI then reads. The body is

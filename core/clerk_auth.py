@@ -6,8 +6,8 @@ It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
 
 Failures raise `core.errors` exceptions, rendered as the standard envelope:
 missing/invalid/expired tokens are 401 (`AUTH_REQUIRED`, `INVALID_TOKEN`,
-`TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`; a write by the app
-map's read-only account is 403 `APP_MAP_READ_ONLY`.
+`TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`; a write from the app
+map's crawl is 403 `APP_MAP_READ_ONLY`.
 
 Verifying a token makes no network call once the JWKS is cached. The user's
 email comes from the session token's `email` claim (Clerk dashboard → Sessions
@@ -321,29 +321,36 @@ APP_MAP_READS = (
 )
 
 
-def is_app_map_user(clerk_user_id: Optional[str]) -> bool:
-    """Whether this is the app map's read-only account (settings.app_map_clerk_user_id)."""
-    app_map_user = settings.app_map_clerk_user_id
-    return bool(app_map_user) and clerk_user_id == app_map_user
+# The header the app map's crawl puts on every request it lets through to the
+# API (src/lib/app-map/crawl-mark.ts in the frontend). A write that carries it
+# is refused whoever is signed in, so the account the crawl signs in as writes
+# when a person (or autopilot) uses it, and never from the crawl. It only takes
+# rights away, so it holds no secret.
+APP_MAP_CRAWL_HEADER = "x-app-map-crawl"
 
 
-def _refuse_app_map_writes(clerk_user_id: Optional[str], request: Optional[Request]) -> None:
-    """The app map's account only reads.
+def is_app_map_crawl(request: Optional[Request]) -> bool:
+    """Whether this request comes from the app map's crawl (it carries `APP_MAP_CRAWL_HEADER`)."""
+    return request is not None and APP_MAP_CRAWL_HEADER in request.headers
 
-    The crawler that signs in as it already aborts every request but a GET and
-    the searches in `APP_MAP_READS`, so this is the second wall: whatever
-    reaches the API with its session, from the crawl or from anyone else
-    signed in as it, changes nothing. A change that starts with a GET
-    (connecting Yahoo) checks `is_app_map_user` itself.
+
+def _refuse_app_map_writes(request: Optional[Request]) -> None:
+    """The app map's crawl only reads.
+
+    The crawler aborts every request but a GET and the searches in
+    `APP_MAP_READS`, and marks each one it lets through to the API with
+    `APP_MAP_CRAWL_HEADER`, so this is the second wall: whatever the crawl
+    sends changes nothing, whoever it is signed in as. A change that starts
+    with a GET (connecting Yahoo) checks `is_app_map_crawl` itself.
     """
-    if request is None or not is_app_map_user(clerk_user_id):
+    if not is_app_map_crawl(request):
         return
     if request.method in _READ_METHODS:
         return
     if request.method == "POST" and any(r.fullmatch(request.url.path) for r in APP_MAP_READS):
         return
     log.info("app_map_write_refused", method=request.method, path=request.url.path)
-    raise AuthorizationError("APP_MAP_READ_ONLY", "This account is read-only")
+    raise AuthorizationError("APP_MAP_READ_ONLY", "The app map's crawl only reads")
 
 
 def verify_clerk_token(
@@ -358,9 +365,9 @@ def verify_clerk_token(
         async def protected_route(current_user: dict = Depends(verify_clerk_token)):
             ...
 
-    FastAPI always passes `request`; it is what the app map's read-only
-    account is checked against (403 APP_MAP_READ_ONLY on a write). A direct
-    call without it only verifies the token.
+    FastAPI always passes `request`; a write that carries the app map's crawl
+    header is refused from it (403 APP_MAP_READ_ONLY). A direct call without
+    it only verifies the token.
 
     Returns:
         dict with 'clerk_user_id' (sub claim), 'email' (the token's claim, or
@@ -407,7 +414,7 @@ def verify_clerk_token(
         log.exception("clerk_auth_unexpected_error", error=type(e).__name__)
         raise AuthenticationError("INVALID_TOKEN", "Authentication failed")
 
-    _refuse_app_map_writes(user["clerk_user_id"], request)
+    _refuse_app_map_writes(request)
     return user
 
 
