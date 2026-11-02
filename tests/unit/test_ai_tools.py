@@ -30,6 +30,10 @@ from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
 from services.public_market_service import PublicMarketService
 
+# The tools are a cached prefix: each later step appends after the app map's find_in_app
+_APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
+_AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes"]
+
 
 def _run(name, raw):
     return asyncio.run(tools.run_tool(name, raw))
@@ -507,8 +511,8 @@ class TestFantasyTools:
     prefix every earlier request built stays intact, and reached through the owned-team check."""
 
     def test_they_follow_the_stats_query_and_take_nba_ids_only(self):
-        assert [t["name"] for t in tools.AGENT_TOOLS[-6:-1]] == ["project_matchup", "plan_streams", "propose_move",
-                                                              "get_lineup", "propose_lineup"]
+        assert [t["name"] for t in tools.AGENT_TOOLS[_APP - 5:_APP]] == ["project_matchup", "plan_streams",
+                                                                      "propose_move", "get_lineup", "propose_lineup"]
         assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
         assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
         moves = tools.AGENT_FANTASY_TOOLS[0]["input_schema"]["properties"]["moves"]
@@ -556,7 +560,7 @@ class TestProposeMove:
     check, and tied to the conversation the turn belongs to."""
 
     def test_the_definition_takes_nba_ids_and_a_reason(self):
-        tool = tools.AGENT_TOOLS[-4]
+        tool = tools.AGENT_TOOLS[_APP - 3]
         assert tool["name"] == "propose_move" and tool["input_schema"]["additionalProperties"] is False
         assert set(tool["input_schema"]["properties"]) == {"team_id", "add", "drop", "day", "reason"}
         assert tool["input_schema"]["required"] == ["team_id", "reason"]
@@ -610,7 +614,7 @@ class TestLineupTools:
     propose_move, reached through the owned-team check; the proposal needs a conversation."""
 
     def test_the_definitions_take_nba_ids_slot_names_and_a_reason(self):
-        read, propose = tools.AGENT_TOOLS[-3], tools.AGENT_TOOLS[-2]
+        read, propose = tools.AGENT_TOOLS[_APP - 2], tools.AGENT_TOOLS[_APP - 1]
         assert read["name"] == "get_lineup" and set(read["input_schema"]["properties"]) == {"team_id", "day"}
         assert propose["name"] == "propose_lineup" and propose["input_schema"]["additionalProperties"] is False
         assert set(propose["input_schema"]["properties"]) == {"team_id", "day", "moves", "fill", "reason"}
@@ -719,8 +723,9 @@ class TestFindInApp:
         return asyncio.run(tools.run_tool("find_in_app", raw, ctx=tools.ToolContext(user_id=42, build=build),
                                           allowed=tools.AGENT_TOOL_NAMES))
 
-    def test_it_is_the_agent_s_alone_and_appended_last(self):
-        assert tools.AGENT_TOOLS[-1]["name"] == "find_in_app"
+    def test_it_is_the_agent_s_alone_and_only_the_later_tools_follow_it(self):
+        # Appended after the proposals; everything since is appended after it, never between
+        assert [t["name"] for t in tools.AGENT_TOOLS[_APP + 1:]] == _AFTER_APP
         assert "find_in_app" not in tools.ASK_TOOL_NAMES | tools.ROUTER_TOOL_NAMES
 
     def test_it_searches_the_map_of_the_build_the_user_has_open(self, loads):

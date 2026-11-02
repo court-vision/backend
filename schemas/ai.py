@@ -19,6 +19,9 @@ from schemas.lineup_editor import MoveRole
 # Postgres text and jsonb cannot hold a NUL, so a string carrying one could
 # never be logged; it is refused before any quota or model call is spent on it
 NO_NUL = r"^[^\x00]*$"
+# The same, and not blank: at least one character that is neither space nor NUL
+# (pydantic's regex engine has no lookahead).
+NO_NUL_NOT_BLANK = r"^[^\x00]*[^\s\x00][^\x00]*$"
 
 # Every ID the caller sends is an int4 in our tables. Unbounded, a JSON integer
 # can run to thousands of digits, each of them copied into the prompt.
@@ -419,3 +422,49 @@ class AiProposalDismissResp(BaseResponse):
 
 class AiTurnFeedbackResp(BaseResponse):
     data: Optional[AiTurnFeedbackData] = None
+
+
+# ---- Dime's notes (the AI desk's "What Dime knows"; services/ai/memory.py) ----
+
+AiNoteKind = Literal["plan", "player", "league", "opponent", "preference", "lesson", "note"]
+
+
+class AiNote(ApiModel):
+    note_id: int
+    kind: AiNoteKind
+    team_id: Optional[int] = Field(None, description="The team it is about; null for a note about the user")
+    text: str
+    recheck_on: Optional[date_type] = None
+    author: Literal["dime", "user"]
+    written_on: date_type
+    retired_on: Optional[date_type] = None
+    retired_by: Optional[Literal["dime", "user"]] = None
+    retired_reason: Optional[str] = None
+
+
+class AiNoteListResp(BaseResponse):
+    """Response for GET /v1/internal/ai/notes."""
+
+    data: Optional[list[AiNote]] = None
+
+
+class AiNoteResp(BaseResponse):
+    data: Optional[AiNote] = None
+
+
+class AiNoteCreateReq(ApiModel):
+    """Body for POST /v1/internal/ai/notes: a note the user writes for the agent."""
+
+    kind: AiNoteKind = "preference"
+    text: str = Field(..., min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
+    team_id: Optional[int] = Field(None, gt=0, le=INT4_MAX)
+    recheck_on: Optional[date_type] = None
+
+
+class AiNoteEditReq(ApiModel):
+    """Body for PATCH /v1/internal/ai/notes/{note_id}: the note is replaced by the user's version."""
+
+    text: Optional[str] = Field(None, min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
+    kind: Optional[AiNoteKind] = None
+    recheck_on: Optional[date_type] = None
+    clear_recheck: bool = False

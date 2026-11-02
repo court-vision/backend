@@ -1,7 +1,8 @@
 """
 usr.ai_conversations and usr.ai_turns — the AI agent's chats — usr.ai_spend,
 the ledger its monthly caps sum (migration 0032, the CV AI plan § 1, § 6), and
-usr.ai_proposals, the roster moves the agent proposed as chips (migration 0039).
+usr.ai_proposals, the roster moves the agent proposed as chips (migration 0039), and
+usr.ai_memory, the notes the agent keeps between conversations (migration 0041).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -125,4 +126,30 @@ class AiProposal(BaseModel):
 
     class Meta:
         table_name = "ai_proposals"
+        schema = "usr"
+
+
+class AiMemory(BaseModel):
+    """One note in the agent's notebook. Never edited in place: a revision retires the
+    row and writes its replacement (`replaces_id`), and forgetting retires it. `team_id`
+    NULL is a note about the user, for every team; `author` is dime or user, and the
+    user's own notes outrank the agent's (migration 0041)."""
+
+    id = BigAutoField(primary_key=True)
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    team_id = ForeignKeyField(Team, column_name="team_id", null=True, on_delete="CASCADE")
+    kind = TextField()                       # plan | player | league | opponent | preference | lesson | note
+    text = TextField()
+    recheck_on = DateField(null=True)
+    author = TextField()                     # dime | user
+    conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", null=True,
+                                      on_delete="SET NULL")
+    replaces_id = BigIntegerField(null=True)
+    created_at = DateTimeField(default=_now)
+    retired_at = DateTimeField(null=True)
+    retired_by = TextField(null=True)        # dime | user
+    retired_reason = TextField(null=True)
+
+    class Meta:
+        table_name = "ai_memory"
         schema = "usr"

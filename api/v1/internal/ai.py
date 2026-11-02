@@ -4,7 +4,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Body, Depends, Path
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 
 from api.deps import UserContext, get_db_user
@@ -16,6 +18,10 @@ from schemas.ai import (
     AiFeedbackData,
     AiFeedbackReq,
     AiFeedbackResp,
+    AiNoteCreateReq,
+    AiNoteEditReq,
+    AiNoteListResp,
+    AiNoteResp,
     AiProposalDismissResp,
     AiProposalResp,
     AiTurnCommentData,
@@ -299,3 +305,68 @@ async def dismiss_proposal(
 ) -> AiProposalDismissResp:
     chip = await AgentService.dismiss_proposal(proposal_id, user.user_id)
     return AiProposalDismissResp(status=ApiStatus.SUCCESS, message="Proposal dismissed", data=chip)
+
+
+_NOTE_404 = {404: {"description": "No such live note, or team_id is not one of the caller's teams"}}
+
+
+@router.get(
+    "/notes",
+    response_model=AiNoteListResp,
+    summary="The agent's notes on the caller's teams (\"What Dime knows\")",
+    description=(
+        "The notes the agent keeps between conversations, newest first: with `team_id`, that team's and the "
+        "ones about the caller; without, every one. `include_retired` adds the revised and forgotten ones."
+    ),
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def list_notes(
+    team_id: Optional[int] = Query(None, gt=0, le=2_147_483_647),
+    include_retired: bool = Query(False),
+    user: UserContext = Depends(get_db_user),
+) -> AiNoteListResp:
+    data = await AgentService.notes(user.user_id, team_id, include_retired)
+    return AiNoteListResp(status=ApiStatus.SUCCESS, message="Notes", data=data)
+
+
+@router.post(
+    "/notes",
+    response_model=AiNoteResp,
+    summary="Write a note for the agent",
+    description="A note of the caller's own (author `user`): the agent reads it and may not change or retire it.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def add_note(req: AiNoteCreateReq, user: UserContext = Depends(get_db_user)) -> AiNoteResp:
+    data = await AgentService.add_note(user.user_id, kind=req.kind, text=req.text, team_id=req.team_id,
+                                       recheck_on=req.recheck_on)
+    return AiNoteResp(status=ApiStatus.SUCCESS, message="Note saved", data=data)
+
+
+@router.patch(
+    "/notes/{note_id}",
+    response_model=AiNoteResp,
+    summary="Change one of the agent's notes",
+    description="Any live note, the agent's or the caller's: it is retired and replaced by the caller's version, "
+                "which the agent may no longer change.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def edit_note(
+    req: AiNoteEditReq,
+    note_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiNoteResp:
+    data = await AgentService.edit_note(user.user_id, note_id, text=req.text, kind=req.kind,
+                                        recheck_on=req.recheck_on, clear_recheck=req.clear_recheck)
+    return AiNoteResp(status=ApiStatus.SUCCESS, message="Note saved", data=data)
+
+
+@router.delete(
+    "/notes/{note_id}",
+    response_model=BaseResponse,
+    summary="Retire one of the agent's notes",
+    description="The note stops reaching the agent. It is kept as retired by the caller, not erased.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def delete_note(note_id: int = Path(..., gt=0), user: UserContext = Depends(get_db_user)) -> BaseResponse:
+    await AgentService.delete_note(user.user_id, note_id)
+    return BaseResponse(status=ApiStatus.SUCCESS, message="Note retired")
