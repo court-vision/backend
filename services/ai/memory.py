@@ -28,6 +28,7 @@ Rules the tools enforce, not the prompt:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Optional
@@ -405,6 +406,24 @@ def digest_of(rows: list[Any], today: date) -> str:
 async def digest(user_id: int, today: date) -> str:
     rows = await run_db("ai.memory_digest", live_for_digest, user_id)
     return digest_of(rows, today)
+
+
+_DIGEST = re.compile(r"Your notes: .*")
+_QUOTED = re.compile(r'"[^"]*"')
+
+
+def without_note_texts(content: str) -> str:
+    """A stored user message with the digest's quoted note texts emptied, for grounding.
+
+    The turn header (the message's first line) carries the digest, and stored history
+    keeps it. A number in a note is not a source for the user's stats (the agent wrote
+    it, or it is the user's plan from another day), so the answer must get it from a
+    tool again. Note texts are quoted with no double quote inside (`_quote`) and no
+    line break (`_clean_text`), and the rest of the header (team ids, note ids) stays."""
+    first, sep, rest = content.partition("\n")
+    if not first.startswith("["):
+        return content
+    return _DIGEST.sub(lambda m: _QUOTED.sub('""', m.group(0)), first, count=1) + sep + rest
 
 
 # ---- the user's own edits (the AI desk's "What Dime knows") ----

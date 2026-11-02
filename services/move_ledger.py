@@ -51,7 +51,7 @@ from db.models.teams import Team
 from services import schedule_service
 from services.providers.identity import nba_ids_by_espn_id
 from services.scoring.models import StatLine
-from services.scoring.resolver import ResolvedScoring, resolve_scoring, resolve_scoring_for_team
+from services.scoring.resolver import ResolvedScoring, resolve_scoring
 
 log = get_logger("move_ledger")
 
@@ -61,12 +61,13 @@ TWO_WEEKS = 14
 MATCH_DAYS = 2                                  # a write counts from its day, or up to two days later
 WRITTEN = ("applied", "applied_unverified")
 ACTIVE_LEAGUE_DAYS = 21                         # leagues with a snapshot this recent are rebuilt
+SEASON_MARGIN_DAYS = 60                         # writes this far outside a league's stored days are another season's
 
 
 # ------------------------------- shapes ------------------------------- #
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class LeagueKey:
     provider: str
     provider_league_id: str
@@ -413,17 +414,24 @@ def _player_ids(moves: Any, action: str) -> frozenset[int]:
     return frozenset(out)
 
 
-def load_writes(cv_teams: dict[int, int]) -> list[CvWrite]:
+def load_writes(cv_teams: dict[int, int], days: list[DayRoster]) -> list[CvWrite]:
     """Court Vision's add/drops on the league's teams that went through, each with who made
     it: a stream lane's pickup, a scheduled pickup, a Dime proposal the user sent (as a write
-    or as a scheduled pickup), or the user's own from the desk."""
+    or as a scheduled pickup), or the user's own from the desk.
+
+    Only this season's: a saved team keeps its id (and its audit rows) when it rolls into a
+    new season, and scoring periods restart at 1, so a write is kept only when its own date
+    falls within `SEASON_MARGIN_DAYS` of the league's stored days."""
     provider_of = {team_id: provider_team_id for provider_team_id, team_id in cv_teams.items()}
-    if not provider_of:
+    if not provider_of or not days:
         return []
+    since = min(d.nba_date for d in days) - timedelta(days=SEASON_MARGIN_DAYS)
+    until = max(d.nba_date for d in days) + timedelta(days=SEASON_MARGIN_DAYS)
     rows = list(
         RosterMove.select()
         .where((RosterMove.kind == "transaction") & RosterMove.status.in_(WRITTEN)
-               & RosterMove.team.in_(list(provider_of)) & RosterMove.scoring_period_id.is_null(False))
+               & RosterMove.team.in_(list(provider_of)) & RosterMove.scoring_period_id.is_null(False)
+               & RosterMove.nba_date.between(since, until))
     )
     if not rows:
         return []
@@ -493,8 +501,13 @@ def stats_through(start: date) -> Optional[date]:
 
 
 def league_scoring(cv_teams: dict[int, int]) -> ResolvedScoring:
+    """The league's own scoring, from the first saved team linked to it. Never a team's
+    `scoring_preview`: the rows are shared by every team in the league, so one user's
+    display override must not decide how everyone's moves are scored."""
     for team_id in sorted(cv_teams.values()):
-        return resolve_scoring_for_team(team_id)
+        team = Team.get_or_none(Team.team_id == team_id)
+        if team is not None and team.league_id is not None:
+            return resolve_scoring(team.league)
     return resolve_scoring(None)
 
 
@@ -554,7 +567,7 @@ def rebuild_league(key: LeagueKey) -> LeagueRebuild:
     """Read the league's stored days, find and score every move, and replace its rows."""
     days = load_days(key)
     cv_teams = cv_teams_in(key, days)
-    league = League(key=key, days=days, cv_teams=cv_teams, writes=load_writes(cv_teams))
+    league = League(key=key, days=days, cv_teams=cv_teams, writes=load_writes(cv_teams, days))
     moves = attribute(detect_changes(days), league.writes)
     espn_ids = {p[0] for m in moves for p in (m.add, m.drop) if p is not None}
     nba_ids = nba_ids_by_espn_id(sorted(espn_ids))
@@ -697,7 +710,7 @@ SOURCE_ORDER = {"dime": 0, "lane": 1, "scheduled": 2, "you": 3, "outside": 4}
 def read_outcomes(q: OutcomeQuery) -> dict[str, Any]:
     """The query's moves (up to its limit) and the per-source summary over all it matched."""
     rows = select_outcomes(q)
-    fmt = rows[0].format if rows else resolve_scoring_for_team(q.team_id).format
+    fmt = rows[0].format if rows else league_scoring({0: q.team_id}).format
     return {
         "format": fmt,
         "moves": [outcome_view(r, q) for r in rows[: q.limit]],

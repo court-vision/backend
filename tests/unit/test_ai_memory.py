@@ -268,3 +268,41 @@ class TestTheTools:
         assert self._call("remember", {"kind": "gossip", "text": "x"}).is_error
         assert self._call("remember", {"kind": "note", "text": "   "}).is_error
         assert self._call("forget", {"note_id": 1}).is_error
+
+
+@pytest.mark.parametrize("text", ["   ", "\n\t ", "a\x00b"])
+def test_a_blank_or_nul_note_is_refused_at_the_schema(text):
+    from pydantic import ValidationError
+
+    from schemas.ai import AiNoteCreateReq, AiNoteEditReq
+
+    with pytest.raises(ValidationError):
+        AiNoteCreateReq(text=text)
+    with pytest.raises(ValidationError):
+        AiNoteEditReq(text=text)
+
+
+def test_a_note_with_words_and_lines_passes_the_schema():
+    from schemas.ai import AiNoteCreateReq, AiNoteEditReq
+
+    assert AiNoteCreateReq(text="  Keep my rookies\nuntil December ").text.strip().startswith("Keep")
+    assert AiNoteEditReq(text="x").text == "x"
+    assert AiNoteEditReq().text is None
+
+
+def test_a_number_only_in_the_note_digest_is_not_grounded():
+    header = ('[Today is Monday 2026-11-02 (US Eastern). The user\'s teams: team_id 7 (espn, points scoring, '
+              '2026-27). Your notes: 2 live (recall reads them). Plans: team_id 7: "stream 3 adds before Friday". '
+              'Due for a recheck: note 12 "he averages 41 lately".]')
+    content = f"{header}\n\nWho should I add? I have \"4 adds\" left."
+    cleaned = memory.without_note_texts(content)
+    assert '"stream 3 adds before Friday"' not in cleaned and "averages 41" not in cleaned
+    assert "team_id 7" in cleaned and "note 12" in cleaned               # ids stay sources
+    assert cleaned.endswith('Who should I add? I have "4 adds" left.')  # the user's own words stay
+    assert agent.ungrounded_numbers("He averages 41.", [cleaned], set()) == 1
+    assert agent.ungrounded_numbers("You have 4 adds.", [cleaned], set()) == 0
+
+
+def test_a_message_without_a_header_is_left_alone():
+    text = 'Your notes: "41 points"'
+    assert memory.without_note_texts(text) == text

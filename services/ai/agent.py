@@ -425,8 +425,10 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
         if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips \
                 and not turn.places:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
-        user_texts = [user_content, *(m["content"] for m in turn.history.messages
-                                      if m["role"] == "user" and isinstance(m["content"], str))]
+        # The header's note digest is not a source either (memory.without_note_texts)
+        user_texts = [memory.without_note_texts(text) for text in
+                      (user_content, *(m["content"] for m in turn.history.messages
+                                       if m["role"] == "user" and isinstance(m["content"], str)))]
         app = [r["data"] for r in turn.all_results().values() if r["tool"] == FIND_IN_APP]
         ungrounded = ungrounded_numbers(
             turn.answer_text(),

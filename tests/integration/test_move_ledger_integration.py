@@ -151,3 +151,37 @@ def test_the_job_rebuilds_the_active_leagues_and_the_desk_reads_them(league):
     assert sorted(m.date for m in by_player.moves) == [_day(2).isoformat(), _day(4).isoformat()]
     only_dime = run(MoveLedgerService.for_team(_owned(league.team), sources=("dime",))).data
     assert [m.source for m in only_dime.moves] == ["dime"]
+
+
+def test_a_team_s_scoring_preview_does_not_score_the_league(league):
+    info = json.loads(league.team.league_info)
+    info["scoring_preview"] = "categories"
+    Team.update(league_info=json.dumps(info)).where(Team.team_id == league.team.team_id).execute()
+
+    ml.rebuild_league(KEY)
+    assert {r.format for r in MoveOutcome.select()} == {"points"}
+
+
+def test_a_past_season_s_write_does_not_explain_this_season_s_move(league):
+    # The desk's day-2 write is gone; last season's write on the same team, period and
+    # players must not stand in for it (scoring periods restart each season).
+    RosterMove.delete().where((RosterMove.scoring_period_id == 2) & (RosterMove.source == "manual")).execute()
+    RosterMove.create(user=league.user.user_id, team=league.team.team_id, nba_date=_day(2) - timedelta(days=365),
+                      scoring_period_id=2, source="manual", kind="transaction", status="applied",
+                      moves=[{"player_id": 104, "action": "add"}, {"player_id": 103, "action": "drop"}])
+
+    ml.rebuild_league(KEY)
+    row = MoveOutcome.get((MoveOutcome.provider_team_id == 1) & (MoveOutcome.scoring_period_id == 2))
+    assert row.source == "outside"
+
+
+@freeze_time("2026-10-25T17:00:00Z")
+def test_the_job_rebuilds_every_active_league(league):
+    other = ml.LeagueKey("espn", "2002", 2027)
+    LineupSnapshot.create(provider="espn", provider_league_id=other.provider_league_id, season=other.season,
+                          provider_team_id=1, team_name="Elsewhere", scoring_period_id=1, nba_date=_day(1),
+                          matchup_period_id=1, player_count=0)
+
+    data = run(MoveLedgerService.run(LedgerRunReq())).data
+    assert [(r.provider_league_id, r.ok) for r in data.leagues] == [("1001", True), ("2002", True)]
+    assert (data.rebuilt, data.failed) == (2, 0)

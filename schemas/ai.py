@@ -19,6 +19,9 @@ from schemas.lineup_editor import MoveRole
 # Postgres text and jsonb cannot hold a NUL, so a string carrying one could
 # never be logged; it is refused before any quota or model call is spent on it
 NO_NUL = r"^[^\x00]*$"
+# The same, and not blank: at least one character that is neither space nor NUL
+# (pydantic's regex engine has no lookahead).
+NO_NUL_NOT_BLANK = r"^[^\x00]*[^\s\x00][^\x00]*$"
 
 # Every ID the caller sends is an int4 in our tables. Unbounded, a JSON integer
 # can run to thousands of digits, each of them copied into the prompt.
@@ -453,7 +456,7 @@ class AiNoteCreateReq(ApiModel):
     """Body for POST /v1/internal/ai/notes: a note the user writes for the agent."""
 
     kind: AiNoteKind = "preference"
-    text: str = Field(..., min_length=1, max_length=500, pattern=NO_NUL)
+    text: str = Field(..., min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
     team_id: Optional[int] = Field(None, gt=0, le=INT4_MAX)
     recheck_on: Optional[date_type] = None
 
@@ -461,7 +464,7 @@ class AiNoteCreateReq(ApiModel):
 class AiNoteEditReq(ApiModel):
     """Body for PATCH /v1/internal/ai/notes/{note_id}: the note is replaced by the user's version."""
 
-    text: Optional[str] = Field(None, min_length=1, max_length=500, pattern=NO_NUL)
+    text: Optional[str] = Field(None, min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
     kind: Optional[AiNoteKind] = None
     recheck_on: Optional[date_type] = None
     clear_recheck: bool = False
