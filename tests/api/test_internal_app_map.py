@@ -2,7 +2,8 @@
 /v1/internal/app-map/sign-in-token: the app map's one-time sign-in, behind
 APP_MAP_TOKEN. Off until the account and token are both configured; the right
 bearer gets a ticket for the configured account and no other. Also the other
-half: a session as that account reaches no write route.
+half: a request from the crawl (it carries the crawl header) reaches no write
+route, while the account itself writes like any other.
 """
 
 import time
@@ -87,7 +88,7 @@ def test_right_bearer_gets_a_ticket_for_the_app_map_account(client, configured, 
     assert clerk == [(APP_MAP_USER, 300)]
 
 
-# ---- A session as the app map's account cannot write ----
+# ---- The crawl's requests cannot write; the account itself can ----
 
 @pytest.fixture
 def signed_in_as(monkeypatch):
@@ -101,13 +102,13 @@ def signed_in_as(monkeypatch):
     app.dependency_overrides.clear()
     client = TestClient(app, raise_server_exceptions=False)
 
-    def headers(sub: str) -> dict:
+    def headers(sub: str, crawl: bool = False) -> dict:
         now = int(time.time())
         token = jwt.encode(
             {"sub": sub, "iss": settings.clerk_issuer, "iat": now, "exp": now + 300},
             pem, algorithm="RS256", headers={"kid": "test-kid"},
         )
-        return {"Authorization": f"Bearer {token}"}
+        return {"Authorization": f"Bearer {token}", **({"X-App-Map-Crawl": "1"} if crawl else {})}
 
     return client, headers
 
@@ -119,9 +120,9 @@ def signed_in_as(monkeypatch):
     ("post", "/v1/internal/streamers/find"),     # get_current_user directly
     ("delete", "/v1/internal/api-keys/k1"),
 ])
-def test_app_map_account_writes_are_403(signed_in_as, configured, method, path):
+def test_the_crawls_writes_are_403(signed_in_as, configured, method, path):
     client, headers = signed_in_as
-    r = getattr(client, method)(path, headers=headers(APP_MAP_USER))
+    r = getattr(client, method)(path, headers=headers(APP_MAP_USER, crawl=True))
     assert r.status_code == 403
     body = r.json()
     assert body["status"] == "authorization_error"
@@ -150,25 +151,26 @@ def yahoo_flow(monkeypatch):
 
 
 @pytest.mark.api
-def test_app_map_account_cannot_start_a_yahoo_connection(signed_in_as, configured, yahoo_flow):
+def test_the_crawl_cannot_start_a_yahoo_connection(signed_in_as, configured, yahoo_flow):
     client, headers = signed_in_as
-    r = client.get("/v1/internal/yahoo/authorize", headers=headers(APP_MAP_USER))
+    r = client.get("/v1/internal/yahoo/authorize", headers=headers(APP_MAP_USER, crawl=True))
     assert r.status_code == 403
     assert r.json()["error_code"] == "APP_MAP_READ_ONLY"
     assert yahoo_flow == []
 
 
 @pytest.mark.api
-def test_other_users_still_start_a_yahoo_connection(signed_in_as, configured, yahoo_flow):
+@pytest.mark.parametrize("user", [APP_MAP_USER, "user_someone"])
+def test_a_person_starts_a_yahoo_connection_as_any_account(signed_in_as, configured, yahoo_flow, user):
     client, headers = signed_in_as
-    r = client.get("/v1/internal/yahoo/authorize", headers=headers("user_someone"))
+    r = client.get("/v1/internal/yahoo/authorize", headers=headers(user))
     assert r.status_code == 200
-    assert yahoo_flow == [("auth_url", "user_someone")]
+    assert yahoo_flow == [("auth_url", user)]
 
 
 @pytest.mark.api
-def test_a_callback_for_the_app_map_account_stores_nothing(client, configured, yahoo_flow):
-    r = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", follow_redirects=False)
+def test_a_callback_the_crawl_lands_on_stores_nothing(client, configured, yahoo_flow):
+    r = client.get("/v1/internal/yahoo/callback?code=abc&state=signed", headers={"X-App-Map-Crawl": "1"}, follow_redirects=False)
     assert r.status_code in (302, 307)
     assert r.headers["location"].endswith("/account?yahoo_error=read_only")
     assert yahoo_flow == []

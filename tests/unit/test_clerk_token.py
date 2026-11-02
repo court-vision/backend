@@ -214,13 +214,14 @@ def test_user_fetch_goes_through_the_shared_session(monkeypatch):
     assert user["email"] == "primary@example.com"
 
 
-# ---- The app map's account is read-only ----
+# ---- The app map's crawl only reads; its account writes ----
 
 APP_MAP_USER = "user_app_map"
 
 
-def _request(method: str, path: str = "/v1/internal/teams/add") -> Request:
-    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
+def _request(method: str, path: str = "/v1/internal/teams/add", crawl: bool = True) -> Request:
+    headers = [(b"x-app-map-crawl", b"1")] if crawl else []
+    return Request({"type": "http", "method": method, "path": path, "headers": headers, "query_string": b""})
 
 
 @pytest.fixture
@@ -236,7 +237,7 @@ def _app_map_credentials(private_pem: bytes, sub: str = APP_MAP_USER) -> HTTPAut
 @pytest.mark.unit
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 @pytest.mark.parametrize("dependency", ["verify_clerk_token", "get_current_user"])
-def test_app_map_account_cannot_write(rsa_keys, trust_test_key, app_map_account, method, dependency):
+def test_the_crawl_cannot_write(rsa_keys, trust_test_key, app_map_account, method, dependency):
     private_pem, _ = rsa_keys
     with pytest.raises(AuthorizationError) as exc:
         getattr(clerk_auth, dependency)(_app_map_credentials(private_pem), _request(method))
@@ -246,7 +247,7 @@ def test_app_map_account_cannot_write(rsa_keys, trust_test_key, app_map_account,
 
 @pytest.mark.unit
 @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
-def test_app_map_account_can_read(rsa_keys, trust_test_key, app_map_account, method):
+def test_the_crawl_can_read(rsa_keys, trust_test_key, app_map_account, method):
     private_pem, _ = rsa_keys
     user = clerk_auth.get_current_user(_app_map_credentials(private_pem), _request(method))
     assert user["clerk_user_id"] == APP_MAP_USER
@@ -254,7 +255,7 @@ def test_app_map_account_can_read(rsa_keys, trust_test_key, app_map_account, met
 
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/internal/teams/12/streamers/find", "/v1/internal/teams/12/stream-lanes/plan"])
-def test_app_map_account_can_run_the_searches_sent_as_post(rsa_keys, trust_test_key, app_map_account, path):
+def test_the_crawl_can_run_the_searches_sent_as_post(rsa_keys, trust_test_key, app_map_account, path):
     private_pem, _ = rsa_keys
     user = clerk_auth.get_current_user(_app_map_credentials(private_pem), _request("POST", path))
     assert user["clerk_user_id"] == APP_MAP_USER
@@ -269,7 +270,7 @@ def test_app_map_account_can_run_the_searches_sent_as_post(rsa_keys, trust_test_
     ("POST", "/v1/internal/streamers/find"),                 # the legacy search takes a league in its body
     ("POST", "/prefix/v1/internal/teams/12/streamers/find"),
 ])
-def test_app_map_account_runs_no_other_post(rsa_keys, trust_test_key, app_map_account, method, path):
+def test_the_crawl_runs_no_other_post(rsa_keys, trust_test_key, app_map_account, method, path):
     private_pem, _ = rsa_keys
     with pytest.raises(AuthorizationError) as exc:
         clerk_auth.get_current_user(_app_map_credentials(private_pem), _request(method, path))
@@ -277,18 +278,21 @@ def test_app_map_account_runs_no_other_post(rsa_keys, trust_test_key, app_map_ac
 
 
 @pytest.mark.unit
-def test_other_users_still_write(rsa_keys, trust_test_key, app_map_account):
+@pytest.mark.parametrize("sub", [APP_MAP_USER, "user_abc"])
+def test_the_crawl_header_refuses_whoever_is_signed_in(rsa_keys, trust_test_key, app_map_account, sub):
     private_pem, _ = rsa_keys
-    user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem, sub="user_abc"), _request("POST"))
-    assert user["clerk_user_id"] == "user_abc"
+    with pytest.raises(AuthorizationError):
+        clerk_auth.verify_clerk_token(_app_map_credentials(private_pem, sub=sub), _request("POST"))
 
 
 @pytest.mark.unit
-def test_nobody_is_read_only_without_an_app_map_account(rsa_keys, trust_test_key, monkeypatch):
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("sub", [APP_MAP_USER, "user_abc"])
+def test_without_the_crawl_header_the_account_writes(rsa_keys, trust_test_key, app_map_account, method, sub):
+    """A person (or autopilot) signed in as the app map's account writes like anyone."""
     private_pem, _ = rsa_keys
-    monkeypatch.setattr(settings, "app_map_clerk_user_id", None)
-    user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem), _request("POST"))
-    assert user["clerk_user_id"] == APP_MAP_USER
+    user = clerk_auth.verify_clerk_token(_app_map_credentials(private_pem, sub=sub), _request(method, crawl=False))
+    assert user["clerk_user_id"] == sub
 
 
 # ---- One-time sign-in tokens ----

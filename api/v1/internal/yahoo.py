@@ -13,11 +13,11 @@ the browser is mid-redirect, so it sends the user back to the frontend (the
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from core.clerk_auth import get_current_user, is_app_map_user
+from core.clerk_auth import get_current_user, is_app_map_crawl
 from core.logging import get_logger
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
@@ -99,6 +99,7 @@ async def yahoo_authorize(
         ),
     ),
     current_user: dict = Depends(get_current_user),
+    request: Request = None,
 ):
     """
     Initiate Yahoo OAuth flow.
@@ -110,10 +111,10 @@ async def yahoo_authorize(
     """
     clerk_user_id = current_user.get("clerk_user_id", "")
     # Connecting Yahoo is a write that starts with a GET, which the app map's
-    # read-only guard lets through: refuse that account here and at the callback
-    if is_app_map_user(clerk_user_id):
+    # crawl guard lets through: refuse the crawl here and at the callback
+    if is_app_map_crawl(request):
         log.info("app_map_write_refused", method="GET", path="/v1/internal/yahoo/authorize")
-        raise AuthorizationError("APP_MAP_READ_ONLY", "This account is read-only")
+        raise AuthorizationError("APP_MAP_READ_ONLY", "The app map's crawl only reads")
     # Yahoo's OAuth state is keyed by the Clerk user id string, not usr.user_id
     auth_url, _state = YahooService.get_auth_url(clerk_user_id, return_to)
     return YahooAuthUrlResponse(
@@ -128,7 +129,8 @@ async def yahoo_callback(
     code: Optional[str] = Query(None, description="Authorization code from Yahoo"),
     state: Optional[str] = Query(None, description="State token for CSRF protection"),
     error: Optional[str] = Query(None, description="Error code if authorization failed"),
-    error_description: Optional[str] = Query(None, description="Error description")
+    error_description: Optional[str] = Query(None, description="Error description"),
+    request: Request = None,
 ):
     """
     Handle Yahoo OAuth callback.
@@ -150,9 +152,9 @@ async def yahoo_callback(
     if not state_data:
         log.warning("yahoo_oauth_invalid_state")
         return _frontend_redirect(None, yahoo_error="invalid_state")
-    if is_app_map_user(state_data.get("user_id")):
-        # A state signed for the app map's account (say, before it was
-        # configured) stores nothing
+    if is_app_map_crawl(request):
+        # The crawl never gets this far (authorize refuses it), but a callback
+        # it lands on stores nothing either
         log.info("app_map_write_refused", method="GET", path="/v1/internal/yahoo/callback")
         return _frontend_redirect(return_to, yahoo_error="read_only")
     if not code:
