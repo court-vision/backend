@@ -41,7 +41,7 @@ from core.nba_calendar import EASTERN, nba_date_et
 from core.settings import settings
 from core.tracing import timed
 from schemas.ai import AiToolCall
-from services.ai import conversations, proposals, spend
+from services.ai import conversations, memory, proposals, spend
 from services.ai.client import get_client
 from services.ai.display import (
     DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_PLACE, SHOW_TABLE, DisplayError, show_chart, show_place, show_table,
@@ -87,6 +87,11 @@ STATUS: dict[str, str] = {
     "get_lineup": "Reading your lineup",
     "propose_lineup": "Checking the lineup",
     "find_in_app": "Looking through the app",
+    "recall": "Reading its notes",
+    "remember": "Making a note",
+    "revise": "Updating a note",
+    "forget": "Retiring a note",
+    "get_move_outcomes": "Checking how moves went",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
     "show_place": "Pointing out where",
@@ -164,8 +169,10 @@ def _team_facts(teams: list[dict[str, Any]], pinned: Optional[int]) -> str:
 async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = None, *,
                  conversation_id: Optional[int] = None) -> str:
     """Today, the season, and the user's teams, by ID and format only: names are
-    league data, and the model can read them with get_my_teams. In a conversation,
-    what became of its earlier proposals (sent, dismissed, expired) comes last."""
+    league data, and the model can read them with get_my_teams. Then the digest of
+    the agent's notes (its plans and the notes due for a recheck; services/ai/memory.py).
+    In a conversation, what became of its earlier proposals (sent, dismissed, expired)
+    comes last."""
     today = nba_date_et() if now is None else now.astimezone(EASTERN).date()
     try:
         teams = await list_my_teams(user_id)
@@ -173,6 +180,11 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
         get_logger().warning("ai_turn_header_teams_failed", user_id=user_id)
         teams = []
     season = await _season_line()
+    notes = ""
+    try:
+        notes = await memory.digest(user_id, today)
+    except Exception:
+        get_logger().warning("ai_turn_header_memory_failed", user_id=user_id)
     chips = ""
     if conversation_id is not None:
         try:
@@ -180,7 +192,7 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
         except Exception:
             get_logger().warning("ai_turn_header_proposals_failed", conversation_id=conversation_id)
     line = f"Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}"
-    return f"[{line} {chips}]" if chips else f"[{line}]"
+    return "[" + " ".join(part for part in (line, notes, chips) if part) + "]"
 
 
 # ---- one model call, streamed ----
@@ -336,6 +348,8 @@ def ungrounded_numbers(text: str, sources: list[Any], names: set[str] = frozense
 # ---- the made-up-place check ----
 
 FIND_IN_APP = "find_in_app"
+# Results whose numbers never ground an answer's: the app map's sample data, and notes
+NOT_SOURCES = frozenset({FIND_IN_APP, *memory.MEMORY_TOOL_NAMES})
 # What an answer names in the app: a bold or quoted span of a few words
 _NAMED = re.compile(r"\*\*([^*\n]{1,60})\*\*|\"([^\"\n]{1,60})\"|“([^”\n]{1,60})”")
 _MAX_NAME_WORDS = 6
@@ -416,9 +430,10 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
         app = [r["data"] for r in turn.all_results().values() if r["tool"] == FIND_IN_APP]
         ungrounded = ungrounded_numbers(
             turn.answer_text(),
-            # A number in a crawled screen is sample data, never a source for the user's stats
-            [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
-            + [r["input"] for r in turn.results.values()]
+            # A number in a crawled screen is sample data, and one in a note is the
+            # agent's own earlier words: neither is a source for the user's stats
+            [r["data"] for r in turn.all_results().values() if r["tool"] not in NOT_SOURCES]
+            + [r["input"] for r in turn.results.values() if r["tool"] not in NOT_SOURCES]
             + user_texts,
             turn.run.names,
         )

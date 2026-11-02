@@ -50,7 +50,8 @@ from services.game_context import GameContext
 from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
-from services.ai import app_map
+from services import move_ledger
+from services.ai import app_map, memory
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -78,6 +79,7 @@ from services.ai.stats.compiler import (
 )
 from services.ai.stats.query import run_query_stats
 from services.player_service import PlayerService
+from services.move_ledger_service import query_for_team as move_ledger_query
 from services.scheduled_pickup_service import ScheduledPickupService
 from services.streamer_service import StreamerService
 from services.team_service import TeamService
@@ -1162,13 +1164,100 @@ AGENT_APP_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+# Dime's memory (the Dime autopilot plan, step 1): notes kept between conversations.
+# A team_id the model names is checked like every team-scoped tool's.
+
+async def _memory_caller(ctx: ToolContext | None, team_id: Optional[int]) -> memory.Caller:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if team_id is not None and await run_db("ai.owned_team", ensure_team_owned, team_id, ctx.user_id) is None:
+        raise AppError("TEAM_NOT_FOUND", f"Team {team_id} is not one of the user's teams")
+    return memory.Caller(user_id=ctx.user_id, conversation_id=ctx.conversation_id, today=nba_date_et())
+
+
+async def _recall(args: memory.RecallInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await memory.recall(await _memory_caller(ctx, args.team_id), args)
+
+
+async def _remember(args: memory.RememberInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await memory.remember(await _memory_caller(ctx, args.team_id), args)
+
+
+async def _revise(args: memory.ReviseInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await memory.revise(await _memory_caller(ctx, None), args)
+
+
+async def _forget(args: memory.ForgetInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await memory.forget(await _memory_caller(ctx, None), args)
+
+
+# The move ledger (the Dime autopilot plan, step 1): every add and drop in the user's
+# leagues and what it earned, scored nightly from the box scores (services/move_ledger.py).
+
+GET_MOVE_OUTCOMES_NAME = "get_move_outcomes"
+MOVE_SOURCES = ("you", "scheduled", "lane", "dime", "outside")
+
+
+class MoveOutcomesInput(_Input):
+    team_id: int = Field(gt=0, lt=2**31)
+    scope: Literal["team", "league"] = "team"
+    source: Optional[list[Literal["you", "scheduled", "lane", "dime", "outside"]]] = Field(None, min_length=1)
+    player_id: Optional[int] = Field(None, gt=0, lt=2**31)
+    since: Optional[date] = None
+    limit: int = Field(12, ge=1, le=40)
+
+
+GET_MOVE_OUTCOMES: dict[str, Any] = {
+    "name": GET_MOVE_OUTCOMES_NAME,
+    "description": (
+        "How adds and drops went: every move a team made (read off its daily rosters, whoever made "
+        "it) and what it earned afterwards in the box scores, scored with the league's scoring, over "
+        "three windows from the day it counted: that day, the rest of that matchup, and two weeks. "
+        "Each window has the added and the dropped player's games and points (category leagues: "
+        "totals, and the categories the add won and lost against the drop), the add's counted games "
+        "(in an active slot on this team), net (add minus drop, points leagues) and complete (false "
+        "while the window is still being played). source says who made it: you (the user, in Court "
+        "Vision), scheduled (a scheduled pickup), lane (a stream lane), dime (your proposal the user "
+        "sent; its forecast and reason sit beside the result), outside (in ESPN itself, waivers, or a "
+        "rival). summary totals each source over all matching moves. scope league reads every team "
+        "in the league (mine false: a rival's). Rebuilt each night after the games. Read it before "
+        "judging a move or writing a lesson, and cite the moves a lesson comes from."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "team_id": _TEAM_ID,
+            "scope": {"type": "string", "enum": ["team", "league"],
+                      "description": "team (default): this team's moves; league: every team's in its league"},
+            "source": {"type": "array", "items": {"type": "string", "enum": list(MOVE_SOURCES)},
+                       "description": "Only moves from these sources"},
+            "player_id": {"type": "integer", "description": "Only moves that added or dropped this NBA player_id"},
+            "since": {"type": "string", "format": "date", "description": "Only moves from this day on (YYYY-MM-DD)"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 40,
+                      "description": "Moves to return, newest first (default 12); summary covers all"},
+        },
+        "required": ["team_id"],
+        "additionalProperties": False,
+    },
+}
+
+
+async def _get_move_outcomes(args: MoveOutcomesInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, _ = await _owned(ctx, args.team_id)
+    q = await move_ledger_query(team, scope=args.scope, sources=tuple(args.source or ()),
+                                nba_player_id=args.player_id, since=args.since, limit=args.limit)
+    found = await run_db("ai.move_outcomes", move_ledger.read_outcomes, q)
+    return {"team_id": args.team_id, "scope": args.scope, **found}
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
-# drop, then the lineup board and its moves), then the app map. The order is part
-# of every request's cached prefix: append, never reorder.
+# drop, then the lineup board and its moves), then the app map, then Dime's
+# memory, then the move ledger. The order is part of every request's cached
+# prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
-    PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS,
+    PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
@@ -1206,6 +1295,11 @@ _REGISTRY: dict[str, _Tool] = {
     GET_LINEUP_NAME: _Tool(GetLineupInput, _get_lineup),
     PROPOSE_LINEUP_NAME: _Tool(ProposeLineupInput, _propose_lineup),
     "find_in_app": _Tool(FindInAppInput, _find_in_app),
+    memory.RECALL_NAME: _Tool(memory.RecallInput, _recall),
+    memory.REMEMBER_NAME: _Tool(memory.RememberInput, _remember),
+    memory.REVISE_NAME: _Tool(memory.ReviseInput, _revise),
+    memory.FORGET_NAME: _Tool(memory.ForgetInput, _forget),
+    GET_MOVE_OUTCOMES_NAME: _Tool(MoveOutcomesInput, _get_move_outcomes),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

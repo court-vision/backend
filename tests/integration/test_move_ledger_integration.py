@@ -1,0 +1,153 @@
+"""
+The move ledger against real SQL: lineup snapshots, Court Vision's writes and box
+scores in, usr.move_outcomes (migration 0041) out, read back the way the AI desk
+and Dime read it.
+"""
+
+import asyncio
+import json
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+from freezegun import freeze_time
+
+from db.models.ai_conversations import AiConversation, AiProposal
+from db.models.lineup_snapshots import LineupSnapshot, LineupSnapshotPlayer
+from db.models.move_outcomes import MoveOutcome
+from db.models.nba.player_game_stats import PlayerGameStats
+from db.models.nba.players import Player
+from db.models.roster_moves import RosterMove
+from db.models.scheduled_pickups import ScheduledPickup
+from db.models.teams import Team
+from db.models.users import User
+from schemas.move_outcomes import LedgerRunReq
+from services import move_ledger as ml
+from services.move_ledger_service import MoveLedgerService
+
+pytestmark = pytest.mark.integration
+
+OPENING = date(2026, 10, 20)
+KEY = ml.LeagueKey("espn", "1001", 2027)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def _day(period: int) -> date:
+    return OPENING + timedelta(days=period - 1)
+
+
+def _stored(team: int, name: str, period: int, players: dict[int, int]) -> None:
+    header = LineupSnapshot.create(
+        provider="espn", provider_league_id=KEY.provider_league_id, season=KEY.season, provider_team_id=team,
+        team_name=name, scoring_period_id=period, nba_date=_day(period), matchup_period_id=1,
+        player_count=len(players),
+    )
+    for pid, slot in players.items():
+        LineupSnapshotPlayer.create(snapshot=header, player_id=pid, player_name=f"P{pid}", lineup_slot_id=slot)
+
+
+def _write(user, team, period, moves, source="manual") -> RosterMove:
+    return RosterMove.create(user=user.user_id, team=team.team_id, nba_date=_day(period), scoring_period_id=period,
+                             source=source, kind="transaction", status="applied", moves=moves)
+
+
+@pytest.fixture
+def league(integration_db):
+    user = User.create(email="atlas@courtvision.dev", clerk_user_id="user_atlas",
+                       created_at=datetime.now(timezone.utc))
+    info = {"provider": "espn", "league_id": 1001, "team_name": "Atlas", "year": 2027, "espn_team_id": 1}
+    team = Team.create(user_id=user.user_id, team_identifier="1001Atlas", league_info=json.dumps(info))
+    for espn_id in (101, 102, 103, 104, 105, 106, 201, 202, 203):
+        Player.create(id=9000 + espn_id, espn_id=espn_id, name=f"P{espn_id}", name_normalized=f"p{espn_id}")
+
+    # Atlas: day 2 the desk swaps 103 for 104; day 3 a scheduled pickup swaps 102 for 105
+    # (sent on day 2, the day before); day 4 Dime's proposal, sent, swaps 104 for 106.
+    _stored(1, "Atlas", 1, {101: 0, 102: 1, 103: 12})
+    _stored(1, "Atlas", 2, {101: 0, 102: 1, 104: 12})
+    _stored(1, "Atlas", 3, {101: 0, 105: 1, 104: 2})
+    _stored(1, "Atlas", 4, {101: 0, 105: 1, 106: 2})
+    # The rival swaps 202 for 203 in ESPN on day 2.
+    _stored(2, "Rival", 1, {201: 0, 202: 0})
+    _stored(2, "Rival", 2, {201: 0, 203: 0})
+    _stored(2, "Rival", 3, {201: 0, 203: 0})
+
+    _write(user, team, 2, [{"player_id": 104, "action": "add"}, {"player_id": 103, "action": "drop"}])
+    pickup_write = _write(user, team, 2, [{"player_id": 105, "action": "add"}, {"player_id": 102, "action": "drop"}],
+                          source="scheduled")
+    ScheduledPickup.create(user=user.user_id, team=team.team_id, add_player_id=105, drop_player_id=102,
+                           add_name="P105", drop_name="P102", scoring_period_id=3, nba_date=_day(3),
+                           not_before_at=datetime(2026, 10, 21, tzinfo=timezone.utc), status="executed",
+                           audit_id=pickup_write.id)
+    dime_write = _write(user, team, 4, [{"player_id": 106, "action": "add"}, {"player_id": 104, "action": "drop"}])
+    conversation = AiConversation.create(user_id=user.user_id, team_id=team.team_id)
+    AiProposal.create(user_id=user.user_id, conversation_id=conversation.id, team_id=team.team_id,
+                      kind="transaction", day=3, scoring_period_id=4, nba_date=_day(4),
+                      add_player_id=106, add_nba_id=9106, add_name="P106",
+                      drop_player_id=104, drop_nba_id=9104, drop_name="P104",
+                      reason="more games this week", summary="Add P106, drop P104",
+                      projection={"scoring": "points", "change": 7.5}, state="sent",
+                      expires_at=datetime(2026, 10, 24, tzinfo=timezone.utc), audit_id=dime_write.id)
+
+    # Box scores: 104 plays days 2 and 3 (started on day 3 only), 103 plays day 2.
+    PlayerGameStats.upsert_game_stats(9104, _day(2), {"min": 30, "pts": 20, "reb": 5, "fpts": 25})
+    PlayerGameStats.upsert_game_stats(9104, _day(3), {"min": 30, "pts": 10, "reb": 0, "fpts": 10})
+    PlayerGameStats.upsert_game_stats(9103, _day(2), {"min": 30, "pts": 6, "reb": 0, "fpts": 6})
+    return SimpleNamespace(user=user, team=team)
+
+
+def _owned(team) -> SimpleNamespace:
+    return SimpleNamespace(team_id=team.team_id, user_id=team.user_id_id, league_id=None, league=None,
+                           league_info_json=team.league_info)
+
+
+def test_the_rebuild_finds_every_move_and_who_made_it(league):
+    done = ml.rebuild_league(KEY)
+    assert (done.days, done.moves) == (7, 4)
+    assert done.by_source == {"you": 1, "scheduled": 1, "dime": 1, "outside": 1}
+
+    rows = {(r.provider_team_id, r.scoring_period_id): r for r in MoveOutcome.select()}
+    desk = rows[(1, 2)]
+    assert (desk.source, desk.add_nba_id, desk.drop_nba_id, desk.paired, desk.team_id_id) == (
+        "you", 9104, 9103, True, league.team.team_id)
+    assert desk.windows["day"]["add"]["games"] == 1 and desk.windows["day"]["add"]["counted_games"] == 0   # benched
+    assert desk.windows["two_weeks"]["add"]["counted_games"] == 1                                            # day 3
+    assert desk.windows["two_weeks"]["complete"] is False
+    assert desk.windows["held_through"] == _day(3).isoformat()
+    assert float(desk.net_points) == desk.windows["two_weeks"]["net"] > 0
+
+    assert rows[(1, 3)].source == "scheduled"
+    dime = rows[(1, 4)]
+    assert (dime.source, dime.forecast, dime.reason) == ("dime", {"scoring": "points", "change": 7.5},
+                                                         "more games this week")
+    rival = rows[(2, 2)]
+    assert (rival.source, rival.team_id_id, rival.add_nba_id, rival.paired) == ("outside", None, 9203, True)
+
+
+def test_a_rerun_replaces_the_league_s_rows(league):
+    ml.rebuild_league(KEY)
+    first = sorted((r.provider_team_id, r.scoring_period_id) for r in MoveOutcome.select())
+    ml.rebuild_league(KEY)
+    assert sorted((r.provider_team_id, r.scoring_period_id) for r in MoveOutcome.select()) == first
+
+
+@freeze_time("2026-10-25T17:00:00Z")
+def test_the_job_rebuilds_the_active_leagues_and_the_desk_reads_them(league):
+    data = run(MoveLedgerService.run(LedgerRunReq())).data
+    assert [(r.provider_league_id, r.season, r.ok, r.moves) for r in data.leagues] == [("1001", 2027, True, 4)]
+
+    mine = run(MoveLedgerService.for_team(_owned(league.team))).data
+    assert (mine.scope, mine.format, mine.total) == ("team", "points", 3)
+    assert [m.date for m in mine.moves] == [_day(4).isoformat(), _day(3).isoformat(), _day(2).isoformat()]
+    assert {s.source: s.moves for s in mine.summary} == {"dime": 1, "scheduled": 1, "you": 1}
+
+    everyone = run(MoveLedgerService.for_team(_owned(league.team), scope="league")).data
+    assert everyone.total == 4
+    assert [m.mine for m in everyone.moves if m.team_name == "Rival"] == [False]
+
+    by_player = run(MoveLedgerService.for_team(_owned(league.team), nba_player_id=9104)).data
+    assert sorted(m.date for m in by_player.moves) == [_day(2).isoformat(), _day(4).isoformat()]
+    only_dime = run(MoveLedgerService.for_team(_owned(league.team), sources=("dime",))).data
+    assert [m.source for m in only_dime.moves] == ["dime"]

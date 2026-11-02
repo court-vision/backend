@@ -20,12 +20,13 @@ from db.base import run_db
 from schemas.ai import (
     AiConversationDetail,
     AiConversationSummary,
+    AiNote,
     AiProposalCheckData,
     AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, conversations, guards, proposals, spend
+from services.ai import agent, conversations, guards, memory, proposals, spend
 
 
 def has_access(user_id: int) -> bool:
@@ -176,3 +177,35 @@ class AgentService:
         ensure_access(user_id)
         if not await conversations.set_feedback(turn_id, user_id, value):
             raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
+
+    # ---- the agent's notes, as the user sees and edits them ----
+
+    @staticmethod
+    async def _owned_team_or_404(team_id: Optional[int], user_id: int) -> None:
+        if team_id is not None and await run_db("ai.owned_team", ensure_team_owned, team_id, user_id) is None:
+            raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
+
+    @staticmethod
+    async def notes(user_id: int, team_id: Optional[int], include_retired: bool = False) -> list[AiNote]:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return [AiNote(**n) for n in await memory.list_for_user(user_id, team_id, include_retired)]
+
+    @staticmethod
+    async def add_note(user_id: int, *, kind: str, text: str, team_id: Optional[int], recheck_on) -> AiNote:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return AiNote(**await memory.add_for_user(user_id, kind=kind, text=text, team_id=team_id,
+                                                  recheck_on=recheck_on))
+
+    @staticmethod
+    async def edit_note(user_id: int, note_id: int, *, text: Optional[str], kind: Optional[str], recheck_on,
+                        clear_recheck: bool) -> AiNote:
+        ensure_access(user_id)
+        return AiNote(**await memory.edit_for_user(user_id, note_id, text=text, kind=kind, recheck_on=recheck_on,
+                                                   clear_recheck=clear_recheck))
+
+    @staticmethod
+    async def delete_note(user_id: int, note_id: int) -> None:
+        ensure_access(user_id)
+        await memory.delete_for_user(user_id, note_id)
