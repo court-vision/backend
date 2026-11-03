@@ -7,10 +7,19 @@ game into slots that are empty or held by players who cannot score today.
 
 Tiers decide who may displace whom:
 
-    A  has a game and is not OUT      never displaced
-    B  has a game but is OUT          kept (the status may flip before tip), displaced
-                                      only by a tier-A bench player
-    C  no game today                  displaced by any A or B bench player
+    A  has a game, not OUT or DOUBTFUL   never displaced (an upgraded doubtful is A)
+    A2 has a game, DOUBTFUL              displaced only by a tier-A bench player
+    B  has a game but is OUT             kept (the status may flip before tip), displaced
+                                         only by a tier-A or A2 bench player
+    C  no game today                     displaced by any A, A2 or B bench player
+
+An "upgraded doubtful" is a DOUBTFUL player whose previous status was OUT (earlier
+the same day, or at his previous game): he is trending toward playing, so he stays
+tier A. Without a previous status (ESPN's string alone) DOUBTFUL is A2.
+
+Nobody is benched *because* he is out or doubtful: a player leaves an active slot
+only when a better-tier bench player with a game needs that slot, directly or
+through a chain of shifts. With no such bench player he stays.
 
 A bench player may take an active slot only when the slot is empty or its holder
 is in a strictly worse tier — never a lateral swap, so this is not an optimizer.
@@ -38,14 +47,15 @@ BENCH_SLOT_ID = 12
 IR_SLOT_ID = 13
 UNTOUCHABLE_SLOT_IDS: frozenset[int] = frozenset({14, 15})
 # Mirrors services.team_insights_service._OUT_STATUSES; DTD / GTD / QUESTIONABLE
-# / DOUBTFUL count as healthy — ESPN still scores them if they play.
+# count as healthy — ESPN still scores them if they play. DOUBTFUL is its own tier.
 OUT_STATUSES: frozenset[str] = frozenset({"OUT", "O", "IL", "IL+", "SUSPENSION", "INJURY_RESERVE"})
 # ESPN's IR rule asks whether the player is *injured*, not whether he can play: a
 # suspension keeps him out of the lineup but the transaction is still refused with
 # TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED, so it must not open slot 13.
 IR_STATUSES: frozenset[str] = OUT_STATUSES - {"SUSPENSION"}
+DOUBTFUL_STATUSES: frozenset[str] = frozenset({"DOUBTFUL"})
 
-TIER_A, TIER_B, TIER_C = 0, 1, 2
+TIER_A, TIER_A2, TIER_B, TIER_C = 0, 1, 2, 3
 MAX_CHAIN_HOPS = 4  # filler + up to three shifts + the evicted player
 
 
@@ -61,10 +71,20 @@ class PlannerPlayer:
     value: float = 0.0
     game_note: Optional[str] = None  # "vs LAL · 7:30 PM", supplied by the caller for move notes
     injured: bool = False            # ESPN's `injured` flag — its IR rule ("player is not injured")
+    previous_status: Optional[str] = None  # the status before the current one; OUT -> DOUBTFUL is an upgrade
 
     @property
     def is_out(self) -> bool:
         return (self.injury_status or "ACTIVE").upper() in OUT_STATUSES
+
+    @property
+    def is_doubtful(self) -> bool:
+        return (self.injury_status or "ACTIVE").upper() in DOUBTFUL_STATUSES
+
+    @property
+    def upgraded_doubtful(self) -> bool:
+        """DOUBTFUL after being OUT: trending toward playing, so treated as healthy."""
+        return self.is_doubtful and (self.previous_status or "").upper() in OUT_STATUSES
 
     @property
     def ir_eligible(self) -> bool:
@@ -80,11 +100,15 @@ class PlannerPlayer:
     def tier(self) -> int:
         if not self.has_game:
             return TIER_C
-        return TIER_B if self.is_out else TIER_A
+        if self.is_out:
+            return TIER_B
+        if self.is_doubtful and not self.upgraded_doubtful:
+            return TIER_A2
+        return TIER_A
 
     @property
     def playable(self) -> bool:
-        """Has a game today and is not OUT (tier A)."""
+        """Has a game today and is neither OUT nor (un-upgraded) DOUBTFUL (tier A)."""
         return self.tier == TIER_A
 
     @property
@@ -173,8 +197,8 @@ def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: 
     ends it when one holder is unlocked and in a strictly worse tier than the
     filler (that holder sits); otherwise any unlocked holder may shift to another
     eligible active slot and the search continues. Among the shortest paths an
-    empty slot beats an eviction, then the worst holder (tier C before B, lowest
-    value) is the one who sits.
+    empty slot beats an eviction, then the worst holder (tier C before B before
+    A2, lowest value) is the one who sits.
     """
     occupants = _occupants(board)
     start_slots = sorted(s for s in filler.eligible_slot_ids if s in ACTIVE_SLOT_IDS and capacity.get(s, 0) > 0)
@@ -268,7 +292,7 @@ def plan_fill(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) 
     unfilled: list[Unfilled] = []
 
     fillers = sorted(
-        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_B)),
+        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_A2, TIER_B)),
         key=lambda p: (p.tier, -p.value, p.name),
     )
     for filler in fillers:

@@ -18,6 +18,8 @@ from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_advanced_stats import PlayerAdvancedStats
 from db.models.nba.games import Game
 from db.models.nba.player_injuries import PlayerInjury
+from db.models.nba.news import NewsItem, NewsItemPlayer, NewsItemTeam
+from db.models.nba.availability import AvailabilityReport, PlayerAvailability
 from db.models.nba.live_player_stats import LivePlayerStats
 from db.models.nba.live_game_score_snapshots import LiveGameScoreSnapshot
 from db.models.nba.player_rolling_stats import PlayerRollingStats
@@ -47,6 +49,12 @@ __all__ = [
     "PlayerAdvancedStats",
     "Game",
     "PlayerInjury",
+    # News and availability
+    "NewsItem",
+    "NewsItemPlayer",
+    "NewsItemTeam",
+    "AvailabilityReport",
+    "PlayerAvailability",
     # Live data
     "LivePlayerStats",
     "LiveGameScoreSnapshot",

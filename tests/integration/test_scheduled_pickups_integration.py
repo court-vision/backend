@@ -305,6 +305,9 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
         + (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.sql").read_text()
     lanes_rollback = (Path(MIGRATIONS_DIR) / "0037__stream_lanes_per_spot.rollback.sql").read_text() \
         + (Path(MIGRATIONS_DIR) / "0030__stream_lanes.rollback.sql").read_text()
+    # 0035 widened the source CHECK again ('availability'); the 0028 forward file
+    # writes its own three-value CHECK, so 0035 runs after it to leave the chain's state.
+    availability_forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
@@ -320,5 +323,7 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
         _audit(user, team)                                                    # but a new 'scheduled' write is refused
     db.execute_sql(forward)
     db.execute_sql(lanes_forward)
+    with db.atomic():
+        db.execute_sql(availability_forward)
     assert table_exists() and "'scheduled'" in _source_check_values()
     assert "NOT VALID" not in _source_check_values()
