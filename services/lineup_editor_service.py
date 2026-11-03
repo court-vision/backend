@@ -7,6 +7,8 @@ Three entry points share one write chain:
     read_state    GET  /teams/{id}/lineup         the editor's board
     plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes)
     apply_manual  POST /teams/{id}/lineup/moves   the user's own moves, for today or a later day
+                                                  (an AI desk lineup chip sends through it too,
+                                                  with `proposal_id`)
     evaluate      POST /jobs/lineup/evaluate      the alerts pipeline: plan, and
                                                   apply it for auto-lineup users
 
@@ -268,10 +270,21 @@ class LineupEditorService:
             raise RosterMoveInvalid(data={"errors": [
                 MoveErrorResp(player_id=e.player_id, code=e.code, message=e.message).model_dump() for e in errors]})
 
+        if req.proposal_id is not None:
+            # An AI desk chip: every move it still needs on this board (each player to the slot it names,
+            # from wherever the board has him) and nothing else, still proposed, before ESPN is asked
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.LINEUP,
+                                     scoring_period_id=req.expected_scoring_period_id,
+                                     moves=[(m.player_id, m.to_slot_id) for m in moves], board=state)
+
         fresh, verified, audit_id = await LineupEditorService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
             moves=moves, source="manual", fallback_slot_counts=slots,
         )
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,

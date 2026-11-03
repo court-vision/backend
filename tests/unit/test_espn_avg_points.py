@@ -185,6 +185,31 @@ def test_free_agents_carry_their_pool_status(espn):
 
 
 @pytest.mark.unit
+def test_free_agents_by_ids_are_the_pool_read_for_named_players(espn, monkeypatch):
+    """A player named outside the market's read is read by id, the same `filterIds` read as the
+    pool entries (a sort, no status filter), and kept only as a free agent or a waiver claim."""
+    seen = {}
+
+    async def provider_get(provider, url, *, params=None, headers=None, cookies=None, expect_key=None, **_):
+        seen.update(params=params, headers=headers)
+        return {"players": [
+            {"id": 1, "status": "FREEAGENT", "onTeamId": 0, "player": _espn_player(1, "Free Guy", 10.0)},
+            {"id": 2, "status": "WAIVERS", "onTeamId": 0, "waiverProcessDate": WAIVER_MS, "player": _espn_player(2, "Waiver Guy", 9.0)},
+            {"id": 3, "status": "ONTEAM", "onTeamId": 4, "player": _espn_player(3, "Rostered Guy", 8.0)},
+        ]}
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
+    resp = asyncio.run(EspnService.get_free_agents_by_ids(LEAGUE, [3, 1, 2, 1]))
+    assert seen["params"] == {"view": "kona_player_info", "scoringPeriodId": 0}
+    assert json.loads(seen["headers"]["x-fantasy-filter"]) == {"players": {
+        "filterIds": {"value": [1, 2, 3]}, "limit": 3, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+    assert [(p.player_id, p.acquisition_status, p.waivers_until) for p in resp.data] == [
+        (1, "free_agent", None), (2, "waivers", date(2025, 10, 25))]
+    assert resp.data[0].valid_positions == ["PG", "G", "UT1", "UT2", "UT3"] and resp.data[0].default_position_id == 1
+    seen.clear()
+    assert asyncio.run(EspnService.get_free_agents_by_ids(LEAGUE, [])).data == [] and seen == {}   # nothing to ask
+
+
+@pytest.mark.unit
 def test_roster_entries_read_the_pool_status_under_player_pool_entry(espn):
     espn["payload"] = {"teams": [{"id": 1, "name": "My Team", "roster": {"entries": [
         {"lineupSlotId": 0, "status": "NORMAL",
@@ -316,3 +341,18 @@ def test_matchup_rosters_carry_resolved_nba_player_ids(matchup):
     ours = {p.player_id: p.nba_player_id for p in resp.data.your_team.roster}
     assert ours == {1: 2544, 2: 203999, 3: None}
     assert resp.data.opponent_team.roster[0].nba_player_id == 201142
+
+
+@pytest.mark.unit
+def test_matchup_rosters_keep_the_projections_inputs_for_the_what_if(matchup):
+    """services.matchup_projection re-runs the projection with moves applied, from each player's
+    per-game line and where his value came from; both ride along off the wire."""
+    matchup["values"] = {3: ValueResult(18.0, "baseline")}
+
+    resp = asyncio.run(EspnService.get_matchup_data(LEAGUE, scoring=POINTS))
+
+    by_id = {p.player_id: p for p in resp.data.your_team.roster}
+    assert by_id[1]._value_source == "provider" and by_id[1]._avg_line.pts == 20.0 and by_id[1]._avg_line.fga == 16.0
+    assert by_id[2]._value_source == "provider" and by_id[2]._avg_line.pts == 10.0
+    assert by_id[3]._value_source == "baseline"
+    assert "_avg_line" not in by_id[1].model_dump() and "_value_source" not in resp.model_dump_json()

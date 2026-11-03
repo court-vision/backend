@@ -185,6 +185,31 @@ async def test_adoption_attaches_a_team_already_on_the_account(user, espn_league
     assert Team.get_by_id(mine.team_id).league_id == data.league_adopted.league_id
 
 
+async def test_adoption_moves_the_team_saved_last_season_to_this_one(user, espn_league):
+    # Last season's team in the same league, renamed since: the room takes it,
+    # moved to this season, rather than last season's league or a second team.
+    from core.settings import settings
+
+    info = LeagueInfo(provider=FantasyProvider.ESPN, league_id=ROOM_LEAGUE, team_name="Last Year's Name",
+                      year=settings.espn_year - 1, espn_team_id=MY_ESPN_TEAM)
+    mine = Team.create(user_id=user.user_id, team_identifier="35392660Last Year's Name",
+                       league_info=TeamService.serialize_league_info(info))
+    room = await _pending_room(user)
+
+    data = (await _init(room.id, user.user_id)).data
+
+    adopted = data.league_adopted
+    assert adopted is not None and adopted.team_id == mine.team_id and adopted.team_created is False
+    team = Team.get_by_id(mine.team_id)
+    stored = json.loads(team.league_info)
+    assert (stored["year"], stored["team_name"], team.team_identifier) == (
+        settings.espn_year, "Room Team 5", "35392660Room Team 5")
+    # Last season's league link went with the move; this read's settings are linked instead.
+    assert team.league_id == adopted.league_id and League.get_by_id(team.league_id).provider_league_id == str(ROOM_LEAGUE)
+    assert DraftSession.get_by_id(room.id).team_id == mine.team_id
+    assert Team.select().where(Team.user_id == user.user_id).count() == 1
+
+
 async def test_a_concurrent_adoption_keeps_the_first_team_and_drops_the_duplicate(user, espn_league):
     # Two INITs (two tabs) both created the team before either attached it: the
     # first attach wins, the loser reports the winner's team and removes its own.

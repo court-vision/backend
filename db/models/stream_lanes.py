@@ -1,7 +1,8 @@
 """
 usr.stream_lanes — a standing order for one roster spot: keep it streaming for the
-rest of the matchup. Before each day the executor job re-plans the spot and, when
-the plan switches, inserts a scheduled pickup with the lane's id (migration 0030).
+rest of the matchup. Before each day the executor job re-plans the team's lanes
+together and, for each spot the plan switches, inserts a scheduled pickup with the
+lane's id (migration 0030; several open lanes per team, one per spot, since 0037).
 usr.stream_lane_events is the lane's history.
 
 Backend-only; data-platform's trigger route only checks, in SQL, whether a lane's
@@ -78,8 +79,9 @@ class StreamLaneEvent(BaseModel):
         schema = "usr"
 
 
-def active_lane_holder(team_id: int):
-    """The player an active lane holds its spot with on this team, or None: nothing else may drop
-    them (scheduled pickups, the desk's transactions)."""
-    lane = StreamLane.get_or_none((StreamLane.team == team_id) & (StreamLane.status == "active"))
-    return lane.holder_player_id if lane is not None else None
+def active_lane_holders(team_id: int) -> set[int]:
+    """The players this team's active lanes hold their spots with: nothing else may drop them
+    (scheduled pickups, the desk's transactions)."""
+    lanes = StreamLane.select(StreamLane.holder_player_id).where((StreamLane.team == team_id)
+                                                                 & (StreamLane.status == "active"))
+    return {lane.holder_player_id for lane in lanes}

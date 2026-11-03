@@ -2,7 +2,7 @@
 Schema migrations, applied at application startup with yoyo-migrations.
 
 backend/migrations/ is the single source of truth for the shared database
-(usr.*, nba.*, stats_s2.*). See migrations/README.md for the conventions.
+(usr.*, nba.*, stats_s2.*, ops.*). See migrations/README.md for the conventions.
 """
 
 from pathlib import Path

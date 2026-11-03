@@ -13,17 +13,20 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional
 
-from api.deps import ensure_team_owned
+from api.deps import ensure_team_owned, load_owned_league_info
 from core.errors import AuthorizationError, ConflictError, NotFoundError
 from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
     AiConversationDetail,
     AiConversationSummary,
+    AiNote,
+    AiProposalCheckData,
+    AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, conversations, guards, spend
+from services.ai import agent, conversations, guards, memory, proposals, spend
 
 
 def has_access(user_id: int) -> bool:
@@ -47,12 +50,12 @@ def _summary(row, turns: int) -> AiConversationSummary:
     )
 
 
-def _turn_view(row) -> AiTurnView:
+def _turn_view(row, parts) -> AiTurnView:
     return AiTurnView(
         id=row.id,
         created_at=row.created_at,
         message=row.message,
-        parts=row.parts or [],
+        parts=parts,
         outcome=row.outcome,
         feedback=row.feedback,
         comment=row.comment,
@@ -88,10 +91,12 @@ class AgentService:
         row = await _conversation(conversation_id, user_id)
         turns = await conversations.turns_of(conversation_id, user_id)
         history = await conversations.history(conversation_id, user_id)
+        # The chips are shown as they stand now, not as the turn stored them
+        parts = await proposals.refresh_history([t.parts or [] for t in turns], conversation_id, user_id)
         return AiConversationDetail(
             **_summary(row, len(turns)).model_dump(),
             full=history.full,
-            history=[_turn_view(t) for t in turns],
+            history=[_turn_view(t, p) for t, p in zip(turns, parts)],
         )
 
     @staticmethod
@@ -101,7 +106,8 @@ class AgentService:
             raise NotFoundError("AI_CONVERSATION_NOT_FOUND", "Conversation not found")
 
     @staticmethod
-    async def start_turn(conversation_id: int, user_id: int, message: str) -> agent.Emitter:
+    async def start_turn(conversation_id: int, user_id: int, message: str,
+                         build: Optional[str] = None) -> agent.Emitter:
         """Check everything a turn needs, claim the conversation, and start the turn.
         Errors raised here are ordinary HTTP errors: nothing has streamed yet."""
         ensure_access(user_id)
@@ -116,7 +122,7 @@ class AgentService:
             if history.full:
                 raise ConflictError("AI_CONVERSATION_FULL", "This conversation is full; start a new one")
             reservation_id = await spend.reserve(user_id)
-            header_line = await agent.header(user_id, row.team_id_id)
+            header_line = await agent.header(user_id, row.team_id_id, conversation_id=conversation_id)
         except BaseException:
             # Nothing has been spent: hand back the reservation and the claim
             if reservation_id is not None:
@@ -124,8 +130,26 @@ class AgentService:
             await conversations.release(conversation_id)
             raise
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
-                          reservation_id=reservation_id)
+                          reservation_id=reservation_id, build=build)
         return agent.start(turn, header_line)
+
+    @staticmethod
+    async def proposal(proposal_id: int, user_id: int) -> AiProposalCheckData:
+        """One chip as it stands, checked again against the board and the pool: what the
+        desk reads before it stages the chip into the tray."""
+        ensure_access(user_id)
+        row = await proposals.get(proposal_id, user_id)
+        team = await run_db("ai.owned_team", ensure_team_owned, proposals.team_of(row), user_id)
+        if team is None:
+            raise NotFoundError("AI_PROPOSAL_NOT_FOUND", "Proposal not found")
+        league_info = await load_owned_league_info(team)
+        chip, problems = await proposals.check(proposal_id, user_id, team, league_info)
+        return AiProposalCheckData(chip=AiProposalChip(**chip), problems=problems)
+
+    @staticmethod
+    async def dismiss_proposal(proposal_id: int, user_id: int) -> AiProposalChip:
+        ensure_access(user_id)
+        return AiProposalChip(**await proposals.dismiss(proposal_id, user_id))
 
     @staticmethod
     async def usage(user_id: int) -> AiUsageData:
@@ -153,3 +177,35 @@ class AgentService:
         ensure_access(user_id)
         if not await conversations.set_feedback(turn_id, user_id, value):
             raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
+
+    # ---- the agent's notes, as the user sees and edits them ----
+
+    @staticmethod
+    async def _owned_team_or_404(team_id: Optional[int], user_id: int) -> None:
+        if team_id is not None and await run_db("ai.owned_team", ensure_team_owned, team_id, user_id) is None:
+            raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
+
+    @staticmethod
+    async def notes(user_id: int, team_id: Optional[int], include_retired: bool = False) -> list[AiNote]:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return [AiNote(**n) for n in await memory.list_for_user(user_id, team_id, include_retired)]
+
+    @staticmethod
+    async def add_note(user_id: int, *, kind: str, text: str, team_id: Optional[int], recheck_on) -> AiNote:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return AiNote(**await memory.add_for_user(user_id, kind=kind, text=text, team_id=team_id,
+                                                  recheck_on=recheck_on))
+
+    @staticmethod
+    async def edit_note(user_id: int, note_id: int, *, text: Optional[str], kind: Optional[str], recheck_on,
+                        clear_recheck: bool) -> AiNote:
+        ensure_access(user_id)
+        return AiNote(**await memory.edit_for_user(user_id, note_id, text=text, kind=kind, recheck_on=recheck_on,
+                                                   clear_recheck=clear_recheck))
+
+    @staticmethod
+    async def delete_note(user_id: int, note_id: int) -> None:
+        ensure_access(user_id)
+        await memory.delete_for_user(user_id, note_id)

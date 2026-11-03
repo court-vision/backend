@@ -72,15 +72,27 @@ class TestOneDefinition:
             assert nba_today() == nba_date_et() == date(2026, 3, 4)
 
     def test_the_fantasy_day_rule_is_deliberately_different(self):
-        """schedule_service's 2 AM ET rule must NOT collapse onto this one."""
+        """schedule_service's 3 AM ET rule must NOT collapse onto this one."""
         from services.schedule_service import _get_nba_today as fantasy_day
         assert fantasy_day is not nba_date_et
         with freeze_time("2026-03-05T09:00:00Z"):  # 4:00 AM ET
-            assert fantasy_day() == date(2026, 3, 5)   # past 2 AM: today
+            assert fantasy_day() == date(2026, 3, 5)   # past 3 AM: today
             assert nba_date_et() == date(2026, 3, 4)   # before 6 AM: yesterday
 
+    def test_the_fantasy_day_turns_at_3am_eastern(self):
+        """ESPN rolls its day at 3 AM ET (midnight Pacific), not 2."""
+        from services.schedule_service import _get_nba_today as fantasy_day
+        with freeze_time("2026-10-22T06:30:00Z"):  # 2:30 AM EDT
+            assert fantasy_day() == date(2026, 10, 21)
+        with freeze_time("2026-10-22T07:00:00Z"):  # 3:00 AM EDT
+            assert fantasy_day() == date(2026, 10, 22)
+        with freeze_time("2026-03-05T07:59:00Z"):  # 2:59 AM EST
+            assert fantasy_day() == date(2026, 3, 4)
+        with freeze_time("2026-03-05T08:00:00Z"):  # 3:00 AM EST
+            assert fantasy_day() == date(2026, 3, 5)
+
     def test_a_lineup_day_is_finished_on_the_fantasy_day_rule(self):
-        """Lineup snapshots and /matchups/daily's roster choice share ESPN's 2 AM ET rule."""
+        """Lineup snapshots and /matchups/daily's roster choice share ESPN's 3 AM ET rule."""
         from services import lineup_snapshot_service, matchup_history_service
         from services.matchup_days import fantasy_today
         assert lineup_snapshot_service.fantasy_today is fantasy_today

@@ -83,6 +83,17 @@ def test_applied_transaction_returns_the_board_and_both_players(authed_client, o
 
 
 @pytest.mark.api
+def test_an_ai_chip_s_id_rides_the_request(authed_client, owned, monkeypatch):
+    _league(monkeypatch, ESPN)
+    calls = _stub(monkeypatch, OK)
+
+    assert authed_client.post("/v1/internal/teams/7/roster/transactions", json={**BODY, "proposal_id": 31}).status_code == 200
+    assert calls[0][2].proposal_id == 31
+    assert authed_client.post("/v1/internal/teams/7/roster/transactions", json={**BODY, "proposal_id": 0}).status_code == 422
+    assert RosterTransactionReq(**BODY).proposal_id is None
+
+
+@pytest.mark.api
 def test_unowned_team_is_404(authed_client, owned, monkeypatch):
     from api import deps
     monkeypatch.setattr(deps, "ensure_team_owned", lambda team_id, user_id: None)
@@ -117,16 +128,21 @@ def test_stale_carries_the_fresh_board(authed_client, owned, monkeypatch):
 
 
 @pytest.mark.api
-def test_invalid_transaction_is_422_with_a_reason(authed_client, owned, monkeypatch):
+@pytest.mark.parametrize("payload, message, reason, player_id", [
+    (BODY, "Kawhi Leonard is on waivers until 2026-10-25 — place the claim on ESPN", "add_on_waivers", 6450),
+    ({k: v for k, v in BODY.items() if k != "add_player_id"},
+     "Anthony Edwards is already being dropped for Kawhi Leonard on Thu Oct 22 — cancel that pickup to drop them now",
+     "drop_is_scheduled", 4594268),
+])
+def test_invalid_transaction_is_422_with_a_reason(authed_client, owned, monkeypatch, payload, message, reason, player_id):
     _league(monkeypatch, ESPN)
-    _stub(monkeypatch, svc.RosterTransactionInvalid(message="Kawhi Leonard is on waivers until 2026-10-25 — place the claim on ESPN",
-                                                    data={"reason": "add_on_waivers", "player_id": 6450}))
-    r = authed_client.post("/v1/internal/teams/7/roster/transactions", json=BODY)
+    _stub(monkeypatch, svc.RosterTransactionInvalid(message=message, data={"reason": reason, "player_id": player_id}))
+    r = authed_client.post("/v1/internal/teams/7/roster/transactions", json=payload)
     assert r.status_code == 422 and r.headers["X-Error-Code"] == "ROSTER_TRANSACTION_INVALID"
     body = r.json()
     assert body["status"] == "validation_error" and body["error_code"] == "ROSTER_TRANSACTION_INVALID"
-    assert body["data"]["reason"] == "add_on_waivers" and body["data"]["player_id"] == 6450
-    assert "waivers" in body["message"]
+    assert body["data"]["reason"] == reason and body["data"]["player_id"] == player_id
+    assert body["message"] == message
 
 
 @pytest.mark.api

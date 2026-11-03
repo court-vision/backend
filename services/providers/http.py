@@ -17,6 +17,7 @@ from core.logging import get_logger
 from core.resilience import ClientError, NetworkError, RateLimitError, ServerError
 from core.settings import settings
 from core.telemetry import scrub_string
+from core.tracing import timed, waiting
 from utils.constants import PROVIDER_AUTH_MESSAGES, PROVIDER_AUTH_MISSING_MESSAGES
 
 BAD_RESPONSE_CODE = "PROVIDER_BAD_RESPONSE"
@@ -206,7 +207,8 @@ async def _send(
     client, capacity = _ensure_provider_runtime(provider)
     queued_at = time.perf_counter()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
+        with waiting(f"{provider} slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         get_logger("provider").warning(
             "provider_capacity_timeout",
@@ -329,7 +331,10 @@ async def _call(
     preview: Optional[str] = None
 
     try:
-        response = await _dispatch(method, provider, url, timeout=timeout, **request_kwargs)
+        # Each caller's own span, a coalesced GET's joiners included: the time
+        # is spent waiting on the provider whoever sent the request.
+        with timed(provider, f"{method} {provider}", **{"server.address": urlsplit(url).hostname or ""}):
+            response = await _dispatch(method, provider, url, timeout=timeout, **request_kwargs)
     except ProviderError as exc:
         status, error = 429, exc
     except ClientError as exc:

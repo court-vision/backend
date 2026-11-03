@@ -13,8 +13,8 @@ A turn is the router's bounded loop grown up:
   `ai_agent_turn_max_usd` its next call is its last. The last call is made with
   `tool_choice: none`, so a turn always ends in an answer.
 - **Streaming.** Prose streams as the model writes it; tool calls and the
-  model's progress notes become status lines; display tools become blocks once
-  the server has built them. Events go on a queue the route drains as SSE.
+  model's progress notes become status lines; display tools become blocks (a
+  table, a chart or a place in the app) once the server has built them. Events go on a queue the route drains as SSE.
 - **Detached.** The turn runs in its own task. A client that disconnects stops
   hearing it, not running it: the tokens are already being spent, and the turn
   must still be written so the conversation stays whole.
@@ -39,11 +39,15 @@ from core.errors import AppError, ProviderError
 from core.logging import get_logger
 from core.nba_calendar import EASTERN, nba_date_et
 from core.settings import settings
+from core.tracing import timed
 from schemas.ai import AiToolCall
-from services.ai import conversations, spend
+from services.ai import conversations, memory, proposals, spend
 from services.ai.client import get_client
-from services.ai.display import DISPLAY_TOOL_NAMES, SHOW_TABLE, DisplayError, show_table
+from services.ai.display import (
+    DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_PLACE, SHOW_TABLE, DisplayError, show_chart, show_place, show_table,
+)
 from services.ai.prompts import AGENT_PROMPT
+from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
 from services.ai.tools import AGENT_TOOL_NAMES, AGENT_TOOLS, ToolContext, list_my_teams, run_tool
 
@@ -57,7 +61,7 @@ BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
-TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE]
+TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE]
 ALLOWED = AGENT_TOOL_NAMES
 
 # What the user sees while a tool runs
@@ -76,7 +80,21 @@ STATUS: dict[str, str] = {
     "get_schedule": "Reading the schedule",
     "get_draft_rooms": "Reading your draft rooms",
     "get_draft_room": "Reading the draft room",
+    "query_stats": "Computing stats",
+    "project_matchup": "Projecting the matchup",
+    "plan_streams": "Planning streams",
+    "propose_move": "Checking the move",
+    "get_lineup": "Reading your lineup",
+    "propose_lineup": "Checking the lineup",
+    "find_in_app": "Looking through the app",
+    "recall": "Reading its notes",
+    "remember": "Making a note",
+    "revise": "Updating a note",
+    "forget": "Retiring a note",
+    "get_move_outcomes": "Checking how moves went",
     "show_table": "Building a table",
+    "show_chart": "Drawing a chart",
+    "show_place": "Pointing out where",
 }
 
 
@@ -88,15 +106,22 @@ class Turn:
     user_id: int
     message: str
     history: conversations.History
+    # The frontend build the user has open (find_in_app reads its app map)
+    build: Optional[str] = None
     # The spend reserved for this turn (usr.ai_spend), settled when it is written
     reservation_id: Optional[int] = None
     run: _Run = field(default_factory=_Run)
     messages: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, Any] = field(default_factory=dict)
     parts: list[dict[str, Any]] = field(default_factory=list)
+    # The proposals (usr.ai_proposals ids) this turn made, to be tied to its row
+    proposals: list[int] = field(default_factory=list)
     cost: int = 0
     context_tokens: int = 0
     tables: int = 0
+    charts: int = 0
+    chips: int = 0
+    places: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -141,9 +166,13 @@ def _team_facts(teams: list[dict[str, Any]], pinned: Optional[int]) -> str:
     return line
 
 
-async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = None) -> str:
+async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = None, *,
+                 conversation_id: Optional[int] = None) -> str:
     """Today, the season, and the user's teams, by ID and format only: names are
-    league data, and the model can read them with get_my_teams."""
+    league data, and the model can read them with get_my_teams. Then the digest of
+    the agent's notes (its plans and the notes due for a recheck; services/ai/memory.py).
+    In a conversation, what became of its earlier proposals (sent, dismissed, expired)
+    comes last."""
     today = nba_date_et() if now is None else now.astimezone(EASTERN).date()
     try:
         teams = await list_my_teams(user_id)
@@ -151,7 +180,19 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
         get_logger().warning("ai_turn_header_teams_failed", user_id=user_id)
         teams = []
     season = await _season_line()
-    return f"[Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}]"
+    notes = ""
+    try:
+        notes = await memory.digest(user_id, today)
+    except Exception:
+        get_logger().warning("ai_turn_header_memory_failed", user_id=user_id)
+    chips = ""
+    if conversation_id is not None:
+        try:
+            chips = await proposals.header_line(conversation_id, user_id, now)
+        except Exception:
+            get_logger().warning("ai_turn_header_proposals_failed", conversation_id=conversation_id)
+    line = f"Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}"
+    return "[" + " ".join(part for part in (line, notes, chips) if part) + "]"
 
 
 # ---- one model call, streamed ----
@@ -159,37 +200,38 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
 async def _stream_call(turn: Turn, emit: Emitter, *, final: bool, messages: list[dict[str, Any]]) -> Any:
     notes: dict[int, str] = {}
     try:
-        async with get_client().beta.messages.stream(
-            model=settings.ai_agent_model,
-            max_tokens=MAX_TOKENS,
-            # The fixed prefix (tools + system) gets its own breakpoint, shared by
-            # every conversation; the top-level one caches each conversation so far.
-            system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            tools=TOOLS,
-            messages=messages,
-            thinking=THINKING,
-            output_config={"effort": settings.ai_agent_effort},
-            cache_control={"type": "ephemeral"},
-            betas=[FALLBACK_BETA, UPDATES_BETA, BINDING_BETA],
-            fallbacks="default",
-            **({"tool_choice": {"type": "none"}} if final else {}),
-        ) as stream:
-            async for event in stream:
-                if event.type == "content_block_start" and event.content_block.type == "text":
-                    # A new text block (the answer after a lookup) starts a new paragraph
-                    if turn.answer_text() and not turn.answer_text().endswith("\n"):
-                        turn.add_text("\n\n")
-                        emit("text", {"delta": "\n\n"})
-                elif event.type == "content_block_delta":
-                    delta = event.delta
-                    if delta.type == "text_delta" and delta.text:
-                        turn.add_text(delta.text)
-                        emit("text", {"delta": delta.text})
-                    elif delta.type == "thinking_delta" and delta.thinking:
-                        notes[event.index] = notes.get(event.index, "") + delta.thinking
-                elif event.type == "content_block_stop" and notes.get(event.index, "").strip():
-                    emit("status", {"text": notes.pop(event.index).strip(), "kind": "note"})
-            return await stream.get_final_message()
+        with timed("claude", "POST claude messages (stream)"):
+            async with get_client().beta.messages.stream(
+                model=settings.ai_agent_model,
+                max_tokens=MAX_TOKENS,
+                # The fixed prefix (tools + system) gets its own breakpoint, shared by
+                # every conversation; the top-level one caches each conversation so far.
+                system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                tools=TOOLS,
+                messages=messages,
+                thinking=THINKING,
+                output_config={"effort": settings.ai_agent_effort},
+                cache_control={"type": "ephemeral"},
+                betas=[FALLBACK_BETA, UPDATES_BETA, BINDING_BETA],
+                fallbacks="default",
+                **({"tool_choice": {"type": "none"}} if final else {}),
+            ) as stream:
+                async for event in stream:
+                    if event.type == "content_block_start" and event.content_block.type == "text":
+                        # A new text block (the answer after a lookup) starts a new paragraph
+                        if turn.answer_text() and not turn.answer_text().endswith("\n"):
+                            turn.add_text("\n\n")
+                            emit("text", {"delta": "\n\n"})
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta" and delta.text:
+                            turn.add_text(delta.text)
+                            emit("text", {"delta": delta.text})
+                        elif delta.type == "thinking_delta" and delta.thinking:
+                            notes[event.index] = notes.get(event.index, "") + delta.thinking
+                    elif event.type == "content_block_stop" and notes.get(event.index, "").strip():
+                        emit("status", {"text": notes.pop(event.index).strip(), "kind": "note"})
+                return await stream.get_final_message()
     except anthropic.AnthropicError as exc:
         raise map_sdk_error(exc) from exc
 
@@ -201,19 +243,36 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
     emit("status", {"text": STATUS.get(name, "Working"), "kind": "tool", "tool": name})
     if name in DISPLAY_TOOL_NAMES:
         try:
-            shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")
+            if name == SHOW_CHART["name"]:
+                shown = show_chart(raw, turn.all_results(), f"c{turn.charts + 1}")
+                turn.charts += 1
+            elif name == SHOW_PLACE["name"]:
+                shown = show_place(raw, turn.all_results(), f"pl{turn.places + 1}", build=turn.build)
+                turn.places += 1
+            else:
+                shown = show_table(raw, turn.all_results(), f"t{turn.tables + 1}")
+                turn.tables += 1
         except DisplayError as exc:
             return {"type": "tool_result", "tool_use_id": block.id, "content": str(exc), "is_error": True}
-        turn.tables += 1
         turn.parts.append({"kind": "block", "block": shown.block})
         emit("block", shown.block)
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
 
-    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id), allowed=ALLOWED)
+    outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id,
+                                                        build=turn.build),
+                             allowed=ALLOWED)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}
     result_id = turn.next_result_id()
     data = json.loads(outcome.content)
+    chip = data.pop(CHIP_KEY, None)
+    if chip is not None:
+        # A proposal: the chip (ESPN ids and all) is the user's block, never the model's result
+        turn.chips += 1
+        shown = {"type": "proposal", "id": f"p{turn.chips}", **chip}
+        turn.parts.append({"kind": "block", "block": shown})
+        turn.proposals.append(chip["proposal_id"])
+        emit("block", shown)
     turn.results[result_id] = {"tool": name, "input": raw if isinstance(raw, dict) else {}, "data": data}
     turn.run.names |= _names_in(outcome.content)
     return {"type": "tool_result", "tool_use_id": block.id,
@@ -286,6 +345,36 @@ def ungrounded_numbers(text: str, sources: list[Any], names: set[str] = frozense
     return sum(1 for n in _numbers(text) if not supported(n))
 
 
+# ---- the made-up-place check ----
+
+FIND_IN_APP = "find_in_app"
+# Results whose numbers never ground an answer's: the app map's sample data, and notes
+NOT_SOURCES = frozenset({FIND_IN_APP, *memory.MEMORY_TOOL_NAMES})
+# What an answer names in the app: a bold or quoted span of a few words
+_NAMED = re.compile(r"\*\*([^*\n]{1,60})\*\*|\"([^\"\n]{1,60})\"|“([^”\n]{1,60})”")
+_MAX_NAME_WORDS = 6
+
+
+def _text_of(value: Any) -> str:
+    return (value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)).casefold()
+
+
+def ungrounded_places(text: str, app: list[Any], others: list[Any]) -> int:
+    """UI names the answer bolds or quotes that appear in no find_in_app result of
+    the conversation (docs/APP_MAP_PLAN.md § 5): a button or screen the model made
+    up. A span the other lookups or the user's own words contain (a player's name,
+    a category) is data, not a place. Logged, not blocked; the eval is where it fails."""
+    known = [_text_of(v) for v in [*app, *others]]
+    count = 0
+    for match in _NAMED.finditer(text):
+        name = next(g for g in match.groups() if g is not None).strip().strip(".,:;!?").casefold()
+        if not name or len(name.split()) > _MAX_NAME_WORDS or not re.search(r"[^\W\d_]", name):
+            continue
+        if not any(name in k for k in known):
+            count += 1
+    return count
+
+
 # ---- the turn ----
 
 async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
@@ -295,6 +384,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
     outcome = "INTERNAL_ERROR"
     turn_id: Optional[int] = None
     ungrounded: Optional[int] = None
+    places: Optional[int] = None
     user_content = f"{header_line}\n\n{turn.message}"
     turn.messages.append({"role": "user", "content": user_content})
     try:
@@ -332,16 +422,26 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 if final or response.stop_reason != "tool_use" or not tool_uses:
                     break
                 turn.messages.append({"role": "user", "content": await _run_tools(turn, tool_uses, emit)})
-        if not turn.answer_text().strip() and not turn.tables:
+        if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips \
+                and not turn.places:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
+        # The header's note digest is not a source either (memory.without_note_texts)
+        user_texts = [memory.without_note_texts(text) for text in
+                      (user_content, *(m["content"] for m in turn.history.messages
+                                       if m["role"] == "user" and isinstance(m["content"], str)))]
+        app = [r["data"] for r in turn.all_results().values() if r["tool"] == FIND_IN_APP]
         ungrounded = ungrounded_numbers(
             turn.answer_text(),
-            [r["data"] for r in turn.all_results().values()]
-            + [r["input"] for r in turn.results.values()]
-            + [user_content, *(m["content"] for m in turn.history.messages
-                               if m["role"] == "user" and isinstance(m["content"], str))],
+            # A number in a crawled screen is sample data, and one in a note is the
+            # agent's own earlier words: neither is a source for the user's stats
+            [r["data"] for r in turn.all_results().values() if r["tool"] not in NOT_SOURCES]
+            + [r["input"] for r in turn.results.values() if r["tool"] not in NOT_SOURCES]
+            + user_texts,
             turn.run.names,
         )
+        places = ungrounded_places(turn.answer_text(), app,
+                                   [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
+                                   + user_texts)
         outcome = "ok"
     except TimeoutError:
         outcome = "AI_TIMEOUT"
@@ -380,6 +480,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                 },
                 title=conversations.title_of(turn.message),
                 reservation_id=turn.reservation_id,
+                proposal_ids=turn.proposals,
             )
         except Exception:
             # The spend is real even when the row isn't: settle it on its own (or,
@@ -388,7 +489,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             get_logger().exception("ai_turn_record_failed", conversation_id=turn.conversation_id, cost_micros=turn.cost)
             await _settle_quietly(turn)
             await _release_quietly(turn.conversation_id)
-        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id)
+        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id, places)
         try:
             month = await spend.month_spend(turn.user_id)
             spent = {"month_usd": month.user / 1e6, "cap_usd": month.user_cap / 1e6}
@@ -421,7 +522,8 @@ async def _release_quietly(conversation_id: int) -> None:
         get_logger().exception("ai_conversation_release_failed", conversation_id=conversation_id)
 
 
-def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[int], turn_id: Optional[int]) -> None:
+def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[int], turn_id: Optional[int],
+              places: Optional[int] = None) -> None:
     run = turn.run
     get_logger().info(
         "ai_turn",
@@ -435,6 +537,8 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         tool_calls=[call.name for call in run.tool_calls],
         tool_errors=sum(call.is_error for call in run.tool_calls),
         tables=turn.tables,
+        charts=turn.charts,
+        places=turn.places,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
         cache_read_input_tokens=run.cache_read_input_tokens,
@@ -446,6 +550,7 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         stop_reason=run.stop_reason,
         duration_ms=duration_ms,
         ungrounded_numbers=ungrounded,
+        ungrounded_places=places,
         prior_turns=turn.history.turns,
         request_ids=run.request_ids,
     )

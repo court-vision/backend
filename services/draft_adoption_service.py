@@ -105,19 +105,21 @@ class DraftAdoptionService:
             league_info.league_name = str(league_name)
 
         # The rows the add-team flow writes, by the same identifier, so a team
-        # already on the account is found rather than duplicated.
+        # already on the account is found rather than duplicated -- and one
+        # saved last season moves to this season's league.
         identifier = str(league_info.league_id) + league_info.team_name
-        team_id, already_exists, has_league = await run_db(
-            "drafts.adopt_team", TeamService._create_or_find, user_id, identifier, league_info
+        saved = await run_db(
+            "drafts.adopt_team", TeamService._create_or_find, user_id, identifier, league_info, data.get("teams"),
         )
-        if not has_league:
+        team_id = saved.team_id
+        if not saved.has_league:
             await LeagueService.sync_for_team(team_id, league_info, espn_payload=data)
 
         attached_id, league_id = await run_db(
-            "drafts.adopt_attach", DraftAdoptionService._attach, session_id, team_id, not already_exists
+            "drafts.adopt_attach", DraftAdoptionService._attach, session_id, team_id, saved.created
         )
         # A concurrent INIT may have attached its own team first; report the one the room has.
-        created = not already_exists and attached_id == team_id
+        created = saved.created and attached_id == team_id
         log.info(
             "draft_league_adopted", session_id=session_id, team_id=attached_id, league_id=league_id,
             espn_league_id=espn_league_id, espn_team_id=espn_team_id, team_created=created,

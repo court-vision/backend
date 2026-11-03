@@ -102,7 +102,7 @@ def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
-                        claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
+                        claimed=[], released=[], held=True, settle_crashes=False, lane_holders=set(),
                         lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None):
@@ -174,7 +174,7 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
-    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_holders", lambda team_id: h.lane_holders)   # no lane unless a test sets one
     monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
 
     async def no_lanes_due(now, limit):
@@ -371,7 +371,7 @@ def test_a_locked_add_the_day_before_is_still_sent(h):
 
 @pytest.mark.unit
 def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h):
-    # 2:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
+    # 3:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN",
                                                                        game=True, started=True)])
@@ -381,7 +381,7 @@ def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h
 
 @pytest.mark.unit
 def test_the_day_before_waits_for_tonights_first_tip_on_the_fresh_board(h):
-    # Scheduled while the schedule showed no games tonight (a 2:00 AM window); they have landed since.
+    # Scheduled while the schedule showed no games tonight (a 3:00 AM window); they have landed since.
     # Sent now it would be same-day business on ESPN, and Edwards would lose his game tonight.
     arrange_day_before(h, drop_game=True)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
@@ -928,7 +928,7 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
 
 @pytest.mark.unit
 def test_schedule_refuses_to_drop_a_stream_lanes_holder(scheduling):
-    scheduling.lane_holder = EDWARDS
+    scheduling.lane_holders = {EDWARDS}
     with pytest.raises(svc.ScheduledPickupInvalid) as exc:
         schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
     assert exc.value.data["reason"] == "drop_is_lane_holder" and scheduling.inserted == []
@@ -994,6 +994,38 @@ def test_schedule_refuses_a_player_on_another_team_or_unknown(scheduling):
     with pytest.raises(svc.ScheduledPickupInvalid) as exc:
         schedule(SchedulePickupReq(add_player_id=KAWHI, scoring_period_id=3))
     assert exc.value.data["reason"] == "add_not_found"
+
+
+@pytest.mark.unit
+def test_schedule_checks_an_ai_chip_before_storing_and_marks_it_sent_after(scheduling, monkeypatch):
+    from core.errors import AppError
+    from services.ai import proposals
+    h = scheduling
+    seen = SimpleNamespace(for_send=[], sent=[], refuse=None)
+
+    async def for_send(proposal_id, user_id, team_id, *, kind, add, drop, scoring_period_id=None, now=None):
+        seen.for_send.append((proposal_id, user_id, team_id, kind, add, drop, scoring_period_id, len(h.inserted)))
+        if seen.refuse:
+            raise seen.refuse
+
+    async def mark_sent(proposal_id, *, audit_id=None, pickup_id=None, now=None):
+        seen.sent.append((proposal_id, audit_id, pickup_id))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+
+    resp = schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+
+    assert resp.data.id == 7
+    assert seen.for_send == [(31, 11, 21, "scheduled", KAWHI, EDWARDS, 3, 0)]     # checked before the row was stored
+    assert seen.sent == [(31, None, 7)]
+
+    seen.refuse = AppError("AI_PROPOSAL_MISMATCH", "The move being sent is not the one this chip proposes", status_code=422)
+    with pytest.raises(AppError):
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+    assert len(h.inserted) == 1 and len(seen.sent) == 1
+
+    schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert len(seen.for_send) == 2 and len(seen.sent) == 1 and len(h.inserted) == 2
 
 
 @pytest.mark.unit
@@ -1066,7 +1098,8 @@ def test_cancel_outcomes(h, monkeypatch):
 
 
 @pytest.mark.unit
-def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
+def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h, monkeypatch):
+    monkeypatch.setattr(txn, "_now", lambda: datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc))   # Wed 11 AM, before the tip
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
     from schemas.roster_transaction import RosterTransactionReq
@@ -1078,3 +1111,19 @@ def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
     run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
         add_player_id=KAWHI, expected_scoring_period_id=2, roster_version="v1")))
     assert h.audits[0]["source"] == "manual"
+
+
+@pytest.mark.unit
+def test_after_the_tip_the_manual_add_is_the_executors_next_day_swap(h, monkeypatch):
+    """The same swap made by hand after Wednesday's first tip: sent now, today's locks aside, and
+    checked on Thursday's board, as the executor's day-before attempt is."""
+    monkeypatch.setattr(txn, "_now", lambda: NOW)
+    monkeypatch.setattr(txn, "_lane_holders", lambda team_id: set())
+    monkeypatch.setattr(txn, "_scheduled_drop", lambda team_id, player_id: None)
+    arrange_day_before(h, drop_game=True, drop_started=True)
+    from schemas.roster_transaction import RosterTransactionReq
+    resp = run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
+        add_player_id=KAWHI, drop_player_id=EDWARDS, expected_scoring_period_id=2, roster_version="v1")))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-22"
+    assert resp.data.lineup.scoring_period_id == 2 and h.txn_calls[0]["scoring_period_id"] == 2
+    assert h.audits[0]["source"] == "manual" and h.updates[-1][1] == "applied"

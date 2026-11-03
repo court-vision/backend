@@ -58,6 +58,7 @@ def clean_tables(integration_db):
             nba.news_item_teams,
             nba.news_items,
             nba.live_player_stats,
+            nba.live_game_score_snapshots,
             nba.breakout_candidates,
             nba.player_injuries,
             nba.player_advanced_stats,

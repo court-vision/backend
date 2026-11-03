@@ -201,6 +201,8 @@ class YahooMatchupService(YahooRosterService):
                     line = lines.get(_normalize_name(p.name))
                     counts = p.lineup_slot not in ("IR", "IL", "IL+", "BE") and not p.injured
                     if line is not None:
+                        # Kept for the what-if projection (services.matchup_projection)
+                        p._avg_line = line
                         out.append((line, p.games_remaining, counts))
                 return out
 
@@ -261,7 +263,7 @@ class YahooMatchupService(YahooRosterService):
             projected_margin=projected_margin,
             # Yahoo exposes only week_start/week_end -- there is no day-granular
             # watermark to read. Derive it from our own calendar on the fantasy
-            # day (2 AM ET), which is when a provider's day flips; using the
+            # day (3 AM ET), which is when a provider's day flips; using the
             # 6 AM ET game-date rule here would report the previous day all
             # morning and make every Yahoo baseline look permanently stale.
             scoring_period_id=season_day(get_nba_today()),
@@ -408,7 +410,7 @@ class YahooMatchupService(YahooRosterService):
             avg_points = valued.value if valued is not None and valued.value is not None else 0.0
             games_remaining = get_remaining_games(p["team"])
 
-            roster.append(MatchupPlayerResp(
+            player = MatchupPlayerResp(
                 player_id=p["player_id"],
                 nba_player_id=nba_id_map.get(normalized_name),
                 name=p["name"],
@@ -420,6 +422,9 @@ class YahooMatchupService(YahooRosterService):
                 games_remaining=games_remaining,
                 injured=p["injured"],
                 injury_status=p["injury_status"],
-            ))
+            )
+            # Where avg_points came from, for the what-if projection's drop choice
+            player._value_source = valued.source if valued is not None and valued.value is not None else None
+            roster.append(player)
 
         return roster

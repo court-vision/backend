@@ -25,6 +25,9 @@ class RosterTransactionReq(ApiModel):
     drop_player_id: Optional[int] = Field(default=None, gt=0)     # ESPN player id to release
     expected_scoring_period_id: int = Field(gt=0)
     roster_version: str = Field(min_length=1, max_length=64)
+    # The AI desk's chip this move sends (usr.ai_proposals.id): checked to be the same move before
+    # the write, marked sent after it. Omitted for the Week desk's own moves.
+    proposal_id: Optional[int] = Field(default=None, gt=0)
 
 
 class RosterTransactionPlayer(ApiModel):
@@ -34,12 +37,15 @@ class RosterTransactionPlayer(ApiModel):
 
 
 class RosterTransactionData(ApiModel):
-    lineup: LineupState                          # the board re-read after the write
+    lineup: LineupState                          # today's board, re-read after the write
     added: Optional[RosterTransactionPlayer] = None
     dropped: Optional[RosterTransactionPlayer] = None
     verified: bool                               # the re-read shows the add on the board and the drop gone
     audit_id: Optional[int] = None
     scoring_period_id: Optional[int] = None
+    # The NBA date (YYYY-MM-DD) the change counts from: today's, or tomorrow's for an add sent
+    # after today's first tip-off, which ESPN puts on tomorrow's roster.
+    counts_from: Optional[str] = None
 
 
 class RosterTransactionResp(BaseResponse):

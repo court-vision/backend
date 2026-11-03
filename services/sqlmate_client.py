@@ -16,6 +16,7 @@ import httpx
 from core.errors import ServiceUnavailableError
 from core.logging import get_correlation_id, get_logger
 from core.settings import settings
+from core.tracing import timed, trace_headers, waiting
 
 UNAVAILABLE_MESSAGE = "Query builder service unavailable — try again in a minute"
 
@@ -75,7 +76,8 @@ async def proxy_request(
     """Send one allow-listed proxy request without retrying mutations."""
     client, capacity = _ensure_runtime()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
+        with waiting("sqlmate slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         get_logger("sqlmate").warning(
             "sqlmate_capacity_timeout",
@@ -93,7 +95,9 @@ async def proxy_request(
 
     started = time.perf_counter()
     try:
-        response = await client.request(method, path, json=json, params=params, headers=headers)
+        with timed("sqlmate", f"{method} sqlmate"):
+            response = await client.request(method, path, json=json, params=params,
+                                            headers=trace_headers(headers))
     except httpx.RequestError as exc:
         get_logger("sqlmate").error(
             "sqlmate_request_failed",

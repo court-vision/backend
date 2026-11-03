@@ -29,6 +29,7 @@ from core.logging import get_logger
 from core.nba_calendar import nba_date_et
 from core.season import previous_season
 from core.settings import settings
+from core.tracing import timed
 from schemas.ai import AiContext, AiToolCall, AiUsage, AskData, AskResp, RouteData, RouteResp
 from schemas.common import ApiStatus
 from services.ai import guards, questions, routing
@@ -152,7 +153,8 @@ def map_sdk_error(exc: anthropic.AnthropicError) -> AppError:
 async def _create(**kwargs: Any) -> Any:
     """One Messages API call, with the SDK's errors mapped onto the app's taxonomy."""
     try:
-        return await get_client().beta.messages.create(**kwargs)
+        with timed("claude", "POST claude messages"):
+            return await get_client().beta.messages.create(**kwargs)
     except anthropic.AnthropicError as exc:
         raise map_sdk_error(exc) from exc
 

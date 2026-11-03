@@ -23,6 +23,7 @@ import httpx
 from core.inflight import provider_write
 from core.logging import get_correlation_id, get_logger
 from core.settings import settings
+from core.tracing import timed, trace_headers, waiting
 
 UNAVAILABLE_MESSAGE = "Lineup write service unavailable — try again in a minute"
 LINEUP_PATH = "/v1/espn/lineup"
@@ -111,7 +112,7 @@ def _headers() -> dict[str, str]:
     correlation_id = get_correlation_id()
     if correlation_id:
         headers["X-Correlation-ID"] = correlation_id
-    return headers
+    return trace_headers(headers)
 
 
 def espn_error(body: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
@@ -183,18 +184,20 @@ async def _send_write(path: str, payload: dict[str, Any], *, item_count: int, re
                       refused_default: str) -> WriterResult:
     client, capacity = _ensure_runtime()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
+        with waiting("fantasy_writer slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         log.warning("fantasy_writer_capacity_timeout", max_in_flight=settings.fantasy_writer_max_in_flight)
         raise FantasyWriterUnavailable(UNAVAILABLE_MESSAGE) from exc
 
     started = time.perf_counter()
     try:
-        if client_factory is not None:
-            async with client_factory() as test_client:
-                response = await test_client.post(path, json=payload, headers=_headers())
-        else:
-            response = await client.post(path, json=payload, headers=_headers())
+        with timed("fantasy_writer", f"POST fantasy_writer {path}"):
+            if client_factory is not None:
+                async with client_factory() as test_client:
+                    response = await test_client.post(path, json=payload, headers=_headers())
+            else:
+                response = await client.post(path, json=payload, headers=_headers())
     except httpx.RequestError as exc:
         log.error("fantasy_writer_request_failed", path=path, error=type(exc).__name__, detail=str(exc),
                   move_count=item_count)

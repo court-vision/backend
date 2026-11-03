@@ -11,7 +11,7 @@ Timing. ESPN counts a transaction for the day it is made only before that day's
 first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
 (the player dropped plays out D-1) and takes effect for D. So the first attempt
 for day D is the first tip-off of D-1, TIP_MARGIN after it and checked again on
-the board it is sent from (the rollover into D-1, 02:00 ET, when D-1 has no
+the board it is sent from (the rollover into D-1, 3 AM ET, when D-1 has no
 games), and the add and the drop go out as one transaction. On that attempt
 today's locks are ESPN's business, not ours: the pre-checks skip them and
 an ESPN refusal other than a full roster or a position limit gets one more try
@@ -109,6 +109,7 @@ from services.lineup_read_service import LineupReadService
 from services.providers import get_provider_adapter, unavailable_message
 from services.providers.identity import nba_ids_by_espn_id
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService, _moves_json
+from services.schedule_service import FANTASY_DAY_ROLLOVER_ET
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("scheduled_pickup")
@@ -118,7 +119,7 @@ DEFERRED = "deferred"
 IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt runs
 
 EASTERN = pytz.timezone("US/Eastern")
-ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
+ROLLOVER_ET = FANTASY_DAY_ROLLOVER_ET   # 3 AM ET: the ESPN fantasy day starts here, as schedule_service.get_nba_today counts it
 RETRY = timedelta(minutes=10)
 TIP_MARGIN = timedelta(minutes=2)   # the day-before swap waits this long past the first tip, clear of ESPN's cutoff
 WAIVER_RETRY = timedelta(minutes=60)
@@ -188,7 +189,7 @@ def et_at(d: date, t: time) -> datetime:
 
 
 def rollover_at(d: date) -> datetime:
-    """When the ESPN fantasy day `d` begins (02:00 ET), as UTC."""
+    """When the ESPN fantasy day `d` begins (3 AM ET, `schedule_service.FANTASY_DAY_ROLLOVER_ET`), as UTC."""
     return et_at(d, ROLLOVER_ET)
 
 
@@ -417,10 +418,10 @@ def _window_for(nba_date: date) -> AttemptWindow:
     return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
 
 
-def _lane_holder(team_id: int) -> Optional[int]:
-    """The player an active stream lane holds its spot with, whom no pickup may drop."""
-    from db.models.stream_lanes import active_lane_holder
-    return active_lane_holder(team_id)
+def _lane_holders(team_id: int) -> set[int]:
+    """The players active stream lanes hold their spots with, whom no pickup may drop."""
+    from db.models.stream_lanes import active_lane_holders
+    return active_lane_holders(team_id)
 
 
 def _lane_status(lane_id: int) -> Optional[str]:
@@ -507,13 +508,18 @@ class ScheduledPickupService:
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
-        if drop is not None and holder is not None and await run_db("pickup.lane_holder", _lane_holder,
-                                                                    team.team_id) == drop:
+        if drop is not None and holder is not None and drop in await run_db("pickup.lane_holder", _lane_holders,
+                                                                            team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
                                                   "stop the lane to drop them", drop)
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             raise _invalid("acquisition_limit", blocked)
+        if req.proposal_id is not None:
+            # An AI desk chip: the same move it shows, still proposed, before the pickup is stored
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.SCHEDULED,
+                                     add=add, drop=drop, scoring_period_id=day)
 
         window = await run_db("pickup.window", _window_for, nba_date)
         now = datetime.now(timezone.utc)
@@ -528,6 +534,9 @@ class ScheduledPickupService:
         log.info("scheduled_pickup_created", team_id=team.team_id, pickup_id=row.id, add=add, drop=drop,
                  day=day, nba_date=nba_date.isoformat(), rule=window.rule,
                  not_before_at=window.not_before_at.isoformat())
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, pickup_id=row.id)
         when = window.not_before_at.astimezone(EASTERN).strftime("%a %b %-d, %-I:%M %p ET")
         return ScheduledPickupResp(
             status=ApiStatus.SUCCESS,

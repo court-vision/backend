@@ -6,7 +6,8 @@ It fetches Clerk's JWKS (JSON Web Key Set) and validates tokens using RS256.
 
 Failures raise `core.errors` exceptions, rendered as the standard envelope:
 missing/invalid/expired tokens are 401 (`AUTH_REQUIRED`, `INVALID_TOKEN`,
-`TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`.
+`TOKEN_EXPIRED`); a JWKS outage is 503 `AUTH_UNAVAILABLE`; a write from the app
+map's crawl is 403 `APP_MAP_READ_ONLY`.
 
 Verifying a token makes no network call once the JWKS is cached. The user's
 email comes from the session token's `email` claim (Clerk dashboard → Sessions
@@ -17,19 +18,21 @@ here on every request cost about 100 ms alone and 300-480 ms in a desk-open
 burst (docs/PERF_AUDIT_2026-10.md, A1).
 """
 
+import re
 import threading
 from http.cookiejar import DefaultCookiePolicy
 
 import jwt
 import requests
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
-from core.errors import AppError, AuthenticationError, ServiceUnavailableError
+from core.errors import AppError, AuthenticationError, AuthorizationError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
+from core.tracing import timed
 
 log = get_logger("auth")
 
@@ -103,7 +106,8 @@ def _fetch_jwks() -> dict[str, rsa.RSAPublicKey]:
         raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
 
     try:
-        response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
+        with timed("clerk", "GET clerk jwks"):
+            response = _clerk_http.get(CLERK_JWKS_URL, timeout=10)
         response.raise_for_status()
         jwks = response.json()
     except requests.RequestException as e:  # includes a body that is not JSON
@@ -225,14 +229,15 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         return None
 
     try:
-        response = _clerk_http.get(
-            f"https://api.clerk.com/v1/users/{clerk_user_id}",
-            headers={
-                "Authorization": f"Bearer {CLERK_SECRET_KEY}",
-                "Content-Type": "application/json"
-            },
-            timeout=10
-        )
+        with timed("clerk", "GET clerk user"):
+            response = _clerk_http.get(
+                f"https://api.clerk.com/v1/users/{clerk_user_id}",
+                headers={
+                    "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
         response.raise_for_status()
         user_data = response.json()
 
@@ -263,14 +268,94 @@ def fetch_clerk_user(clerk_user_id: str) -> Optional[dict]:
         return None
 
 
+def create_sign_in_token(clerk_user_id: str, expires_in_seconds: int) -> str:
+    """
+    A one-time sign-in ticket for one user, from Clerk's Backend API.
+
+    The browser redeems it with Clerk (`signIn.create({strategy: "ticket"})`),
+    so whoever holds it signs in as that user without a password, once, until
+    it expires. Only the app map's sign-in route calls this, for the app map's
+    own account. The ticket is never logged.
+    """
+    if not CLERK_SECRET_KEY:
+        log.error("clerk_secret_key_missing")
+        raise ServiceUnavailableError("AUTH_UNAVAILABLE", "Authentication is not configured")
+
+    try:
+        with timed("clerk", "POST clerk sign_in_tokens"):
+            response = _clerk_http.post(
+                "https://api.clerk.com/v1/sign_in_tokens",
+                headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
+                json={"user_id": clerk_user_id, "expires_in_seconds": expires_in_seconds},
+                timeout=10,
+            )
+        response.raise_for_status()
+        body = response.json()
+    except requests.RequestException as e:  # includes a body that is not JSON
+        status = e.response.status_code if e.response is not None else None
+        log.error("clerk_sign_in_token_failed", error=type(e).__name__, status=status)
+        raise ServiceUnavailableError("SIGN_IN_TOKEN_UNAVAILABLE", "A sign-in token could not be created")
+
+    ticket = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(ticket, str) or not ticket:
+        log.error("clerk_sign_in_token_malformed", body_type=type(body).__name__)
+        raise ServiceUnavailableError("SIGN_IN_TOKEN_UNAVAILABLE", "A sign-in token could not be created")
+    return ticket
+
+
 def _require_token(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
     if credentials is None or not credentials.credentials:
         raise AuthenticationError("AUTH_REQUIRED", "Authentication required")
     return credentials.credentials
 
 
+# What the app map's account may do: read. CORS preflights never reach auth.
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# The reads that go as a POST (a search whose options are in the body), which
+# the app map's crawl sends from the Week desk. Each stores nothing. The crawl
+# sends exactly these (src/lib/app-map/reads.ts in the frontend); this is the wall.
+APP_MAP_READS = (
+    re.compile(r"/v1/internal/teams/\d+/streamers/find"),     # the market's search
+    re.compile(r"/v1/internal/teams/\d+/stream-lanes/plan"),  # a stream lane's dry run
+)
+
+
+# The header the app map's crawl puts on every request it lets through to the
+# API (src/lib/app-map/crawl-mark.ts in the frontend). A write that carries it
+# is refused whoever is signed in, so the account the crawl signs in as writes
+# when a person (or autopilot) uses it, and never from the crawl. It only takes
+# rights away, so it holds no secret.
+APP_MAP_CRAWL_HEADER = "x-app-map-crawl"
+
+
+def is_app_map_crawl(request: Optional[Request]) -> bool:
+    """Whether this request comes from the app map's crawl (it carries `APP_MAP_CRAWL_HEADER`)."""
+    return request is not None and APP_MAP_CRAWL_HEADER in request.headers
+
+
+def _refuse_app_map_writes(request: Optional[Request]) -> None:
+    """The app map's crawl only reads.
+
+    The crawler aborts every request but a GET and the searches in
+    `APP_MAP_READS`, and marks each one it lets through to the API with
+    `APP_MAP_CRAWL_HEADER`, so this is the second wall: whatever the crawl
+    sends changes nothing, whoever it is signed in as. A change that starts
+    with a GET (connecting Yahoo) checks `is_app_map_crawl` itself.
+    """
+    if not is_app_map_crawl(request):
+        return
+    if request.method in _READ_METHODS:
+        return
+    if request.method == "POST" and any(r.fullmatch(request.url.path) for r in APP_MAP_READS):
+        return
+    log.info("app_map_write_refused", method=request.method, path=request.url.path)
+    raise AuthorizationError("APP_MAP_READ_ONLY", "The app map's crawl only reads")
+
+
 def verify_clerk_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request = None,
 ) -> dict:
     """
     Verify a Clerk JWT token and return the payload.
@@ -279,6 +364,10 @@ def verify_clerk_token(
         @router.get('/protected')
         async def protected_route(current_user: dict = Depends(verify_clerk_token)):
             ...
+
+    FastAPI always passes `request`; a write that carries the app map's crawl
+    header is refused from it (403 APP_MAP_READ_ONLY). A direct call without
+    it only verifies the token.
 
     Returns:
         dict with 'clerk_user_id' (sub claim), 'email' (the token's claim, or
@@ -305,7 +394,7 @@ def verify_clerk_token(
         if settings.clerk_authorized_parties and azp and azp not in settings.clerk_authorized_parties:
             raise AuthenticationError("INVALID_TOKEN", "Invalid authorized party")
 
-        return {
+        user = {
             "clerk_user_id": payload.get("sub"),
             # None when the session token has no email claim. Nothing is fetched
             # here: get_or_create_user fetches it when it creates or links a user.
@@ -325,9 +414,13 @@ def verify_clerk_token(
         log.exception("clerk_auth_unexpected_error", error=type(e).__name__)
         raise AuthenticationError("INVALID_TOKEN", "Authentication failed")
 
+    _refuse_app_map_writes(request)
+    return user
+
 
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request = None,
 ) -> dict:
     """
     Wrapper around verify_clerk_token for backward compatibility.
@@ -338,7 +431,7 @@ def get_current_user(
     Returns:
         dict with 'clerk_user_id' (use this instead of old 'uid') and 'email'
     """
-    return verify_clerk_token(credentials)
+    return verify_clerk_token(credentials, request)
 
 
 def clear_jwks_cache():

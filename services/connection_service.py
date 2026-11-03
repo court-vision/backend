@@ -137,7 +137,8 @@ def _team_keys(league_id: Any, espn_team_id: Any, team_name: Optional[str]) -> l
     ESPN's team id inside the league when known -- it survives renames -- and
     the name otherwise. No season: Court Vision's own identity for a team is
     league id + name (`team_identifier`), so a team saved last season is the
-    same team ESPN now lists under the league's renewal.
+    same team ESPN now lists under the league's renewal. Whether that team is
+    on the renewal's season yet is `_mark_tracked`'s question.
     """
     keys: list[tuple] = []
     if espn_team_id is not None:
@@ -240,20 +241,39 @@ def _tracked_espn_teams(user_id: int) -> list[tuple[int, dict]]:
     return tracked
 
 
+def _season_of(info: dict) -> Optional[int]:
+    try:
+        return int(info.get("year"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _mark_tracked(teams: list[EspnAccountTeam], tracked: list[tuple[int, dict]]) -> list[EspnAccountTeam]:
     """Mark each ESPN team with the Court Vision team already tracking it
-    (matched by `_team_keys`, ESPN's team id before the name)."""
-    index: dict[tuple, int] = {}
+    (matched by `_team_keys`, ESPN's team id before the name).
+
+    A Court Vision team still on an earlier season does not track the league's
+    renewal: it reads last season's league until it moves. That entry is
+    marked with the team as `previous_season_team_id` instead, and adding it
+    moves the team to the entry's season (TeamService._create_or_find).
+    """
+    index: dict[tuple, list[tuple[int, Optional[int]]]] = {}
     for team_id, info in tracked:
         for key in _team_keys(info.get("league_id"), info.get("espn_team_id"), info.get("team_name")):
-            index.setdefault(key, team_id)
-    return [
-        team.model_copy(update={"tracked_team_id": next(
-            (index[key] for key in _team_keys(team.league_id, team.espn_team_id, team.team_name) if key in index),
-            None,
-        )})
-        for team in teams
-    ]
+            index.setdefault(key, []).append((team_id, _season_of(info)))
+    marked = []
+    for team in teams:
+        # ESPN's id before the name: the name is only the fallback when no saved team has the id
+        keys = _team_keys(team.league_id, team.espn_team_id, team.team_name)
+        group = next((group for group in (index.get(key) for key in keys) if group), [])
+        current = next((team_id for team_id, season in group if season is None or season >= team.season), None)
+        older = [(season, team_id) for team_id, season in group if season is not None and season < team.season]
+        earlier = max(older)[1] if older else None
+        marked.append(team.model_copy(update={
+            "tracked_team_id": current,
+            "previous_season_team_id": earlier if current is None else None,
+        }))
+    return marked
 
 
 def _adopt_account_teams(user_id: int, connection_id: int, account_teams: list[EspnAccountTeam]) -> list[int]:

@@ -7,16 +7,21 @@ block makes each request's token spend visible to the caller as well as to
 the `ai_request` log line.
 """
 
-from datetime import datetime
+from datetime import date as date_type, datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import Field
 
+from schemas.app_map import BUILD_PATTERN
 from schemas.common import ApiModel, BaseResponse
+from schemas.lineup_editor import MoveRole
 
 # Postgres text and jsonb cannot hold a NUL, so a string carrying one could
 # never be logged; it is refused before any quota or model call is spent on it
 NO_NUL = r"^[^\x00]*$"
+# The same, and not blank: at least one character that is neither space nor NUL
+# (pydantic's regex engine has no lookahead).
+NO_NUL_NOT_BLANK = r"^[^\x00]*[^\s\x00][^\x00]*$"
 
 # Every ID the caller sends is an int4 in our tables. Unbounded, a JSON integer
 # can run to thousands of digits, each of them copied into the prompt.
@@ -191,6 +196,9 @@ class AiTurnReq(ApiModel):
     """Body for POST /v1/internal/ai/conversations/{conversation_id}/turns."""
 
     message: str = Field(..., min_length=1, max_length=AGENT_MESSAGE_MAX, pattern=NO_NUL)
+    build: Optional[str] = Field(None, pattern=BUILD_PATTERN,
+                                 description="The frontend build the user has open, its commit's full SHA: CV AI reads "
+                                             "that build's app map, or the newest when it has none yet")
 
 
 class AiTableColumn(ApiModel):
@@ -211,6 +219,111 @@ class AiTable(ApiModel):
     total_rows: int = Field(..., description="Rows before the table's limit")
 
 
+class AiChartAxis(ApiModel):
+    key: str
+    label: str
+
+
+class AiChartSeries(ApiModel):
+    key: str
+    label: str
+    values: list[Optional[float]] = Field(..., description="One value per category, in order; null is a gap")
+
+
+class AiChart(ApiModel):
+    """A bar or line chart the server built from the agent's tool results; the model never types its values."""
+
+    type: Literal["chart"] = "chart"
+    id: str = Field(..., description="Unique within its turn, e.g. 'c1'")
+    title: str
+    kind: Literal["bar", "line"]
+    result_ids: list[str] = Field(..., description="The tool results the values were copied from")
+    tools: list[str] = Field(..., description="The lookups behind those results")
+    x: AiChartAxis = Field(..., description="The column along the x axis")
+    categories: list[str] = Field(..., description="The x values, in drawing order")
+    series: list[AiChartSeries] = Field(..., min_length=1, max_length=4)
+    total_rows: int = Field(..., description="X values before the chart's limit")
+
+
+AiProposalState = Literal["proposed", "sent", "dismissed", "expired"]
+AiProposalKind = Literal["transaction", "scheduled", "lineup"]
+
+
+class AiProposalPlayer(ApiModel):
+    espn_id: int = Field(..., description="ESPN player id: what the roster transaction / scheduled pickup takes")
+    nba_player_id: Optional[int] = Field(None, description="nba.players.id when known (Scout, headshot)")
+    name: str
+    team: Optional[str] = Field(None, description="NBA tricode")
+
+
+class AiProposalMove(ApiModel):
+    """One slot move of a lineup chip, as the lineup write takes it (`LineupMoveReq`: espn_id,
+    from_slot_id, to_slot_id) and the tray shows it."""
+
+    espn_id: int = Field(..., description="ESPN player id: `LineupMoveReq.player_id`")
+    nba_player_id: Optional[int] = Field(None, description="nba.players.id when known (Scout, headshot)")
+    name: str
+    team: Optional[str] = Field(None, description="NBA tricode")
+    from_slot_id: int = Field(..., description="The slot he is in on the chip's board")
+    from_slot: str = Field(..., description="Its name (PG, UT, BE, IR, ...)")
+    to_slot_id: int
+    to_slot: str
+    role: MoveRole = Field("shift", description="start (bench to active), bench (to the bench), shift (the rest)")
+    note: Optional[str] = Field(None, description="The planner's note: his game, 'no game today', 'OUT'")
+
+
+class AiProposalChip(ApiModel):
+    """A move the agent proposed and the server checked: the chip the AI desk shows. Staged, it goes
+    into the Week desk's tray (rendered in the AI desk) and is sent by its slider through the Week
+    desk's own write with `proposal_id` on the request, which marks it sent: the roster transaction
+    (`kind` transaction: `add` / `drop`, today), the scheduled pickup (`kind` scheduled: `add` / `drop`,
+    a later day) or the lineup write (`kind` lineup: `moves`, one day's board, today's or a later
+    day's, written at once). Never executed from here."""
+
+    proposal_id: int
+    state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, or expired")
+    kind: AiProposalKind
+    team_id: int
+    day: int = Field(..., description="Matchup day index, 0 = the matchup's first day")
+    date: date_type = Field(..., description="The NBA date the move is for")
+    dow: str = Field(..., description="Mon, Tue, ...")
+    scoring_period_id: int = Field(..., description="ESPN's day for the move (the scheduled pickup's day; "
+                                                    "a lineup chip's board, `ApplyLineupMovesReq.expected_scoring_period_id`)")
+    add: Optional[AiProposalPlayer] = None
+    drop: Optional[AiProposalPlayer] = None
+    moves: list[AiProposalMove] = Field(default_factory=list, description="A lineup chip's slot moves; empty otherwise")
+    summary: str = Field(..., description="One sentence: the move, its day, and what sending does")
+    reason: str = Field(..., description="The agent's reason, as it wrote it")
+    change: Optional[float] = Field(None, description="Projected change for the matchup (points, or category wins); "
+                                                      "for a lineup chip the day's change in points, if a points league")
+    scoring: Optional[str] = Field(None, description="The league's scoring format the change is in")
+    expires_at: datetime = Field(..., description="When the chip stops being stageable (the day's first tip, or its rollover)")
+    sent_at: Optional[datetime] = None
+
+
+class AiProposal(AiProposalChip):
+    """The chip as a block in a turn's parts."""
+
+    type: Literal["proposal"] = "proposal"
+    id: str = Field(..., description="Unique within its turn, e.g. 'p1'")
+
+
+class AiPlace(ApiModel):
+    """A place in the app, from the app map: the server builds its steps and link, the model never types them."""
+
+    type: Literal["place"] = "place"
+    id: str = Field(..., description="Unique within its turn, e.g. 'pl1' (a proposal's are p1, p2, ...)")
+    screen_id: str = Field(..., description="The app map's id of the screen")
+    desk: str = Field(..., description="The desk's name, e.g. 'Week'")
+    steps: str = Field(..., description="The clicks from the desk's front, e.g. 'Week › Market P › ONE DAY'")
+    href: str = Field(..., description="A path in the app: the screen's own link, or its desk's when it has none")
+    direct: bool = Field(..., description="href opens the screen itself; otherwise the steps lead there from href")
+    matches_build: bool = Field(..., description="The map is of the build the user has open")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace], Field(discriminator="type")]
+
+
 class AiTextPart(ApiModel):
     kind: Literal["text"] = "text"
     text: str
@@ -218,7 +331,7 @@ class AiTextPart(ApiModel):
 
 class AiBlockPart(ApiModel):
     kind: Literal["block"] = "block"
-    block: AiTable
+    block: AiBlock
 
 
 AiPart = Annotated[Union[AiTextPart, AiBlockPart], Field(discriminator="kind")]
@@ -290,5 +403,68 @@ class AiTurnCommentResp(BaseResponse):
     data: Optional[AiTurnCommentData] = None
 
 
+class AiProposalCheckData(ApiModel):
+    chip: AiProposalChip
+    problems: list[str] = Field(..., description="Why the chip can't be staged now; empty when it can")
+
+
+class AiProposalResp(BaseResponse):
+    """Response for GET /v1/internal/ai/proposals/{proposal_id}."""
+
+    data: Optional[AiProposalCheckData] = None
+
+
+class AiProposalDismissResp(BaseResponse):
+    """Response for POST /v1/internal/ai/proposals/{proposal_id}/dismiss."""
+
+    data: Optional[AiProposalChip] = None
+
+
 class AiTurnFeedbackResp(BaseResponse):
     data: Optional[AiTurnFeedbackData] = None
+
+
+# ---- Dime's notes (the AI desk's "What Dime knows"; services/ai/memory.py) ----
+
+AiNoteKind = Literal["plan", "player", "league", "opponent", "preference", "lesson", "note"]
+
+
+class AiNote(ApiModel):
+    note_id: int
+    kind: AiNoteKind
+    team_id: Optional[int] = Field(None, description="The team it is about; null for a note about the user")
+    text: str
+    recheck_on: Optional[date_type] = None
+    author: Literal["dime", "user"]
+    written_on: date_type
+    retired_on: Optional[date_type] = None
+    retired_by: Optional[Literal["dime", "user"]] = None
+    retired_reason: Optional[str] = None
+
+
+class AiNoteListResp(BaseResponse):
+    """Response for GET /v1/internal/ai/notes."""
+
+    data: Optional[list[AiNote]] = None
+
+
+class AiNoteResp(BaseResponse):
+    data: Optional[AiNote] = None
+
+
+class AiNoteCreateReq(ApiModel):
+    """Body for POST /v1/internal/ai/notes: a note the user writes for the agent."""
+
+    kind: AiNoteKind = "preference"
+    text: str = Field(..., min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
+    team_id: Optional[int] = Field(None, gt=0, le=INT4_MAX)
+    recheck_on: Optional[date_type] = None
+
+
+class AiNoteEditReq(ApiModel):
+    """Body for PATCH /v1/internal/ai/notes/{note_id}: the note is replaced by the user's version."""
+
+    text: Optional[str] = Field(None, min_length=1, max_length=500, pattern=NO_NUL_NOT_BLANK)
+    kind: Optional[AiNoteKind] = None
+    recheck_on: Optional[date_type] = None
+    clear_recheck: bool = False

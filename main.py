@@ -14,10 +14,12 @@ from core.health import health_response
 from core.logging import setup_logging, get_logger
 from core.settings import settings
 from core.telemetry import init_sentry
+from core.tracing import RequestSpanMiddleware, init_tracing
 from core.watchdog import start_loop_watchdog
 from core.warmup import warm_request_path
 from core.rate_limit import limiter, rate_limit_exceeded_handler
-from db.base import init_db, close_db, start_db_runtime, stop_db_runtime
+from db.base import db, init_db, close_db, start_db_runtime, stop_db_runtime
+from services import request_timings
 from services.ai import questions as ai_questions
 from services.features_client import start_features_runtime, stop_features_runtime
 from services.sqlmate_client import start_sqlmate_runtime, stop_sqlmate_runtime
@@ -29,13 +31,19 @@ from api.v1.internal import (users, teams, lineups, yahoo, matchups, streamers, 
                              api_keys, rankings as internal_rankings, sqlmate as internal_sqlmate,
                              drafts, lineup_editor, jobs, team_streamers, roster_transactions,
                              scheduled_pickups, stream_lanes,
-                             connections, ai, lineup_snapshots)
+                             connections, ai, lineup_snapshots, app_map, move_outcomes)
 from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
                            schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
 # No SENTRY_DSN (dev, tests) -> nothing happens.
 init_sentry(settings, ignore_errors=[RateLimitExceeded])
+
+# Every request's time, split into where it went, for the data-platform
+# dashboard's Latency page (and Railway's Traces page when tracing is on there).
+if settings.request_timings_enabled:
+    init_tracing(request_timings.queue, service_name=settings.service_name,
+                 version=settings.version, database=db)
 
 
 @asynccontextmanager
@@ -53,6 +61,7 @@ async def lifespan(app: FastAPI):
 
     watchdog = None
     retention = None
+    timings = None
     try:
         # Startup migrations are deliberately synchronous before the server
         # accepts traffic; init_db closes their connection when complete.
@@ -83,10 +92,18 @@ async def lifespan(app: FastAPI):
         # background: it logs its own failure, and a slow or failing sweep must
         # never delay or fail a startup.
         retention = asyncio.create_task(ai_questions.keep_redacting())
+        if settings.request_timings_enabled:
+            timings = asyncio.create_task(request_timings.keep_writing())
         yield
     finally:
         if retention is not None:
             retention.cancel()
+        if timings is not None:
+            timings.cancel()
+            try:  # the last few seconds of requests, while the DB runtime is still up
+                await asyncio.wait_for(request_timings.flush(), 5)
+            except Exception as exc:
+                log.warning("request_timings_final_flush_failed", error=type(exc).__name__)
         if watchdog is not None:
             watchdog.stop()
         # All lifecycle functions are idempotent, including partial-startup cleanup.
@@ -122,9 +139,11 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# Add middlewares (order matters - first added = outermost)
-app.add_middleware(RequestContextMiddleware)  # Outermost: correlation id + one http_request log line
+# Add middlewares (order matters - the last added is outermost)
+app.add_middleware(RequestContextMiddleware)  # Correlation id + one http_request log line
 setup_middleware(app)                         # Exception handlers + CORS
+if settings.request_timings_enabled:
+    app.add_middleware(RequestSpanMiddleware)  # Outermost: each request's server span
 
 # API v1 Public routes
 api_v1_public = APIRouter(prefix="/v1")
@@ -156,6 +175,7 @@ api_v1_internal.include_router(internal_sqlmate.router)
 api_v1_internal.include_router(drafts.router)
 api_v1_internal.include_router(lineup_editor.router)
 api_v1_internal.include_router(lineup_snapshots.router)
+api_v1_internal.include_router(move_outcomes.router)
 api_v1_internal.include_router(jobs.router)
 api_v1_internal.include_router(team_streamers.router)
 api_v1_internal.include_router(roster_transactions.router)
@@ -163,6 +183,7 @@ api_v1_internal.include_router(scheduled_pickups.router)
 api_v1_internal.include_router(stream_lanes.router)
 api_v1_internal.include_router(connections.router)
 api_v1_internal.include_router(ai.router)
+api_v1_internal.include_router(app_map.router)
 
 app.include_router(api_v1_internal)
 

@@ -6,8 +6,9 @@ schedule, so the lane's decision times follow the executor's whatever that rule 
 
 Covers starting a lane (its gates and what is stored), the dry run, a decision's every branch
 (switch, keep, waiting on its pickup, before the window, a provider error, the holder gone or
-adopted, an expired connection, missed days, the last day, past the end), the tick wrapper, the
-user's pause / resume / stop, and what a settled lane pickup tells the lane.
+adopted, an expired connection, missed days, the last day, past the end), a team's lanes deciding
+together, the tick wrapper, the user's pause / resume / stop, and what a settled lane pickup tells
+the lane.
 """
 
 import asyncio
@@ -29,7 +30,7 @@ PG, C, UT, BE, IR = 0, 4, 11, 12, 13
 LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=552315826, team_name="GloatingSoap369", year=2027,
                     espn_s2="s2", swid="{SWID}", espn_team_id=1)
 TEAM = SimpleNamespace(team_id=21, user_id=11, league_info_json="{}", league_id=None, league=None)
-HOLDER, GUARD, FA, FA2 = 1, 2, 10, 11
+HOLDER, GUARD, FA, FA2, BIG = 1, 2, 10, 11, 3
 MON = date(2026, 11, 16)                                     # ESPN day 28; the matchup runs to Sun 11/22 (day 34)
 NOON = datetime(2026, 11, 16, 17, 0, tzinfo=timezone.utc)   # Mon noon EST, before the 7 PM tip
 TUE = MON + timedelta(days=1)
@@ -63,9 +64,9 @@ def board(players=None, *, period=28, nba_date="2026-11-16", acq="default", can_
                        write_blocked_reason=reason, roster_version="v", fetched_at="now", acquisitions=acq)
 
 
-def free_agent(pid, name, team, *, avg=25.0, status="free_agent", until=None):
-    return PlayerResp(player_id=pid, name=name, avg_points=avg, team=team, valid_positions=["SF", "UT1"],
-                      injured=False, acquisition_status=status, waivers_until=until, default_position_id=3)
+def free_agent(pid, name, team, *, avg=25.0, status="free_agent", until=None, positions=("SF", "UT1"), pos=3):
+    return PlayerResp(player_id=pid, name=name, avg_points=avg, team=team, valid_positions=list(positions),
+                      injured=False, acquisition_status=status, waivers_until=until, default_position_id=pos)
 
 
 def lane(**kw):
@@ -88,9 +89,9 @@ def h(monkeypatch):
     schedule = {MON: {"MIA", "DEN"}, MON + timedelta(1): {"LAL"}, MON + timedelta(2): {"MIA"},
                 MON + timedelta(3): {"LAL"}, MON + timedelta(5): {"MIA"}}
     h = SimpleNamespace(board=board(), pool=[free_agent(FA, "Free Agent", "LAL")], reads=0, schedule=schedule,
-                        pending=[], open_lane=None, inserted=[], recorded=[], steps=[], held=True,
+                        pending=[], open_lanes=[], inserted=[], recorded=[], steps=[], held=True,
                         lane_pending=False, adopted=None, team=(LEAGUE, {}), cancelled=[], cancel_prior="pending",
-                        lane_pickups=[], day_adds=0)
+                        lane_pickups=[], day_adds=0, projections=[], lane_pending_ids=set())
 
     class Adapter:
         def capabilities(self, league_info):
@@ -152,11 +153,12 @@ def h(monkeypatch):
     monkeypatch.setattr(Game, "get_earliest_game_time_on_date", staticmethod(first_tip))
     monkeypatch.setattr(Game, "get_teams_playing_on_date", staticmethod(lambda d: set(h.schedule.get(d, ()))))
     monkeypatch.setattr(svc, "_pending_pickups", lambda team_id: list(h.pending))
-    monkeypatch.setattr(svc, "_open_lane", lambda team_id: h.open_lane)
+    monkeypatch.setattr(svc, "_open_lanes", lambda team_id: list(h.open_lanes))
+    monkeypatch.setattr(svc, "_set_projections", lambda rows, now: h.projections.extend(rows))
     monkeypatch.setattr(svc, "_insert_lane", insert)
     monkeypatch.setattr(svc, "_record_decision", record)
     monkeypatch.setattr(svc, "_lane_step", step)
-    monkeypatch.setattr(svc, "_lane_has_pending", lambda lane_id: h.lane_pending)
+    monkeypatch.setattr(svc, "_lane_has_pending", lambda lane_id: h.lane_pending or lane_id in h.lane_pending_ids)
     monkeypatch.setattr(svc, "_adopt_executed", lambda lane_id, holder_id, on_board: h.adopted)
     monkeypatch.setattr(svc, "_lane_pickups", lambda lane_id: list(h.lane_pickups))
     monkeypatch.setattr(svc, "_cancel_pickup", cancel)
@@ -167,7 +169,10 @@ def h(monkeypatch):
 
 
 def decide(h, lane_row, now):
-    return run(svc.StreamLaneService._decide(lane_row, now))
+    """One lane's run: what its team's run tells the user about it."""
+    notices = run(svc.StreamLaneService._decide_team([lane_row], now))
+    assert len(notices) <= 1
+    return notices[0] if notices else None
 
 
 # ---- starting ---------------------------------------------------------------------------------
@@ -201,14 +206,13 @@ def test_after_todays_tip_the_lane_starts_tomorrow(h, monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("arrange, error, reason", [
-    (lambda h: setattr(h, "open_lane", object()), svc.StreamLaneExists, None),
+    (lambda h: setattr(h, "open_lanes", [lane(id=5, status="paused")]), svc.StreamLaneExists, None),
+    (lambda h: setattr(h, "open_lanes", [lane(id=i, holder_player_id=100 + i) for i in range(svc.MAX_LANES)]),
+     svc.StreamLaneLimit, None),
     (lambda h: h.pending.append(svc.PendingPickup(1, 30, MON, 99, HOLDER)), svc.StreamLaneInvalid, "scheduled_out"),
     (lambda h: setattr(h, "board", board(acq=None)), svc.StreamLaneInvalid, "no_matchup_end"),
     (lambda h: setattr(h, "board", board(acq=AcquisitionState(per="day", limit=1, matchup_end=MON, waiver_hours=24))),
      None, None),
-    (lambda h: setattr(h, "board", board(acq=AcquisitionState(per="day", limit=1, matchup_end=date(2026, 11, 22),
-                                                              waiver_hours=48))),
-     svc.StreamLaneInvalid, "waiver_period_unsupported"),
 ])
 def test_start_refuses(h, monkeypatch, arrange, error, reason):
     monkeypatch.setattr(svc, "datetime", _clock(NOON))
@@ -280,6 +284,34 @@ def test_a_switch_schedules_the_pickup_and_the_next_decision(h):
     assert rec.fields["next_period"] == 30
     assert rec.fields["next_decision_at"] == opens(TUE + timedelta(days=1))
     assert rec.fields["projection"]["days"][0]["player"]["player_id"] == FA
+
+
+@pytest.mark.unit
+def test_a_paused_lanes_holder_off_the_roster_is_not_picked_up(h):
+    """The free agent is another lane's holder, dropped while it was paused: he stays that lane's."""
+    h.open_lanes = [lane(), lane(id=8, status="paused", holder_player_id=FA, holder_name="Free Agent")]
+    decide(h, lane(), tuesday(h))
+    (rec,) = h.recorded
+    assert rec.pickup is None and [e["action"] for e in rec.events] == ["keep"]
+
+
+@pytest.mark.unit
+def test_a_paused_lanes_holder_a_pickup_brings_back_is_the_rosters_from_its_day(h, monkeypatch):
+    """The user scheduled the dropped holder's return for Tuesday, for the guard: the plan finds his
+    values there, and still can't take him."""
+    h.open_lanes = [lane(), lane(id=8, status="paused", holder_player_id=FA, holder_name="Free Agent")]
+    h.pending = [svc.PendingPickup(90, 29, TUE, FA, GUARD)]
+    pools, real = [], svc.plan_lanes
+
+    def plan_lanes(board_, holder_ids, pool, *args):
+        pools.append({f.player_id for f in pool})
+        return real(board_, holder_ids, pool, *args)
+
+    monkeypatch.setattr(svc, "plan_lanes", plan_lanes)
+    decide(h, lane(), tuesday(h))
+    assert pools == [{FA}]
+    (rec,) = h.recorded
+    assert rec.pickup is None and [e["action"] for e in rec.events] == ["keep"]
 
 
 @pytest.mark.unit
@@ -422,20 +454,144 @@ def test_a_decision_that_lost_its_claim_tells_nobody(h):
 
 
 @pytest.mark.unit
-def test_the_tick_carries_on_past_a_broken_lane(h, monkeypatch):
-    claimed = [lane(id=1, holder_player_id=None), lane(id=2)]
+def test_the_tick_carries_on_past_a_broken_team(h, monkeypatch):
+    claimed = [lane(id=1, team_id=22), lane(id=2)]
     monkeypatch.setattr(svc, "_claim_due_lanes", lambda now, limit: claimed)
     h.board = board([lineup_player(GUARD, "Guard", PG, "DEN", eligible=(PG, UT, BE))])
+    real = svc.StreamLaneService._decide_team
 
-    async def boom_then_real(lane_row, now):
-        if lane_row.id == 1:
+    async def boom_then_real(lanes, now):
+        if lanes[0].team_id == 22:
             raise RuntimeError("bad row")
-        return await real(lane_row, now)
-    real = svc.StreamLaneService._decide
-    monkeypatch.setattr(svc.StreamLaneService, "_decide", staticmethod(boom_then_real))
+        return await real(lanes, now)
+    monkeypatch.setattr(svc.StreamLaneService, "_decide_team", staticmethod(boom_then_real))
     notices = run(svc.StreamLaneService.decide_due(tip(MON), 4))
     assert h.steps[0].lane_id == 1 and h.steps[0].fields["reason"] == "error"
     assert [n.lane_id for n in notices] == [2]           # lane 2's holder is gone: paused, and told
+
+
+# ---- a team's lanes, together -------------------------------------------------------------------
+
+
+def two_spots(h, *, used=3):
+    """The holder (UT) and a big (C), both MIA, both streamed; the league leaves 4 - `used` adds. Two LAL
+    free agents play Tuesday and Thursday: one fills UT, the other C."""
+    h.board = board([lineup_player(HOLDER, "Holder", UT, "MIA", eligible=(UT, BE), avg=15),
+                     lineup_player(GUARD, "Guard", PG, "DEN", eligible=(PG, UT, BE), avg=30),
+                     lineup_player(BIG, "Big", C, "MIA", eligible=(C, UT, BE), avg=15)],
+                    period=29, nba_date=TUE.isoformat(),
+                    acq=AcquisitionState(per="matchup", limit=4, matchup_period_id=5, matchup_start=MON,
+                                         matchup_end=date(2026, 11, 22), matchup_used=used, waiver_hours=24))
+    h.board = h.board.model_copy(update={"slot_counts": {"0": 1, "4": 1, "11": 1, "12": 3, "13": 1}})
+    h.pool = [free_agent(FA, "Free Agent", "LAL"), free_agent(FA2, "Free Big", "LAL", positions=("C", "UT1"), pos=5)]
+    return svc.rollover_at(TUE), [lane(), lane(id=8, holder_player_id=BIG, holder_name="Big", original_player_id=BIG,
+                                           original_name="Big")]
+
+
+@pytest.mark.unit
+def test_lanes_deciding_a_day_share_the_adds_left(h):
+    """One add for two spots that would each take a free agent: the plan spends it once."""
+    now, lanes = two_spots(h, used=3)
+    assert run(svc.StreamLaneService._decide_team(lanes, now)) == []
+    assert [r.lane_id for r in h.recorded] == [7, 8]
+    pickups = [r.pickup for r in h.recorded if r.pickup]
+    assert len(pickups) == 1
+    keep = next(r for r in h.recorded if r.pickup is None)
+    assert [e["action"] for e in keep.events] == ["keep"]
+    for r in h.recorded:
+        proj = r.fields["projection"]
+        assert proj["lanes"] == 2 and proj["adds_left"] == 1 and r.fields["next_period"] == 30
+    assert sum(r.fields["projection"]["adds"] for r in h.recorded) == 1
+
+
+@pytest.mark.unit
+def test_lanes_with_adds_to_spare_each_take_a_different_free_agent(h):
+    now, lanes = two_spots(h, used=2)
+    run(svc.StreamLaneService._decide_team(lanes, now))
+    pickups = {r.lane_id: r.pickup for r in h.recorded}
+    assert (pickups[7]["drop_player_id"], pickups[8]["drop_player_id"]) == (HOLDER, BIG)
+    assert {pickups[7]["add_player_id"], pickups[8]["add_player_id"]} == {FA, FA2}
+    assert all(p["lane_id"] == lane_id and p["scoring_period_id"] == 29 for lane_id, p in pickups.items())
+
+
+@pytest.mark.unit
+def test_a_lane_waiting_on_its_pickup_leaves_the_others_to_decide(h):
+    now, lanes = two_spots(h, used=2)
+    h.lane_pending_ids = {8}
+    run(svc.StreamLaneService._decide_team(lanes, now))
+    assert [s.lane_id for s in h.steps] == [8] and h.steps[0].fields["reason"] == "pickup_pending"
+    (rec,) = h.recorded
+    assert rec.lane_id == 7 and rec.fields["projection"]["lanes"] == 1
+
+
+@pytest.mark.unit
+def test_a_day_that_fails_leaves_the_teams_other_days_to_decide(h, monkeypatch):
+    now, (first, second) = two_spots(h, used=2)
+    second.next_period = 30                              # decides Wednesday: a group of its own
+    real = svc.StreamLaneService._decide_together
+
+    async def boom_then_real(group, period, *args):
+        if period == 29:
+            raise RuntimeError("bad day")
+        return await real(group, period, *args)
+    monkeypatch.setattr(svc.StreamLaneService, "_decide_together", staticmethod(boom_then_real))
+    assert run(svc.StreamLaneService._decide_team([first, second], now)) == []
+    assert [(s.lane_id, s.fields["reason"]) for s in h.steps] == [(7, "error"), (8, "window_not_open")]
+
+
+@pytest.mark.unit
+def test_a_lane_started_beside_one_deciding_the_same_day_is_planned_with_it(h, monkeypatch):
+    now, _ = two_spots(h, used=2)
+    monkeypatch.setattr(svc, "datetime", _clock(now))
+    other = lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=29, attempts=2, reason=None)
+    h.open_lanes = [other]
+    plan = run(svc.StreamLaneService.plan(TEAM, LEAGUE, StreamLanePlanReq(player_id=HOLDER))).data
+    assert plan.projection.lanes == 2 and [o.lane_id for o in plan.others] == [5]
+    assert plan.others[0].holder.player_id == BIG and plan.others[0].projection.lanes == 2
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
+    fields, _ = h.inserted[0]
+    assert fields["projection"]["lanes"] == 2
+    ((lane_id, attempts, projection),) = h.projections
+    assert (lane_id, attempts, projection["lanes"]) == (5, 2, 2)
+
+
+@pytest.mark.unit
+def test_a_lane_whose_decision_is_running_is_not_planned_with(h, monkeypatch):
+    """Its decision writes its own projection, under the claim a start would fence on: the start
+    plans alone and leaves it be."""
+    now, _ = two_spots(h, used=2)
+    monkeypatch.setattr(svc, "datetime", _clock(now))
+    h.open_lanes = [lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=29, reason="in_progress")]
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
+    assert h.inserted[0][0]["projection"]["lanes"] == 1 and h.projections == []
+
+
+@pytest.mark.unit
+def test_a_lane_that_has_decided_the_day_is_roster_for_a_new_one(h, monkeypatch):
+    now, _ = two_spots(h, used=2)
+    monkeypatch.setattr(svc, "datetime", _clock(now))
+    h.open_lanes = [lane(id=5, holder_player_id=BIG, holder_name="Big", next_period=30)]
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
+    assert h.inserted[0][0]["projection"]["lanes"] == 1 and h.projections == []
+
+
+@pytest.mark.unit
+def test_a_spot_streamed_already_or_a_full_team_refuses_the_dry_run_too(h, monkeypatch):
+    monkeypatch.setattr(svc, "datetime", _clock(NOON))
+    h.open_lanes = [lane(id=5)]
+    with pytest.raises(svc.StreamLaneExists):
+        run(svc.StreamLaneService.plan(TEAM, LEAGUE, StreamLanePlanReq(player_id=HOLDER)))
+    h.open_lanes = [lane(id=i, holder_player_id=100 + i) for i in range(svc.MAX_LANES)]
+    with pytest.raises(svc.StreamLaneLimit):
+        run(svc.StreamLaneService.plan(TEAM, LEAGUE, StreamLanePlanReq(player_id=HOLDER)))
+
+
+@pytest.mark.unit
+def test_a_league_with_longer_waivers_can_stream(h, monkeypatch):
+    monkeypatch.setattr(svc, "datetime", _clock(NOON))
+    h.board = board(acq=AcquisitionState(per="matchup", limit=4, matchup_end=date(2026, 11, 22), waiver_hours=48))
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER)))
+    assert h.inserted[0][0]["projection"]["rehold_after"] == 3
 
 
 # ---- the user's changes --------------------------------------------------------------------------

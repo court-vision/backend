@@ -180,6 +180,12 @@ class Settings(BaseSettings):
     # resends the whole history, so a long conversation costs more per turn.
     ai_agent_max_turns: int = 20
     ai_agent_max_context_tokens: int = 150_000
+    # The connection the agent's query_stats tool reads on (services/ai/stats/
+    # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
+    # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
+    # same database as DATABASE_URL. Unset, the tool runs on the main pool in a
+    # read-only transaction with the same 2 s timeout and says so in the log.
+    ask_reader_database_url: Optional[str] = None
 
     # Logging
     log_level: str = "INFO"
@@ -197,6 +203,20 @@ class Settings(BaseSettings):
     # Frontend origins allowed as the token's `azp` (authorized party).
     # Empty disables the check. Env format is JSON: ["http://localhost:3000"]
     clerk_authorized_parties: list[str] = []
+
+    # The app map's account (docs/APP_MAP_PLAN.md): the Clerk user the crawler
+    # signs in as to map the signed-in desks. The account writes like any other;
+    # the crawl's own requests carry core/clerk_auth.APP_MAP_CRAWL_HEADER and are
+    # refused anything but GET/HEAD/OPTIONS and the two searches in
+    # APP_MAP_READS (403 APP_MAP_READ_ONLY). APP_MAP_TOKEN is the bearer the crawl presents to
+    # POST /v1/internal/app-map/sign-in-token for a one-time sign-in as that
+    # user; CI never holds the Clerk secret or the account's password.
+    app_map_clerk_user_id: Optional[str] = None
+    app_map_token: Optional[SecretStr] = None
+    # The bearer the workflow's upload step presents to
+    # PUT /v1/internal/app-map/maps/{build}. A token of its own: it can replace
+    # the map CV AI reads, so only the upload step holds it, never the crawl.
+    app_map_upload_token: Optional[SecretStr] = None
 
     # Yahoo OAuth Configuration
     yahoo_client_id: Optional[str] = None
@@ -225,6 +245,17 @@ class Settings(BaseSettings):
     sentry_dsn: Optional[SecretStr] = None
     sentry_environment: Optional[str] = None  # defaults to the Railway environment name, else "development"
     sentry_traces_sample_rate: float = 0.0
+
+    # Request timing (core/tracing.py, services/request_timings.py): every
+    # request's time, split into ESPN, Postgres, our own code and the rest, is
+    # written to ops.request_timings for the data-platform dashboard's Latency
+    # page. Rows are inserted in batches every flush interval and kept for the
+    # retention period. Off: no spans, no rows (Railway tracing then sees only
+    # its own edge spans).
+    request_timings_enabled: bool = True
+    request_timings_flush_seconds: float = 10.0
+    request_timings_retention_days: int = 30
+    request_timings_queue_max: int = 5000
 
     # Event-loop watchdog: exit the process (Railway restarts it) when the loop has not
     # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).

@@ -283,3 +283,32 @@ def test_matchup_rosters_survive_a_failed_history_read(world, monkeypatch):
     league_info = svc.public_league_info(OWNER)
     found = asyncio.run(svc.LineupSnapshotService.rosters_for_matchup(league_info, {1: "GloatingSoap369", 5: "Rival"}, YESTERDAY))
     assert list(found) == [1]
+
+
+@pytest.mark.unit
+def test_a_weeks_rosters_come_from_one_read_and_espn_only_for_the_latest_day(world, monkeypatch):
+    reads = []
+    load = svc._load_snapshots
+    monkeypatch.setattr(svc, "_load_snapshots", lambda ref, team_ids, dates: reads.append(list(dates)) or load(ref, team_ids, dates))
+    two_days_ago, three_days_ago = date(2026, 11, 8), date(2026, 11, 7)
+    stored(world, 1, nba_date=two_days_ago)
+    stored(world, 5, "Rival", nba_date=two_days_ago)        # 11-09 not captured yet; 11-07 never was
+    league_info = svc.public_league_info(OWNER)
+    found = asyncio.run(svc.LineupSnapshotService.rosters_for_matchup_days(
+        league_info, {1: "GloatingSoap369", 5: "Rival"}, [three_days_ago, two_days_ago, YESTERDAY]))
+    assert reads == [[three_days_ago, two_days_ago, YESTERDAY]]
+    assert found[three_days_ago] == {}                      # no read of ESPN for an older gap
+    assert {t: s.source for t, s in found[two_days_ago].items()} == {1: "snapshot", 5: "snapshot"}
+    assert {t: s.source for t, s in found[YESTERDAY].items()} == {1: "provider_history", 5: "provider_history"}
+    assert world.espn_calls == [(("mTeam", "mRoster"), PERIOD)]
+
+
+@pytest.mark.unit
+def test_a_week_with_every_day_stored_never_reads_espn(world):
+    stored(world, 1)
+    stored(world, 5, "Rival")
+    league_info = svc.public_league_info(OWNER)
+    found = asyncio.run(svc.LineupSnapshotService.rosters_for_matchup_days(
+        league_info, {1: "GloatingSoap369", 5: "Rival"}, [YESTERDAY]))
+    assert sorted(found[YESTERDAY]) == [1, 5] and world.espn_calls == []
+    assert asyncio.run(svc.LineupSnapshotService.rosters_for_matchup_days(league_info, {1: "x"}, [])) == {}

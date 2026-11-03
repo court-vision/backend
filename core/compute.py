@@ -29,6 +29,7 @@ import sentry_sdk
 from core.errors import ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
+from core.tracing import waiting
 
 T = TypeVar("T")
 
@@ -82,7 +83,8 @@ async def run_cpu(operation_name: str, fn: Callable[..., T], *args: Any, **kwarg
     executor, capacity = _ensure_cpu_runtime()
     queued_at = time.perf_counter()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.cpu_queue_timeout_seconds)
+        with waiting("cpu slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.cpu_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         log.error(
             "cpu_capacity_timeout",

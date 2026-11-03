@@ -11,6 +11,7 @@ from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
 from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp
+from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
 from schemas.valuation import (
     StandardRankResp,
@@ -19,6 +20,7 @@ from schemas.valuation import (
     StandardValuationResp,
 )
 from services.lineup_editor_service import LineupEditorService
+from services.move_ledger_service import MoveLedgerService
 from services.scheduled_pickup_service import ScheduledPickupService
 from services.valuation.engine import playoff_weight_of
 from services.valuation.standard import (
@@ -57,6 +59,18 @@ async def execute_pickups(req: PickupExecuteReq):
     is attempted and due rows are pushed back ten minutes.
     """
     return respond(await ScheduledPickupService.execute_due(req))
+
+
+@router.post("/ledger/run", response_model=LedgerRunResp)
+async def run_move_ledger(req: LedgerRunReq):
+    """Rebuild the move ledger (usr.move_outcomes) of every league with a recent snapshot,
+    or of the one named.
+
+    Called by data-platform's move_ledger pipeline each night, after the lineup
+    snapshots. Each league's rows are replaced whole in one transaction, so a rerun
+    is always safe; a league that fails is reported in `data.leagues`, never raised.
+    """
+    return respond(await MoveLedgerService.run(req))
 
 
 @router.post("/valuation/standard", response_model=StandardValuationResp)

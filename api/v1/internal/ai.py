@@ -4,7 +4,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Body, Depends, Path
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 
 from api.deps import UserContext, get_db_user
@@ -16,6 +18,12 @@ from schemas.ai import (
     AiFeedbackData,
     AiFeedbackReq,
     AiFeedbackResp,
+    AiNoteCreateReq,
+    AiNoteEditReq,
+    AiNoteListResp,
+    AiNoteResp,
+    AiProposalDismissResp,
+    AiProposalResp,
     AiTurnCommentData,
     AiTurnCommentReq,
     AiTurnCommentResp,
@@ -201,7 +209,8 @@ async def _events(emit: Emitter) -> AsyncIterator[str]:
         "`note` for the agent's own progress note, `step` for the start of each step after the "
         "first, when whatever the last status said is done);\n"
         "- `text` `{delta}`: the answer's prose, as it is written;\n"
-        "- `block` (an `AiTable`): a table the server built from the agent's lookups;\n"
+        "- `block` (an `AiTable`, `AiChart`, `AiProposal` or `AiPlace`): a table, chart, proposed move or "
+        "place in the app the server built from the agent's lookups;\n"
         "- `error` `{code, message}`: the turn failed (AI_DECLINED, AI_TIMEOUT, AI_INCOMPLETE, AI_BUSY, ...);\n"
         "- `done` `{turn_id, outcome, cost_usd, model_calls, duration_ms, spend}`: always last.\n\n"
         "Text and blocks arrive in the order the user should see them. Lines starting with `:` are "
@@ -221,7 +230,7 @@ async def send_turn(
     conversation_id: int = Path(..., gt=0),
     user: UserContext = Depends(get_db_user),
 ) -> StreamingResponse:
-    emit = await AgentService.start_turn(conversation_id, user.user_id, req.message)
+    emit = await AgentService.start_turn(conversation_id, user.user_id, req.message, build=req.build)
     return StreamingResponse(
         _events(emit),
         media_type="text/event-stream",
@@ -262,3 +271,102 @@ async def turn_comment(
     stored = await AgentService.comment(turn_id, user.user_id, req.comment)
     return AiTurnCommentResp(status=ApiStatus.SUCCESS, message="Note saved",
                              data=AiTurnCommentData(turn_id=turn_id, comment=stored))
+
+
+@router.get(
+    "/proposals/{proposal_id}",
+    response_model=AiProposalResp,
+    summary="One of the agent's proposed moves, checked again",
+    description="The chip as it stands and a fresh check against the board and the player pool: what the "
+                "desk reads before it stages the chip into the tray. `problems` says why it can't be staged.",
+    responses={**_AGENT_ERRORS, 404: {"description": "No such proposal for this caller (AI_PROPOSAL_NOT_FOUND)"}},
+)
+async def get_proposal(
+    proposal_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiProposalResp:
+    data = await AgentService.proposal(proposal_id, user.user_id)
+    return AiProposalResp(status=ApiStatus.SUCCESS, message="Proposal", data=data)
+
+
+@router.post(
+    "/proposals/{proposal_id}/dismiss",
+    response_model=AiProposalDismissResp,
+    summary="Let one of the agent's proposed moves go",
+    description="The chip leaves the tray for good; a move that was already sent can't be dismissed (409 "
+                "AI_PROPOSAL_SENT). Sending a chip is the Week desk's roster transaction / scheduled pickup "
+                "with `proposal_id` on the request, never a route here.",
+    responses={**_AGENT_ERRORS, 404: {"description": "No such proposal for this caller (AI_PROPOSAL_NOT_FOUND)"},
+               409: {"description": "Already sent (AI_PROPOSAL_SENT)"}},
+)
+async def dismiss_proposal(
+    proposal_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiProposalDismissResp:
+    chip = await AgentService.dismiss_proposal(proposal_id, user.user_id)
+    return AiProposalDismissResp(status=ApiStatus.SUCCESS, message="Proposal dismissed", data=chip)
+
+
+_NOTE_404 = {404: {"description": "No such live note, or team_id is not one of the caller's teams"}}
+
+
+@router.get(
+    "/notes",
+    response_model=AiNoteListResp,
+    summary="The agent's notes on the caller's teams (\"What Dime knows\")",
+    description=(
+        "The notes the agent keeps between conversations, newest first: with `team_id`, that team's and the "
+        "ones about the caller; without, every one. `include_retired` adds the revised and forgotten ones."
+    ),
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def list_notes(
+    team_id: Optional[int] = Query(None, gt=0, le=2_147_483_647),
+    include_retired: bool = Query(False),
+    user: UserContext = Depends(get_db_user),
+) -> AiNoteListResp:
+    data = await AgentService.notes(user.user_id, team_id, include_retired)
+    return AiNoteListResp(status=ApiStatus.SUCCESS, message="Notes", data=data)
+
+
+@router.post(
+    "/notes",
+    response_model=AiNoteResp,
+    summary="Write a note for the agent",
+    description="A note of the caller's own (author `user`): the agent reads it and may not change or retire it.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def add_note(req: AiNoteCreateReq, user: UserContext = Depends(get_db_user)) -> AiNoteResp:
+    data = await AgentService.add_note(user.user_id, kind=req.kind, text=req.text, team_id=req.team_id,
+                                       recheck_on=req.recheck_on)
+    return AiNoteResp(status=ApiStatus.SUCCESS, message="Note saved", data=data)
+
+
+@router.patch(
+    "/notes/{note_id}",
+    response_model=AiNoteResp,
+    summary="Change one of the agent's notes",
+    description="Any live note, the agent's or the caller's: it is retired and replaced by the caller's version, "
+                "which the agent may no longer change.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def edit_note(
+    req: AiNoteEditReq,
+    note_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiNoteResp:
+    data = await AgentService.edit_note(user.user_id, note_id, text=req.text, kind=req.kind,
+                                        recheck_on=req.recheck_on, clear_recheck=req.clear_recheck)
+    return AiNoteResp(status=ApiStatus.SUCCESS, message="Note saved", data=data)
+
+
+@router.delete(
+    "/notes/{note_id}",
+    response_model=BaseResponse,
+    summary="Retire one of the agent's notes",
+    description="The note stops reaching the agent. It is kept as retired by the caller, not erased.",
+    responses={**_AGENT_ERRORS, **_NOTE_404},
+)
+async def delete_note(note_id: int = Path(..., gt=0), user: UserContext = Depends(get_db_user)) -> BaseResponse:
+    await AgentService.delete_note(user.user_id, note_id)
+    return BaseResponse(status=ApiStatus.SUCCESS, message="Note retired")
