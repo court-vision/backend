@@ -38,7 +38,9 @@ class TestCatalog:
 
     def test_fpts_is_labelled_as_court_visions_formula(self):
         assert METRICS["fpts"].label == "CV fantasy points"
-        assert "not the user's league scoring" in catalog.FPTS_NOTE
+        # The note names the formula (ESPN's default points) without asking for a caveat
+        assert "ESPN's default points scoring" in catalog.FPTS_NOTE
+        assert "not the user's league scoring" not in catalog.FPTS_NOTE
 
     def test_the_description_names_every_metric_once(self):
         text = catalog.describe()

@@ -254,8 +254,10 @@ class TestGetMyTeams:
         assert seen == [42]
         teams = json.loads(outcome.content)["teams"]
         assert teams[0] == {"team_id": 7, "team_name": "Sengun Szn", "league_name": "Dorm League 26-27",
-                            "provider": "espn", "season": 2027, "scoring": "categories"}
+                            "provider": "espn", "season": 2027, "scoring": "categories", "points_scoring": None}
         assert (teams[1]["league_name"], teams[1]["scoring"]) == ("Work League", "points")
+        # No synced league, so whether it scores ESPN's default points isn't known
+        assert teams[1]["points_scoring"] is None
 
     def test_takes_no_arguments(self):
         outcome = asyncio.run(tools.run_tool("get_my_teams", {"user_id": 1}, ctx=tools.ToolContext(user_id=42)))

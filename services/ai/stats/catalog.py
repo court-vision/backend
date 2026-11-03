@@ -173,9 +173,12 @@ _METRICS: tuple[Metric, ...] = (
 METRICS: dict[str, Metric] = {m.name: m for m in _METRICS}
 METRIC_NAMES: tuple[str, ...] = tuple(METRICS)
 
-# A note the tool result carries whenever fpts is among the metrics: the
-# formula is Court Vision's, not the user's league scoring.
-FPTS_NOTE = "fpts is Court Vision's fantasy points formula, not the user's league scoring"
+# A note the tool result carries whenever fpts is among the metrics: Court
+# Vision's formula is ESPN's default points scoring (cv_core's
+# DEFAULT_POINT_WEIGHTS), and the turn header says which of the user's points
+# leagues score that way. It names the formula without asking for a caveat.
+FPTS_NOTE = ("fpts is ESPN's default points scoring; the header says which of the user's points "
+             "leagues score that way")
 
 
 def describe() -> str:

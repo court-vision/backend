@@ -81,6 +81,7 @@ from services.ai.stats.query import run_query_stats
 from services.player_service import PlayerService
 from services.move_ledger_service import query_for_team as move_ledger_query
 from services.scheduled_pickup_service import ScheduledPickupService
+from services.scoring import DEFAULT_POINT_WEIGHTS, PointsScoring
 from services.streamer_service import StreamerService
 from services.team_service import TeamService
 from services.players_list_service import PlayersListService
@@ -299,23 +300,36 @@ async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -
     }
 
 
+def points_scoring(scoring: Optional[str], league: Any) -> Optional[str]:
+    """For a points team, whether its league scores ESPN's default points, which is
+    Court Vision's fpts ("espn_default"), or its own point values ("custom"). None
+    for any other format, and while the league's settings haven't been synced: the
+    weights aren't known yet, so neither answer would be true."""
+    if scoring != "points" or league is None or not getattr(league, "settings_synced", False):
+        return None
+    weights = getattr(league, "point_weights", None) or DEFAULT_POINT_WEIGHTS
+    return "espn_default" if PointsScoring(weights).is_default else "custom"
+
+
 async def list_my_teams(user_id: int) -> list[dict[str, Any]]:
     """One user's fantasy teams, as the router knows them. The tool returns all of
-    it; the router's view carries everything but the names (`routing.describe_view`)."""
+    it; the router's view carries everything but the names (`routing.describe_view`),
+    and the agent's header everything but the names (`agent._team_facts`)."""
     resp = await TeamService.get_teams(user_id)
-    return [
-        {
+    teams = []
+    for team in (resp.data or []):
+        scoring = team.league.scoring_type if team.league else team.league_info.scoring_preview
+        teams.append({
             "team_id": team.team_id,
             "team_name": team.league_info.team_name,
             "league_name": (team.league.name if team.league and team.league.name
                             else team.league_info.league_name),
             "provider": getattr(team.league_info.provider, "value", team.league_info.provider),
             "season": team.league_info.year,
-            "scoring": (team.league.scoring_type if team.league
-                        else team.league_info.scoring_preview),
-        }
-        for team in (resp.data or [])
-    ]
+            "scoring": scoring,
+            "points_scoring": points_scoring(scoring, team.league),
+        })
+    return teams
 
 
 async def _get_my_teams(args: MyTeamsInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -852,7 +866,7 @@ AGENT_READ_TOOLS: list[dict[str, Any]] = [
             "`season` for another one, and `sort_by` a stat for his best games in it (his top 10 "
             "blocks games: sort_by 'blk', games 10). Up to 82 games. Each has date, opponent, home, "
             "minutes, points, rebounds, assists, steals, blocks, turnovers, makes and attempts, "
-            "and CV fantasy points (fpts, Court Vision's formula, not the user's league scoring). "
+            "and fantasy points (fpts, ESPN's default points scoring). "
             "games_played is how many he played that season. Appearances under a minute are left out."
         ),
         "input_schema": {
