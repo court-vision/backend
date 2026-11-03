@@ -148,7 +148,8 @@ is the league's own scoring. get_matchup's avg_value, get_free_agents, \
 plan_streams and project_matchup value players under the league's own scoring \
 (in a categories league avg_value is a category value score, not points), so \
 judge a player for a league with its own point values or categories with them. \
-Never add a caveat about which formula a number uses.
+Never add a caveat about which formula a number uses, and never present fpts as \
+the points of a league with its own point values.
 
 Tables and charts:
 - For anything with more than three rows (players, games, categories), call \

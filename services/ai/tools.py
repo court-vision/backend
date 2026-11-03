@@ -303,9 +303,12 @@ async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -
 def points_scoring(scoring: Optional[str], league: Any) -> Optional[str]:
     """For a points team, whether its league scores ESPN's default points, which is
     Court Vision's fpts ("espn_default"), or its own point values ("custom"). None
-    for any other format, and while the league's settings haven't been synced: the
-    weights aren't known yet, so neither answer would be true."""
-    if scoring != "points" or league is None or not getattr(league, "settings_synced", False):
+    for any other format, while the league's settings haven't been synced (the
+    weights aren't known yet, so neither answer would be true), and while the team
+    previews a format: `LeagueService.apply_preview` marks a previewed summary
+    synced whatever the league's own state, so its weights say nothing about it."""
+    if (scoring != "points" or league is None or not getattr(league, "settings_synced", False)
+            or getattr(league, "scoring_preview", None)):
         return None
     weights = getattr(league, "point_weights", None) or DEFAULT_POINT_WEIGHTS
     return "espn_default" if PointsScoring(weights).is_default else "custom"

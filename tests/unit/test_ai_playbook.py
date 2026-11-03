@@ -46,15 +46,16 @@ def test_the_playbook_carries_the_checks_before_a_move():
 
 
 def test_the_rules_no_longer_ask_for_a_caveat_on_fpts():
-    assert "not the \\\nuser's league scoring" not in prompts.AGENT_PROMPT
     assert "not the user's league scoring" not in prompts.AGENT_PROMPT
-    assert "Never add a caveat about which formula a number uses." in prompts.AGENT_PROMPT
+    assert "Never add a caveat about which formula a number uses" in prompts.AGENT_PROMPT
+    # ...but fpts is never passed off as a custom league's points
+    assert "never present fpts as the points of a league with its own point values" in prompts.AGENT_PROMPT
 
 
 # ---- which points leagues score ESPN's default ----
 
-def _league(weights, synced=True):
-    return SimpleNamespace(point_weights=weights, settings_synced=synced)
+def _league(weights, synced=True, preview=None):
+    return SimpleNamespace(point_weights=weights, settings_synced=synced, scoring_preview=preview)
 
 
 def test_a_synced_points_league_on_the_default_weights_is_espn_default():
@@ -71,6 +72,8 @@ def test_no_answer_for_categories_or_unsynced_leagues():
     assert points_scoring("categories", _league({})) is None
     assert points_scoring("points", _league(dict(DEFAULT_POINT_WEIGHTS), synced=False)) is None
     assert points_scoring("points", None) is None
+    # A preview marks the summary synced whatever the league's own state: no label then
+    assert points_scoring("points", _league({}, preview="points")) is None
 
 
 def test_the_header_names_each_points_leagues_scoring(monkeypatch):
