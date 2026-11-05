@@ -9,7 +9,9 @@ from fastapi import APIRouter, Security
 from core.compute import run_cpu
 from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
-from schemas.autopilot import CheckinRunData, CheckinRunResp, CheckinStarted
+from schemas.autopilot import (
+    CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData, CheckinRunResp, CheckinStarted,
+)
 from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
@@ -20,7 +22,7 @@ from schemas.valuation import (
     StandardValuationReq,
     StandardValuationResp,
 )
-from services.ai import checkins
+from services.ai import checkins, events
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
 from services.scheduled_pickup_service import ScheduledPickupService
@@ -93,6 +95,27 @@ async def run_checkins():
         message="Check-ins are off" if out["off"] else f"Started {len(started)} check-in(s)",
         data=CheckinRunData(off=out["off"], teams=out["teams"], started=started, missed=out["missed"],
                             skipped=out["skipped"], stale=out["stale"]),
+    ))
+
+
+@router.post("/checkins/events", response_model=CheckinEventsResp)
+async def checkin_events(req: CheckinEventsReq):
+    """What came in about players: verdicts that changed for games not yet tipped, news items just
+    stored. Each becomes an event on every team Dime runs that rosters the player, and a team with a
+    new one gets a check-in about it (or the scheduled one about to run takes it).
+
+    Called by data-platform's availability pipeline (its late-scratch events, every 2-minute tick that
+    has one) and its news feed (every 5 minutes). Keys only: the verdicts and items are read here. Off
+    unless DIME_EVENTS_ENABLED; the check-ins run on here after the response.
+    """
+    out = await events.receive([(v.player_id, v.game_date) for v in req.availability], req.news)
+    started = [CheckinStarted(checkin_id=s.checkin_id, team_id=s.team_id, kind=s.kind, date=s.nba_date)
+               for s in out["started"]]
+    return respond(CheckinEventsResp(
+        status=ApiStatus.SUCCESS,
+        message="Events are off" if out["off"] else f"Recorded {out['recorded']} event(s)",
+        data=CheckinEventsData(off=out["off"], teams=out["teams"], facts=out["facts"], recorded=out["recorded"],
+                               started=started),
     ))
 
 

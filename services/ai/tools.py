@@ -51,7 +51,8 @@ from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
-from services.ai import app_map, automations, decisions, league, memory, steering as ai_steering
+from services import news_service
+from services.ai import app_map, automations, decisions, league, memory, news as ai_news, steering as ai_steering
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -232,7 +233,14 @@ TOOLS: list[dict[str, Any]] = [
             "A player's current injury report: status, injury, expected return, "
             "report_date, and report_age_days (never more than 7). injury=null means "
             "Court Vision has no current report, which is not proof of health: say "
-            "there is no current injury information rather than calling the player healthy."
+            "there is no current injury information rather than calling the player healthy. "
+            "availability is the verdict for his game today, or his next one, resolved from "
+            "the NBA box score, ESPN's injury list and ESPN fantasy every few minutes on game "
+            "days: game_date, verdict (out, doubtful, questionable, probable, available), "
+            "final (the box score has spoken), decided_by (the source that won), reason, "
+            "detail (the source's words), expected_return, previous_verdict and changed_at. "
+            "It is newer than injury when they differ. latest_news is his newest news item "
+            "of the last three days (get_player_news for more)."
         ),
         "input_schema": {
             "type": "object",
@@ -297,10 +305,19 @@ async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -
     resp = await PlayerService.get_player_status(args.player_id)
     # The service returns only a report from the last seven days, with its
     # age already on it; an older one comes back as no report at all.
-    return {
+    out: dict[str, Any] = {
         "player_id": args.player_id,
         "injury": resp.data.model_dump() if resp.data else None,
     }
+    # The availability verdict and the newest news item (the news pipeline plan § 7). A failed read
+    # leaves them out rather than failing the report the player had before them.
+    try:
+        out["availability"] = await news_service.verdict_for(args.player_id, nba_date_et())
+        latest = await news_service.latest_item(args.player_id)
+        out["latest_news"] = latest.view(body_chars=news_service.BODY_CHARS) if latest is not None else None
+    except Exception:
+        get_logger().exception("ai_player_status_news_failed", player_id=args.player_id)
+    return out
 
 
 def points_scoring(scoring: Optional[str], league: Any) -> Optional[str]:
@@ -1287,6 +1304,19 @@ async def _get_league(args: league.GetLeagueInput, ctx: ToolContext | None) -> d
     return await league.get_league(team, await load_owned_league_info(team), args)
 
 
+async def _get_player_news(args: ai_news.PlayerNewsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await ai_news.get_player_news(args)
+
+
+async def _get_news(args: ai_news.NewsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    roster: Optional[frozenset[int]] = None
+    if args.team_id is not None:
+        team = await _owned_team(ctx, args.team_id)
+        from services.ai import events
+        roster = await events.roster_ids(team.team_id, ctx.user_id)
+    return await ai_news.get_news(args, roster)
+
+
 async def _get_league_activity(args: league.LeagueActivityInput, ctx: ToolContext | None) -> dict[str, Any]:
     return await league.get_league_activity(await _owned_team(ctx, args.team_id), args)
 
@@ -1360,12 +1390,12 @@ async def _cancel_pickup(args: ai_steering.CancelPickupInput, ctx: ToolContext |
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
 # memory, then the move ledger, then the league tools, then the automations and
-# the check-ins' decisions. The order is part of every request's cached prefix:
-# append, never reorder.
+# the check-ins' decisions, then the news. The order is part of every request's
+# cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
-    *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS,
+    *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS, *ai_news.NEWS_TOOLS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
@@ -1423,6 +1453,8 @@ _REGISTRY: dict[str, _Tool] = {
     ai_steering.STEER_NAME: _Tool(ai_steering.SteerInput, _steer),
     ai_steering.SET_LANE_NAME: _Tool(ai_steering.SetLaneInput, _set_lane),
     ai_steering.CANCEL_PICKUP_NAME: _Tool(ai_steering.CancelPickupInput, _cancel_pickup),
+    ai_news.GET_PLAYER_NEWS_NAME: _Tool(ai_news.PlayerNewsInput, _get_player_news),
+    ai_news.GET_NEWS_NAME: _Tool(ai_news.NewsInput, _get_news),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

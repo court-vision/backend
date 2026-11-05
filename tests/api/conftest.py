@@ -90,6 +90,7 @@ def make_test_app() -> FastAPI:
         ownership, analytics, schedule,
         live as live_public, playoffs,
         sqlmate as public_sqlmate,
+        news as public_news,
     )
 
     app = FastAPI(title="Court Vision API (test)")
@@ -119,6 +120,7 @@ def make_test_app() -> FastAPI:
     api_v1_public.include_router(live_public.router)
     api_v1_public.include_router(playoffs.router)
     api_v1_public.include_router(public_sqlmate.router)
+    api_v1_public.include_router(public_news.router)
     app.include_router(api_v1_public)
 
     # Internal routes

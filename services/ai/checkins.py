@@ -13,7 +13,10 @@ A check-in is a turn Dime starts itself. Four kinds, each about one fantasy day
 - **pre_lock**, shortly before the day's first tip: the lineup after the fill and
   the late-scratch check, one call on it;
 - **night**, 6 AM ET the next day, once the box scores and the nightly move
-  ledger are in: how the day's calls went, and what that teaches.
+  ledger are in: how the day's calls went, and what that teaches;
+- **event**, when a verdict changes or news lands about a player on the roster
+  (services/ai/events.py; the plan's step 6): not on the clock, and not a slot,
+  so a team can have several a day, within their own cap.
 
 Each runs once per team, kind and day (claimed by inserting its row), inside a
 window; a window that closes before the check-in could run leaves it `missed`
@@ -34,6 +37,12 @@ the plan's step 5): while no automation Dime acts on is at AI (the default, and 
 with DIME_ACTING_ENABLED off) a check-in is exactly step 3's; otherwise its brief says
 which automations are at AI, and a change it logs on them is sent (services/ai/
 acting.py). The Check-ins row is this switch: on while the team isn't paused.
+
+Every check-in takes the team's pending events when it starts (events.take), so
+a scheduled one about to run lists them in its brief rather than another turn
+starting for them. Events come in only for a team whose Late scratches row is at
+AI (or with autopilot on), and with DIME_EVENTS_ENABLED off there are none, and
+every brief is as before.
 """
 
 from __future__ import annotations
@@ -41,7 +50,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from peewee import fn
 
@@ -59,7 +68,9 @@ from services.ai import agent, autonomy, conversations, levels, spend
 from services.scheduled_pickup_service import et_at
 
 MORNING, WEEKLY, PRE_LOCK, NIGHT = "morning", "weekly", "pre_lock", "night"
+# What the schedule (and Run now) can start; an event check-in starts only for its events
 KINDS = (MORNING, WEEKLY, PRE_LOCK, NIGHT)
+EVENT = "event"
 RUNNING, DONE, FAILED, MISSED, SKIPPED = "running", "done", "failed", "missed", "skipped"
 # States that count toward the day's cap: a check-in that ran (or is running)
 _RAN = (RUNNING, DONE, FAILED)
@@ -77,7 +88,7 @@ _MANUAL_PRE_LOCK = timedelta(hours=2)
 _STALE_MARGIN = timedelta(minutes=10)
 
 LABELS = {MORNING: "Morning check-in", WEEKLY: "Weekly check-in", PRE_LOCK: "Pre-lock check-in",
-          NIGHT: "Night follow-up"}
+          NIGHT: "Night follow-up", EVENT: "Event check-in"}
 
 
 def _now() -> datetime:
@@ -272,7 +283,7 @@ def _of_conversation(conversation_id: int, user_id: int) -> Optional[AiCheckin]:
 
 
 @db_operation("ai.checkins_list")
-def _list(user_id: int, team_id: Optional[int], limit: int) -> tuple[list[AiCheckin], dict[int, dict[str, int]]]:
+def _list(user_id: int, team_id: Optional[int], limit: int) -> tuple[list[AiCheckin], dict[int, dict[str, Any]]]:
     query = AiCheckin.select().where(AiCheckin.user_id == user_id)
     if team_id is not None:
         query = query.where(AiCheckin.team_id == team_id)
@@ -297,11 +308,16 @@ def _tallies(checkin_ids: list[int]) -> dict[int, dict[str, int]]:
                    .group_by(AutopilotAction.checkin_id).tuples()):
         if cid in out:
             out[cid]["sent"] = int(n)
+    # What it was told came in (the events step), on the tally under `events`
+    from services.ai import events
+    for cid, rows in events.of_checkins(checkin_ids).items():
+        out.setdefault(cid, {"decisions": 0, "changes": 0, "agree": 0, "disagree": 0, "sent": 0})
+        out[cid]["events"] = [events.event_view(e) for e in rows]
     return out
 
 
 @db_operation("ai.checkin_tally")
-def _tally(checkin_id: int) -> dict[str, int]:
+def _tally(checkin_id: int) -> dict[str, Any]:
     return _tallies([checkin_id]).get(checkin_id, {})
 
 
@@ -401,6 +417,21 @@ _STEPS = {
         "night proved wrong.\n"
         "- Log a decision only for something that needs a call now."
     ),
+    EVENT: (
+        "Something came in about players on the team (listed above). Decide whether anything should change now:\n"
+        "- get_player_status for each player named (his verdict for his next game, its source, the latest news), "
+        "get_player_news when the news needs more, and get_automations for what auto-lineup and the "
+        "late-scratch check have written or will write today.\n"
+        "- get_lineup for the day his game is on. If he is out and in a starting slot, or cleared and on the bench "
+        "while a worse player starts, propose_lineup the change, unless the fill or the late-scratch check "
+        "already makes it.\n"
+        "- If he will miss more than that game (a long absence, a lost role), weigh an add or a drop: run your "
+        "playbook's checks and project_matchup it first, or hold and say why.\n" +
+        ("- To keep an automation from undoing your call, steer it: a pin, or an override at zero for the days "
+         "he is out, ending when he is due back.\n" if settings.dime_steering_enabled else "") +
+        "- Log one decision for each player named: a change citing its proposal, or a hold and why.\n"
+        "- remember what the follow-up should check, with a recheck day."
+    ),
 }
 
 
@@ -420,10 +451,12 @@ def acting_rules(rows: list[str]) -> str:
 
 
 def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
-          acting: Optional[list[str]] = None) -> str:
+          acting: Optional[list[str]] = None, events: Sequence[str] = ()) -> str:
     """The check-in's opening message: what it is, its rules (shadow, or which automations Dime acts
-    on), and the steps for its kind. Acting on none, it is step 3's brief exactly."""
+    on), what came in since the last check-in (`events`, one line each), and the steps for its kind.
+    Acting on none and no events, it is step 3's brief exactly."""
     who = ("The user asked for it from the AI desk." if manual
+           else "It started because news came in about the roster." if kind == EVENT
            else "It started on its schedule.")
     live = bool(acting)
     rules = acting_rules(acting) if live else _SHADOW
@@ -434,7 +467,13 @@ def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
              if live else
              "End with a short note for the user: what you'd change and what you'd keep, and why, in a few "
              "lines. Your decisions show as their own blocks, so don't list them again.")
-    return f"{head}\n\n{_STEPS[kind]}\n\n{close}"
+    news = ""
+    if events:
+        lead = ("What came in:" if kind == EVENT else
+                "What came in since your last check-in (weigh it in your calls, and log a call on any that "
+                "changes one):")
+        news = lead + "\n" + "\n".join(events) + "\n\n"
+    return f"{head}\n\n{news}{_STEPS[kind]}\n\n{close}"
 
 
 # ------------------------------- running one ------------------------------- #
@@ -468,6 +507,17 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
     if checkin_id is None:
         await spend.cancel(reservation_id)
         return None
+    from services.ai import events
+    try:
+        taken = await events.take(team_id, checkin_id, now)
+    except Exception:
+        get_logger().exception("ai_checkin_events_failed", checkin_id=checkin_id, team_id=team_id)
+        taken = []
+    if kind == EVENT and not taken:
+        # Another check-in took them between the kick and this claim
+        await spend.cancel(reservation_id)
+        await _settle(checkin_id, SKIPPED, "no_events", None, 0, now)
+        return None
     conversation_id: Optional[int] = None
     try:
         conversation = await conversations.create(user_id, team_id, kind=conversations.CHECKIN,
@@ -479,13 +529,19 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
         acting = autonomy.acting_rows(await _autopilot_row(team_id))
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
-                          message=brief(kind, nba_date, team_id, manual=manual, acting=acting),
+                          message=brief(kind, nba_date, team_id, manual=manual, acting=acting,
+                                        events=events.brief_lines(taken)),
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.CHECKIN_TOOLS, allowed=agent.CHECKIN_ALLOWED, checkin_id=checkin_id,
                           limits=agent.Limits.checkin())
     except Exception:
         get_logger().exception("ai_checkin_start_failed", checkin_id=checkin_id, team_id=team_id, kind=kind)
         await spend.cancel(reservation_id)
+        if taken:
+            try:
+                await events.release(checkin_id)
+            except Exception:
+                get_logger().exception("ai_checkin_events_release_failed", checkin_id=checkin_id)
         if conversation_id is not None:
             await conversations.release(conversation_id)
         await _settle(checkin_id, FAILED, "start_failed", None, 0, _now())
@@ -499,7 +555,8 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
 
 
 async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int, kind: str) -> None:
-    """The check-in's turn, then its row settled with the turn's outcome and cost."""
+    """The check-in's turn, then its row settled with the turn's outcome and cost, then the team kicked
+    for any event that came in while it ran."""
     result: Optional[agent.TurnResult] = None
     try:
         result = await agent.run_turn(turn, agent.Emitter(), header_line=header_line)
@@ -513,11 +570,44 @@ async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int
             get_logger().exception("ai_checkin_settle_failed", checkin_id=checkin_id)
         get_logger().info("ai_checkin", checkin_id=checkin_id, team_id=team_id, kind=kind, state=state,
                           reason=reason, cost_micros=cost, decisions=turn.decisions, proposals=len(turn.proposals))
+        await _after(team_id, turn.user_id)
+
+
+async def _after(team_id: int, user_id: int) -> None:
+    """Once a check-in is settled: what it did may have changed the roster, and events that came in
+    while it ran wait for a kick."""
+    from services.ai import events
+    if not events.enabled():
+        return
+    # A move it made (or one the user sent from its chips meanwhile) may have changed the roster
+    events.forget_roster(team_id)
+    try:
+        await events.kick(team_id, user_id, _now())
+    except Exception:
+        get_logger().exception("ai_checkin_event_kick_failed", team_id=team_id)
+
+
+async def start_slot(row: Autopilot, slot: Slot, now: datetime) -> Optional[Started]:
+    """Start a scheduled check-in that is due (an event kick found it so): it takes the team's
+    pending events. Within the day's cap, like the tick (desk runs don't count)."""
+    team_id, user_id = row.team_id_id, row.user_id_id
+    if await _ran_since(team_id, now - timedelta(days=1), scheduled_only=True) >= settings.autopilot_checkins_per_day:
+        return None
+    checkin_id = await _start(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now)
+    return None if checkin_id is None else Started(checkin_id, team_id, slot.kind, slot.nba_date)
+
+
+async def start_event(row: Autopilot, today: date, now: datetime) -> Optional[Started]:
+    """Start an event check-in about `today` for the team's pending events (events.kick checked the caps)."""
+    team_id, user_id = row.team_id_id, row.user_id_id
+    checkin_id = await _start(team_id, user_id, EVENT, today, now, manual=False, now=now)
+    return None if checkin_id is None else Started(checkin_id, team_id, EVENT, today)
 
 
 async def _tick_team(row: Autopilot, slots: list[Slot], days: list[date], now: datetime,
                      out: dict[str, Any]) -> None:
-    """One team's share of a tick: the first due check-in started, closed windows recorded as missed."""
+    """One team's share of a tick: the first due check-in started, closed windows recorded as missed,
+    and, with nothing running, the team's waiting events given their turn (events.kick)."""
     team_id, user_id = row.team_id_id, row.user_id_id
     taken = await _taken(team_id, days)
     busy = await _busy(team_id)
@@ -544,6 +634,11 @@ async def _tick_team(row: Autopilot, slots: list[Slot], days: list[date], now: d
                 continue
             busy, ran = True, ran + 1
             out["started"].append(Started(checkin_id, team_id, slot.kind, slot.nba_date))
+    if not busy:
+        # Events that waited (a check-in was running, one was about to open): their turn now
+        started = await _kick_events(row, now)
+        if started is not None:
+            out["started"].append(started)
 
 
 async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
@@ -575,6 +670,17 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
     get_logger().info("ai_checkins_tick", teams=out["teams"], started=len(out["started"]), missed=out["missed"],
                       skipped=out["skipped"], stale=out["stale"])
     return out
+
+
+async def _kick_events(row: Autopilot, now: datetime) -> Optional[Started]:
+    from services.ai import events
+    if not events.enabled():
+        return None
+    try:
+        return await events.kick(row.team_id_id, row.user_id_id, now, row=row)
+    except Exception:
+        get_logger().exception("ai_checkin_event_kick_failed", team_id=row.team_id_id)
+        return None
 
 
 # ------------------------------- the AI desk ------------------------------- #
@@ -677,7 +783,7 @@ def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot], 
     }
 
 
-def summary_of(row: AiCheckin, tally: Optional[dict[str, int]] = None) -> dict[str, Any]:
+def summary_of(row: AiCheckin, tally: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     t = tally or {}
     return {
         "checkin_id": row.id,
@@ -698,6 +804,7 @@ def summary_of(row: AiCheckin, tally: Optional[dict[str, int]] = None) -> dict[s
         "agree": t.get("agree", 0),
         "disagree": t.get("disagree", 0),
         "sent": t.get("sent", 0),
+        "events": t.get("events", []),
     }
 
 
