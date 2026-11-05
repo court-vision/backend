@@ -33,6 +33,8 @@ Method. An integer program, solved by HiGHS:
                       x[j,s-1] - x[j,s] + x[j,t] <= 1 for s < t < s + rehold_after
     a free agent      x[j,d] = 0 before their own waivers clear
     position limits   the spots' players at a limited position fit that day's room
+    holds (Dime's)    a[j,d] = 0 on a day j may not be added (a block); x[j,d] = 1 on a day a
+                      spot's player must stay (a keep). Keeping every spot's player stays a plan
 
 Each day's lineup is an assignment problem, so once x is whole the seats are too: y
 needn't be integer. Any waiver gap can be planned, not only one or two days.
@@ -68,13 +70,17 @@ TIME_LIMIT_S = 10.0
 class Streamer:
     """A player who could hold a spot: their value on each day of the horizon if they play (0 with
     no game, or out), the active slots they may fill, the first day they can take a spot (waivers
-    clearing; a spot's player now: 0), and their default position (for position limits)."""
+    clearing; a spot's player now: 0), and their default position (for position limits). Dime's
+    holds (services/steering.py): `no_add`, the days they may not be added (a block), and `kept`,
+    the days a spot's player may not leave it (a keep; a free agent's is ignored)."""
 
     player_id: int
     values: tuple[float, ...]
     eligible: frozenset[int]
     available_from: int = 0
     position: Optional[int] = None
+    no_add: frozenset[int] = frozenset()
+    kept: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -226,8 +232,13 @@ def plan_streams(
     n = len(players)
     x = [[m.col(1.0 if j < spots or d >= p.available_from else 0.0) for d in range(horizon)]
          for j, p in enumerate(players)]
-    # A spot's player is held going in: they can't be added on day 0.
-    a = [[m.col(0.0 if j < spots and d == 0 else 1.0) for d in range(horizon)] for j in range(n)]
+    for j, p in enumerate(players[:spots]):
+        for d in p.kept:
+            if 0 <= d < horizon:
+                m.col_lower[x[j][d]] = 1.0      # a keep: the spot's player holds a spot that day
+    # A spot's player is held going in: they can't be added on day 0. Nor anyone on a day Dime blocks them.
+    a = [[m.col(0.0 if (j < spots and d == 0) or d in p.no_add else 1.0) for d in range(horizon)]
+         for j, p in enumerate(players)]
     points: dict[int, int] = {}          # y column -> its player's points that day, in UNITs
     seated: dict[tuple[int, int], list[int]] = {(s, d): [] for s in seats for d in range(horizon)}
 

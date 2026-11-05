@@ -336,10 +336,22 @@ _SHADOW = (
     "call agree or disagree."
 )
 
-_REVIEW = (
+_REVIEW_PLANS = (
     "- Judge each automation's plan: auto-lineup's fill, each lane's next decision, each scheduled pickup. "
     "Log one decision for each, a hold when you'd keep it. For a lineup or roster change, propose it first "
     "and cite the proposal; a lane change is said in the summary.\n"
+)
+# With Dime's steering on (DIME_STEERING_ENABLED, the plan's step 4), a change to an automation's plan
+# is a chip too: steer it with holds, or change the lane or the pickup, and cite that
+_REVIEW_STEER = (
+    "- Judge each automation's plan: auto-lineup's fill, each lane's next decision, each scheduled pickup, "
+    "and your own holds (get_automations lists them). Log one decision for each, a hold when you'd keep it. "
+    "For a lineup or roster change, propose it first and cite the proposal. To change what an automation "
+    "does, steer it rather than work around it: steer holds (keep, block, override, pin, or clear one "
+    "that no longer fits), set_lane, or cancel_pickup, and cite that chip.\n"
+)
+_REVIEW = (
+    (_REVIEW_STEER if settings.dime_steering_enabled else _REVIEW_PLANS) +
     "- Then look for what no automation does: an add or drop worth making (run your playbook's checks "
     "first, and project_matchup it). Log it as a change with automation none, or log that you'd stand pat.\n"
     "- remember what the follow-up should check (a thesis, a player to watch), with a recheck day."

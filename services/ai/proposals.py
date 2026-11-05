@@ -34,6 +34,12 @@ ESPN id: the tool result carries NBA ids, and the chip the frontend gets
 (`CHIP_KEY`, popped off the result by the turn loop) carries the ESPN ids the
 writes take.
 
+Dime's steering chips (`steer`, `lane`, `cancel_pickup`; services/ai/steering.py, the Dime
+autopilot plan, step 4) are proposals too, stored here with what applying them does in `action`.
+They change no ESPN roster, so they are never staged: the AI desk applies one through the Week
+desk's own route for it (the holds route, the lane routes, the pickup's cancel) with its id,
+which checks it (`steering.for_apply`) and marks it sent.
+
 States: `proposed` (stageable), `sent`, `dismissed`, and `shadow`: a proposal made in one of
 Dime's check-ins (services/ai/checkins.py), checked exactly like a chip and stored as what Dime
 would have done, but never staged, dismissed or sent (the Dime autopilot plan, step 3). `expired`
@@ -63,12 +69,12 @@ from db.models.ai_conversations import AiProposal
 from db.models.nba.games import Game
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import LineupState
-from services import schedule_service
+from services import schedule_service, steering
 from services.acquisitions import budget_block
 from services.ai.fantasy import MoveInput, ProjectMatchupInput, _first_open_day, _identities, project_matchup
 from services.daily_actions_service import has_open_seat
 from services.lineup_editor_service import _roster_slots, _slot_name, planner_players, slot_counts_of
-from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, plan_fill, validate_moves
+from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, validate_moves
 from services.providers import get_provider_adapter
 from services.roster_transaction_service import (
     RosterTransactionInvalid,
@@ -86,6 +92,9 @@ PROPOSE_LINEUP_NAME = "propose_lineup"
 GET_LINEUP_NAME = "get_lineup"
 CHIP_KEY = "chip"
 TRANSACTION, SCHEDULED, LINEUP = "transaction", "scheduled", "lineup"
+# Dime's steering chips (services/ai/steering.py): applied through a Week desk route, never staged
+STEER, LANE, CANCEL_PICKUP = "steer", "lane", "cancel_pickup"
+STEERING_KINDS = frozenset({STEER, LANE, CANCEL_PICKUP})
 # The slots a lineup move names, as ESPN names them (PG ... UT, BE, IR); 14-15 are never edited
 SLOT_IDS: dict[str, int] = {name: sid for sid, name in POSITION_MAP.items()
                             if isinstance(sid, int) and isinstance(name, str) and name and sid <= IR_SLOT_ID}
@@ -441,8 +450,25 @@ def _moves_view(row: Any) -> list[dict[str, Any]]:
             for m in (row.moves or [])]
 
 
+def _model_players(value: Any) -> Any:
+    """A steering chip's action as the model reads it: every player as his NBA id, name and team."""
+    if isinstance(value, dict):
+        if "espn_id" in value and "name" in value:
+            return {"player_id": value.get("nba_player_id"), "name": value["name"], "team": value.get("team")}
+        return {k: _model_players(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_model_players(v) for v in value]
+    return value
+
+
 def view_of(row: Any, now: datetime) -> dict[str, Any]:
     """The tool result the model reads (NBA ids only)."""
+    if row.kind in STEERING_KINDS:
+        return {
+            "proposal_id": row.id, "state": state_of(row, now), "kind": row.kind, "date": row.nba_date.isoformat(),
+            "action": _model_players(row.action or {}), "summary": row.summary, "reason": row.reason,
+            "expires_at": _aware(row.expires_at).isoformat(),
+        }
     return {
         "proposal_id": row.id,
         "state": state_of(row, now),
@@ -480,6 +506,10 @@ def chip_of(row: Any, now: datetime) -> dict[str, Any]:
         "scoring": projection.get("scoring"),
         "expires_at": _aware(row.expires_at).isoformat(),
         "sent_at": _aware(row.sent_at).isoformat() if row.sent_at else None,
+        # A steering chip's action, under its kind's key (the frontend's AiProposalChip)
+        "steer": (row.action or {}) if row.kind == STEER else None,
+        "lane": (row.action or {}) if row.kind == LANE else None,
+        "pickup": (row.action or {}) if row.kind == CANCEL_PICKUP else None,
     }
 
 
@@ -587,6 +617,13 @@ async def _problems(team: Any, league_info: LeagueInfo, state: LineupState, kind
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             problems.append(blocked + ".")
+    # Dime's own holds (services/steering.py): a block on the add, a keep on the drop
+    hold = steering.blocking(await steering.holds_for(team.team_id), add=add.espn_id if add else None,
+                             drop=drop.espn_id if drop else None, day=nba_date)
+    if hold is not None:
+        what = "won't be added" if hold.kind == steering.BLOCK else "is kept"
+        problems.append(f"{hold.name} {what} through {steering.day_span(hold.ends_on, hold.ends_on)} "
+                        f"(hold {hold.id}: {hold.reason}); clear the hold first.")
     return problems
 
 
@@ -744,12 +781,14 @@ def _move_view(m: Move, names: dict[int, Any]) -> dict[str, Any]:
             "from_slot": _slot_name(m.from_slot_id), "to_slot": _slot_name(m.to_slot_id), "role": m.role, "note": m.note}
 
 
-def lineup_view(board: _DayBoard, team_id: int) -> dict[str, Any]:
+def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] = ()) -> dict[str, Any]:
     """The model's view of a day's board (NBA ids only): slots, every player's slot, eligibility,
-    game, lock and value, and the server's own fill for the day."""
+    game, lock and value, and the server's own fill for the day, as auto-lineup would make it
+    with the team's holds (a pinned player marked `pinned`)."""
     state = board.state
     planners = {pp.player_id: pp for pp in planner_players(state)}
-    plan = plan_fill(list(planners.values()), slot_counts_of(state))
+    plan = steering.fill_with(list(planners.values()), slot_counts_of(state), holds, board.nba_date)
+    pinned = {h.player_id for h in steering.on_day(holds, board.nba_date, steering.PIN)}
     by_id = {p.player_id: p for p in state.players}
     players = []
     for p in state.players:
@@ -762,6 +801,7 @@ def lineup_view(board: _DayBoard, team_id: int) -> dict[str, Any]:
             "eligible_slots": eligible, "game": pp.game_note if p.has_game_today else None,
             "locked": p.locked, "injury": p.injury_status if (p.injured or p.injury_status) else None,
             "avg_value": p.avg_points, "value_kind": p.value_kind,
+            **({"pinned": True} if p.player_id in pinned else {}),
         })
     slots = [{"slot": sd.slot, "count": sd.count} for sd in state.slots] or \
         [{"slot": _slot_name(sid), "count": n} for sid, n in sorted(slot_counts_of(state).items())]
@@ -780,7 +820,8 @@ def lineup_view(board: _DayBoard, team_id: int) -> dict[str, Any]:
 
 
 async def get_lineup(team: Any, league_info: LeagueInfo, args: GetLineupInput) -> dict[str, Any]:
-    return lineup_view(await _day_board(team, league_info, args.day), team.team_id)
+    board = await _day_board(team, league_info, args.day)
+    return lineup_view(board, team.team_id, await steering.holds_for(team.team_id))
 
 
 def _resolve_moves(state: LineupState, wanted: Sequence[LineupMoveInput]) -> list[Move]:
@@ -822,7 +863,8 @@ async def propose_lineup(user_id: int, conversation_id: int, team: Any, league_i
     board = await _day_board(team, league_info, args.day)
     state = board.state
     if args.fill:
-        plan = plan_fill(planner_players(state), slot_counts_of(state))
+        plan = steering.fill_with(planner_players(state), slot_counts_of(state),
+                                  await steering.holds_for(team.team_id), board.nba_date)
         if plan.is_noop:
             raise AppError("AI_PROPOSAL_INVALID", f"{plan.summary} ({_day_label(board.nba_date)})")
         moves = list(plan.moves)
@@ -865,6 +907,9 @@ async def check(proposal_id: int, user_id: int, team: Any, league_info: LeagueIn
     state = state_of(row, now)
     if state != PROPOSED:
         return chip_of(row, now), [_NOT_PENDING[state] + "."]
+    if row.kind in STEERING_KINDS:
+        from services.ai import steering as ai_steering  # it builds on this module
+        return chip_of(row, now), await ai_steering.problems(row, team)
     board = await _board(team, league_info)
     if row.kind == LINEUP:
         # The chip's own day's board: today's, or a later day's read as the Week desk's day tab does
@@ -985,6 +1030,8 @@ async def header_line(conversation_id: int, user_id: int, now: Optional[datetime
     for row in rows[-HEADER_MAX:]:
         if row.kind == LINEUP:
             who = f"lineup: {lineup_words(row.moves or [])}"
+        elif row.kind in STEERING_KINDS:
+            who = f"{row.kind}: {row.summary.split('. ')[0]}"
         else:
             who = " / ".join(filter(None, [f"add {row.add_name}" if row.add_name else "", f"drop {row.drop_name}" if row.drop_name else ""]))
         items.append(f"#{row.id} {who} ({dow(row.nba_date)} {row.nba_date.isoformat()}): {state_of(row, now)}")

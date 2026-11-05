@@ -56,6 +56,25 @@ def empty_category_value_cache():
     clear()
 
 
+# ---- Dime's holds ----
+
+@pytest.fixture(autouse=True)
+def no_team_holds(request, monkeypatch):
+    """Every fill and lane plan reads the team's holds (services/steering.py). Outside the
+    database-backed suite a test sees none unless it stubs its own, so no unit test reaches
+    for a database through them."""
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
+    from services import steering
+
+    async def none(team_id, today=None):
+        return []
+
+    monkeypatch.setattr(steering, "live_rows", none)
+    yield
+
+
 # ---- The captured draft ----
 
 @pytest.fixture(scope="session")

@@ -1094,6 +1094,40 @@ def test_cancel_outcomes(h, monkeypatch):
         run(svc.ScheduledPickupService.cancel(TEAM, 1))
 
 
+@pytest.mark.unit
+def test_dimes_cancel_chip_is_checked_as_this_pickup_first_and_marked_sent_once_cancelled(h, monkeypatch):
+    from core.errors import ConflictError
+    from services.ai import proposals, steering as ai_steering
+    asked, sent, refuse = [], [], []
+
+    async def for_apply(proposal_id, user_id, team_id, kind, **match):
+        asked.append((proposal_id, user_id, team_id, kind, match))
+        if refuse:
+            raise refuse[0]
+        return SimpleNamespace(id=proposal_id)
+
+    async def mark_sent(proposal_id, **kw):
+        sent.append((proposal_id, kw))
+    monkeypatch.setattr(ai_steering, "for_apply", for_apply)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: ("pending", row(status="cancelled")))
+    run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert asked == [(41, 11, 21, "cancel_pickup", {"pickup_id": 1})] and sent == [(41, {"pickup_id": 1})]
+
+    # Refused, nothing is cancelled; already made, the chip stays as it was
+    cancelled = []
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: cancelled.append(pickup_id))
+    refuse.append(ConflictError("AI_PROPOSAL_NOT_PENDING", "Already sent"))
+    with pytest.raises(ConflictError):
+        run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert cancelled == []
+    refuse.clear()
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: ("executed", row(status="executed")))
+    with pytest.raises(svc.ScheduledPickupNotPending):
+        run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert len(sent) == 1
+
+
 # ---- the manual route is untouched ----------------------------------------------------------
 
 

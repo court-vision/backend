@@ -6,9 +6,18 @@ change how one tells you, stop it. Clerk-authenticated;
 ownership via `get_owned_team`; credentials hydrated only here, at the provider
 boundary. The decisions themselves run in the scheduled-pickups executor
 (`jobs.py`), before each day of the matchup.
+
+Dime's lane chips (the Dime autopilot plan, step 4) are applied through these same
+routes with `proposal_id` (the start and update bodies, the stop's query): the chip
+must be the caller's, this team's, still proposed, and this very action (start on
+this player, pause / resume / stop of this lane), else 409 AI_PROPOSAL_NOT_PENDING,
+422 AI_PROPOSAL_MISMATCH, or 409 AI_STEERING_OFF while steering is switched off. The
+step records Dime's reason, and the chip is marked sent.
 """
 
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 
 from api.deps import OwnedTeamContext, get_owned_team, load_owned_league_info
 from core.responses import respond
@@ -80,10 +89,12 @@ async def update_stream_lane(lane_id: int, req: StreamLaneUpdateReq, team: Owned
 
 
 @router.delete("/{team_id}/stream-lanes/{lane_id}", response_model=StreamLaneResp)
-async def stop_stream_lane(lane_id: int, team: OwnedTeamContext = Depends(get_owned_team)):
+async def stop_stream_lane(lane_id: int, team: OwnedTeamContext = Depends(get_owned_team),
+                           proposal_id: Optional[int] = Query(None, gt=0)):
     """
     Stop a lane. A pickup it scheduled that hasn't run is cancelled with it; the player
     holding the spot stays on the roster. 409 STREAM_LANE_BUSY while that pickup is being
     made (try again in a few minutes); 404 STREAM_LANE_NOT_FOUND; 409 STREAM_LANE_ENDED.
+    `proposal_id`: Dime's stop chip for this lane, applied (see below).
     """
-    return respond(await StreamLaneService.stop(team, lane_id))
+    return respond(await StreamLaneService.stop(team, lane_id, proposal_id))

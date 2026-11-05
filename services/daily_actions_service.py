@@ -42,7 +42,7 @@ from schemas.daily_actions import (
 )
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
-from services import schedule_service
+from services import schedule_service, steering
 from services.espn_service import EspnService
 from services.lineup_editor_service import (
     _clock,
@@ -53,7 +53,7 @@ from services.lineup_editor_service import (
     slot_counts_of,
     unfilled_results,
 )
-from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_fill, plan_ir
+from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_ir
 from services.lineup_read_service import LineupReadService, _games_on  # noqa: F401  (tests stand in for its read here)
 from services.matchup_days import index_games
 from services.player_value_service import PlayerValueService
@@ -381,7 +381,9 @@ class DailyActionsService:
 
         players = planner_players(state)
         counts = slot_counts_of(state)
-        fill = plan_fill(players, counts)
+        # The fill as auto-lineup will make it, with Dime's holds (services/steering.py)
+        holds = await steering.holds_for(team.team_id, date.fromisoformat(state.nba_date)) if state.nba_date else []
+        fill = steering.fill_with(players, counts, holds, date.fromisoformat(state.nba_date) if state.nba_date else None)
         ir = plan_ir(players, counts)
         value_kind = state.players[0].value_kind if state.players else "fpts"
 

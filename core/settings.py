@@ -196,6 +196,13 @@ class Settings(BaseSettings):
     autopilot_checkin_max_model_calls: int = 12
     autopilot_checkin_max_tool_calls: int = 32
     autopilot_checkin_timeout_seconds: float = 360.0
+    # Dime's steering (the Dime autopilot plan, step 4; services/ai/steering.py): the
+    # steer, set_lane and cancel_pickup tools, the chips they make, and the pins a sent
+    # lineup chip leaves on the players it benches. Off until two weeks of shadow
+    # check-ins on the test team say Dime's calls are worth steering with; off, the
+    # agent's tools and prompt prefix are exactly step 3's and the chips' routes refuse.
+    # Holds already set keep steering the planners either way, until their end dates.
+    dime_steering_enabled: bool = False
     # The connection the agent's query_stats tool reads on (services/ai/stats/
     # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
     # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the

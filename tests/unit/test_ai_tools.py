@@ -53,7 +53,7 @@ def _stats_resp(message="Player stats fetched successfully"):
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
         defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
-                                       *tools.CHECKIN_ONLY_TOOLS]}
+                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
