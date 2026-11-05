@@ -231,6 +231,17 @@ class Settings(BaseSettings):
     # AUTOPILOT_CHECKINS_PER_DAY; an event that comes in this close before a scheduled check-in
     # opens waits for it. A team's roster is read from ESPN at most once per this many seconds.
     dime_events_enabled: bool = False
+    # Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py): a plan before
+    # the draft (set as the room's punts), a note when the user's pick is near, a read of the recap,
+    # and the user's seat in a mock room (Dime makes the user's picks through the room's own pick
+    # path; a live ESPN draft stays advice, since nothing writes a pick to ESPN). Every note is a
+    # turn on the AI desk's spend line, started from the room. Off (the default), the draft routes
+    # refuse and the draft tools are offered nowhere; get_draft_recap, a read, is offered either way.
+    # A note answers one question with the board already read, so it gets a short leash.
+    dime_draft_enabled: bool = False
+    dime_draft_max_model_calls: int = 5
+    dime_draft_max_tool_calls: int = 10
+    dime_draft_timeout_seconds: float = 120.0
     autopilot_event_checkins_per_day: int = 3
     autopilot_event_fold_minutes: int = 20
     autopilot_event_roster_ttl_seconds: int = 600
@@ -470,6 +481,9 @@ class Settings(BaseSettings):
             "autopilot_checkin_timeout_seconds": self.autopilot_checkin_timeout_seconds,
             "autopilot_event_checkins_per_day": self.autopilot_event_checkins_per_day,
             "autopilot_event_roster_ttl_seconds": self.autopilot_event_roster_ttl_seconds,
+            "dime_draft_max_model_calls": self.dime_draft_max_model_calls,
+            "dime_draft_max_tool_calls": self.dime_draft_max_tool_calls,
+            "dime_draft_timeout_seconds": self.dime_draft_timeout_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:

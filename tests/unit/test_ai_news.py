@@ -127,7 +127,8 @@ class TestGetNews:
 class TestDefinitions:
     def test_the_news_tools_are_appended_last_and_every_toolset_has_them(self):
         names = [t["name"] for t in tools.AGENT_TOOLS]
-        assert names[-2:] == ["get_player_news", "get_news"]
+        # Appended after the decisions; only the draft recap (step 7) came after them
+        assert names[-3:-1] == ["get_player_news", "get_news"] and names[-1] == "get_draft_recap"
         from services.ai import agent
         assert {"get_player_news", "get_news"} <= agent.ALLOWED
         assert {"get_player_news", "get_news"} <= agent.CHECKIN_ALLOWED

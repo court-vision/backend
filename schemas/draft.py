@@ -12,10 +12,11 @@ DraftKind = Literal["live", "manual", "mock", "import"]
 DraftStatus = Literal["active", "completed", "abandoned"]
 DraftType = Literal["snake", "auction"]
 Availability = Literal["likely", "tossup", "gone"]
-PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
+PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock", "dime"]
 # What a client may claim a pick's provenance is. `mock` is missing on purpose:
 # it asserts the autopicker made the pick, which the room's undo rules and the
-# recap both read, so it is written by the server or not at all.
+# recap both read, so it is written by the server or not at all. So is `dime`:
+# Dime made the pick in the user's mock seat (services/ai/draft.py).
 ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
 MockUntil = Literal["my_turn", "end"]
 ScoringFormat = Literal["points", "categories"]
