@@ -105,7 +105,7 @@ def kicking(on, monkeypatch):
     """kick over stubbed rows: team 23 (user 42) on a Tuesday with a 7 PM first tip, switched on Monday."""
     state = SimpleNamespace(row=SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 0),
                                                 paused_at=None),
-                            waiting=[_event()], busy=False, ran=0, taken={("night", MON)}, event_checkins=0,
+                            waiting=[_event()], busy=False, runs=[], taken={("night", MON)}, event_checkins=0,
                             dropped=[], slots_started=[], events_started=[])
 
     async def autopilot_row(team_id):
@@ -125,10 +125,10 @@ def kicking(on, monkeypatch):
         return {MON: time(19, 30), TUE: time(19)}
 
     async def taken(team_id, days):
-        return state.taken
+        return {(kind, day) for kind, day in state.taken if day in days}
 
-    async def ran_since(team_id, since):
-        return state.ran
+    async def run_times(team_id, since):
+        return [at for at in state.runs if at >= since]
 
     async def event_checkins_on(team_id, nba_date):
         return state.event_checkins
@@ -147,7 +147,7 @@ def kicking(on, monkeypatch):
     monkeypatch.setattr(checkins, "_busy", busy)
     monkeypatch.setattr(checkins, "_tips", tips)
     monkeypatch.setattr(checkins, "_taken", taken)
-    monkeypatch.setattr(checkins, "_ran_since", ran_since)
+    monkeypatch.setattr(checkins, "_run_times", run_times)
     monkeypatch.setattr(events, "_event_checkins_on", event_checkins_on)
     monkeypatch.setattr(checkins, "start_slot", start_slot)
     monkeypatch.setattr(checkins, "start_event", start_event)
@@ -192,12 +192,28 @@ class TestKick:
         assert kick(et(TUE, 15)) is None
         assert kicking.events_started == []
 
+    def test_a_night_follow_up_that_ran_is_not_started_again(self, kicking):
+        # 10:00: Monday's night follow-up (it runs on Tuesday's morning, about Monday) and the morning ran
+        kicking.taken |= {("morning", TUE)}
+        started = kick(et(TUE, 10))
+        assert started.kind == checkins.EVENT and kicking.slots_started == []
+
     def test_an_event_check_in_never_takes_a_scheduled_one_s_place_under_the_day_s_cap(self, kicking):
         kicking.taken |= {("morning", TUE)}
-        kicking.ran = 5                                        # pre-lock is still owed: 5 + 1 = 6
+        # Five ran in the day: one more, and pre-lock at 18:15 would be the seventh
+        kicking.runs = [et(MON, 18, 45), et(TUE, 6), et(TUE, 9), et(TUE, 11), et(TUE, 12)]
         assert kick(et(TUE, 15)) is None
-        kicking.ran = 4
+        kicking.runs = kicking.runs[:-1]
         assert kick(et(TUE, 15)) is not None
+
+    def test_nor_tomorrow_morning_s_the_cap_counts_a_rolling_day(self, kicking):
+        # 21:00, after pre-lock: today's three ran, then two event check-ins. A third would make six
+        # in the day before tomorrow's 06:00 night follow-up, and the tick would skip it at the cap
+        kicking.taken |= {("morning", TUE), ("pre_lock", TUE)}
+        kicking.runs = [et(TUE, 6, 15), et(TUE, 9, 15), et(TUE, 18, 15), et(TUE, 19), et(TUE, 20)]
+        assert kick(et(TUE, 21)) is None
+        kicking.runs = kicking.runs[:-1]
+        assert kick(et(TUE, 21)) is not None
 
     def test_event_check_ins_have_their_own_daily_cap(self, kicking):
         kicking.taken |= {("morning", TUE)}

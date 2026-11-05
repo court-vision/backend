@@ -235,6 +235,15 @@ def _ran_since(team_id: int, since: datetime, *, scheduled_only: bool = False) -
     return query.count()
 
 
+@db_operation("ai.checkin_run_times")
+def _run_times(team_id: int, since: datetime) -> list[datetime]:
+    """When each check-in that ran since `since` started: an event kick weighs which of them are
+    still inside the day before each check-in it must leave room for."""
+    return [at for (at,) in AiCheckin.select(AiCheckin.started_at)
+            .where(AiCheckin.team_id == team_id, AiCheckin.started_at >= since, AiCheckin.state.in_(_RAN))
+            .tuples()]
+
+
 @db_operation("ai.checkin_claim")
 def _claim(team_id: int, user_id: int, kind: str, nba_date: date, due_at: datetime, *, manual: bool,
            now: datetime, state: str = RUNNING, reason: Optional[str] = None) -> Optional[int]:

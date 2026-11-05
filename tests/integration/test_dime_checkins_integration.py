@@ -91,6 +91,8 @@ class TestClaims:
         assert run(checkins._taken(team.team_id, [DAY])) == {("morning", DAY), ("pre_lock", DAY)}
         assert run(checkins._busy(team.team_id)) is True
         assert run(checkins._ran_since(team.team_id, _now() - timedelta(days=1))) == 4
+        times = run(checkins._run_times(team.team_id, _now() - timedelta(days=1)))
+        assert len(times) == 4 and all(at.tzinfo is not None for at in times)
 
     def test_one_runs_per_team_at_a_time_whatever_a_tick_read_before(self, integration_db):
         me, them = _user(1), _user(2)

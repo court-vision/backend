@@ -21,7 +21,8 @@ verdict change or news item. Then the team is kicked:
   check-in could answer;
 - otherwise an event check-in starts for them, within its own daily cap
   (AUTOPILOT_EVENT_CHECKINS_PER_DAY) and never in a scheduled check-in's place
-  under AUTOPILOT_CHECKINS_PER_DAY;
+  under AUTOPILOT_CHECKINS_PER_DAY (a rolling day, so tomorrow morning's are
+  owed room too);
 - a team with a check-in running waits: that one's finish kicks again, as does
   every 15-minute tick.
 
@@ -65,6 +66,8 @@ NEWS_FRESH = timedelta(hours=3)
 NEWS_STALE = timedelta(hours=12)
 # A player whose game tips this soon after the next scheduled check-in opens can't wait for it
 URGENT_MARGIN = timedelta(minutes=15)
+# AUTOPILOT_CHECKINS_PER_DAY counts a rolling day
+DAY = timedelta(days=1)
 
 VERDICT_WORDS = {
     "out": "ruled out",
@@ -405,8 +408,12 @@ async def kick(team_id: int, user_id: int, now: Optional[datetime] = None, *, ro
     if not waiting or await checkins._busy(team_id):
         return None
     cal = await checkins.calendar(now)
-    taken = await checkins._taken(team_id, [cal.today])
-    ahead = [s for s in cal.slots() if (s.kind, s.nba_date) not in taken and now < s.closes_at
+    # Today's check-ins and tomorrow's: the cap is a rolling day, so tomorrow morning's are owed
+    # room too. The night follow-up is about the day before, so the claimed rows are read by each
+    # slot's own day.
+    slots = cal.slots() + cal.slots(cal.today + timedelta(days=1))
+    taken = await checkins._taken(team_id, sorted({s.nba_date for s in slots}))
+    ahead = [s for s in slots if (s.kind, s.nba_date) not in taken and now < s.closes_at
              and s.closes_at > _aware(row.active_since)]
     due = [s for s in ahead if s.due_at <= now]
     if due:
@@ -418,9 +425,23 @@ async def kick(team_id: int, user_id: int, now: Optional[datetime] = None, *, ro
         urgent = any(e.tip_at is not None and _aware(e.tip_at) <= opens + URGENT_MARGIN for e in waiting)
         if not urgent:
             return None
-    ran = await checkins._ran_since(team_id, now - timedelta(days=1))
-    if ran + len(ahead) >= settings.autopilot_checkins_per_day:
+    runs = await checkins._run_times(team_id, now - DAY)
+    if not leaves_room(runs, ahead, now, settings.autopilot_checkins_per_day):
         return None
     if await _event_checkins_on(team_id, cal.today) >= settings.autopilot_event_checkins_per_day:
         return None
     return await checkins.start_event(row, cal.today, now)
+
+
+def leaves_room(runs: Sequence[datetime], ahead: Sequence[Any], now: datetime, cap: int) -> bool:
+    """Whether one more check-in started now stays under the rolling day's cap and leaves every
+    scheduled one owed in the next day its place. When each falls due, the cap counts what ran in
+    the day before it: the runs still inside that day, this one, and the owed ones due before it."""
+    if len(runs) + 1 > cap:
+        return False
+    owed = sorted((s for s in ahead if s.due_at < now + DAY), key=lambda s: s.due_at)
+    for before, slot in enumerate(owed):
+        counted = sum(1 for at in runs if _aware(at) >= slot.due_at - DAY)
+        if counted + 1 + before >= cap:
+            return False
+    return True
