@@ -12,7 +12,7 @@ steering is on), and the re-check before applying.
 """
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -264,24 +264,33 @@ def test_a_lane_is_paused_resumed_or_stopped_only_from_a_state_it_can_leave(chip
 
 
 @pytest.mark.unit
-def test_a_pickup_is_cancelled_only_while_pending_and_before_its_day(chips, monkeypatch):
+def test_a_pickup_is_cancelled_only_while_pending_and_before_its_deadline(chips, monkeypatch):
+    deadline = datetime(2026, 10, 22, 23, 0, tzinfo=timezone.utc)   # tomorrow's first tip
     pk = SimpleNamespace(id=70, status="pending", nba_date=TOMORROW, scoring_period_id=3, add_player_id=KAWHI,
                          add_name="Kawhi Leonard", add_team="LAC", drop_player_id=EDWARDS, drop_name="Anthony Edwards",
-                         drop_team="MIN", lane_id=3)
+                         drop_team="MIN", lane_id=3, deadline_at=deadline)
     found = {"row": pk}
     monkeypatch.setattr(mod, "_team_pickup", lambda team_id, pickup_id: found["row"])
     import services.providers.identity as identity
     monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {KAWHI: NBA_KAWHI, EDWARDS: NBA_EDWARDS})
 
-    def cancel():
+    def cancel(now=NOW):
         return run(mod.cancel_pickup(11, 7, TEAM, mod.CancelPickupInput(team_id=21, pickup_id=70,
-                                                                       reason="Kawhi is questionable"), NOW))
+                                                                       reason="Kawhi is questionable"), now))
     out = cancel()
     stored = chips.inserted[0]
     assert stored["action"]["pickup_id"] == 70 and stored["action"]["lane_id"] == 3
-    assert stored["expires_at"] == mod.rollover_at(TOMORROW)
+    assert stored["expires_at"] == deadline   # the chip lasts as long as the pickup may still be made
     assert "a stream lane's" in stored["summary"]
     assert AiProposalChip.model_validate(out[proposals.CHIP_KEY]).pickup.drop.espn_id == EDWARDS
+    # Deferred past the rollover into its day (a waiver period), it can still be cancelled before the tip.
+    cancel(mod.rollover_at(TOMORROW) + timedelta(hours=2))
+    with pytest.raises(AppError, match="deadline has passed"):
+        cancel(deadline)
+    # With no deadline (no game that day), until the day passes.
+    found["row"] = SimpleNamespace(**{**vars(pk), "deadline_at": None})
+    cancel()
+    assert chips.inserted[-1]["expires_at"] == mod.rollover_at(date(2026, 10, 23))
     found["row"] = SimpleNamespace(**{**vars(pk), "status": "executed"})
     with pytest.raises(AppError, match="not a pending pickup"):
         cancel()

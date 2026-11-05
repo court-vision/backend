@@ -82,9 +82,10 @@ def on_day(holds: Sequence[Hold], day: date, kind: Optional[str] = None) -> list
 
 def share_on(holds: Sequence[Hold], player_id: int, day: date) -> float:
     """The share of his value a player counts for on `day`: an override's, or 1. Two overrides on
-    one day (Dime set a second without clearing the first) count the later one."""
+    one day (Dime set a second without clearing the first) count the one set last (the higher id),
+    whichever starts first: the live list is ordered by start day, not by when a hold was set."""
     found = [h for h in holds if h.kind == OVERRIDE and h.player_id == player_id and h.covers(day)]
-    return found[-1].share if found else 1.0
+    return max(found, key=lambda h: h.id).share if found else 1.0
 
 
 def steer_fill(players: Sequence[PlannerPlayer], holds: Sequence[Hold], day: date) -> list[PlannerPlayer]:

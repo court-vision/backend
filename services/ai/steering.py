@@ -504,9 +504,12 @@ async def cancel_pickup(user_id: int, conversation_id: int, team: Any, args: Can
     if pk is None or pk.status != "pending":
         raise AppError("AI_PROPOSAL_INVALID", f"Pickup {args.pickup_id} is not a pending pickup on this team "
                                               "(get_scheduled_pickups lists them)")
-    expires = rollover_at(pk.nba_date)
+    # The pickup can be cancelled for as long as it may still be made: until its deadline (day D's
+    # first tip-off), or with none until D passes. A pickup deferred past the rollover into D (a
+    # waiver period, a writer outage) is still pending and still cancellable then.
+    expires = pk.deadline_at or rollover_at(pk.nba_date + timedelta(days=1))
     if expires <= now:
-        raise AppError("AI_PROPOSAL_INVALID", "That pickup's day has begun: it is being made or has been")
+        raise AppError("AI_PROPOSAL_INVALID", "That pickup's deadline has passed: it has been made or won't be")
     ids = [i for i in (pk.add_player_id, pk.drop_player_id) if i]
     nba = await run_db("ai.nba_ids", nba_ids_by_espn_id, ids)
     add = _player(pk.add_player_id, nba.get(pk.add_player_id), pk.add_name, pk.add_team)

@@ -58,6 +58,9 @@ def test_a_players_share_is_his_overrides_or_one_and_the_later_override_counts()
              hold(KEEP, 1, D0, D3, hid=3)]
     assert [steering.share_on(holds, 1, d) for d in (D0, D1, D2, D3)] == [0.5, 0.0, 0.5, 1.0]
     assert steering.share_on(holds, 2, D0) == 1.0
+    # The live list is by start day: a newer override that starts earlier still wins its days.
+    by_start = [hold(OVERRIDE, 1, D0, D2, share=0.5, hid=8), hold(OVERRIDE, 1, D1, D2, share=0.0, hid=7)]
+    assert [steering.share_on(by_start, 1, d) for d in (D0, D1, D2)] == [0.5, 0.5, 0.5]
 
 
 @pytest.mark.unit
