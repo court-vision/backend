@@ -631,13 +631,17 @@ def select_outcomes(q: OutcomeQuery) -> list[MoveOutcome]:
         & (MoveOutcome.provider_league_id == q.key.provider_league_id)
         & (MoveOutcome.season == q.key.season)
     )
+    from peewee import fn
+
+    mine = fn.COALESCE(MoveOutcome.team_id, 0) == q.team_id
+    if q.provider_team_id is not None:
+        mine = mine | (MoveOutcome.provider_team_id == q.provider_team_id)
     if q.scope == "team":
-        mine = MoveOutcome.team_id == q.team_id
-        if q.provider_team_id is not None:
-            mine = mine | (MoveOutcome.provider_team_id == q.provider_team_id)
         where = where & mine
     if q.sources:
-        where = where & MoveOutcome.source.in_(list(q.sources))
+        # By the source the asking team sees (`visible_source`): a rival's move is outside
+        chosen = mine & MoveOutcome.source.in_(list(q.sources))
+        where = where & ((chosen | ~mine) if "outside" in q.sources else chosen)
     if q.nba_player_id is not None:
         where = where & ((MoveOutcome.add_nba_id == q.nba_player_id) | (MoveOutcome.drop_nba_id == q.nba_player_id))
     if q.since is not None:
@@ -655,32 +659,42 @@ def is_mine(row: Any, q: OutcomeQuery) -> bool:
     return row.team_id_id == q.team_id or (q.provider_team_id is not None and row.provider_team_id == q.provider_team_id)
 
 
+def visible_source(row: Any, q: OutcomeQuery) -> str:
+    """Who made the move, as the asking team may know it. A rival can use Court Vision too,
+    and how they made a move (a lane, their own Dime, the desk) is theirs: to everyone else
+    in the league it was made outside Court Vision, which is all ESPN shows them as well."""
+    return row.source if is_mine(row, q) else "outside"
+
+
 def outcome_view(row: Any, q: OutcomeQuery) -> dict[str, Any]:
-    """One move as the agent and the desk read it. Player ids are NBA ids."""
+    """One move as the agent and the desk read it. Player ids are NBA ids. A rival's move
+    never carries its Court Vision source, forecast or reason (`visible_source`)."""
+    mine = is_mine(row, q)
     view: dict[str, Any] = {
         "move_id": row.id,
         "date": row.nba_date.isoformat() if hasattr(row.nba_date, "isoformat") else str(row.nba_date),
         "team_name": row.team_name,
-        "mine": is_mine(row, q),
-        "source": row.source,
+        "mine": mine,
+        "source": visible_source(row, q),
         "add": _player(row.add_nba_id, row.add_name),
         "drop": _player(row.drop_nba_id, row.drop_name),
         "paired": bool(row.paired),
         "windows": row.windows,
     }
-    if row.forecast is not None or row.reason:
+    if mine and (row.forecast is not None or row.reason):
         view["forecast"] = row.forecast
         view["reason"] = row.reason
     return view
 
 
-def summarize(rows: Iterable[Any], fmt: str) -> list[dict[str, Any]]:
+def summarize(rows: Iterable[Any], fmt: str, q: Optional[OutcomeQuery] = None) -> list[dict[str, Any]]:
     """Per source: how many moves, how many have a complete two weeks, and how those went
     (points: the summed net and how many came out ahead or behind; categories: the
-    categories the adds won and lost against the drops)."""
+    categories the adds won and lost against the drops). With `q`, rivals' moves count
+    as outside (`visible_source`)."""
     groups: dict[str, list[Any]] = defaultdict(list)
     for row in rows:
-        groups[row.source].append(row)
+        groups[visible_source(row, q) if q is not None else row.source].append(row)
     out: list[dict[str, Any]] = []
     for source in sorted(groups, key=lambda s: SOURCE_ORDER.get(s, 99)):
         items = groups[source]
@@ -715,5 +729,5 @@ def read_outcomes(q: OutcomeQuery) -> dict[str, Any]:
         "format": fmt,
         "moves": [outcome_view(r, q) for r in rows[: q.limit]],
         "total": len(rows),
-        "summary": summarize(rows, fmt),
+        "summary": summarize(rows, fmt, q),
     }

@@ -51,7 +51,7 @@ from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
-from services.ai import app_map, memory
+from services.ai import app_map, league, memory
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -1237,8 +1237,8 @@ GET_MOVE_OUTCOMES: dict[str, Any] = {
         "Vision), scheduled (a scheduled pickup), lane (a stream lane), dime (your proposal the user "
         "sent; its forecast and reason sit beside the result), outside (in ESPN itself, waivers, or a "
         "rival). summary totals each source over all matching moves. scope league reads every team "
-        "in the league (mine false: a rival's). Rebuilt each night after the games. Read it before "
-        "judging a move or writing a lesson, and cite the moves a lesson comes from."
+        "in the league (mine false: a rival's, always outside). Rebuilt each night after the games. "
+        "Read it before judging a move or writing a lesson, and cite the moves a lesson comes from."
     ),
     "input_schema": {
         "type": "object",
@@ -1267,14 +1267,43 @@ async def _get_move_outcomes(args: MoveOutcomesInput, ctx: ToolContext | None) -
     return {"team_id": args.team_id, "scope": args.scope, **found}
 
 
+# Dime's league knowledge (the Dime autopilot plan, step 2): the standings, schedule and
+# rosters, the league's adds and drops, and a draft room's board (services/ai/league.py).
+
+async def _get_league(args: league.GetLeagueInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, league_info = await _owned(ctx, args.team_id)
+    return await league.get_league(team, league_info, args)
+
+
+async def _get_league_activity(args: league.LeagueActivityInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    team = await run_db("ai.owned_team", ensure_team_owned, args.team_id, ctx.user_id)
+    if team is None:
+        raise AppError("TEAM_NOT_FOUND", f"Team {args.team_id} is not one of the user's teams")
+    return await league.get_league_activity(team, args)
+
+
+async def _get_draft_board(args: league.DraftBoardInput, ctx: ToolContext | None) -> dict[str, Any]:
+    from api.deps import _owned_session
+
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    room = await run_db("ai.owned_session", _owned_session, args.room_id, ctx.user_id)
+    if room is None:
+        raise AppError("DRAFT_NOT_FOUND", f"Draft room {args.room_id} is not one of the user's rooms")
+    return await league.get_draft_board(room, args)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
-# memory, then the move ledger. The order is part of every request's cached
-# prefix: append, never reorder.
+# memory, then the move ledger, then the league tools. The order is part of every
+# request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
+    *league.LEAGUE_TOOLS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 
@@ -1317,6 +1346,9 @@ _REGISTRY: dict[str, _Tool] = {
     memory.REVISE_NAME: _Tool(memory.ReviseInput, _revise),
     memory.FORGET_NAME: _Tool(memory.ForgetInput, _forget),
     GET_MOVE_OUTCOMES_NAME: _Tool(MoveOutcomesInput, _get_move_outcomes),
+    league.GET_LEAGUE_NAME: _Tool(league.GetLeagueInput, _get_league),
+    league.GET_LEAGUE_ACTIVITY_NAME: _Tool(league.LeagueActivityInput, _get_league_activity),
+    league.GET_DRAFT_BOARD_NAME: _Tool(league.DraftBoardInput, _get_draft_board),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"

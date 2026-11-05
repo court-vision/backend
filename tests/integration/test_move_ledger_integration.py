@@ -185,3 +185,62 @@ def test_the_job_rebuilds_every_active_league(league):
     data = run(MoveLedgerService.run(LedgerRunReq())).data
     assert [(r.provider_league_id, r.ok) for r in data.leagues] == [("1001", True), ("2002", True)]
     assert (data.rebuilt, data.failed) == (2, 0)
+
+
+def _rival_on_court_vision(league) -> None:
+    """The rival's day-2 swap was a stream lane's pickup on another Court Vision user's team."""
+    other = User.create(email="rival@example.com", clerk_user_id="user_rival", created_at=datetime.now(timezone.utc))
+    info = {"provider": "espn", "league_id": 1001, "team_name": "Rival", "year": 2027, "espn_team_id": 2}
+    team = Team.create(user_id=other.user_id, team_identifier="1001Rival", league_info=json.dumps(info))
+    _write(other, team, 2, [{"player_id": 203, "action": "add"}, {"player_id": 202, "action": "drop"}])
+
+
+def test_a_rival_s_court_vision_source_stays_theirs(league):
+    _rival_on_court_vision(league)
+    ml.rebuild_league(KEY)
+    assert MoveOutcome.get(MoveOutcome.provider_team_id == 2).source == "you"      # stored as theirs
+
+    everyone = run(MoveLedgerService.for_team(_owned(league.team), scope="league")).data
+    rival = next(m for m in everyone.moves if m.team_name == "Rival")
+    assert rival.mine is False and rival.source == "outside" and rival.reason is None
+    assert {s.source: s.moves for s in everyone.summary} == {"dime": 1, "scheduled": 1, "you": 1, "outside": 1}
+
+    # Filtering by source goes by what the asking team sees, too
+    outside = run(MoveLedgerService.for_team(_owned(league.team), scope="league", sources=("outside",))).data
+    assert [m.team_name for m in outside.moves] == ["Rival"]
+    yours = run(MoveLedgerService.for_team(_owned(league.team), scope="league", sources=("you",))).data
+    assert [(m.team_name, m.source) for m in yours.moves] == [("Atlas", "you")]
+
+
+def test_league_activity_regroups_the_ledger_by_team(league):
+    from services.ai import league as ai_league
+
+    _rival_on_court_vision(league)
+    Player.update(position="G").where(Player.id.in_([9104, 9105])).execute()
+    Player.update(position="C").where(Player.id == 9203).execute()
+    ml.rebuild_league(KEY)
+
+    args = ai_league.LeagueActivityInput(team_id=league.team.team_id, days=7)
+    out = run(ai_league.get_league_activity(_owned(league.team), args, today=_day(5)))
+    assert out["through"] == _day(4).isoformat() and out["total"] == 4
+    assert [(m["date"], m["team_name"], m["mine"]) for m in out["moves"]] == [
+        (_day(4).isoformat(), "Atlas", True), (_day(3).isoformat(), "Atlas", True),
+        (_day(2).isoformat(), "Rival", False), (_day(2).isoformat(), "Atlas", True),
+    ]
+    desk = out["moves"][3]
+    assert desk["source"] == "you" and desk["add"] == {"player_id": 9104, "name": "P104", "position": "G"}
+    assert desk["still_held"] is False and desk["held_through"] == _day(3).isoformat()
+    rival = out["moves"][2]
+    # The rival's last stored day is day 3, and 203 is still there on it
+    assert "source" not in rival and rival["still_held"] is True
+    assert {t["team_name"]: (t["adds"], t["drops"], t["positions_added"]) for t in out["by_team"]} == {
+        "Atlas": (3, 3, "G 2"), "Rival": (1, 1, "C 1"),
+    }
+
+    rival_only = run(ai_league.get_league_activity(
+        _owned(league.team), ai_league.LeagueActivityInput(team_id=league.team.team_id, league_team_id=2),
+        today=_day(5)))
+    assert [m["team_name"] for m in rival_only["moves"]] == ["Rival"]
+    recent = run(ai_league.get_league_activity(
+        _owned(league.team), ai_league.LeagueActivityInput(team_id=league.team.team_id, days=2), today=_day(5)))
+    assert [m["date"] for m in recent["moves"]] == [_day(4).isoformat(), _day(3).isoformat()]
