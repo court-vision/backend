@@ -130,6 +130,26 @@ def test_a_resumed_variant_refuses_rows_of_other_agent_code(loaded, monkeypatch,
             asyncio.run(answers.run(loaded, [], tmp_path, max_usd=1.0, model=None))
 
 
+def test_a_paid_run_keeps_back_what_one_case_can_cost(loaded, monkeypatch, tmp_path, capsys):
+    from pydantic import SecretStr
+
+    monkeypatch.setattr(settings, "anthropic_api_key", SecretStr("sk-test"))
+    monkeypatch.setattr(settings, "ai_agent_turn_max_usd", 1.0)
+
+    async def header_line():
+        return ""
+    monkeypatch.setattr(answers, "header_line", header_line)
+    bound = answers.case_bound(settings.ai_agent_model, answers.FIRST_CONTEXT)
+    # The turn's cap is checked before a call, so the call over it and the final call after it come on top
+    assert bound > 1.0 + 2 * agent.MAX_TOKENS * 20 / 1e6
+
+    case = {"id": "market", "question": "Where do I pick up a free agent?", "expect": [{"desk": "week", "steps": "Market"}]}
+    # Under the bound nothing is asked (a model call here would fail: no client is scripted)
+    assert asyncio.run(answers.run(loaded, [case], tmp_path, max_usd=bound - 0.01, model=None)) == 0
+    assert "stopping" in capsys.readouterr().out
+    assert not (tmp_path / "results.jsonl").exists()
+
+
 def _map_file(tmp_path):
     path = tmp_path / "app-map.json"
     path.write_text(json.dumps(MAP))

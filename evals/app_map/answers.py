@@ -15,8 +15,9 @@ or a league is replaced:
 The asker has one ESPN points team, as the header says; nothing reads it.
 
 **Every case costs money**: about $0.05 to $0.15 on Opus 5.5 at medium effort.
-The run stops before a case could take it past `--max-usd`, and resumes where
-it stopped: rows already in the variant's results.jsonl are skipped.
+The run stops before a case could take it past `--max-usd` (`case_bound`, about
+$2.90 kept back), and resumes where it stopped: rows already in the variant's
+results.jsonl are skipped.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ FIXTURE_TEAMS = [{"team_id": 1, "provider": "espn", "scoring": "points", "points
 RETRYABLE = {"AI_BUSY", "AI_UNAVAILABLE"}
 OFF_LIMITS = ("Not part of this eval: here only find_in_app and show_place answer, so answer from the app map "
               "alone and don't use this tool again.")
+# A call's input before any case has shown how large a turn's context gets
+FIRST_CONTEXT = 60_000
 # The agent's code a row was measured on (prompt, playbook, tools, search, place check), as ai_route keeps its router's
 AGENT_CODE = "services/ai"
 
@@ -49,6 +52,18 @@ def agent_sha() -> str:
         if path.is_file() and path.suffix in {".py", ".md"}:
             digest.update(str(path.relative_to(root)).encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()[:12]
+
+
+def case_bound(model: str, context: int) -> float:
+    """The most one case can cost, in dollars. A turn checks its cap before each
+    call, so the call that crosses it and the final call after it come on top:
+    each at most a full answer (MAX_TOKENS) on the largest context seen so far."""
+    from core.settings import settings
+    from services.ai import agent, spend
+
+    p = spend.price_of(model)
+    call = (agent.MAX_TOKENS * p.output + context * max(p.input, p.cache_write)) / 1e6
+    return settings.ai_agent_turn_max_usd + 2 * call
 
 
 def _read(path: Path) -> list[dict[str, Any]]:
@@ -120,6 +135,7 @@ def outcome_of(turn: Any, done: dict[str, Any], desks: dict[str, str], question:
         "made_up": made_up,
         "ungrounded_places": len(made_up),
         "cost_usd": turn.cost / 1e6,
+        "context_tokens": turn.context_tokens,
         "model": turn.run.model,
         "model_calls": turn.run.model_calls,
     }
@@ -158,19 +174,19 @@ async def run(loaded: Any, cases: list[dict[str, Any]], out: Path, *, max_usd: f
     done_ids = {r["id"] for r in rows}
     pending = [c for c in cases if c["id"] not in done_ids]
     spent = sum(r.get("cost_usd", 0) for r in [*rows, *_read(out / "errors.jsonl")])
-    # A turn stops making calls once it has spent its own cap, so that is the most one case can cost
-    worst = settings.ai_agent_turn_max_usd
+    context = max([FIRST_CONTEXT, *(r.get("context_tokens") or 0 for r in rows)])
     print(f"{len(pending)} to ask of {asked_of['model']} (effort {asked_of['effort']}) on map {loaded.build[:12]}, "
           f"${spent:.2f} spent, cap ${max_usd:.2f}")
     header = await header_line()
     with _patches(loaded, model):
         for case in pending:
-            if spent + worst > max_usd:
+            if spent + case_bound(asked_of["model"], context) > max_usd:
                 print(f"stopping: another case could pass the ${max_usd:.2f} cap")
                 break
             started = time.monotonic()
             outcome = await ask(loaded, case, header)
             spent += outcome["cost_usd"]
+            context = max(context, outcome["context_tokens"] or 0)
             if outcome["outcome"] in RETRYABLE:
                 with (out / "errors.jsonl").open("a") as f:
                     f.write(json.dumps({"id": case["id"], **asked_of, **outcome}, default=str) + "\n")

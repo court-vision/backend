@@ -33,7 +33,7 @@ Usage:
     .venv/bin/python -m evals.app_map.run --selfcheck
     .venv/bin/python -m evals.app_map.run --retrieval --map app-map.json
     .venv/bin/python -m evals.app_map.run --generated --map app-map.json --variant g1
-    .venv/bin/python -m evals.app_map.run --answers --map app-map.json --variant a1 --max-usd 4
+    .venv/bin/python -m evals.app_map.run --answers --map app-map.json --variant a1 --max-usd 6
 """
 
 from __future__ import annotations

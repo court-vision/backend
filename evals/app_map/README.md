@@ -25,7 +25,7 @@ something the app can't do. Nothing is judged by a model.
 .venv/bin/python -m evals.app_map.run --retrieval --map app-map.json      # free
 .venv/bin/python -m evals.app_map.run --approve-harness                   # after reading the cases
 .venv/bin/python -m evals.app_map.run --generated --map app-map.json --variant g1              # about $0.30
-.venv/bin/python -m evals.app_map.run --answers --map app-map.json --variant a1 --max-usd 5    # about $3
+.venv/bin/python -m evals.app_map.run --answers --map app-map.json --variant a1 --max-usd 6    # about $3
 ```
 
 `app-map.json` is the App Map workflow's artifact (`app-map-<sha>`, kept 30
@@ -52,7 +52,9 @@ Nothing is written to it. Paid runs need `ANTHROPIC_API_KEY`.
 
 A paid run names a new `--variant` per measurement and refuses to add to rows
 of another model, effort, map (the crawl, not only the build) or version of
-the agent's code (`services/ai`). It refuses to start until the harness (the
+the agent's code (`services/ai`). It stops before a case could pass
+`--max-usd`, keeping back the most one case can cost (about $2.90: the turn's
+$1 cap, then two full calls on top), so `--max-usd 6` asks all 27 for about $3. It refuses to start until the harness (the
 runner, the grader and the cases) is approved, so a score can't come from a
 grader that changed underneath it.
 
