@@ -224,6 +224,16 @@ def test_best_available_can_be_one_position(room):
     assert [r["name"] for r in body["best_available"]] == ["Wing One"]
 
 
+def test_recommendations_ask_for_no_more_than_the_board_scores(room):
+    from services.draft_board_service import RECOMMENDATION_COUNT
+
+    assert league.BOARD_RECOMMENDATIONS == RECOMMENDATION_COUNT
+    schema = league.GET_DRAFT_BOARD["input_schema"]["properties"]["recommendations"]
+    assert schema["maximum"] == RECOMMENDATION_COUNT
+    out = _run("get_draft_board", {"room_id": 5, "recommendations": RECOMMENDATION_COUNT + 1})
+    assert out.is_error and "Invalid input" in out.content
+
+
 def test_get_draft_board_refuses_a_room_that_is_not_the_user_s(room):
     out = _run("get_draft_board", {"room_id": 6})
     assert out.is_error and "not one of the user's rooms" in out.content

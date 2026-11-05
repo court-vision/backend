@@ -59,10 +59,15 @@ class LeagueActivityInput(_Input):
     limit: int = Field(25, ge=1, le=60)
 
 
+# The board service scores at most this many recommendations (draft_board_service.RECOMMENDATION_COUNT,
+# imported lazily with the rest of the board; a test pins the two together).
+BOARD_RECOMMENDATIONS = 5
+
+
 class DraftBoardInput(_Input):
     room_id: int = Field(..., gt=0, lt=2**31)
     rank_source: Literal["cv", "espn"] = "cv"
-    recommendations: int = Field(5, ge=1, le=10)
+    recommendations: int = Field(BOARD_RECOMMENDATIONS, ge=1, le=BOARD_RECOMMENDATIONS)
     available: int = Field(10, ge=0, le=30)
     position: Optional[Literal["PG", "SG", "SF", "PF", "C", "G", "F"]] = None
 
@@ -148,8 +153,8 @@ GET_DRAFT_BOARD: dict[str, Any] = {
             "room_id": {"type": "integer", "description": "A room_id from get_draft_rooms"},
             "rank_source": {"type": "string", "enum": ["cv", "espn"],
                             "description": "What orders the recommendations (default cv)"},
-            "recommendations": {"type": "integer", "minimum": 1, "maximum": 10,
-                                "description": "How many recommendations (default 5)"},
+            "recommendations": {"type": "integer", "minimum": 1, "maximum": BOARD_RECOMMENDATIONS,
+                                "description": "How many recommendations (default 5, the most the board scores)"},
             "available": {"type": "integer", "minimum": 0, "maximum": 30,
                           "description": "How many of the best players still on the board (default 10)"},
             "position": {"type": "string", "enum": list(BOARD_POSITIONS),
