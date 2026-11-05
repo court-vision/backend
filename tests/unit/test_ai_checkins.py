@@ -229,7 +229,10 @@ class TestTick:
 def starting(monkeypatch):
     monkeypatch.setattr(settings, "autopilot_checkin_timeout_seconds", 60.0)
     state = SimpleNamespace(reservation=55, claim=7, cancelled=[], released=[], settled=[], claims=[],
-                            created=[], launched=[], header_error=None)
+                            created=[], launched=[], header_error=None, autopilot=None)
+
+    async def autopilot_row(team_id):
+        return state.autopilot
 
     async def reserve(user_id):
         return state.reservation
@@ -277,6 +280,7 @@ def starting(monkeypatch):
     monkeypatch.setattr(agent, "header", header)
     monkeypatch.setattr(checkins, "_settle", settle)
     monkeypatch.setattr(checkins, "_run", fake_run)
+    monkeypatch.setattr(checkins, "_autopilot_row", autopilot_row)
     return state
 
 
@@ -298,6 +302,24 @@ class TestStart:
         assert turn.checkin_id == 7 and turn.reservation_id == 55 and turn.conversation_id == 31
         assert turn.limits == agent.Limits.checkin()
         assert turn.message.startswith("[Morning check-in for team_id 23")
+
+    def test_every_kind_in_shadow_is_step_3_s_brief_and_a_mode_that_acts_says_so(self, starting, monkeypatch):
+        _start()
+        shadow = starting.launched[0][0].message
+        assert shadow == checkins.brief("morning", TUE, 23, manual=False)
+        assert checkins._SHADOW in shadow and "How much you may do" not in shadow
+        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        starting.autopilot = SimpleNamespace(paused_at=None, mode="shadow", lineup_mode="act", streaming_mode=None,
+                                             adds_drops_mode="suggest")
+        _start()
+        acting = starting.launched[1][0].message
+        assert "lineup act, streaming shadow, adds and drops suggest" in acting
+        assert checkins._SHADOW not in acting and "what you sent, what you left for them" in acting
+        # A paused team runs in shadow whatever its modes say
+        starting.autopilot = SimpleNamespace(paused_at=datetime(2025, 11, 10, tzinfo=timezone.utc), mode="act",
+                                             lineup_mode=None, streaming_mode=None, adds_drops_mode=None)
+        _start()
+        assert starting.launched[2][0].message == shadow
 
     def test_a_spent_budget_skips_a_scheduled_one_and_refuses_a_manual_one(self, starting):
         starting.reservation = None
@@ -459,7 +481,8 @@ class TestLogDecision:
         block = out[decisions.DECISION_KEY]
         assert block == {"decision_id": 60, "area": "lineup", "automation": "auto_lineup", "call": "hold",
                          "summary": "Keep auto-lineup's fill", "reason": "Every starter plays tonight",
-                         "proposal_id": None, "verdict": None}
+                         "proposal_id": None, "verdict": None, "action": None}
+        assert "action" not in out          # a hold commits nothing
         assert logging_stubs.inserted[0]["team_id"] == 23 and logging_stubs.inserted[0]["checkin_id"] == 7
 
     def test_only_a_running_check_in_on_its_own_team_logs(self, logging_stubs):
@@ -488,13 +511,19 @@ class TestRefreshHistory:
 
         async def of_conversation(conversation_id, user_id):
             return [row]
+
+        async def actions_of(decision_ids):
+            assert decision_ids == [60]
+            return {60: {"outcome": "sent", "rule": None, "message": "Sent by Dime", "at": None}}
         monkeypatch.setattr(decisions, "_of_conversation", of_conversation)
+        monkeypatch.setattr(decisions.acting, "actions_of", actions_of)
         part = {"kind": "block", "block": {"type": "decision", "id": "d1", "decision_id": 60, "verdict": None}}
         text = {"kind": "text", "text": "hi"}
         out = run(decisions.refresh_history([[text, part]], 31, 42))
         assert out[0][0] == text
         assert out[0][1]["block"]["verdict"] == "agree" and out[0][1]["block"]["id"] == "d1"
         assert out[0][1]["block"]["type"] == "decision"
+        assert out[0][1]["block"]["action"]["outcome"] == "sent"      # what Dime did about it, as it stands
 
     def test_a_chat_without_decisions_reads_nothing(self, monkeypatch):
         async def boom(*a):

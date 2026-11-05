@@ -436,19 +436,29 @@ async def run_checkin(req: AiCheckinRunReq, user: UserContext = Depends(get_db_u
 @router.put(
     "/autopilot/{team_id}",
     response_model=AiAutopilotResp,
-    summary="Switch Dime's scheduled check-ins on or off for a team",
-    description="On starts (or resumes) the team's check-ins; off pauses them. A check-in whose window closed "
-                "while they were off is not counted as missed.",
-    responses=_CHECKIN_ERRORS,
+    summary="Dime's autopilot on a team: the check-ins' switch, and how much Dime may do",
+    description=(
+        "Any of: `on` starts (or resumes) the team's check-ins and off pauses them (a check-in whose window "
+        "closed while they were off is not counted as missed; resuming also lifts a pause Dime made itself); "
+        "`mode` sets how much Dime may do on the whole team (shadow logs, suggest makes chips, act sends within "
+        "the policy); `own` sets a kind of move's own mode (lineup, streaming, adds_drops), null to follow the "
+        "team's. Setting up a team that was never switched on leaves it paused unless `on` is true."
+    ),
+    responses={
+        **_CHECKIN_ERRORS,
+        409: {"description": "act while acting is switched off on the server (AI_ACTING_OFF)"},
+        422: {"description": "Nothing to change, or an unknown mode or kind of move (AI_AUTOPILOT_INVALID)"},
+    },
 )
 async def set_autopilot(
     req: AiAutopilotReq,
     team_id: int = Path(..., gt=0, le=2_147_483_647),
     user: UserContext = Depends(get_db_user),
 ) -> AiAutopilotResp:
-    data = await AgentService.set_autopilot(user.user_id, team_id, req.on)
-    return AiAutopilotResp(status=ApiStatus.SUCCESS, message="Check-ins on" if data.on else "Check-ins paused",
-                           data=data)
+    data = await AgentService.set_autopilot(user.user_id, team_id, req.on, req.mode,
+                                            dict(req.own) if req.own is not None else None)
+    message = ("Check-ins on" if data.on else "Check-ins paused") if req.on is not None else "Autopilot updated"
+    return AiAutopilotResp(status=ApiStatus.SUCCESS, message=message, data=data)
 
 
 @router.put(

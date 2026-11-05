@@ -352,14 +352,16 @@ def test_switched_off_no_chip_is_applied(applying, monkeypatch):
 def test_applying_holds_sets_them_with_the_chip_s_reason_and_clears_its_clears(applying, monkeypatch):
     seen = {}
 
-    async def apply(row_id, team_id, user_id, holds, clears, today, now):
-        seen.update(row_id=row_id, team_id=team_id, user_id=user_id, holds=holds, clears=clears, today=today)
+    async def apply(row_id, team_id, user_id, holds, clears, today, now, by):
+        seen.update(row_id=row_id, team_id=team_id, user_id=user_id, holds=holds, clears=clears, today=today, by=by)
         return len(holds)
     monkeypatch.setattr(mod, "_apply_holds", apply)
     monkeypatch.setattr(mod.schedule_service, "get_nba_today", lambda: TODAY)
     assert run(mod.apply_holds(TEAM, 41)) == 1
     assert (seen["row_id"], seen["team_id"], seen["user_id"], seen["clears"]) == (41, 21, 11, [6])
     assert seen["holds"][0]["reason"] == "Jokic is the team" and seen["today"] == TODAY
+    assert seen["by"] == "user"
+    assert run(mod.apply_holds(TEAM, 41, by="dime")) == 1 and seen["by"] == "dime"   # Dime applying its own
 
     async def gone(*args):
         return None

@@ -18,6 +18,12 @@ check-in included, for the night follow-up and the weekly retro.
 `log_decision` exists only in a check-in's own turn (the check-in's tool list,
 services/ai/checkins.py); a follow-up the user asks in that conversation is an
 ordinary turn and is refused.
+
+A change that cites its proposal is also the commitment (the Dime autopilot plan,
+step 5; services/ai/acting.py): under the team's mode for that kind of move it stays
+logged (shadow), becomes a chip the user can send (suggest), or is sent by the
+server within the policy (act). The decision carries what became of it (`action`).
+With DIME_ACTING_ENABLED off the tool reads as before: no mode can act then.
 """
 
 from __future__ import annotations
@@ -32,7 +38,8 @@ from core.errors import AppError, NotFoundError
 from db.base import db_operation
 from db.models.ai_conversations import AiProposal, AiTurn
 from db.models.autopilot import AiCheckin, AiDecision
-from services.ai import proposals
+from core.settings import settings
+from services.ai import acting, proposals
 
 LOG_DECISION_NAME = "log_decision"
 GET_DECISIONS_NAME = "get_decisions"
@@ -126,6 +133,29 @@ LOG_DECISION: dict[str, Any] = {
     },
 }
 
+# With acting switched on (DIME_ACTING_ENABLED, the plan's step 5), a logged change is also the
+# commitment, so the tool says so; off, the check-in prefix is exactly step 3's
+LOG_DECISION_ACTING: dict[str, Any] = {
+    **LOG_DECISION,
+    "description": (
+        "Log one call this check-in makes, holds included. area: lineup (the day's slots), streaming (lanes "
+        "and stream pickups), adds_drops (your own adds and drops), other. automation: whose plan you reviewed "
+        "(auto_lineup's fill, a stream_lane's next decision, a scheduled_pickup, or none for a move no "
+        "automation is making). call: hold (keep the plan, or do nothing) or change (do something else). A "
+        "change to the lineup or the roster cites the proposal_id propose_lineup or propose_move returned in "
+        "this check-in; any other change cites the chip a tool made for it in this check-in, if one did. "
+        "Logging a change that cites its proposal commits that move under the team's mode for its area, which "
+        "the brief gives: shadow keeps it as what you would have done; suggest makes it a chip the user can "
+        "send; act sends it now through the user's own write routes, if the policy allows (get_automations' "
+        "autopilot section has the caps and what you have used). The result's `action` says what happened: "
+        "sent, blocked (the rule; the move is left as a chip for the user), refused (by ESPN or the route) or "
+        "failed. Never say a move was made unless its action says sent, and log as a change only what you'd "
+        "do. summary: what you do or would do, in a line. reason: why, with the number behind it. The user "
+        "reads every one and marks it agree or disagree. Only in a check-in."
+    ),
+}
+CHECKIN_LOG_DECISION = LOG_DECISION_ACTING if settings.dime_acting_enabled else LOG_DECISION
+
 GET_DECISIONS: dict[str, Any] = {
     "name": GET_DECISIONS_NAME,
     "description": (
@@ -153,8 +183,9 @@ GET_DECISIONS: dict[str, Any] = {
 # ------------------------------- shapes ------------------------------- #
 
 
-def block_of(row: Any) -> dict[str, Any]:
-    """The decision as a block in the check-in's parts (an `AiDecisionBlock` without its block id)."""
+def block_of(row: Any, action: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The decision as a block in the check-in's parts (an `AiDecisionBlock` without its block id).
+    `action` is what Dime did about it on its own (services/ai/acting.py), when it acted."""
     return {
         "decision_id": row.id,
         "area": row.area,
@@ -164,6 +195,7 @@ def block_of(row: Any) -> dict[str, Any]:
         "reason": row.reason,
         "proposal_id": row.proposal_id_id if hasattr(row, "proposal_id_id") else row.proposal_id,
         "verdict": row.verdict,
+        "action": action,
     }
 
 
@@ -264,10 +296,21 @@ async def log_decision(user_id: int, checkin_id: Optional[int], args: LogDecisio
     row = await _insert(checkin_id=checkin_id, user_id=user_id, team_id=checkin.team_id_id, area=args.area,
                         automation=args.automation, call=args.call, summary=args.summary, reason=args.reason,
                         proposal_id=args.proposal_id, created_at=_now())
-    block = block_of(row)
-    return {"decision_id": row.id, "logged": True, "call": args.call, "area": args.area,
-            "automation": args.automation, "summary": args.summary,
-            "move": _move_of(proposal, _now()), DECISION_KEY: block}
+    # A change that cites its move commits it under the team's mode (shadow: nothing happens)
+    verdict = None
+    if args.call == "change" and proposal is not None:
+        verdict = await acting.commit(user_id, checkin, row.id, proposal.id)
+        if verdict.mode != "shadow":
+            proposal = await _proposal(proposal.id, checkin.conversation_id_id) or proposal
+    done = verdict is not None and verdict.outcome is not None
+    block = block_of(row, {"outcome": verdict.outcome, "rule": verdict.rule, "message": verdict.message,
+                           "at": _now().isoformat()} if done else None)
+    out = {"decision_id": row.id, "logged": True, "call": args.call, "area": args.area,
+           "automation": args.automation, "summary": args.summary,
+           "move": _move_of(proposal, _now()), DECISION_KEY: block}
+    if verdict is not None and verdict.mode != "shadow":
+        out["action"] = verdict.view()
+    return out
 
 
 async def get_decisions(user_id: int, args: GetDecisionsInput) -> dict[str, Any]:
@@ -313,10 +356,11 @@ async def refresh_history(history: list[list[dict[str, Any]]], conversation_id: 
     if not any(_is_decision(p) for parts in history for p in parts):
         return history
     rows = {row.id: row for row in await _of_conversation(conversation_id, user_id)}
+    actions = await acting.actions_of(list(rows))
 
     def refresh(part: dict[str, Any]) -> dict[str, Any]:
         row = rows.get(part["block"].get("decision_id")) if _is_decision(part) else None
         if row is None:
             return part
-        return {**part, "block": {**part["block"], **block_of(row), "id": part["block"].get("id")}}
+        return {**part, "block": {**part["block"], **block_of(row, actions.get(row.id)), "id": part["block"].get("id")}}
     return [[refresh(p) for p in parts] for parts in history]

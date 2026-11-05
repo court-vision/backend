@@ -18,6 +18,7 @@ from core.errors import AuthorizationError, ConflictError, NotFoundError
 from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
+    AiActing,
     AiAutopilotTeam,
     AiCheckinsData,
     AiCheckinSummary,
@@ -30,7 +31,26 @@ from schemas.ai import (
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, checkins, conversations, decisions, guards, memory, proposals, spend
+from services.ai import agent, autonomy, checkins, conversations, decisions, guards, memory, proposals, spend
+from services.steering import enabled as steering_enabled
+
+
+def acting_info() -> dict:
+    """Whether Dime can act on its own, and the policy it acts within (the autopilot plan, step 5)."""
+    return {
+        "available": autonomy.acting_available(),
+        "steering": steering_enabled(),
+        "writes": settings.roster_writes_enabled,
+        "policy": {
+            "adds_per_day": settings.autopilot_adds_per_day,
+            "adds_per_matchup": settings.autopilot_adds_per_matchup,
+            "adds_reserve": settings.autopilot_adds_reserve,
+            "protected_top": settings.autopilot_protected_top,
+            "churn_hours": settings.autopilot_churn_hours,
+            "pause_refused": settings.autopilot_pause_refused,
+            "pause_same_block": settings.autopilot_pause_same_block,
+        },
+    }
 
 
 def has_access(user_id: int) -> bool:
@@ -209,7 +229,7 @@ class AgentService:
         spent, cap = await spend.autopilot_month_spend()
         return AiCheckinsData(teams=[AiAutopilotTeam(**t) for t in teams],
                               checkins=[AiCheckinSummary(**r) for r in rows],
-                              month_usd=spent / 1e6, cap_usd=cap / 1e6)
+                              month_usd=spent / 1e6, cap_usd=cap / 1e6, acting=AiActing(**acting_info()))
 
     @staticmethod
     async def run_checkin(user_id: int, team_id: int, kind: Optional[str]) -> AiCheckinSummary:
@@ -218,9 +238,10 @@ class AgentService:
         return AiCheckinSummary(**await checkins.summary(row.id))
 
     @staticmethod
-    async def set_autopilot(user_id: int, team_id: int, on: bool) -> AiAutopilotTeam:
+    async def set_autopilot(user_id: int, team_id: int, on: Optional[bool], mode: Optional[str] = None,
+                            own: Optional[dict[str, Optional[str]]] = None) -> AiAutopilotTeam:
         ensure_access(user_id)
-        await checkins.set_autopilot(user_id, team_id, on)
+        await checkins.set_autopilot(user_id, team_id, on, mode, own)
         teams = {t["team_id"]: t for t in await checkins.teams_of(user_id)}
         return AiAutopilotTeam(**teams[team_id])
 

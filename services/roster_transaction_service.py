@@ -163,7 +163,10 @@ def _player(player_id: int, name: str, team: str) -> RosterTransactionPlayer:
 class RosterTransactionService:
 
     @staticmethod
-    async def apply(team, league_info: LeagueInfo, req: RosterTransactionReq) -> RosterTransactionResp:
+    async def apply(team, league_info: LeagueInfo, req: RosterTransactionReq, *,
+                    source: str = "manual") -> RosterTransactionResp:
+        """`source` is the audit row's: 'manual' for the route, 'autopilot' when Dime sends its own
+        chip (services/ai/acting.py), through every check the route makes."""
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         adapter = get_provider_adapter(league_info.provider)
@@ -217,7 +220,7 @@ class RosterTransactionService:
         fresh, verified, audit_id = await RosterTransactionService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
             add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-            verify_scoring_period_id=next_day,
+            source=source, verify_scoring_period_id=next_day,
         )
         if req.proposal_id is not None:
             from services.ai import proposals
@@ -322,7 +325,8 @@ class RosterTransactionService:
                      fallback_slot_counts, source: str = "manual",
                      before_send: Optional[Callable[[int], Awaitable[None]]] = None,
                      verify_scoring_period_id: Optional[int] = None) -> tuple[LineupState, bool, int]:
-        """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor.
+        """`source` is the audit row's: 'manual' for the route, 'scheduled' for the pickup executor,
+        'autopilot' for a move Dime sent itself (a chip of its own, or a pickup it scheduled).
         `before_send(audit_id)` runs once the audit row exists, right before the writer is called
         (the pickup executor's last check); when it raises, nothing is sent and the audit row says so.
         `verify_scoring_period_id` is the day whose board the write is checked against (today's when

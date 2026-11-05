@@ -1,17 +1,22 @@
 """
-usr.autopilot, usr.ai_checkins and usr.ai_decisions -- Dime's check-ins in shadow
-(migration 0042, the Dime autopilot plan, step 3; services/ai/checkins.py).
+usr.autopilot, usr.ai_checkins, usr.ai_decisions and usr.autopilot_actions -- Dime's
+check-ins (migration 0042, the Dime autopilot plan, step 3; services/ai/checkins.py)
+and what it does on its own (migration 0044, step 5; services/ai/acting.py).
 
-A team Dime runs on has an `Autopilot` row (and an entry in AUTOPILOT_TEAM_IDS).
-Each check-in Dime starts itself is an `AiCheckin`, claimed by its insert and
-settled with its turn; each call the check-in makes, holds included, is an
-`AiDecision`, which the user marks agree or disagree. Backend-only.
+A team Dime runs on has an `Autopilot` row (and an entry in AUTOPILOT_TEAM_IDS),
+which also says how much Dime may do there (`mode` and each kind of move's own;
+services/ai/autonomy.py). Each check-in Dime starts itself is an `AiCheckin`,
+claimed by its insert and settled with its turn; each call the check-in makes,
+holds included, is an `AiDecision`, which the user marks agree or disagree; a
+change Dime was allowed to act on is an `AutopilotAction`, with the policy's
+verdict and the write's outcome. Backend-only.
 """
 
 from datetime import datetime, timezone
 
 from peewee import (
-    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, TextField,
+    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, IntegerField,
+    SmallIntegerField, TextField,
 )
 
 from db.base import BaseModel
@@ -26,7 +31,9 @@ def _now() -> datetime:
 
 class Autopilot(BaseModel):
     """One team Dime runs check-ins on. `paused_at` is the Pause switch; `active_since` is
-    when it last started or resumed. How Dime may act is added with the acting step."""
+    when it last started or resumed. `mode` is how much Dime may do on the team (shadow,
+    suggest, act); `lineup_mode`, `streaming_mode` and `adds_drops_mode`, when set, stand in
+    for it on that kind of move (services/ai/autonomy.py reads them)."""
 
     team_id = ForeignKeyField(Team, column_name="team_id", primary_key=True, on_delete="CASCADE")
     user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
@@ -36,6 +43,10 @@ class Autopilot(BaseModel):
     paused_at = DateTimeField(null=True)
     paused_by = TextField(null=True)          # user | system
     paused_reason = TextField(null=True)
+    mode = TextField(default="shadow")        # shadow | suggest | act
+    lineup_mode = TextField(null=True)        # None = the team's mode
+    streaming_mode = TextField(null=True)
+    adds_drops_mode = TextField(null=True)
 
     class Meta:
         table_name = "autopilot"
@@ -88,4 +99,31 @@ class AiDecision(BaseModel):
 
     class Meta:
         table_name = "ai_decisions"
+        schema = "usr"
+
+
+class AutopilotAction(BaseModel):
+    """A change a check-in committed that Dime was allowed to act on: `capability` lineup |
+    streaming | adds_drops, the proposal's `kind`, the day it is for, how many players it adds,
+    and what became of it: `outcome` sent | blocked (a rule; `rule` names it) | refused (the route
+    or ESPN) | failed. `audit_id` is the usr.roster_moves row of an ESPN write."""
+
+    id = BigAutoField(primary_key=True)
+    team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    checkin_id = ForeignKeyField(AiCheckin, column_name="checkin_id", null=True, on_delete="SET NULL")
+    decision_id = ForeignKeyField(AiDecision, column_name="decision_id", null=True, on_delete="SET NULL")
+    proposal_id = ForeignKeyField(AiProposal, column_name="proposal_id", null=True, on_delete="SET NULL")
+    capability = TextField()
+    kind = TextField()
+    nba_date = DateField()
+    adds = SmallIntegerField(default=0)
+    outcome = TextField()
+    rule = TextField(null=True)
+    message = TextField()
+    audit_id = IntegerField(null=True)
+    created_at = DateTimeField(default=_now)
+
+    class Meta:
+        table_name = "autopilot_actions"
         schema = "usr"

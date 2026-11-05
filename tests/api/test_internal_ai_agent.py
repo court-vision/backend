@@ -211,3 +211,33 @@ def test_a_turn_s_chip_is_a_block_in_the_conversation(authed_client, user, invit
     assert parts[0]["block"]["type"] == "proposal" and parts[0]["block"]["id"] == "p1"
     assert parts[0]["block"]["state"] == "sent" and parts[0]["block"]["drop"]["espn_id"] == 4594268
     assert parts[1] == {"kind": "text", "text": "Kawhi for Edwards."}
+
+
+@pytest.mark.api
+def test_autopilot_takes_the_switch_the_team_s_mode_and_a_kind_s_own(authed_client, user, invited, monkeypatch):
+    from schemas.ai import AiAutopilotTeam
+    from services.ai import checkins
+    seen = []
+
+    async def set_autopilot(user_id, team_id, on, mode=None, own=None):
+        seen.append((user_id, team_id, on, mode, own))
+        if mode == "act" or "act" in (own or {}).values():
+            raise checkins.ActingOff()
+        return AiAutopilotTeam(team_id=team_id, on=on is not False,
+                               autonomy={"mode": mode or "shadow", "own": own or {}})
+    monkeypatch.setattr(AgentService, "set_autopilot", staticmethod(set_autopilot))
+
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"on": False})
+    assert r.status_code == 200 and r.json()["message"] == "Check-ins paused"
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"mode": "suggest", "own": {"lineup": None, "streaming": "shadow"}})
+    assert r.status_code == 200 and r.json()["message"] == "Autopilot updated"
+    data = r.json()["data"]["autonomy"]
+    assert data["mode"] == "suggest" and data["own"] == {"lineup": None, "streaming": "shadow", "adds_drops": None}
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"own": {"adds_drops": "act"}})
+    assert (r.status_code, r.json()["error_code"]) == (409, "AI_ACTING_OFF")
+    assert seen == [(42, 21, False, None, None), (42, 21, None, "suggest", {"lineup": None, "streaming": "shadow"}),
+                    (42, 21, None, None, {"adds_drops": "act"})]
+    # Nothing to change, an unknown mode or an unknown kind of move never reach the service
+    for body in ({}, {"own": {}}, {"mode": "autopilot"}, {"own": {"trades": "act"}}):
+        assert authed_client.put(f"{BASE}/autopilot/21", json=body).status_code == 422
+    assert len(seen) == 3

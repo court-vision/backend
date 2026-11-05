@@ -27,8 +27,13 @@ conversation (kind `checkin`), the server's brief as its message, the check-in
 tool list (`log_decision` added) and bounds, and its spend on the autopilot line
 (services/ai/spend.py). In shadow nothing reaches ESPN: its proposals are stored
 `shadow`, and every call it makes is a decision (services/ai/decisions.py) the
-user marks agree or disagree. How Dime may act (one switch, or one per kind of
-move) is step 5's; nothing here decides it.
+user marks agree or disagree.
+
+How much Dime may do on the team is its mode (services/ai/autonomy.py; the plan's
+step 5): with every kind of move in shadow (the default) a check-in is exactly
+step 3's; otherwise its brief says which areas suggest or act, and a change it
+logs is committed there (services/ai/acting.py). Whether that is one setting for
+the team or one per kind of move is the user's still: the row holds both.
 """
 
 from __future__ import annotations
@@ -45,12 +50,12 @@ from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from core.settings import settings
 from db.base import db_operation
-from db.models.autopilot import AiCheckin, AiDecision, Autopilot
+from db.models.autopilot import AiCheckin, AiDecision, Autopilot, AutopilotAction
 from db.models.nba.games import Game
 from db.models.teams import Team
 from schemas.common import ApiStatus
 from services import schedule_service
-from services.ai import agent, conversations, spend
+from services.ai import agent, autonomy, conversations, spend
 from services.scheduled_pickup_service import et_at
 
 MORNING, WEEKLY, PRE_LOCK, NIGHT = "morning", "weekly", "pre_lock", "night"
@@ -274,11 +279,17 @@ def _tallies(checkin_ids: list[int]) -> dict[int, dict[str, int]]:
         return out
     for d in (AiDecision.select(AiDecision.checkin_id, AiDecision.call, AiDecision.verdict)
               .where(AiDecision.checkin_id.in_(checkin_ids))):
-        t = out.setdefault(d.checkin_id_id, {"decisions": 0, "changes": 0, "agree": 0, "disagree": 0})
+        t = out.setdefault(d.checkin_id_id, {"decisions": 0, "changes": 0, "agree": 0, "disagree": 0, "sent": 0})
         t["decisions"] += 1
         t["changes"] += d.call == "change"
         if d.verdict in ("agree", "disagree"):
             t[d.verdict] += 1
+    # The moves it sent on its own (the acting step)
+    for cid, n in (AutopilotAction.select(AutopilotAction.checkin_id, fn.COUNT(AutopilotAction.id))
+                   .where(AutopilotAction.checkin_id.in_(checkin_ids), AutopilotAction.outcome == "sent")
+                   .group_by(AutopilotAction.checkin_id).tuples()):
+        if cid in out:
+            out[cid]["sent"] = int(n)
     return out
 
 
@@ -299,19 +310,30 @@ def _autopilot_teams(user_id: int, team_ids: list[int]) -> list[tuple[int, Optio
     return [(t, rows.get(t)) for t in owned]
 
 
+@db_operation("ai.autopilot_row")
+def _autopilot_row(team_id: int) -> Optional[Autopilot]:
+    return Autopilot.get_or_none(Autopilot.team_id == team_id)
+
+
 @db_operation("ai.autopilot_set")
-def _set_autopilot(team_id: int, user_id: int, on: bool, now: datetime) -> Autopilot:
+def _set_autopilot(team_id: int, user_id: int, on: Optional[bool], now: datetime,
+                   modes: Optional[dict[str, Optional[str]]] = None) -> Autopilot:
+    """The switch (`on`; None leaves it) and the modes (`modes`: column to value, None = the team's)."""
+    modes = modes or {}
     row = Autopilot.get_or_none(Autopilot.team_id == team_id)
     if row is None:
-        row = Autopilot.create(team_id=team_id, user_id=user_id, created_at=now, updated_at=now, active_since=now,
-                               paused_at=None if on else now, paused_by=None if on else "user")
-        return row
-    if on and row.paused_at is not None:
+        # Set up before it is switched on: it starts paused, as the switch left off
+        live = bool(on)
+        return Autopilot.create(team_id=team_id, user_id=user_id, created_at=now, updated_at=now, active_since=now,
+                                paused_at=None if live else now, paused_by=None if live else "user", **modes)
+    if modes:
+        Autopilot.update(updated_at=now, **modes).where(Autopilot.team_id == team_id).execute()
+    if on is True and row.paused_at is not None:
         # Resumed: what fell due while it was paused is not missed
         (Autopilot.update(paused_at=None, paused_by=None, paused_reason=None, active_since=now, updated_at=now,
                           user_id=user_id)
          .where(Autopilot.team_id == team_id).execute())
-    elif not on and row.paused_at is None:
+    elif on is False and row.paused_at is None:
         (Autopilot.update(paused_at=now, paused_by="user", paused_reason=None, updated_at=now)
          .where(Autopilot.team_id == team_id).execute())
     return Autopilot.get(Autopilot.team_id == team_id)
@@ -394,13 +416,37 @@ _STEPS = {
 }
 
 
-def brief(kind: str, nba_date: date, team_id: int, *, manual: bool) -> str:
-    """The check-in's opening message: what it is, the shadow rules, and the steps for its kind."""
+def acting_rules(modes: dict[str, str]) -> str:
+    """The rules of a check-in on a team where some kind of move suggests or acts (the plan's step 5)."""
+    return (
+        f"How much you may do on this team: {autonomy.words(modes)}. Lineup is slot moves and pins; streaming is "
+        "the lanes, their pickups and the holds that steer them; adds and drops are your own adds and drops and "
+        "the user's scheduled pickups. Every proposal you make in a check-in is first logged in shadow; "
+        "log_decision with call change and its proposal_id is what commits it, under its area's mode: shadow keeps "
+        "it as what you would have done, suggest makes it a chip the user can send, act sends it now through the "
+        "user's own write routes if the policy allows (get_automations' autopilot section has the caps, what you "
+        "have used and what you did lately). A move the policy blocks or ESPN refuses is left as a chip for the "
+        "user; don't try it again in this check-in. So propose freely, but log as a change only what you'd do, and "
+        "never say a move was made unless log_decision's action says sent. log_decision records each call you "
+        "make, holds included. The user isn't here while you work: they read this conversation later and mark "
+        "each call agree or disagree."
+    )
+
+
+def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
+          modes: Optional[dict[str, str]] = None) -> str:
+    """The check-in's opening message: what it is, its rules (shadow, or what each kind of move may
+    do), and the steps for its kind. Every kind in shadow, it is step 3's brief exactly."""
     who = ("The user asked for it from the AI desk." if manual
            else "It started on its schedule.")
+    live = modes is not None and any(m != autonomy.SHADOW for m in modes.values())
+    rules = acting_rules(modes) if live else _SHADOW
     head = (f"[{LABELS[kind]} for team_id {team_id}, about {nba_date.strftime('%A')} {nba_date.isoformat()}. "
-            f"{who} {_SHADOW}]")
-    close = ("End with a short note for the user: what you'd change and what you'd keep, and why, in a few "
+            f"{who} {rules}]")
+    close = ("End with a short note for the user: what you sent, what you left for them to send, and what you'd "
+             "keep, and why, in a few lines. Your decisions show as their own blocks, so don't list them again."
+             if live else
+             "End with a short note for the user: what you'd change and what you'd keep, and why, in a few "
              "lines. Your decisions show as their own blocks, so don't list them again.")
     return f"{head}\n\n{_STEPS[kind]}\n\n{close}"
 
@@ -445,8 +491,9 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         await conversations.claim(conversation_id, user_id, hold)
         await _attach(checkin_id, conversation_id)
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
+        modes = autonomy.effective_modes(await _autopilot_row(team_id))
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
-                          message=brief(kind, nba_date, team_id, manual=manual),
+                          message=brief(kind, nba_date, team_id, manual=manual, modes=modes),
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.CHECKIN_TOOLS, allowed=agent.CHECKIN_ALLOWED, checkin_id=checkin_id,
                           limits=agent.Limits.checkin())
@@ -574,11 +621,40 @@ async def run_now(user_id: int, team_id: int, kind: Optional[str] = None,
     return row
 
 
-async def set_autopilot(user_id: int, team_id: int, on: bool) -> Autopilot:
-    """The AI desk's switch: on starts (or resumes) the team's check-ins, off pauses them."""
+class ActingOff(ConflictError):
+    error_code = "AI_ACTING_OFF"
+    default_message = "Dime can't act on its own yet: acting is switched off on the server"
+
+
+def mode_changes(mode: Optional[str], own: Optional[dict[str, Optional[str]]]) -> dict[str, Optional[str]]:
+    """The columns a settings change writes: `mode` the team's, `own` a kind of move's (None = follow
+    the team's). Refuses act while acting is switched off, and an unknown mode or kind."""
+    out: dict[str, Optional[str]] = {}
+    wanted = [mode] if mode is not None else []
+    if mode is not None:
+        out["mode"] = mode
+    for cap, value in (own or {}).items():
+        if cap not in autonomy.COLUMNS:
+            raise AppError("AI_AUTOPILOT_INVALID", f"Unknown kind of move {cap!r}", status_code=422)
+        out[autonomy.COLUMNS[cap]] = value
+        if value is not None:
+            wanted.append(value)
+    for m in wanted:
+        if m not in autonomy.MODES:
+            raise AppError("AI_AUTOPILOT_INVALID", "A mode is shadow, suggest or act", status_code=422)
+    if autonomy.ACT in wanted and not autonomy.acting_available():
+        raise ActingOff()
+    return out
+
+
+async def set_autopilot(user_id: int, team_id: int, on: Optional[bool], mode: Optional[str] = None,
+                        own: Optional[dict[str, Optional[str]]] = None) -> Autopilot:
+    """The team's autopilot settings: `on` starts (or resumes) the check-ins, off pauses them (a pause
+    Dime made itself is lifted the same way); `mode` and `own` set how much Dime may do (autonomy.py)."""
     await _ensure_owned(team_id, user_id)
     _ensure_allowed(team_id, user_id)
-    return await _set_autopilot(team_id, user_id, on, _now())
+    changes = mode_changes(mode, own)
+    return await _set_autopilot(team_id, user_id, on, _now(), changes)
 
 
 def next_slot(cal: Calendar, row: Optional[Autopilot], taken: set[tuple[str, date]],
@@ -620,6 +696,7 @@ def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot]) 
         "paused_reason": row.paused_reason if row is not None else None,
         "next": None if upcoming is None else {"kind": upcoming.kind, "date": upcoming.nba_date,
                                                "due_at": upcoming.due_at},
+        "autonomy": autonomy.view(row),
     }
 
 
@@ -643,6 +720,7 @@ def summary_of(row: AiCheckin, tally: Optional[dict[str, int]] = None) -> dict[s
         "changes": t.get("changes", 0),
         "agree": t.get("agree", 0),
         "disagree": t.get("disagree", 0),
+        "sent": t.get("sent", 0),
     }
 
 

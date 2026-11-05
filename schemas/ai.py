@@ -10,7 +10,7 @@ the `ai_request` log line.
 from datetime import date as date_type, datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from schemas.app_map import BUILD_PATTERN
 from schemas.common import ApiModel, BaseResponse
@@ -400,6 +400,22 @@ AiDecisionCall = Literal["hold", "change"]
 AiVerdict = Literal["agree", "disagree"]
 
 
+AiActionOutcome = Literal["sent", "blocked", "refused", "failed"]
+
+
+class AiDecisionAction(ApiModel):
+    """What Dime did about a change on its own, on a team where that kind of move acts (the Dime
+    autopilot plan, step 5; usr.autopilot_actions). A blocked or refused move is left as a chip."""
+
+    outcome: AiActionOutcome = Field(..., description="sent (it went out) · blocked (a rule of the policy stopped it "
+                                                      "before anything was sent) · refused (the route or ESPN said "
+                                                      "no) · failed (ESPN unreachable, credentials, an error)")
+    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, cap_matchup, reserve, protected, "
+                                                  "churn, paused, writes_off, ...) or the error code")
+    message: str = Field(..., description="What happened, in a sentence")
+    at: Optional[datetime] = None
+
+
 class AiDecisionBlock(ApiModel):
     """One call a check-in made (usr.ai_decisions), holds included: shown in its conversation for the user
     to agree or disagree with. A change to the lineup or the roster names the shadow proposal behind it,
@@ -416,6 +432,8 @@ class AiDecisionBlock(ApiModel):
     reason: str
     proposal_id: Optional[int] = Field(None, description="The shadow proposal behind a change")
     verdict: Optional[AiVerdict] = Field(None, description="The user's call on it; null until they make one")
+    action: Optional[AiDecisionAction] = Field(None, description="What Dime did about it on its own, where its kind "
+                                                                 "of move acts; null in shadow and suggest")
 
 
 AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock], Field(discriminator="type")]
@@ -473,6 +491,7 @@ class AiCheckinSummary(ApiModel):
     changes: int = Field(..., description="Of those, the ones that would change an automation's plan or the roster")
     agree: int
     disagree: int
+    sent: int = Field(0, description="Moves it sent on its own (where a kind of move acts)")
 
 
 class AiCheckinSlot(ApiModel):
@@ -481,8 +500,37 @@ class AiCheckinSlot(ApiModel):
     due_at: datetime
 
 
+AiAutonomyMode = Literal["shadow", "suggest", "act"]
+AiCapability = Literal["lineup", "streaming", "adds_drops"]
+
+
+class AiAutonomyModes(ApiModel):
+    lineup: AiAutonomyMode = "shadow"
+    streaming: AiAutonomyMode = "shadow"
+    adds_drops: AiAutonomyMode = "shadow"
+
+
+class AiAutonomyOwn(ApiModel):
+    """A kind of move's own setting; null follows the team's."""
+
+    lineup: Optional[AiAutonomyMode] = None
+    streaming: Optional[AiAutonomyMode] = None
+    adds_drops: Optional[AiAutonomyMode] = None
+
+
+class AiAutonomy(ApiModel):
+    """How much Dime may do on the team (services/ai/autonomy.py): shadow logs, suggest makes chips, act
+    sends within the policy. `mode` is the team's; `own` a kind of move's, standing in for it when set;
+    `effective` what each kind is now (act reads as suggest while acting is off on the server, and every
+    kind is shadow while the team is paused)."""
+
+    mode: AiAutonomyMode = "shadow"
+    own: AiAutonomyOwn = Field(default_factory=AiAutonomyOwn)
+    effective: AiAutonomyModes = Field(default_factory=AiAutonomyModes)
+
+
 class AiAutopilotTeam(ApiModel):
-    """A team Dime may run check-ins on, and its switch."""
+    """A team Dime may run check-ins on, its switch, and how much Dime may do there."""
 
     team_id: int
     on: bool = Field(..., description="Check-ins run on the schedule")
@@ -491,6 +539,28 @@ class AiAutopilotTeam(ApiModel):
     paused_by: Optional[Literal["user", "system"]] = None
     paused_reason: Optional[str] = None
     next: Optional[AiCheckinSlot] = Field(None, description="The next scheduled check-in, while on")
+    autonomy: AiAutonomy = Field(default_factory=AiAutonomy)
+
+
+class AiActingPolicy(ApiModel):
+    """The rules every move Dime sends itself is held to (core/settings.py)."""
+
+    adds_per_day: int
+    adds_per_matchup: int
+    adds_reserve: int = Field(..., description="Adds this matchup Dime leaves for the user (injuries)")
+    protected_top: int = Field(..., description="Dime never drops one of the roster's top this many by value")
+    churn_hours: int = Field(..., description="Nor a player added this recently, unless he is out")
+    pause_refused: int = Field(..., description="It pauses itself after this many refused writes in a day")
+    pause_same_block: int = Field(..., description="...or this many blocks by the same rule in a day")
+
+
+class AiActing(ApiModel):
+    """Whether Dime can act on its own at all, and the policy it acts within."""
+
+    available: bool = Field(..., description="DIME_ACTING_ENABLED: off, act can't be set and reads as suggest")
+    steering: bool = Field(..., description="DIME_STEERING_ENABLED: Dime's steering chips exist at all")
+    writes: bool = Field(..., description="ROSTER_WRITES_ENABLED: writes to ESPN are on")
+    policy: AiActingPolicy
 
 
 class AiCheckinsData(ApiModel):
@@ -498,6 +568,7 @@ class AiCheckinsData(ApiModel):
     checkins: list[AiCheckinSummary] = Field(..., description="Newest first")
     month_usd: float = Field(..., description="This month's check-in spend, every autopilot team")
     cap_usd: float = Field(..., description="The check-ins' monthly budget, apart from the AI desk's")
+    acting: Optional[AiActing] = None
 
 
 class AiCheckinsResp(BaseResponse):
@@ -518,9 +589,20 @@ class AiCheckinResp(BaseResponse):
 
 
 class AiAutopilotReq(ApiModel):
-    """Body for PUT /v1/internal/ai/autopilot/{team_id}."""
+    """Body for PUT /v1/internal/ai/autopilot/{team_id}: any of the switch and the modes; what is left out
+    stays as it is."""
 
-    on: bool = Field(..., description="true starts (or resumes) the team's check-ins, false pauses them")
+    on: Optional[bool] = Field(None, description="true starts (or resumes, a pause Dime made itself included) "
+                                                 "the team's check-ins, false pauses them")
+    mode: Optional[AiAutonomyMode] = Field(None, description="How much Dime may do on the whole team")
+    own: Optional[dict[AiCapability, Optional[AiAutonomyMode]]] = Field(
+        None, description="A kind of move's own mode; null makes it follow the team's again")
+
+    @model_validator(mode="after")
+    def _something(self) -> "AiAutopilotReq":
+        if self.on is None and self.mode is None and not self.own:
+            raise ValueError("send on, mode or own")
+        return self
 
 
 class AiAutopilotResp(BaseResponse):

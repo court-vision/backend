@@ -247,7 +247,10 @@ class LineupEditorService:
     # ---- manual write ----
 
     @staticmethod
-    async def apply_manual(team, league_info: LeagueInfo, req: ApplyLineupMovesReq) -> ApplyLineupMovesResp:
+    async def apply_manual(team, league_info: LeagueInfo, req: ApplyLineupMovesReq, *,
+                           source: str = "manual") -> ApplyLineupMovesResp:
+        """The Week desk's lineup write. `source` is the audit row's: 'manual', or 'autopilot' when
+        Dime sends its own lineup chip (services/ai/acting.py), through every check made here."""
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         adapter = get_provider_adapter(league_info.provider)
@@ -283,7 +286,7 @@ class LineupEditorService:
 
         fresh, verified, audit_id = await LineupEditorService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
-            moves=moves, source="manual", fallback_slot_counts=slots,
+            moves=moves, source=source, fallback_slot_counts=slots,
         )
         if req.proposal_id is not None:
             from services.ai import proposals
