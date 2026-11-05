@@ -51,6 +51,7 @@ from core.nba_calendar import nba_date_et
 from core.settings import settings
 from db.base import db, db_operation, run_db
 from db.models.dime_draft import AiDraftNote, AiDraftRoom
+from db.models.drafts import DraftPick
 from schemas.draft import DraftPickCreate, DraftSessionUpdate, MockAdvanceRequest
 
 PLAN, PICK, RECAP = "plan", "pick", "recap"
@@ -256,11 +257,29 @@ def _seat_off(session_id: int, reason: str) -> None:
      .where(AiDraftRoom.session_id == session_id).execute())
 
 
+def _drop_undone_now(session_id: int) -> int:
+    """A pick Dime made that was undone since (the user took the seat back and undid it, or a
+    keystroke did): its seat note no longer stands for a pick, so it fails `undone`, leaving that
+    pick free for the seat to make again and out of the room's list of Dime's picks."""
+    kept = DraftPick.select(DraftPick.overall_pick).where(DraftPick.session == session_id, DraftPick.source == "dime")
+    return (AiDraftNote.update(state=FAILED, reason="undone", finished_at=_now())
+            .where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK, AiDraftNote.seat == True,  # noqa: E712
+                   AiDraftNote.state == DONE, AiDraftNote.for_pick.not_in(kept))
+            .execute())
+
+
+@db_operation("ai.draft_drop_undone")
+def _drop_undone(session_id: int) -> int:
+    return _drop_undone_now(session_id)
+
+
 @db_operation("ai.draft_note_claim")
 def _claim(session_id: int, user_id: int, kind: str, for_pick: Optional[int], seat: bool,
            facts: dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
     """Insert the note `running`: (its id, None), or (None, the note already written for this pick),
     or (None, None) when another note is running in the room."""
+    if kind == PICK and seat:
+        _drop_undone_now(session_id)
     if kind == PICK:
         held = (AiDraftNote.select(AiDraftNote.id)
                 .where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
@@ -576,6 +595,7 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
         return out
     now = _now()
     await _sweep(room.session_id, _stale_before(now))
+    await _drop_undone(room.session_id)
     row = await _room(room.session_id)
     notes = await _notes(room.session_id, VIEW_NOTES)
     seat = row.seat if row is not None else SEAT_OFF

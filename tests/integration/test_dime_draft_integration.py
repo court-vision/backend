@@ -305,6 +305,34 @@ async def test_dime_s_pick_is_the_user_s_at_the_pick_on_the_clock_and_made_once(
     assert err.value.error_code == "DRAFT_ROOM_IS_SIMULATED"
 
 
+async def test_a_pick_dime_made_and_the_user_undid_is_made_again(team, pool, monkeypatch):
+    room = await _room(team)
+
+    async def act(turn):
+        board = _board_in(turn.message)
+        top = board["recommendations"][0]["player_id"]
+        result = await _tool(turn, "draft_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not result.is_error, result.content
+        return "Took him."
+
+    calls = _fake_turn(monkeypatch, act)
+    from services.draft_mock_service import DraftMockService
+    from schemas.draft import MockAdvanceRequest
+    await DraftMockService.advance(room.session_id, MockAdvanceRequest(until="my_turn"))
+    first = await _settled(await draft.start(team.user_id_id, room, draft.PICK, seat=True))
+    assert first.state == "done" and first.took["overall_pick"] == 3
+    # The user takes the pick back: the seat note no longer stands for a pick
+    await DraftService.remove_pick(room.session_id, 3)
+    room = await _ctx(room.session_id, team.user_id_id)
+    view = await draft.room_view(team.user_id_id, room)
+    old = next(n for n in view["notes"] if n["id"] == first.id)
+    assert old["state"] == "failed" and old["reason"] == "undone"
+    # Handed the seat again at pick 3, Dime makes the pick again instead of reading the old note as done
+    again = await _settled(await draft.start(team.user_id_id, room, draft.PICK, seat=True))
+    assert again.id != first.id and again.state == "done" and len(calls) == 2
+    assert DraftPick.get(DraftPick.session == room.session_id, DraftPick.overall_pick == 3).source == "dime"
+
+
 async def test_a_turn_that_makes_no_pick_fails_its_note(team, pool, monkeypatch):
     room = await _room(team)
     from services.draft_mock_service import DraftMockService
