@@ -142,3 +142,53 @@ def test_a_long_tree_is_cut_at_a_line():
     assert len(tree) <= TREE_CHARS + 4
     assert tree.endswith("\n- …")
     assert all(line.startswith("- ") for line in tree.splitlines())
+
+
+@pytest.mark.parametrize("text,words", [
+    ("Who's playing tonight?", ["play", "tonight"]),
+    ("Where do I pick up a free agent?", ["pickup", "free", "agent"]),
+    ("How do I turn on auto lineup?", ["auto", "lineup"]),
+    ("adding added adds", ["add", "add", "add"]),
+    ("dropped setting passing", ["drop", "set", "pass"]),
+    ("matches boxes", ["match", "box"]),
+])
+def test_tokens_join_phrasal_verbs_and_stem(text, words):
+    assert tokens(text) == words
+
+
+def test_scheduled_and_schedule_are_one_word():
+    assert tokens("scheduled") == tokens("schedule") == tokens("scheduling")
+
+
+def variant(*screens):
+    m = AppMapUpload.model_validate({**MAP, "screens": [*MAP["screens"], *screens]})
+    return LoadedMap(build=BUILD, crawled_at=datetime(2026, 10, 20, tzinfo=timezone.utc), map=m)
+
+
+def test_the_app_s_words_inside_data_barely_count():
+    # A conversation's answer is made of the app's words; a line of the app's own copy is not
+    chat = screen("ai/conversation", "scout", [step("Who should I stream?", example=True, within="Conversations")],
+                  "- text: Dime looked at the free agents to pick up this week and found three worth streaming "
+                  "for blocks, though the best of them plays only twice before the weekend")
+    loaded = variant(chat)
+    assert ids(loaded.search("free agents to pick up"))[0] == "week/market-p"
+    market, conversation = (loaded._screens.docs[i] for i in (1, len(loaded.screens) - 1))
+    assert market["free"] == 1 and 0 < conversation["free"] < 0.25
+
+
+def test_the_same_control_on_another_row_is_one_place():
+    pin = [screen(f"scout/pool-option/pin-p~{n}", "scout",
+                  [step(name, role="option", example=True, within="Pool"), step("Pin P")],
+                  "- button \"Pin P\" [pressed]\n- text: Pinned players side by side (C)")
+           for n, name in (("a", "1 N. Jokić DEN C"), ("b", "2 L. Dončić LAL G"))]
+    found = ids(variant(*pin).search("pin players side by side"))
+    assert found.count("scout/pool-option/pin-p~a") == 1 and "scout/pool-option/pin-p~b" not in found
+
+
+def test_a_desk_that_lost_the_session_is_not_a_place():
+    lost = screen("account~lost", "account", [], "- banner\n- main", link="/sign-in?redirect_url=%2Faccount",
+                  signed_in=True)
+    lost["url"] = lost["link"]
+    loaded = variant(lost)
+    assert "account~lost" not in {s.id for s in loaded.screens}
+    assert "account~lost" not in ids(loaded.search("account settings teams connections"))

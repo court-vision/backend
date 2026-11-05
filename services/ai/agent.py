@@ -361,26 +361,69 @@ NOT_SOURCES = frozenset({FIND_IN_APP, *memory.MEMORY_TOOL_NAMES})
 # What an answer names in the app: a bold or quoted span of a few words
 _NAMED = re.compile(r"\*\*([^*\n]{1,60})\*\*|\"([^\"\n]{1,60})\"|“([^”\n]{1,60})”")
 _MAX_NAME_WORDS = 6
+# A span is a place when the answer sends the user to it: a verb of getting
+# somewhere just before it ("open **Market**", "tap \"Send\"") or a word for a
+# part of the app just after it ("the **Market** view"), or a step in a trail
+# ("Week › **Market**"). Bold for emphasis ("**Hold** him", "**Add Kessler**")
+# is none of these.
+_GO = frozenset(
+    "click clicking tap tapping press pressing hit open opening select choose toggle switch flip "
+    "go head navigate visit find use under".split()
+)
+_PART = frozenset(
+    "tab tabs button buttons desk desks menu view views panel pane page screen sheet dialog link toggle "
+    "switch key shortcut option options setting settings section tray slider field box column lens "
+    "mode list rail".split()
+)
+_BEFORE, _AFTER = 4, 3
+_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?")
+_SENTENCE_END = re.compile(r"[.!?:;]\s|\n")
 
 
 def _text_of(value: Any) -> str:
     return (value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)).casefold()
 
 
-def ungrounded_places(text: str, app: list[Any], others: list[Any]) -> int:
-    """UI names the answer bolds or quotes that appear in no find_in_app result of
-    the conversation (docs/APP_MAP_PLAN.md § 5): a button or screen the model made
-    up. A span the other lookups or the user's own words contain (a player's name,
-    a category) is data, not a place. Logged, not blocked; the eval is where it fails."""
-    known = [_text_of(v) for v in [*app, *others]]
-    count = 0
+def _sends_there(text: str, start: int, end: int) -> bool:
+    """Whether the span at text[start:end] is somewhere the answer sends the user."""
+    before = text[:start]
+    cut = max((m.end() for m in _SENTENCE_END.finditer(before)), default=0)
+    before = before[cut:]
+    after = text[end:]
+    stop = _SENTENCE_END.search(after)
+    after = after[:stop.start()] if stop else after
+    if before.rstrip().endswith(("›", ">")) or after.lstrip().startswith(("›", ">")):
+        return True
+    words_before = [w.casefold() for w in _WORD.findall(before)][-_BEFORE:]
+    words_after = [w.casefold() for w in _WORD.findall(after)][:_AFTER]
+    return any(w in _GO for w in words_before) or any(w in _PART for w in words_after)
+
+
+def placed_names(text: str) -> list[str]:
+    """The bold or quoted names an answer sends the user to, as written."""
+    out = []
     for match in _NAMED.finditer(text):
-        name = next(g for g in match.groups() if g is not None).strip().strip(".,:;!?").casefold()
+        group = next(i for i, g in enumerate(match.groups(), start=1) if g is not None)
+        name = match.group(group).strip().strip(".,:;!?")
         if not name or len(name.split()) > _MAX_NAME_WORDS or not re.search(r"[^\W\d_]", name):
             continue
-        if not any(name in k for k in known):
-            count += 1
-    return count
+        if _sends_there(text, match.start(), match.end()):
+            out.append(name)
+    return out
+
+
+def made_up_places(text: str, app: list[Any], others: list[Any]) -> list[str]:
+    """The places an answer names (`placed_names`) that appear in no find_in_app
+    result of the conversation (docs/APP_MAP_PLAN.md § 5): a button or screen the
+    model made up. A name the other lookups or the user's own words contain (a
+    player's, a category) is data, not a place."""
+    known = [_text_of(v) for v in [*app, *others]]
+    return [name for name in placed_names(text) if not any(name.casefold() in k for k in known)]
+
+
+def ungrounded_places(text: str, app: list[Any], others: list[Any]) -> int:
+    """How many places the answer made up. Logged, not blocked; the eval is where it fails."""
+    return len(made_up_places(text, app, others))
 
 
 # ---- the turn ----
@@ -393,6 +436,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
     turn_id: Optional[int] = None
     ungrounded: Optional[int] = None
     places: Optional[int] = None
+    made_up: list[str] = []
     user_content = f"{header_line}\n\n{turn.message}"
     turn.messages.append({"role": "user", "content": user_content})
     try:
@@ -447,9 +491,10 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             + user_texts,
             turn.run.names,
         )
-        places = ungrounded_places(turn.answer_text(), app,
-                                   [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
-                                   + user_texts)
+        made_up = made_up_places(turn.answer_text(), app,
+                                 [r["data"] for r in turn.all_results().values() if r["tool"] != FIND_IN_APP]
+                                 + user_texts)
+        places = len(made_up)
         outcome = "ok"
     except TimeoutError:
         outcome = "AI_TIMEOUT"
@@ -497,7 +542,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             get_logger().exception("ai_turn_record_failed", conversation_id=turn.conversation_id, cost_micros=turn.cost)
             await _settle_quietly(turn)
             await _release_quietly(turn.conversation_id)
-        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id, places)
+        _log_turn(turn, outcome, duration_ms, ungrounded, turn_id, places, made_up=made_up)
         try:
             month = await spend.month_spend(turn.user_id)
             spent = {"month_usd": month.user / 1e6, "cap_usd": month.user_cap / 1e6}
@@ -530,8 +575,12 @@ async def _release_quietly(conversation_id: int) -> None:
         get_logger().exception("ai_conversation_release_failed", conversation_id=conversation_id)
 
 
+# The made-up places a turn's log line names, so a count can be read without the answer
+_LOGGED_PLACES = 5
+
+
 def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[int], turn_id: Optional[int],
-              places: Optional[int] = None) -> None:
+              places: Optional[int] = None, *, made_up: Optional[list[str]] = None) -> None:
     run = turn.run
     get_logger().info(
         "ai_turn",
@@ -559,6 +608,7 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         duration_ms=duration_ms,
         ungrounded_numbers=ungrounded,
         ungrounded_places=places,
+        made_up_places=(made_up or [])[:_LOGGED_PLACES],
         prior_turns=turn.history.turns,
         request_ids=run.request_ids,
     )
