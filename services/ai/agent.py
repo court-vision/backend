@@ -155,11 +155,19 @@ class Emitter:
 
 # ---- the header each user message carries ----
 
+# How the header names a points league's scoring (`tools.points_scoring`): ESPN's
+# default is Court Vision's fpts, so the agent can quote fpts there as the league's own
+_POINTS_SCORING = {"espn_default": "ESPN default points", "custom": "its own point values"}
+
+
 def _team_facts(teams: list[dict[str, Any]], pinned: Optional[int]) -> str:
     if not teams:
         return "The user has no teams yet."
-    facts = [f"team_id {t['team_id']} ({t['provider']}, {t['scoring'] or 'unknown'} scoring, {t['season']})"
-             for t in teams]
+
+    def scoring(t: dict[str, Any]) -> str:
+        named = _POINTS_SCORING.get(t.get("points_scoring") or "")
+        return f"{t['scoring'] or 'unknown'} scoring" + (f": {named}" if named else "")
+    facts = [f"team_id {t['team_id']} ({t['provider']}, {scoring(t)}, {t['season']})" for t in teams]
     line = "The user's teams: " + "; ".join(facts) + "."
     if pinned is not None and any(t["team_id"] == pinned for t in teams):
         line += f" Pinned team: team_id {pinned}."

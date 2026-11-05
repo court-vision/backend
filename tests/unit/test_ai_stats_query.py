@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 
 from services.ai.stats import query
+from services.ai.stats.catalog import FPTS_NOTE
 from services.ai.stats.compiler import ROW_CAP, StatsSpec
 from services.ai.stats.query import SpecError, run_query_stats
 
@@ -98,7 +99,7 @@ class TestRows:
                                   "fpts_rm2": 55.0, "series": "Nikola Jokic"}
         assert [r["series"] for r in out["rows"]] == ["Nikola Jokic", "Nikola Jokic", "Victor Wembanyama"]
         assert out["total_rows"] == 3
-        assert out["note"] == "fpts is Court Vision's fantasy points formula, not the user's league scoring"
+        assert out["note"] == FPTS_NOTE
 
     def test_series_stay_unique_across_seasons_and_season_types(self):
         reader = FakeReader([

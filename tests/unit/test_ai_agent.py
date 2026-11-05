@@ -383,7 +383,7 @@ class TestTurn:
                 for pid, name in ((1641705, "Victor Wembanyama"), (203999, "Nikola Jokic")) for g in (1, 2, 3)]
         stats = {"grain": "game", "season_type": "regular", "seasons": ["2024-25"],
                  "labels": {"fpts_rm2": "CV fantasy points, 2-game rolling mean"}, "rows": rows, "total_rows": 6,
-                 "note": "fpts is Court Vision's fantasy points formula, not the user's league scoring"}
+                 "note": "fpts is ESPN's default points scoring; the header says which of the user's points leagues score that way"}
         calls = _tools(monkeypatch, {"query_stats": stats})
         spec = {"players": [1641705, 203999], "grain": "game", "metrics": ["fpts"], "seasons": ["2024-25"],
                 "transform": {"rolling_mean": 2}}
