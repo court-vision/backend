@@ -33,7 +33,7 @@ from services.public_market_service import PublicMarketService
 # The tools are a cached prefix: each later step appends after the app map's find_in_app
 _APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
 _AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes",
-              "get_league", "get_league_activity", "get_draft_board"]
+              "get_league", "get_league_activity", "get_draft_board", "get_automations", "get_decisions"]
 
 
 def _run(name, raw):
@@ -52,7 +52,8 @@ def _stats_resp(message="Player stats fetched successfully"):
 @pytest.mark.unit
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
-        defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]}
+        defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
+                                       *tools.CHECKIN_ONLY_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
@@ -576,7 +577,7 @@ class TestProposeMove:
             seen["owned"] = (ctx.user_id, team_id)
             return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
 
-        async def propose(user_id, conversation_id, team, league_info, args):
+        async def propose(user_id, conversation_id, team, league_info, args, *, shadow=False):
             seen["propose"] = (user_id, conversation_id, team.team_id, args)
             return {"proposal_id": 31, "chip": {"proposal_id": 31}}
         monkeypatch.setattr(tools, "_owned", owned)
@@ -641,7 +642,7 @@ class TestLineupTools:
             seen["read"] = (team.team_id, args.day)
             return {"team_id": team.team_id, "players": []}
 
-        async def propose(user_id, conversation_id, team, league_info, args):
+        async def propose(user_id, conversation_id, team, league_info, args, *, shadow=False):
             seen["propose"] = (user_id, conversation_id, team.team_id, args)
             return {"proposal_id": 40, "chip": {"proposal_id": 40}}
         monkeypatch.setattr(tools, "_owned", owned)

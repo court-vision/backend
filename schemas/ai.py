@@ -245,7 +245,8 @@ class AiChart(ApiModel):
     total_rows: int = Field(..., description="X values before the chart's limit")
 
 
-AiProposalState = Literal["proposed", "sent", "dismissed", "expired"]
+# shadow: made in one of Dime's check-ins (services/ai/checkins.py), checked but never sendable
+AiProposalState = Literal["proposed", "sent", "dismissed", "expired", "shadow"]
 AiProposalKind = Literal["transaction", "scheduled", "lineup"]
 
 
@@ -281,7 +282,8 @@ class AiProposalChip(ApiModel):
     day's, written at once). Never executed from here."""
 
     proposal_id: int
-    state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, or expired")
+    state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, expired, or shadow "
+                                                    "(a check-in's: what Dime would have done, never staged or sent)")
     kind: AiProposalKind
     team_id: int
     day: int = Field(..., description="Matchup day index, 0 = the matchup's first day")
@@ -321,7 +323,31 @@ class AiPlace(ApiModel):
     matches_build: bool = Field(..., description="The map is of the build the user has open")
 
 
-AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace], Field(discriminator="type")]
+AiDecisionArea = Literal["lineup", "streaming", "adds_drops", "other"]
+AiDecisionAutomation = Literal["auto_lineup", "stream_lane", "scheduled_pickup", "none"]
+AiDecisionCall = Literal["hold", "change"]
+AiVerdict = Literal["agree", "disagree"]
+
+
+class AiDecisionBlock(ApiModel):
+    """One call a check-in made (usr.ai_decisions), holds included: shown in its conversation for the user
+    to agree or disagree with. A change to the lineup or the roster names the shadow proposal behind it,
+    the chip shown just above it in the same turn."""
+
+    type: Literal["decision"] = "decision"
+    id: str = Field(..., description="Unique within its turn, e.g. 'd1'")
+    decision_id: int
+    area: AiDecisionArea
+    automation: AiDecisionAutomation = Field(..., description="Whose plan it reviewed; none for a move no "
+                                                              "automation makes")
+    call: AiDecisionCall = Field(..., description="hold: keep the plan (or do nothing) · change: do something else")
+    summary: str = Field(..., description="What Dime would do, one line")
+    reason: str
+    proposal_id: Optional[int] = Field(None, description="The shadow proposal behind a change")
+    verdict: Optional[AiVerdict] = Field(None, description="The user's call on it; null until they make one")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock], Field(discriminator="type")]
 
 
 class AiTextPart(ApiModel):
@@ -348,10 +374,108 @@ class AiTurnView(ApiModel):
     cost_usd: float
 
 
+# ---- Dime's check-ins (services/ai/checkins.py; the Dime autopilot plan, step 3) ----
+
+AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night"]
+AiCheckinState = Literal["running", "done", "failed", "missed", "skipped"]
+
+
+class AiCheckinSummary(ApiModel):
+    """One check-in: a turn Dime started itself, about one fantasy day, in shadow."""
+
+    checkin_id: int
+    team_id: int
+    kind: AiCheckinKind = Field(..., description="morning, weekly (a matchup's first morning), pre_lock (before "
+                                                 "the first tip) or night (the next morning's follow-up)")
+    date: date_type = Field(..., description="The fantasy day it is about")
+    manual: bool = Field(..., description="Run from the AI desk rather than on the schedule")
+    state: AiCheckinState
+    reason: Optional[str] = Field(None, description="Why it failed, was missed or skipped (e.g. window_closed, "
+                                                    "budget, daily_cap, AI_TIMEOUT)")
+    due_at: datetime
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    conversation_id: Optional[int] = Field(None, description="Its conversation; null when it never ran")
+    title: str
+    cost_usd: float
+    decisions: int = Field(..., description="Calls it logged, holds included")
+    changes: int = Field(..., description="Of those, the ones that would change an automation's plan or the roster")
+    agree: int
+    disagree: int
+
+
+class AiCheckinSlot(ApiModel):
+    kind: AiCheckinKind
+    date: date_type
+    due_at: datetime
+
+
+class AiAutopilotTeam(ApiModel):
+    """A team Dime may run check-ins on, and its switch."""
+
+    team_id: int
+    on: bool = Field(..., description="Check-ins run on the schedule")
+    active_since: Optional[datetime] = Field(None, description="When it was last switched on or resumed")
+    paused_at: Optional[datetime] = None
+    paused_by: Optional[Literal["user", "system"]] = None
+    paused_reason: Optional[str] = None
+    next: Optional[AiCheckinSlot] = Field(None, description="The next scheduled check-in, while on")
+
+
+class AiCheckinsData(ApiModel):
+    teams: list[AiAutopilotTeam] = Field(..., description="The caller's teams Dime may run check-ins on")
+    checkins: list[AiCheckinSummary] = Field(..., description="Newest first")
+    month_usd: float = Field(..., description="This month's check-in spend, every autopilot team")
+    cap_usd: float = Field(..., description="The check-ins' monthly budget, apart from the AI desk's")
+
+
+class AiCheckinsResp(BaseResponse):
+    """Response for GET /v1/internal/ai/checkins."""
+
+    data: Optional[AiCheckinsData] = None
+
+
+class AiCheckinRunReq(ApiModel):
+    """Body for POST /v1/internal/ai/checkins: run one now."""
+
+    team_id: int = Field(..., gt=0, le=INT4_MAX)
+    kind: Optional[AiCheckinKind] = Field(None, description="Default: by the clock against today's first tip")
+
+
+class AiCheckinResp(BaseResponse):
+    data: Optional[AiCheckinSummary] = None
+
+
+class AiAutopilotReq(ApiModel):
+    """Body for PUT /v1/internal/ai/autopilot/{team_id}."""
+
+    on: bool = Field(..., description="true starts (or resumes) the team's check-ins, false pauses them")
+
+
+class AiAutopilotResp(BaseResponse):
+    data: Optional[AiAutopilotTeam] = None
+
+
+class AiDecisionVerdictReq(ApiModel):
+    """Body for PUT /v1/internal/ai/decisions/{decision_id}/verdict."""
+
+    verdict: Optional[AiVerdict] = Field(..., description="null clears it")
+
+
+class AiDecisionVerdictData(ApiModel):
+    decision_id: int
+    verdict: Optional[AiVerdict] = None
+
+
+class AiDecisionVerdictResp(BaseResponse):
+    data: Optional[AiDecisionVerdictData] = None
+
+
 class AiConversationSummary(ApiModel):
     id: int
     title: Optional[str] = Field(None, description="The first message, shortened; null until one is sent")
     team_id: Optional[int] = None
+    kind: Literal["chat", "checkin"] = Field("chat", description="chat (the user's), or a check-in's conversation")
     created_at: datetime
     updated_at: datetime
     turns: int
@@ -360,6 +484,9 @@ class AiConversationSummary(ApiModel):
 class AiConversationDetail(AiConversationSummary):
     full: bool = Field(..., description="True when the conversation takes no more turns: start a new one")
     history: list[AiTurnView] = Field(..., description="Every turn, oldest first, failed ones included")
+    checkin: Optional[AiCheckinSummary] = Field(None, description="The check-in that started it, for a check-in's "
+                                                                 "conversation: its first turn's message is the "
+                                                                 "server's brief, not the user's")
 
 
 class AiConversationResp(BaseResponse):

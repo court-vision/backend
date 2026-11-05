@@ -13,6 +13,10 @@ Two rules hold everything else up:
   claim that is never released (a crashed process) lapses on its own.
 
 Every function scopes by `user_id`: another user's conversation reads as missing.
+
+A conversation's `kind` is `chat` (the user started it) or `checkin` (one of
+Dime's check-ins started it, services/ai/checkins.py, with its title set at
+creation). The AI desk lists the chats; the check-ins are listed apart.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from services.ai import spend
 
 TITLE_LENGTH = 80
 OK = "ok"
+CHAT, CHECKIN = "chat", "checkin"
 
 
 def _now() -> datetime:
@@ -54,18 +59,19 @@ def title_of(message: str) -> str:
 
 
 @db_operation("ai.create_conversation")
-def create(user_id: int, team_id: Optional[int]) -> AiConversation:
-    return AiConversation.create(user_id=user_id, team_id=team_id)
+def create(user_id: int, team_id: Optional[int], *, kind: str = CHAT, title: Optional[str] = None) -> AiConversation:
+    return AiConversation.create(user_id=user_id, team_id=team_id, kind=kind, title=title)
 
 
 @db_operation("ai.list_conversations")
 def list_for(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """The user's chats, newest first. Check-in conversations are listed with the check-ins."""
     counts = dict(AiTurn.select(AiTurn.conversation_id, fn.COUNT(AiTurn.id))
                   .where(AiTurn.user_id == user_id)
                   .group_by(AiTurn.conversation_id)
                   .tuples())
     rows = (AiConversation.select()
-            .where(AiConversation.user_id == user_id)
+            .where(AiConversation.user_id == user_id, AiConversation.kind == CHAT)
             .order_by(AiConversation.updated_at.desc(), AiConversation.id.desc())
             .limit(limit))
     return [{"conversation": row, "turns": counts.get(row.id, 0)} for row in rows]

@@ -56,7 +56,8 @@ def owned(monkeypatch):
 
 def test_the_league_tools_follow_the_ledger_in_the_cached_prefix():
     names = [t["name"] for t in tools.AGENT_TOOLS]
-    assert names[-4:] == ["get_move_outcomes", "get_league", "get_league_activity", "get_draft_board"]
+    at = names.index("get_move_outcomes")
+    assert names[at:at + 4] == ["get_move_outcomes", "get_league", "get_league_activity", "get_draft_board"]
     assert league.LEAGUE_TOOL_NAMES <= tools.AGENT_TOOL_NAMES
     assert not league.LEAGUE_TOOL_NAMES & (tools.ASK_TOOL_NAMES | tools.ROUTER_TOOL_NAMES)
 
