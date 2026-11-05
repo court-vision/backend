@@ -78,11 +78,32 @@ class TestClaims:
         assert first is not None
         assert _claim(team, me) is None
         assert _claim(team, me, state="missed") is None
-        assert _claim(team, me, kind="pre_lock") is not None
-        assert _claim(team, me, manual=True) is not None and _claim(team, me, manual=True) is not None
+        run(checkins._settle(first, "done", None, None, 0, _now()))
+        second = _claim(team, me, kind="pre_lock")
+        assert second is not None
+        run(checkins._settle(second, "done", None, None, 0, _now()))
+        manual = _claim(team, me, manual=True)
+        assert manual is not None
+        run(checkins._settle(manual, "done", None, None, 0, _now()))
+        assert _claim(team, me, manual=True) is not None
         assert run(checkins._taken(team.team_id, [DAY])) == {("morning", DAY), ("pre_lock", DAY)}
         assert run(checkins._busy(team.team_id)) is True
         assert run(checkins._ran_since(team.team_id, _now() - timedelta(days=1))) == 4
+
+    def test_one_runs_per_team_at_a_time_whatever_a_tick_read_before(self, integration_db):
+        me, them = _user(1), _user(2)
+        team, other = _team(me), _team(them)
+        running = _claim(team, me)
+        assert running is not None
+        # Another slot, a manual run: refused at the insert while one runs (two overlapping ticks,
+        # or Run now during a tick, can't both start one)
+        assert _claim(team, me, kind="pre_lock") is None
+        assert _claim(team, me, manual=True) is None
+        # A missed or skipped one isn't running, so it still lands; another team runs alongside
+        assert _claim(team, me, kind="night", state="missed") is not None
+        assert _claim(other, them) is not None
+        run(checkins._settle(running, "failed", "AI_TIMEOUT", None, 0, _now()))
+        assert _claim(team, me, kind="pre_lock") is not None
 
     def test_missed_and_skipped_ones_close_at_once_and_don_t_count_toward_the_cap(self, integration_db):
         me = _user(1)
@@ -97,8 +118,10 @@ class TestClaims:
     def test_a_check_in_whose_process_died_is_swept_and_its_late_turn_still_settles(self, integration_db):
         me = _user(1)
         team = _team(me)
+        them = _user(2)
+        other = _team(them)
         old = _claim(team, me, started=_now() - timedelta(hours=1))
-        fresh = _claim(team, me, kind="pre_lock")
+        fresh = _claim(other, them, kind="pre_lock")
         assert run(checkins._sweep(_now() - timedelta(minutes=20), _now())) == 1
         assert AiCheckin.get_by_id(old).state == "failed" and AiCheckin.get_by_id(old).reason == "stale"
         assert AiCheckin.get_by_id(fresh).state == "running"

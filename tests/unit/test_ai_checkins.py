@@ -126,7 +126,8 @@ def tick(monkeypatch):
     monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
     monkeypatch.setattr(settings, "autopilot_team_ids", [23])
     monkeypatch.setattr(settings, "autopilot_checkins_per_day", 6)
-    state = SimpleNamespace(rows=[SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 0),
+    # Switched on Monday night, after Monday's own check-ins had closed
+    state = SimpleNamespace(rows=[SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 23),
                                                   paused_at=None)],
                             taken=set(), busy=False, ran=0, claims=[], started=[], swept=0)
 
@@ -204,6 +205,15 @@ class TestTick:
         monkeypatch.setattr(settings, "autopilot_team_ids", [23])
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         assert run(checkins.run_due(et(TUE, 9, 30)))["off"] is True and tick.started == []
+
+    def test_yesterday_s_check_ins_no_tick_reached_are_still_recorded_as_missed(self, tick):
+        # The scheduler was down from Monday morning to past the rollover: Monday's weekly and
+        # pre-lock are recorded missed on Tuesday's first tick, and Tuesday's follow-up still runs
+        tick.rows[0].active_since = et(MON, 0)
+        out = run(checkins.run_due(et(TUE, 9, 30)))
+        assert ("weekly", MON, "missed", "window_closed") in tick.claims
+        assert ("pre_lock", MON, "missed", "window_closed") in tick.claims
+        assert out["missed"] == 2 and tick.started == [(23, "night", MON, False)]
 
     def test_switched_on_after_the_window_closed_is_not_missed(self, tick):
         tick.rows[0].active_since = et(TUE, 15)
@@ -365,6 +375,14 @@ class TestRunNow:
         monkeypatch.setattr(settings, "autopilot_team_ids", [])
         with pytest.raises(AuthorizationError):
             run(checkins.run_now(42, 23, now=et(TUE, 10)))
+
+    def test_one_started_between_the_check_and_the_claim_is_refused_as_running(self, now_stubs, monkeypatch):
+        async def lost(*args, **kwargs):
+            return None
+        monkeypatch.setattr(checkins, "_start", lost)
+        with pytest.raises(ConflictError) as err:
+            run(checkins.run_now(42, 23, now=et(TUE, 10)))
+        assert err.value.error_code == "AI_CHECKIN_RUNNING"
 
 
 class TestNextSlot:

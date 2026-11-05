@@ -18,7 +18,8 @@
 --
 -- usr.ai_checkins is one row per check-in: claimed by its insert (one per team,
 -- kind and day, so ticks on two replicas can't both run it; a manual "run now"
--- is outside that rule), then settled with its turn's outcome and cost.
+-- is outside that rule; and one running per team, manual or not), then settled
+-- with its turn's outcome and cost.
 -- `missed` is a check-in whose window closed before it could run; `skipped`
 -- one that was refused (the check-ins' monthly budget, the day's cap).
 --
@@ -79,6 +80,12 @@ CREATE TABLE IF NOT EXISTS usr.ai_checkins (
 CREATE UNIQUE INDEX IF NOT EXISTS ai_checkins_slot_uq
     ON usr.ai_checkins (team_id, kind, nba_date)
     WHERE NOT manual;
+
+-- One check-in running per team, scheduled or manual: two ticks (or a tick and Run now) that both
+-- read the team as idle can't both start one. The stale sweep frees a team whose process died.
+CREATE UNIQUE INDEX IF NOT EXISTS ai_checkins_one_running_uq
+    ON usr.ai_checkins (team_id)
+    WHERE state = 'running';
 
 CREATE INDEX IF NOT EXISTS ai_checkins_team
     ON usr.ai_checkins (team_id, started_at DESC);

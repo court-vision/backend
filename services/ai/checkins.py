@@ -171,7 +171,7 @@ def _tips(days: list[date]) -> dict[date, time]:
 
 async def calendar(now: datetime) -> Calendar:
     today = fantasy_day(now)
-    tips = await _tips([today - timedelta(days=1), today, today + timedelta(days=1)])
+    tips = await _tips([today + timedelta(days=n) for n in (-2, -1, 0, 1)])
     current = schedule_service.get_current_matchup(today)
     return Calendar(today=today, tips=tips, matchup_start=current["start_date"] if current else None)
 
@@ -216,13 +216,13 @@ def _ran_since(team_id: int, since: datetime) -> int:
 def _claim(team_id: int, user_id: int, kind: str, nba_date: date, due_at: datetime, *, manual: bool,
            now: datetime, state: str = RUNNING, reason: Optional[str] = None) -> Optional[int]:
     """Insert the check-in's row; None when a scheduled one already has its slot (another tick
-    claimed it). A manual run is outside the one-per-slot rule."""
-    query = AiCheckin.insert(team_id=team_id, user_id=user_id, kind=kind, nba_date=nba_date, manual=manual,
+    claimed it), or when the team already has one running (the unique index makes that check atomic,
+    whatever an earlier read said). A manual run is outside the one-per-slot rule only."""
+    return (AiCheckin.insert(team_id=team_id, user_id=user_id, kind=kind, nba_date=nba_date, manual=manual,
                              due_at=due_at, state=state, reason=reason, started_at=now,
                              finished_at=None if state == RUNNING else now)
-    if not manual:
-        query = query.on_conflict_ignore()
-    return query.execute()
+            .on_conflict_ignore()
+            .execute())
 
 
 @db_operation("ai.checkin_attach")
@@ -486,7 +486,9 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
     if not rows:
         return out
     cal = await calendar(now)
-    slots = cal.slots()
+    # Yesterday's too: a check-in whose window closed while no tick ran (the scheduler down past
+    # the 3 AM rollover) is still recorded as missed. Only today's can be due.
+    slots = cal.slots(cal.today - timedelta(days=1)) + cal.slots()
     days = sorted({s.nba_date for s in slots})
     for row in rows:
         team_id, user_id = row.team_id_id, row.user_id_id
@@ -552,7 +554,9 @@ async def run_now(user_id: int, team_id: int, kind: Optional[str] = None,
     cal = await calendar(now)
     kind = kind or default_kind(now, cal.today, cal.tips.get(cal.today), cal.matchup_start)
     checkin_id = await _start(team_id, user_id, kind, day_of(kind, cal.today), now, manual=True, now=now)
-    row = await _get(checkin_id) if checkin_id is not None else None
+    if checkin_id is None:  # one started between the check above and the claim
+        raise ConflictError("AI_CHECKIN_RUNNING", "A check-in is already running on this team; wait for it to finish")
+    row = await _get(checkin_id)
     if row is None:
         raise AppError("AI_CHECKIN_INVALID", "The check-in didn't start; try again", status_code=500)
     return row
