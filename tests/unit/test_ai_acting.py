@@ -493,6 +493,24 @@ class TestSend:
         run(acting._send(TEAM, LEAGUE, prop(kind="lane", action={"op": "stop", "lane_id": 5})))
         assert routes[-1] == ("stop", 5, 31, "dime")
 
+    def test_a_lineup_already_set_on_espn_is_sent_and_still_pins_its_bench_as_dime_s(self, routes, monkeypatch):
+        from services import steering
+        done = []
+
+        async def mark_sent(proposal_id, audit_id=None):
+            done.append(("sent", proposal_id))
+
+        async def pin(proposal_id, now=None, *, by="user"):
+            done.append(("pinned", proposal_id, by))
+
+        monkeypatch.setattr(proposals, "live_moves", lambda board, row: [])
+        monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+        monkeypatch.setattr(steering, "pin_benched", pin)
+        msg, audit_id = run(acting._send(TEAM, LEAGUE, prop(kind="lineup", scoring_period_id=1)))
+        assert (msg, audit_id) == ("The lineup was already set this way on ESPN", None)
+        assert done == [("sent", 31), ("pinned", 31, "dime")]
+        assert not routes                                             # nothing went to ESPN
+
 
 class TestWords:
     def test_a_live_chip_says_what_it_says_outside_a_check_in(self, monkeypatch):

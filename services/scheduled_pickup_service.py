@@ -653,6 +653,15 @@ class ScheduledPickupService:
                              lane_status=lane_status)
                 return None
 
+        by_dime = bool(getattr(row, "made_by_autopilot", False)) and row.audit_id is None
+        if by_dime:
+            # Dime scheduled this itself: it goes only if Dime still acts on adds and drops here now
+            # (a pause, a lower mode or a switch turned off since stops it). A user's pickup isn't asked.
+            from services.ai import acting
+            stop = await acting.pickup_block(row.team_id, row.user_id)
+            if stop is not None:
+                return await settle(row, now, SKIPPED, stop[0], detail=stop[1])
+
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)
         except NotFoundError:
@@ -730,6 +739,12 @@ class ScheduledPickupService:
         blocked = budget_block(acq, nba_date, day_adds=day_adds)
         if blocked:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
+        if by_dime and add is not None:
+            # The adds left now, not when Dime scheduled it: the user may have used some since
+            from services.ai import acting
+            reserve = acting.reserve_block(acq, nba_date)
+            if reserve is not None:
+                return await settle(row, now, SKIPPED, acting.P_RESERVE, detail=reserve, team_name=team_name)
 
         try:
             holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,

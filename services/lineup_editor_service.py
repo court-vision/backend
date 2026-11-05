@@ -292,7 +292,7 @@ class LineupEditorService:
             from services.ai import proposals
             await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
             # Dime benched them on purpose: auto-lineup's fill leaves them benched that day
-            await steering.pin_benched(req.proposal_id)
+            await steering.pin_benched(req.proposal_id, by="dime" if source == "autopilot" else "user")
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,

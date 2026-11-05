@@ -315,12 +315,9 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
             used = await _adds_sent(team_id, week["start_date"], week["end_date"])
             if used >= settings.autopilot_adds_per_matchup:
                 return R_CAP_MATCHUP, f"Dime has made its {settings.autopilot_adds_per_matchup} add(s) this matchup"
-        acq = board.acquisitions
-        from services.acquisitions import in_current_matchup, matchup_room
-        room = matchup_room(acq) if acq is not None else None
-        if room is not None and in_current_matchup(acq, row.nba_date) and room <= settings.autopilot_adds_reserve:
-            return R_RESERVE, (f"{room} of the league's adds left this matchup; Dime keeps "
-                               f"{settings.autopilot_adds_reserve} for you")
+        reserve = reserve_block(board.acquisitions, row.nba_date)
+        if reserve is not None:
+            return R_RESERVE, reserve
     if row.drop_player_id is not None:
         held = next((p for p in board.players if p.player_id == row.drop_player_id), None)
         name = held.name if held else (row.drop_name or "That player")
@@ -332,6 +329,43 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
         if not out and await _recent_adds(team_id, row.drop_player_id, since, since_day):
             return R_CHURN, (f"{name} joined the team in the last {settings.autopilot_churn_hours} hours, and isn't "
                              "out, so Dime won't drop him yet")
+    return None
+
+
+def reserve_block(acq: Any, day: date) -> Optional[str]:
+    """Why an add for `day` would take one of the league's adds Dime keeps for the user, as the
+    sentence the user reads; None when there is room (or no per-matchup limit, or `day` is in a
+    later matchup)."""
+    from services.acquisitions import in_current_matchup, matchup_room
+    room = matchup_room(acq) if acq is not None else None
+    if room is not None and in_current_matchup(acq, day) and room <= settings.autopilot_adds_reserve:
+        return f"{room} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
+    return None
+
+
+# A pickup Dime scheduled itself, re-checked when it comes due: its reasons (usr.scheduled_pickups.reason)
+P_OFF, P_ACTING_OFF, P_PAUSED = "dime_off", "dime_acting_off", "dime_paused"
+P_NOT_ALLOWED, P_NOT_ACTING, P_RESERVE = "dime_not_allowed", "dime_not_acting", "dime_reserve"
+
+
+async def pickup_block(team_id: int, user_id: int) -> Optional[tuple[str, str]]:
+    """Whether Dime still sends adds and drops itself on the team, asked when a pickup it scheduled
+    comes due (services/scheduled_pickup_service.py): the switches, the team's pause and the mode as
+    they are now, not as they were when it was scheduled. (reason, sentence) when the pickup may no
+    longer go; None when it may. The add caps aren't asked again: the pickup counted toward them
+    when it was scheduled."""
+    from services.ai import checkins
+    if not settings.ai_enabled or not settings.autopilot_enabled:
+        return P_OFF, "Dime is switched off on the server"
+    if not autonomy.acting_available():
+        return P_ACTING_OFF, "Dime's acting is switched off on the server"
+    autopilot = await _autopilot_row(team_id)
+    if autopilot is None or autopilot.paused_at is not None:
+        return P_PAUSED, "Dime is paused on this team"
+    if not checkins.allowed(team_id, user_id):
+        return P_NOT_ALLOWED, "This team isn't open to autopilot"
+    if autonomy.effective(autopilot, autonomy.ADDS_DROPS) != autonomy.ACT:
+        return P_NOT_ACTING, "Dime no longer makes adds and drops itself on this team"
     return None
 
 
@@ -371,6 +405,8 @@ async def _send(team: Any, league_info: Any, row: Any) -> tuple[str, Optional[in
         moves = proposals.live_moves(board, row)
         if not moves:
             await proposals.mark_sent(row.id)
+            # Nothing to write, but the chip still says who sits: the fill mustn't start them again
+            await steering.pin_benched(row.id, by="dime")
             return "The lineup was already set this way on ESPN", None
         req = ApplyLineupMovesReq(
             moves=[LineupMoveReq(player_id=m.player_id, from_slot_id=m.from_slot_id, to_slot_id=m.to_slot_id)

@@ -246,7 +246,7 @@ async def clear(team_id: int, hold_id: int, *, by: str = "user", now: Optional[d
 
 
 @db_operation("steering.pin_benched")
-def _pin_benched(row: Any, now: datetime) -> int:
+def _pin_benched(row: Any, now: datetime, by: str) -> int:
     from db.models.team_holds import TeamHold
     made = 0
     for m in row.moves or []:
@@ -257,14 +257,15 @@ def _pin_benched(row: Any, now: datetime) -> int:
                         kind=PIN, player_id=m["espn_id"], nba_player_id=m.get("nba_player_id"),
                         player_name=m.get("name") or str(m["espn_id"]), player_team=m.get("team"),
                         starts_on=row.nba_date, ends_on=row.nba_date, reason=(row.reason or "")[:REASON_MAX] or "Benched",
-                        proposal_id=row.id, applied_by="user", created_at=now)
+                        proposal_id=row.id, applied_by=by, created_at=now)
         made += 1
     return made
 
 
-async def pin_benched(proposal_id: int, now: Optional[datetime] = None) -> None:
+async def pin_benched(proposal_id: int, now: Optional[datetime] = None, *, by: str = "user") -> None:
     """A sent lineup chip's benched players, pinned for its day: the fill won't start them again.
-    Only while steering is on; never raises (the lineup write is done)."""
+    `by` is who sent the chip: 'user', or 'dime' when Dime sent it itself. Only while steering is
+    on; never raises (the lineup write is done)."""
     from db.models.ai_conversations import AiProposal
     if not enabled():
         return
@@ -272,7 +273,7 @@ async def pin_benched(proposal_id: int, now: Optional[datetime] = None) -> None:
         row = await run_db("steering.pin_row", lambda pid: AiProposal.get_or_none(AiProposal.id == pid), proposal_id)
         if row is None or row.kind != "lineup":
             return
-        made = await _pin_benched(row, now or datetime.now(timezone.utc))
+        made = await _pin_benched(row, now or datetime.now(timezone.utc), by)
         if made:
             log.info("steering_pinned_benched", proposal_id=proposal_id, pins=made)
     except Exception:
