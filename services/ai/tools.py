@@ -353,12 +353,17 @@ GET_MY_TEAMS: dict[str, Any] = {
     "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
 
-async def _owned(ctx: ToolContext | None, team_id: int) -> tuple[OwnedTeamContext, LeagueInfo]:
+async def _owned_team(ctx: ToolContext | None, team_id: int) -> OwnedTeamContext:
     if ctx is None:
         raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
     team = await run_db("ai.owned_team", ensure_team_owned, team_id, ctx.user_id)
     if team is None:
         raise AppError("TEAM_NOT_FOUND", f"Team {team_id} is not one of the user's teams")
+    return team
+
+
+async def _owned(ctx: ToolContext | None, team_id: int) -> tuple[OwnedTeamContext, LeagueInfo]:
+    team = await _owned_team(ctx, team_id)
     return team, await load_owned_league_info(team)
 
 
@@ -1271,17 +1276,13 @@ async def _get_move_outcomes(args: MoveOutcomesInput, ctx: ToolContext | None) -
 # rosters, the league's adds and drops, and a draft room's board (services/ai/league.py).
 
 async def _get_league(args: league.GetLeagueInput, ctx: ToolContext | None) -> dict[str, Any]:
-    team, league_info = await _owned(ctx, args.team_id)
-    return await league.get_league(team, league_info, args)
+    team = await _owned_team(ctx, args.team_id)
+    league.espn_league(team)  # a Yahoo team is refused before its credentials are loaded
+    return await league.get_league(team, await load_owned_league_info(team), args)
 
 
 async def _get_league_activity(args: league.LeagueActivityInput, ctx: ToolContext | None) -> dict[str, Any]:
-    if ctx is None:
-        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
-    team = await run_db("ai.owned_team", ensure_team_owned, args.team_id, ctx.user_id)
-    if team is None:
-        raise AppError("TEAM_NOT_FOUND", f"Team {args.team_id} is not one of the user's teams")
-    return await league.get_league_activity(team, args)
+    return await league.get_league_activity(await _owned_team(ctx, args.team_id), args)
 
 
 async def _get_draft_board(args: league.DraftBoardInput, ctx: ToolContext | None) -> dict[str, Any]:

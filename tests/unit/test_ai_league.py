@@ -41,15 +41,17 @@ async def _run_db(name, fn, *args, **kw):
 
 @pytest.fixture
 def owned(monkeypatch):
-    async def owned_team(ctx, team_id):
-        if team_id != 21:
-            raise AppError("TEAM_NOT_FOUND", f"Team {team_id} is not one of the user's teams")
-        return TEAM, SimpleNamespace(provider="espn")
+    hydrated = []
 
-    monkeypatch.setattr(tools, "_owned", owned_team)
+    async def load_credentials(team):
+        hydrated.append(team.team_id)
+        return SimpleNamespace(provider="espn")
+
+    monkeypatch.setattr(tools, "load_owned_league_info", load_credentials)
     monkeypatch.setattr(tools, "ensure_team_owned", lambda team_id, user_id: TEAM if team_id == 21 else None)
     monkeypatch.setattr(tools, "run_db", _run_db)
     monkeypatch.setattr(league, "run_db", _run_db)
+    return hydrated
 
 
 def test_the_league_tools_follow_the_ledger_in_the_cached_prefix():
@@ -75,6 +77,7 @@ def test_get_league_reads_an_owned_team_s_league(owned, monkeypatch):
     body = json.loads(out.content)
     assert body["team_id"] == 21 and body["standings"][0]["mine"] is True
     assert seen == {"roster_ids": [1, 4], "all_rosters": False, "day": date(2026, 11, 2)}
+    assert owned == [21]
 
 
 def test_get_league_refuses_someone_else_s_team_and_too_many_rosters(owned):
@@ -82,6 +85,16 @@ def test_get_league_refuses_someone_else_s_team_and_too_many_rosters(owned):
     assert out.is_error and "not one of the user's teams" in out.content
     out = _run("get_league", {"team_id": 21, "rosters": list(range(1, 30))})
     assert out.is_error and "Invalid input" in out.content
+    assert owned == []
+
+
+def test_a_yahoo_team_is_refused_before_its_credentials_are_loaded(owned, monkeypatch):
+    yahoo = SimpleNamespace(**{**vars(TEAM), "league_info_json": json.dumps(
+        {"provider": "yahoo", "league_id": 5, "team_name": "Y", "year": 2027})})
+    monkeypatch.setattr(tools, "ensure_team_owned", lambda team_id, user_id: yahoo)
+    out = _run("get_league", {"team_id": 21})
+    assert out.is_error and "ESPN leagues only" in out.content and "Yahoo team" in out.content
+    assert owned == []
 
 
 def test_a_league_read_refusal_reaches_the_model(owned, monkeypatch):

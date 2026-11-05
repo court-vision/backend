@@ -168,6 +168,15 @@ GET_DRAFT_BOARD: dict[str, Any] = {
 LEAGUE_TOOLS: list[dict[str, Any]] = [GET_LEAGUE, GET_LEAGUE_ACTIVITY, GET_DRAFT_BOARD]
 
 
+def espn_league(team: OwnedTeamContext) -> LeagueInfo:
+    """The team's league as stored, without its credentials, refusing a Yahoo team before
+    anything of it is loaded."""
+    info = public_league_info(team)
+    if info.provider != FantasyProvider.ESPN:
+        raise AppError("LEAGUE_ESPN_ONLY", "The league is read for ESPN leagues only, and this is a Yahoo team")
+    return info
+
+
 # ---- get_league ----
 
 async def get_league(team: OwnedTeamContext, league_info: LeagueInfo, args: GetLeagueInput) -> dict[str, Any]:
@@ -183,9 +192,7 @@ async def get_league_activity(team: OwnedTeamContext, args: LeagueActivityInput,
     from services import move_ledger
     from services.matchup_days import fantasy_today
 
-    info = public_league_info(team)
-    if info.provider != FantasyProvider.ESPN:
-        raise AppError("LEAGUE_ESPN_ONLY", "League activity is read for ESPN leagues only, and this is a Yahoo team")
+    info = espn_league(team)
     key = move_ledger.league_key_of(info)
     own = await run_db("league.own_team", move_ledger.own_provider_team_id, key, info)
     today = today or fantasy_today()
