@@ -117,6 +117,19 @@ def test_a_paid_check_needs_an_approved_harness(monkeypatch, tmp_path):
     assert run.approved()
 
 
+def test_a_resumed_variant_refuses_rows_of_other_agent_code(loaded, monkeypatch, tmp_path):
+    from pydantic import SecretStr
+
+    monkeypatch.setattr(settings, "anthropic_api_key", SecretStr("sk-test"))
+    row = {"id": "market", "model": settings.ai_agent_model, "effort": settings.ai_agent_effort, "build": loaded.build,
+           "crawled_at": loaded.crawled_at.isoformat(), "agent": answers.agent_sha()}
+    # Another version of the agent's code, or another crawl of the same build
+    for changed in ({"agent": "0" * 12}, {"crawled_at": "2026-10-21T07:00:00+00:00"}):
+        (tmp_path / "results.jsonl").write_text(json.dumps({**row, **changed}) + "\n")
+        with pytest.raises(SystemExit, match="new --variant"):
+            asyncio.run(answers.run(loaded, [], tmp_path, max_usd=1.0, model=None))
+
+
 def _map_file(tmp_path):
     path = tmp_path / "app-map.json"
     path.write_text(json.dumps(MAP))

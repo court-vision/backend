@@ -51,7 +51,8 @@ Nothing is written to it. Paid runs need `ANTHROPIC_API_KEY`.
   queries to tune the search against next.
 
 A paid run names a new `--variant` per measurement and refuses to add to rows
-of another model, effort or map. It refuses to start until the harness (the
+of another model, effort, map (the crawl, not only the build) or version of
+the agent's code (`services/ai`). It refuses to start until the harness (the
 runner, the grader and the cases) is approved, so a score can't come from a
 grader that changed underneath it.
 

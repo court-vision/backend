@@ -21,6 +21,7 @@ it stopped: rows already in the variant's results.jsonl are skipped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from contextlib import ExitStack
@@ -37,6 +38,17 @@ FIXTURE_TEAMS = [{"team_id": 1, "provider": "espn", "scoring": "points", "points
 RETRYABLE = {"AI_BUSY", "AI_UNAVAILABLE"}
 OFF_LIMITS = ("Not part of this eval: here only find_in_app and show_place answer, so answer from the app map "
               "alone and don't use this tool again.")
+# The agent's code a row was measured on (prompt, playbook, tools, search, place check), as ai_route keeps its router's
+AGENT_CODE = "services/ai"
+
+
+def agent_sha() -> str:
+    root = Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    for path in sorted((root / AGENT_CODE).rglob("*")):
+        if path.is_file() and path.suffix in {".py", ".md"}:
+            digest.update(str(path.relative_to(root)).encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()[:12]
 
 
 def _read(path: Path) -> list[dict[str, Any]]:
@@ -137,10 +149,12 @@ async def run(loaded: Any, cases: list[dict[str, Any]], out: Path, *, max_usd: f
         raise SystemExit("ANTHROPIC_API_KEY isn't set: the answers check asks the real model")
     results = out / "results.jsonl"
     rows = _read(results)
-    asked_of = {"model": model or settings.ai_agent_model, "effort": settings.ai_agent_effort, "build": loaded.build}
+    # A later crawl of the same build replaces its map, so the crawl is part of what was measured
+    asked_of = {"model": model or settings.ai_agent_model, "effort": settings.ai_agent_effort, "build": loaded.build,
+                "crawled_at": loaded.crawled_at.isoformat(), "agent": agent_sha()}
     if rows and any({k: r.get(k) for k in asked_of} != asked_of for r in rows):
-        raise SystemExit(f"{results} holds rows from another model, effort or map: a new measurement "
-                         "goes in a new --variant")
+        raise SystemExit(f"{results} holds rows from another model, effort, map or version of the agent's code: "
+                         "a new measurement goes in a new --variant")
     done_ids = {r["id"] for r in rows}
     pending = [c for c in cases if c["id"] not in done_ids]
     spent = sum(r.get("cost_usd", 0) for r in [*rows, *_read(out / "errors.jsonl")])
