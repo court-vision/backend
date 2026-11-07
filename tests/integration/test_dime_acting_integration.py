@@ -217,6 +217,23 @@ class TestTheActionsLog:
         recent = run(acting._recent(team.team_id, 3))
         assert [a.outcome for a in recent] == ["refused", "blocked", "sent"]
 
+    def test_dime_s_moves_list_the_call_and_the_check_in_newest_first(self, team):
+        checkin_id, conv = _checkin(team)
+        p = _proposal(team, conv)
+        d = _decision(team, checkin_id, p)
+        _action(team, checkin_id=checkin_id, decision_id=d.id, proposal_id=p.id)
+        _action(team, outcome="blocked", rule="cap_day", message="Dime has made its 2 add(s)", capability="lanes",
+                kind="lane", adds=0)
+        listed = run(acting.list_actions(team.user_id_id, team.team_id))
+        assert [a["outcome"] for a in listed] == ["blocked", "sent"]
+        held, sent = listed
+        assert (held["row"], held["rule"], held["summary"], held["conversation_id"]) == ("lanes", "cap_day", None, None)
+        assert (sent["summary"], sent["conversation_id"], sent["checkin_kind"], sent["proposal_id"]) == \
+            ("Add Kawhi", conv.id, "morning", p.id)
+        assert sent["at"].tzinfo is not None
+        assert run(acting.list_actions(team.user_id_id, team.team_id, limit=1))[0]["outcome"] == "blocked"
+        assert run(acting.list_actions(team.user_id_id + 1)) == []                 # only the user's own
+
     def test_a_team_s_actions_go_with_it(self, team):
         _action(team)
         Team.delete().where(Team.team_id == team.team_id).execute()

@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-from peewee import IntegrityError, fn
+from peewee import JOIN, IntegrityError, fn
 
 from core.errors import AppError, ProviderAuthError
 from core.logging import get_logger
@@ -232,6 +232,23 @@ def _recent(team_id: int, limit: int) -> list[AutopilotAction]:
                 .order_by(AutopilotAction.created_at.desc(), AutopilotAction.id.desc()).limit(limit))
 
 
+@db_operation("acting.actions_list")
+def _list(user_id: int, team_id: Optional[int], limit: int) -> list[Any]:
+    """The user's actions, newest first, each with the call that made it and its check-in's
+    conversation (either may be gone: the log outlives them)."""
+    from db.models.autopilot import AiDecision
+    q = (AutopilotAction
+         .select(AutopilotAction, AiDecision.summary.alias("call_summary"),
+                 AiCheckin.conversation_id.alias("conversation"), AiCheckin.kind.alias("checkin_kind"))
+         .join(AiDecision, JOIN.LEFT_OUTER, on=(AutopilotAction.decision_id == AiDecision.id))
+         .switch(AutopilotAction)
+         .join(AiCheckin, JOIN.LEFT_OUTER, on=(AutopilotAction.checkin_id == AiCheckin.id))
+         .where(AutopilotAction.user_id == user_id))
+    if team_id is not None:
+        q = q.where(AutopilotAction.team_id == team_id)
+    return list(q.order_by(AutopilotAction.created_at.desc(), AutopilotAction.id.desc()).limit(limit).objects())
+
+
 # ------------------------------- shapes ------------------------------- #
 
 
@@ -245,6 +262,21 @@ async def actions_of(decision_ids: list[int]) -> dict[int, dict[str, Any]]:
     """The action each decision led to, by decision id (the ones that led to none are absent)."""
     rows = await _of_decisions(decision_ids)
     return {did: action_view(a) for did, a in rows.items()}
+
+
+def listed_view(row: Any) -> dict[str, Any]:
+    """An action as the AI desk's Dime's moves lists it (an `AiAutopilotActionItem`)."""
+    return {"action_id": row.id, "team_id": row.team_id_id, "row": row.capability, "kind": row.kind,
+            "date": row.nba_date, "adds": row.adds, "outcome": row.outcome, "rule": row.rule,
+            "message": row.message, "summary": getattr(row, "call_summary", None),
+            "checkin_id": row.checkin_id_id, "conversation_id": getattr(row, "conversation", None),
+            "checkin_kind": getattr(row, "checkin_kind", None), "proposal_id": row.proposal_id_id,
+            "at": _aware(row.created_at) if row.created_at else None}
+
+
+async def list_actions(user_id: int, team_id: Optional[int] = None, limit: int = 100) -> list[dict[str, Any]]:
+    """Everything Dime did on its own for the user (on one team, or all), newest first."""
+    return [listed_view(r) for r in await _list(user_id, team_id, limit)]
 
 
 async def sent_counts(checkin_ids: list[int]) -> dict[int, int]:

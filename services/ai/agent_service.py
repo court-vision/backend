@@ -19,6 +19,7 @@ from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
     AiActing,
+    AiAutopilotActionItem,
     AiAutopilotTeam,
     AiCheckinsData,
     AiCheckinSummary,
@@ -33,6 +34,7 @@ from schemas.ai import (
     AiUsageData,
 )
 from services.ai import (
+    acting,
     agent,
     ai_settings,
     autonomy,
@@ -258,6 +260,12 @@ class AgentService:
         await checkins.set_autopilot(user_id, team_id, change)
         teams = {t["team_id"]: t for t in await checkins.teams_of(user_id)}
         return AiAutopilotTeam(**teams[team_id])
+
+    @staticmethod
+    async def actions(user_id: int, team_id: Optional[int], limit: int) -> list[AiAutopilotActionItem]:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return [AiAutopilotActionItem(**a) for a in await acting.list_actions(user_id, team_id, limit)]
 
     # ---- the account's AI features (services/ai/ai_settings.py) ----
 

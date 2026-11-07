@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from api.deps import UserContext, get_db_user
 from core.errors import NotFoundError
 from schemas.ai import (
+    AiAutopilotActionsResp,
     AiAutopilotReq,
     AiAutopilotResp,
     AiCheckinResp,
@@ -474,6 +475,27 @@ async def set_autopilot(
     else:
         message = "Automations updated"
     return AiAutopilotResp(status=ApiStatus.SUCCESS, message=message, data=data)
+
+
+@router.get(
+    "/actions",
+    response_model=AiAutopilotActionsResp,
+    summary="Everything Dime did on its own",
+    description=(
+        "The moves Dime's check-ins handled themselves on automations at AI, newest first (with `team_id`, that "
+        "team's only): each one sent, or held back (blocked by a rule of the policy, refused by ESPN or the "
+        "route, or failed) and left as a chip, with the automation it counts under, the call Dime logged for it "
+        "and its check-in's conversation."
+    ),
+    responses={**_AGENT_ERRORS, 404: _CHECKIN_ERRORS[404]},
+)
+async def list_actions(
+    team_id: Optional[int] = Query(None, gt=0, le=2_147_483_647),
+    limit: int = Query(100, ge=1, le=200),
+    user: UserContext = Depends(get_db_user),
+) -> AiAutopilotActionsResp:
+    data = await AgentService.actions(user.user_id, team_id, limit)
+    return AiAutopilotActionsResp(status=ApiStatus.SUCCESS, message="Dime's moves", data=data)
 
 
 @router.get(

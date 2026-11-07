@@ -404,8 +404,8 @@ AiActionOutcome = Literal["sent", "blocked", "refused", "failed"]
 
 
 class AiDecisionAction(ApiModel):
-    """What Dime did about a change on its own, on a team where that kind of move acts (the Dime
-    autopilot plan, step 5; usr.autopilot_actions). A blocked or refused move is left as a chip."""
+    """What Dime did about a change on its own, on automations at AI (the Dime autopilot plan, step 5;
+    usr.autopilot_actions). A blocked or refused move is left as a chip."""
 
     outcome: AiActionOutcome = Field(..., description="sent (it went out) · blocked (a rule of the policy stopped it "
                                                       "before anything was sent) · refused (the route or ESPN said "
@@ -558,6 +558,33 @@ class AiActing(ApiModel):
     steering: bool = Field(..., description="DIME_STEERING_ENABLED: Dime's steering chips exist at all")
     writes: bool = Field(..., description="ROSTER_WRITES_ENABLED: writes to ESPN are on")
     policy: AiActingPolicy
+
+
+class AiAutopilotActionItem(ApiModel):
+    """One move Dime handled on its own (usr.autopilot_actions), as the AI desk's Dime's moves lists it."""
+
+    action_id: int
+    team_id: int
+    row: Literal["lineup", "daily_actions", "lanes", "late_scratch"] = Field(
+        ..., description="The automation it counts under")
+    kind: str = Field(..., description="The chip's kind: transaction, scheduled, lineup, steer, lane, cancel_pickup")
+    date: date_type = Field(..., description="The fantasy day the move is for")
+    adds: int = Field(0, description="Players it adds (what Dime's caps count)")
+    outcome: AiActionOutcome
+    rule: Optional[str] = Field(None, description="The rule that held it back, or the error code")
+    message: str = Field(..., description="What happened, in a sentence")
+    summary: Optional[str] = Field(None, description="The call Dime logged for it; null once that is gone")
+    checkin_id: Optional[int] = None
+    conversation_id: Optional[int] = Field(None, description="The check-in's conversation, to open it")
+    checkin_kind: Optional[AiCheckinKind] = None
+    proposal_id: Optional[int] = Field(None, description="The chip; a held-back one can still be sent there")
+    at: Optional[datetime] = None
+
+
+class AiAutopilotActionsResp(BaseResponse):
+    """Response for GET /v1/internal/ai/actions."""
+
+    data: Optional[list[AiAutopilotActionItem]] = None
 
 
 class AiFeatures(ApiModel):

@@ -251,6 +251,23 @@ def test_autopilot_takes_the_check_ins_the_switch_and_the_levels(authed_client, 
     assert len(seen) == 5
 
 
+def test_dime_s_moves(authed_client, user, invited, monkeypatch):
+    from services.ai import acting
+    asked = []
+
+    async def list_actions(user_id, team_id=None, limit=100):
+        asked.append((user_id, team_id, limit))
+        return [{"action_id": 70, "team_id": 21, "row": "daily_actions", "kind": "transaction", "date": "2026-11-10",
+                 "adds": 1, "outcome": "sent", "rule": None, "message": "Sent by Dime: Added Kawhi Leonard",
+                 "summary": "Add Kawhi", "checkin_id": 9, "conversation_id": 31, "checkin_kind": "morning",
+                 "proposal_id": 5, "at": "2026-11-10T14:00:00+00:00"}]
+    monkeypatch.setattr(acting, "list_actions", list_actions)
+    r = authed_client.get(f"{BASE}/actions?limit=20")
+    assert r.status_code == 200 and r.json()["data"][0]["row"] == "daily_actions"
+    assert r.json()["data"][0]["conversation_id"] == 31 and asked == [(42, None, 20)]
+    assert authed_client.get(f"{BASE}/actions?limit=0").status_code == 422
+
+
 def test_the_account_s_ai_features(authed_client, user, invited, monkeypatch):
     from services.ai import ai_settings
     store = {"features": ai_settings.AiSettings()}
