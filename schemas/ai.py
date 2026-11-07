@@ -432,8 +432,8 @@ class AiDecisionBlock(ApiModel):
     reason: str
     proposal_id: Optional[int] = Field(None, description="The shadow proposal behind a change")
     verdict: Optional[AiVerdict] = Field(None, description="The user's call on it; null until they make one")
-    action: Optional[AiDecisionAction] = Field(None, description="What Dime did about it on its own, where its kind "
-                                                                 "of move acts; null in shadow and suggest")
+    action: Optional[AiDecisionAction] = Field(None, description="What Dime did about it on its own, where its row "
+                                                                 "is at AI; null where the change is a review")
 
 
 AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock], Field(discriminator="type")]
@@ -470,7 +470,7 @@ AiCheckinState = Literal["running", "done", "failed", "missed", "skipped"]
 
 
 class AiCheckinSummary(ApiModel):
-    """One check-in: a turn Dime started itself, about one fantasy day, in shadow."""
+    """One check-in: a turn Dime started itself, about one fantasy day."""
 
     checkin_id: int
     team_id: int
