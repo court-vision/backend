@@ -51,7 +51,7 @@ from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
-from services.ai import app_map, league, memory
+from services.ai import app_map, automations, decisions, league, memory
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -181,6 +181,9 @@ class ToolContext:
     conversation_id: Optional[int] = None
     # The frontend build the user has open: find_in_app reads that build's app map
     build: Optional[str] = None
+    # The check-in this turn is (services/ai/checkins.py): its proposals are stored in shadow,
+    # and only it may log decisions
+    checkin_id: Optional[int] = None
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -789,7 +792,8 @@ async def _propose_move(args: ProposeMoveInput, ctx: ToolContext | None) -> dict
     if ctx.conversation_id is None:
         raise AppError("AI_NO_CONVERSATION", "A move can only be proposed inside a conversation")
     team, league_info = await _owned(ctx, args.team_id)
-    return await propose_move(ctx.user_id, ctx.conversation_id, team, league_info, args)
+    return await propose_move(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                              shadow=ctx.checkin_id is not None)
 
 
 async def _get_lineup(args: GetLineupInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -803,7 +807,8 @@ async def _propose_lineup(args: ProposeLineupInput, ctx: ToolContext | None) -> 
     if ctx.conversation_id is None:
         raise AppError("AI_NO_CONVERSATION", "A lineup can only be proposed inside a conversation")
     team, league_info = await _owned(ctx, args.team_id)
-    return await propose_lineup(ctx.user_id, ctx.conversation_id, team, league_info, args)
+    return await propose_lineup(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                                shadow=ctx.checkin_id is not None)
 
 
 async def _plan_streams(args: PlanStreamsInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -1296,17 +1301,43 @@ async def _get_draft_board(args: league.DraftBoardInput, ctx: ToolContext | None
     return await league.get_draft_board(room, args)
 
 
+# Dime's check-ins (the Dime autopilot plan, step 3): what the automations are set to do,
+# and what the check-ins decided. log_decision is a check-in's own (CHECKIN_ONLY_TOOLS).
+
+async def _get_automations(args: automations.GetAutomationsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, _ = await _owned(ctx, args.team_id)
+    return await automations.get_automations(team, ctx.user_id)
+
+
+async def _get_decisions(args: decisions.GetDecisionsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if await run_db("ai.owned_team", ensure_team_owned, args.team_id, ctx.user_id) is None:
+        raise AppError("TEAM_NOT_FOUND", f"Team {args.team_id} is not one of the user's teams")
+    return await decisions.get_decisions(ctx.user_id, args)
+
+
+async def _log_decision(args: decisions.LogDecisionInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await decisions.log_decision(ctx.user_id, ctx.checkin_id, args)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
-# memory, then the move ledger, then the league tools. The order is part of every
-# request's cached prefix: append, never reorder.
+# memory, then the move ledger, then the league tools, then the automations and
+# the check-ins' decisions. The order is part of every request's cached prefix:
+# append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
-    *league.LEAGUE_TOOLS,
+    *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
+# A check-in's conversation gets these after the agent's (and its display tools)
+CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.LOG_DECISION]
+CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONLY_TOOLS)
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
 ROUTER_TOOLS: list[dict[str, Any]] = [TOOLS[0], GET_MY_TEAMS]
@@ -1350,8 +1381,11 @@ _REGISTRY: dict[str, _Tool] = {
     league.GET_LEAGUE_NAME: _Tool(league.GetLeagueInput, _get_league),
     league.GET_LEAGUE_ACTIVITY_NAME: _Tool(league.LeagueActivityInput, _get_league_activity),
     league.GET_DRAFT_BOARD_NAME: _Tool(league.DraftBoardInput, _get_draft_board),
+    automations.GET_AUTOMATIONS_NAME: _Tool(automations.GetAutomationsInput, _get_automations),
+    decisions.GET_DECISIONS_NAME: _Tool(decisions.GetDecisionsInput, _get_decisions),
+    decisions.LOG_DECISION_NAME: _Tool(decisions.LogDecisionInput, _log_decision),
 }
-assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | AGENT_TOOL_NAMES == set(_REGISTRY), \
+assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"
 
 

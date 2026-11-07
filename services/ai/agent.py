@@ -21,6 +21,13 @@ A turn is the router's bounded loop grown up:
 
 Every turn writes one usr.ai_turns row, failed or not (a failed turn can
 still have cost money), and logs one `ai_turn` line.
+
+A check-in (services/ai/checkins.py) is the same turn started by the server
+instead of the user: its opening message is the server's brief, it runs with
+the check-in's tool list (the agent's plus `log_decision`) and its own bounds
+(`Limits.checkin`), and its proposals are stored in shadow. Every turn of a
+check-in's conversation uses that tool list, so its replayed history always
+matches the tools it was written with.
 """
 
 from __future__ import annotations
@@ -43,13 +50,16 @@ from core.tracing import timed
 from schemas.ai import AiToolCall
 from services.ai import conversations, memory, proposals, spend
 from services.ai.client import get_client
+from services.ai.decisions import DECISION_KEY, LOG_DECISION_NAME
 from services.ai.display import (
     DISPLAY_TOOL_NAMES, SHOW_CHART, SHOW_PLACE, SHOW_TABLE, DisplayError, show_chart, show_place, show_table,
 )
 from services.ai.prompts import AGENT_PROMPT
 from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
-from services.ai.tools import AGENT_TOOL_NAMES, AGENT_TOOLS, ToolContext, list_my_teams, run_tool
+from services.ai.tools import (
+    AGENT_TOOL_NAMES, AGENT_TOOLS, CHECKIN_ONLY_TOOLS, CHECKIN_TOOL_NAMES, ToolContext, list_my_teams, run_tool,
+)
 
 # Progress notes between tool calls come back as `thinking` blocks on Opus 5.5;
 # "updates" returns a short summary of each one and keeps the reasoning hidden.
@@ -63,6 +73,10 @@ MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
 TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE]
 ALLOWED = AGENT_TOOL_NAMES
+# A check-in's conversation: the same tools, then the check-in's own, appended so the
+# rest of the prefix is the AI desk's
+CHECKIN_TOOLS: list[dict[str, Any]] = [*TOOLS, *CHECKIN_ONLY_TOOLS]
+CHECKIN_ALLOWED = CHECKIN_TOOL_NAMES
 
 # What the user sees while a tool runs
 STATUS: dict[str, str] = {
@@ -92,10 +106,47 @@ STATUS: dict[str, str] = {
     "revise": "Updating a note",
     "forget": "Retiring a note",
     "get_move_outcomes": "Checking how moves went",
+    "get_league": "Reading the league",
+    "get_league_activity": "Reading the league's moves",
+    "get_draft_board": "Reading the draft board",
+    "get_automations": "Reading what the automations will do",
+    "get_decisions": "Reading its earlier calls",
+    "log_decision": "Logging a call",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
     "show_place": "Pointing out where",
 }
+
+
+@dataclass(frozen=True)
+class Limits:
+    """One turn's bounds: model calls, tool calls, wall clock, and the spend past which its next
+    model call is its last."""
+
+    model_calls: int
+    tool_calls: int
+    timeout_seconds: float
+    max_usd: float
+
+    @classmethod
+    def chat(cls) -> "Limits":
+        return cls(settings.ai_agent_max_model_calls, settings.ai_agent_max_tool_calls,
+                   settings.ai_agent_turn_timeout_seconds, settings.ai_agent_turn_max_usd)
+
+    @classmethod
+    def checkin(cls) -> "Limits":
+        """A check-in reads far more than a chat answer (memory, the automations, the board, the
+        matchup, the ledger) and nobody waits on it, so it gets more steps and more time. The
+        spend ceiling is the same."""
+        return cls(settings.autopilot_checkin_max_model_calls, settings.autopilot_checkin_max_tool_calls,
+                   settings.autopilot_checkin_timeout_seconds, settings.ai_agent_turn_max_usd)
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    turn_id: Optional[int]
+    outcome: str
+    cost: int
 
 
 @dataclass
@@ -110,6 +161,12 @@ class Turn:
     build: Optional[str] = None
     # The spend reserved for this turn (usr.ai_spend), settled when it is written
     reservation_id: Optional[int] = None
+    # The tools it may call: the AI desk's, or a check-in conversation's
+    tools: list[dict[str, Any]] = field(default_factory=lambda: TOOLS)
+    allowed: frozenset[str] = ALLOWED
+    # The check-in this turn is (usr.ai_checkins): its proposals are shadow, and it logs decisions
+    checkin_id: Optional[int] = None
+    limits: Limits = field(default_factory=Limits.chat)
     run: _Run = field(default_factory=_Run)
     messages: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, Any] = field(default_factory=dict)
@@ -122,6 +179,7 @@ class Turn:
     charts: int = 0
     chips: int = 0
     places: int = 0
+    decisions: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -215,7 +273,7 @@ async def _stream_call(turn: Turn, emit: Emitter, *, final: bool, messages: list
                 # The fixed prefix (tools + system) gets its own breakpoint, shared by
                 # every conversation; the top-level one caches each conversation so far.
                 system=[{"type": "text", "text": AGENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                tools=TOOLS,
+                tools=turn.tools,
                 messages=messages,
                 thinking=THINKING,
                 output_config={"effort": settings.ai_agent_effort},
@@ -267,8 +325,8 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
 
     outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id,
-                                                        build=turn.build),
-                             allowed=ALLOWED)
+                                                        build=turn.build, checkin_id=turn.checkin_id),
+                             allowed=turn.allowed)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}
     result_id = turn.next_result_id()
@@ -281,6 +339,13 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         turn.parts.append({"kind": "block", "block": shown})
         turn.proposals.append(chip["proposal_id"])
         emit("block", shown)
+    decision = data.pop(DECISION_KEY, None)
+    if decision is not None:
+        # A check-in's call: shown in its conversation for the user to agree or disagree with
+        turn.decisions += 1
+        shown = {"type": "decision", "id": f"d{turn.decisions}", **decision}
+        turn.parts.append({"kind": "block", "block": shown})
+        emit("block", shown)
     turn.results[result_id] = {"tool": name, "input": raw if isinstance(raw, dict) else {}, "data": data}
     turn.run.names |= _names_in(outcome.content)
     return {"type": "tool_result", "tool_use_id": block.id,
@@ -290,7 +355,7 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
 async def _run_tools(turn: Turn, tool_uses: list[Any], emit: Emitter) -> list[dict[str, Any]]:
     """Every tool_use gets a tool_result, all in one user message. Lookups run
     together; display calls run after them, in the order the model made them."""
-    budget = max(settings.ai_agent_max_tool_calls - len(turn.run.tool_calls), 0)
+    budget = max(turn.limits.tool_calls - len(turn.run.tool_calls), 0)
     runnable, over = tool_uses[:budget], tool_uses[budget:]
     lookups = [b for b in runnable if b.name not in DISPLAY_TOOL_NAMES]
     displays = [b for b in runnable if b.name in DISPLAY_TOOL_NAMES]
@@ -356,8 +421,9 @@ def ungrounded_numbers(text: str, sources: list[Any], names: set[str] = frozense
 # ---- the made-up-place check ----
 
 FIND_IN_APP = "find_in_app"
-# Results whose numbers never ground an answer's: the app map's sample data, and notes
-NOT_SOURCES = frozenset({FIND_IN_APP, *memory.MEMORY_TOOL_NAMES})
+# Results whose numbers never ground an answer's: the app map's sample data, notes, and the
+# check-in's own logged calls (their summary and reason are the model's words)
+NOT_SOURCES = frozenset({FIND_IN_APP, *memory.MEMORY_TOOL_NAMES, LOG_DECISION_NAME})
 # What an answer names in the app: a bold or quoted span of a few words
 _NAMED = re.compile(r"\*\*([^*\n]{1,60})\*\*|\"([^\"\n]{1,60})\"|“([^”\n]{1,60})”")
 _MAX_NAME_WORDS = 6
@@ -385,9 +451,9 @@ def ungrounded_places(text: str, app: list[Any], others: list[Any]) -> int:
 
 # ---- the turn ----
 
-async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
+async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> TurnResult:
     """Run one turn to the end, write it, and close the stream. Never raises:
-    failures become an `error` event and the turn's outcome."""
+    failures become an `error` event and the turn's outcome, which it returns."""
     started = time.monotonic()
     outcome = "INTERNAL_ERROR"
     turn_id: Optional[int] = None
@@ -396,14 +462,15 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
     user_content = f"{header_line}\n\n{turn.message}"
     turn.messages.append({"role": "user", "content": user_content})
     try:
-        async with asyncio.timeout(settings.ai_agent_turn_timeout_seconds):
-            for call in range(1, settings.ai_agent_max_model_calls + 1):
+        limits = turn.limits
+        async with asyncio.timeout(limits.timeout_seconds):
+            for call in range(1, limits.model_calls + 1):
                 if call > 1:
                     # A new step: whatever the last status said (a table, a lookup) is done
                     emit("status", {"text": "Thinking", "kind": "step"})
-                final = (call == settings.ai_agent_max_model_calls
-                         or len(turn.run.tool_calls) >= settings.ai_agent_max_tool_calls
-                         or turn.cost >= round(settings.ai_agent_turn_max_usd * 1_000_000))
+                final = (call == limits.model_calls
+                         or len(turn.run.tool_calls) >= limits.tool_calls
+                         or turn.cost >= round(limits.max_usd * 1_000_000))
                 response = await _stream_call(turn, emit, final=final,
                                               messages=[*turn.history.messages, *turn.messages])
                 turn.run.record(response)
@@ -431,7 +498,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
                     break
                 turn.messages.append({"role": "user", "content": await _run_tools(turn, tool_uses, emit)})
         if not turn.answer_text().strip() and not turn.tables and not turn.charts and not turn.chips \
-                and not turn.places:
+                and not turn.places and not turn.decisions:
             raise ProviderError("anthropic", "The assistant returned no answer; try again", error_code="AI_INCOMPLETE")
         # The header's note digest is not a source either (memory.without_note_texts)
         user_texts = [memory.without_note_texts(text) for text in
@@ -512,6 +579,7 @@ async def run_turn(turn: Turn, emit: Emitter, *, header_line: str) -> None:
             "spend": spent,
         })
         emit.close()
+    return TurnResult(turn_id=turn_id, outcome=outcome, cost=turn.cost)
 
 
 async def _settle_quietly(turn: Turn) -> None:
@@ -547,6 +615,8 @@ def _log_turn(turn: Turn, outcome: str, duration_ms: int, ungrounded: Optional[i
         tables=turn.tables,
         charts=turn.charts,
         places=turn.places,
+        decisions=turn.decisions,
+        checkin_id=turn.checkin_id,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
         cache_read_input_tokens=run.cache_read_input_tokens,

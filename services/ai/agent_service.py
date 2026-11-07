@@ -18,15 +18,19 @@ from core.errors import AuthorizationError, ConflictError, NotFoundError
 from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
+    AiAutopilotTeam,
+    AiCheckinsData,
+    AiCheckinSummary,
     AiConversationDetail,
     AiConversationSummary,
+    AiDecisionVerdictData,
     AiNote,
     AiProposalCheckData,
     AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, conversations, guards, memory, proposals, spend
+from services.ai import agent, checkins, conversations, decisions, guards, memory, proposals, spend
 
 
 def has_access(user_id: int) -> bool:
@@ -44,10 +48,15 @@ def _summary(row, turns: int) -> AiConversationSummary:
         id=row.id,
         title=row.title,
         team_id=row.team_id_id,
+        kind=_kind(row),
         created_at=row.created_at,
         updated_at=row.updated_at,
         turns=turns,
     )
+
+
+def _kind(row) -> str:
+    return getattr(row, "kind", None) or conversations.CHAT
 
 
 def _turn_view(row, parts) -> AiTurnView:
@@ -91,12 +100,18 @@ class AgentService:
         row = await _conversation(conversation_id, user_id)
         turns = await conversations.turns_of(conversation_id, user_id)
         history = await conversations.history(conversation_id, user_id)
-        # The chips are shown as they stand now, not as the turn stored them
+        # The chips and a check-in's decisions are shown as they stand now, not as the turn stored them
         parts = await proposals.refresh_history([t.parts or [] for t in turns], conversation_id, user_id)
+        checkin = None
+        if _kind(row) == conversations.CHECKIN:
+            parts = await decisions.refresh_history(parts, conversation_id, user_id)
+            found = await checkins.of_conversation(conversation_id, user_id)
+            checkin = AiCheckinSummary(**found) if found is not None else None
         return AiConversationDetail(
             **_summary(row, len(turns)).model_dump(),
             full=history.full,
             history=[_turn_view(t, p) for t, p in zip(turns, parts)],
+            checkin=checkin,
         )
 
     @staticmethod
@@ -129,8 +144,13 @@ class AgentService:
                 await spend.cancel(reservation_id)
             await conversations.release(conversation_id)
             raise
+        # A follow-up in a check-in's conversation keeps that conversation's tool list, so its replayed
+        # history matches; it is the user's own turn, so it logs no decisions and its chips can be sent
+        checkin = _kind(row) == conversations.CHECKIN
+        tools = agent.CHECKIN_TOOLS if checkin else agent.TOOLS
+        allowed = agent.CHECKIN_ALLOWED if checkin else agent.ALLOWED
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
-                          reservation_id=reservation_id, build=build)
+                          reservation_id=reservation_id, build=build, tools=tools, allowed=allowed)
         return agent.start(turn, header_line)
 
     @staticmethod
@@ -177,6 +197,38 @@ class AgentService:
         ensure_access(user_id)
         if not await conversations.set_feedback(turn_id, user_id, value):
             raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
+
+    # ---- Dime's check-ins (services/ai/checkins.py), in shadow ----
+
+    @staticmethod
+    async def checkins(user_id: int, team_id: Optional[int]) -> AiCheckinsData:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        teams = await checkins.teams_of(user_id)
+        rows = await checkins.inbox(user_id, team_id)
+        spent, cap = await spend.autopilot_month_spend()
+        return AiCheckinsData(teams=[AiAutopilotTeam(**t) for t in teams],
+                              checkins=[AiCheckinSummary(**r) for r in rows],
+                              month_usd=spent / 1e6, cap_usd=cap / 1e6)
+
+    @staticmethod
+    async def run_checkin(user_id: int, team_id: int, kind: Optional[str]) -> AiCheckinSummary:
+        ensure_access(user_id)
+        row = await checkins.run_now(user_id, team_id, kind)
+        return AiCheckinSummary(**await checkins.summary(row.id))
+
+    @staticmethod
+    async def set_autopilot(user_id: int, team_id: int, on: bool) -> AiAutopilotTeam:
+        ensure_access(user_id)
+        await checkins.set_autopilot(user_id, team_id, on)
+        teams = {t["team_id"]: t for t in await checkins.teams_of(user_id)}
+        return AiAutopilotTeam(**teams[team_id])
+
+    @staticmethod
+    async def decision_verdict(decision_id: int, user_id: int, verdict: Optional[str]) -> AiDecisionVerdictData:
+        ensure_access(user_id)
+        block = await decisions.set_verdict(decision_id, user_id, verdict)
+        return AiDecisionVerdictData(decision_id=block["decision_id"], verdict=block["verdict"])
 
     # ---- the agent's notes, as the user sees and edits them ----
 

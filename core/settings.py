@@ -180,6 +180,22 @@ class Settings(BaseSettings):
     # resends the whole history, so a long conversation costs more per turn.
     ai_agent_max_turns: int = 20
     ai_agent_max_context_tokens: int = 150_000
+
+    # Dime's check-ins (the Dime autopilot plan, step 3; services/ai/checkins.py):
+    # turns Dime starts itself on a schedule, in shadow (nothing is sent). They run
+    # only on a team listed here (internal usr.teams ids, JSON: [23]) that also has
+    # a usr.autopilot row (switched on in the AI desk), and only while
+    # AUTOPILOT_ENABLED and AI_ENABLED are on. They are priced like any turn
+    # (AI_AGENT_TURN_MAX_USD is the ceiling of each) but on their own monthly line,
+    # shared by every autopilot team, so they can't eat the AI desk's budget. A
+    # check-in reads more than a chat answer, so it gets more steps and more time.
+    autopilot_enabled: bool = True
+    autopilot_team_ids: list[int] = []
+    autopilot_monthly_budget_usd: float = 60.0
+    autopilot_checkins_per_day: int = 6
+    autopilot_checkin_max_model_calls: int = 12
+    autopilot_checkin_max_tool_calls: int = 32
+    autopilot_checkin_timeout_seconds: float = 360.0
     # The connection the agent's query_stats tool reads on (services/ai/stats/
     # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
     # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
@@ -409,6 +425,11 @@ class Settings(BaseSettings):
             "ai_agent_turn_timeout_seconds": self.ai_agent_turn_timeout_seconds,
             "ai_agent_max_turns": self.ai_agent_max_turns,
             "ai_agent_max_context_tokens": self.ai_agent_max_context_tokens,
+            "autopilot_monthly_budget_usd": self.autopilot_monthly_budget_usd,
+            "autopilot_checkins_per_day": self.autopilot_checkins_per_day,
+            "autopilot_checkin_max_model_calls": self.autopilot_checkin_max_model_calls,
+            "autopilot_checkin_max_tool_calls": self.autopilot_checkin_max_tool_calls,
+            "autopilot_checkin_timeout_seconds": self.autopilot_checkin_timeout_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:

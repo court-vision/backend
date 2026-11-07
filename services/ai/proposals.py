@@ -34,7 +34,10 @@ ESPN id: the tool result carries NBA ids, and the chip the frontend gets
 (`CHIP_KEY`, popped off the result by the turn loop) carries the ESPN ids the
 writes take.
 
-States: `proposed` (stageable), `sent`, `dismissed`; `expired` is read off
+States: `proposed` (stageable), `sent`, `dismissed`, and `shadow`: a proposal made in one of
+Dime's check-ins (services/ai/checkins.py), checked exactly like a chip and stored as what Dime
+would have done, but never staged, dismissed or sent (the Dime autopilot plan, step 3). `expired`
+is read off
 `expires_at` -- for a move today the day's first tip-off (or the 3 AM ET turn
 into the next day when the day has no games), for a scheduled move the turn into
 its day, when ESPN reaches it and scheduling for it closes, for a lineup the turn
@@ -87,7 +90,11 @@ TRANSACTION, SCHEDULED, LINEUP = "transaction", "scheduled", "lineup"
 SLOT_IDS: dict[str, int] = {name: sid for sid, name in POSITION_MAP.items()
                             if isinstance(sid, int) and isinstance(name, str) and name and sid <= IR_SLOT_ID}
 MOVES_MAX = 30   # ApplyLineupMovesReq.moves
-PROPOSED, SENT, DISMISSED, EXPIRED = "proposed", "sent", "dismissed", "expired"
+PROPOSED, SENT, DISMISSED, EXPIRED, SHADOW = "proposed", "sent", "dismissed", "expired", "shadow"
+_NOT_PENDING = {SENT: "This move was already sent", DISMISSED: "This chip was dismissed",
+                EXPIRED: "This chip expired: the day it was for has started",
+                SHADOW: "This move was logged by a check-in in shadow; it can't be sent"}
+SHADOW_WORDS = "Logged in shadow, not sent."
 REASON_MAX = 200
 # Proposals listed in a turn's header, newest first
 HEADER_MAX = 12
@@ -276,17 +283,20 @@ def dow(d: date) -> str:
     return d.strftime("%a")
 
 
-def summary_of(kind: str, add_name: Optional[str], drop_name: Optional[str], nba_date: date) -> str:
-    """What will happen, in plain words, as the chip says it."""
+def summary_of(kind: str, add_name: Optional[str], drop_name: Optional[str], nba_date: date,
+               shadow: bool = False) -> str:
+    """What will happen, in plain words, as the chip says it (a shadow one: what would have)."""
     if add_name and drop_name:
         move = f"Add {add_name}, drop {drop_name}"
     elif add_name:
         move = f"Add {add_name} into an open roster spot"
     else:
         move = f"Drop {drop_name}"
+    when = "today" if kind == TRANSACTION else f"{dow(nba_date)} {nba_date.month}/{nba_date.day}"
+    if shadow:
+        return f"{move}, {when}. {SHADOW_WORDS}"
     if kind == TRANSACTION:
         return f"{move}, today. Goes to ESPN when you send it."
-    when = f"{dow(nba_date)} {nba_date.month}/{nba_date.day}"
     return f"{move}, {when}. Scheduled: made for you ahead of {nba_date:%A}'s games."
 
 
@@ -308,10 +318,13 @@ def lineup_words(moves: Sequence[dict[str, Any]]) -> str:
     return ", ".join(parts)
 
 
-def lineup_summary(moves: Sequence[dict[str, Any]], nba_date: date, today: bool) -> str:
+def lineup_summary(moves: Sequence[dict[str, Any]], nba_date: date, today: bool, shadow: bool = False) -> str:
     """What will happen, as a lineup chip says it. The write is immediate for any day's board."""
     words = lineup_words(moves)
     words = words[:1].upper() + words[1:]
+    if shadow:
+        when = "today" if today else f"{dow(nba_date)} {nba_date.month}/{nba_date.day}"
+        return f"{words}, {when}. {SHADOW_WORDS}"
     if today:
         return f"{words}, today. Goes to ESPN when you send it."
     when = f"{dow(nba_date)} {nba_date.month}/{nba_date.day}"
@@ -510,9 +523,10 @@ def _dismiss(proposal_id: int, user_id: int, now: datetime) -> Optional[AiPropos
 @db_operation("ai.proposal_sent")
 def _mark_sent(proposal_id: int, now: datetime, audit_id: Optional[int], pickup_id: Optional[int]) -> bool:
     """Record the send on a row not already sent. A dismiss that landed while the write was with
-    ESPN is overtaken: the move was made, and the chip has to say so. A second send never is."""
+    ESPN is overtaken: the move was made, and the chip has to say so. A second send never is, and
+    a shadow row never is (`for_send` refuses it before any write)."""
     return (AiProposal.update(state=SENT, sent_at=now, updated_at=now, audit_id=audit_id, pickup_id=pickup_id)
-            .where(AiProposal.id == proposal_id, AiProposal.state != SENT).execute()) > 0
+            .where(AiProposal.id == proposal_id, AiProposal.state.not_in([SENT, SHADOW])).execute()) > 0
 
 
 def _pending_pickup_of(team_id: int, add_player_id: int):
@@ -593,10 +607,12 @@ async def _board(team: Any, league_info: LeagueInfo, scoring_period_id: Optional
 
 
 async def propose_move(user_id: int, conversation_id: int, team: Any, league_info: LeagueInfo,
-                       args: ProposeMoveInput, now: Optional[datetime] = None) -> dict[str, Any]:
+                       args: ProposeMoveInput, now: Optional[datetime] = None, *,
+                       shadow: bool = False) -> dict[str, Any]:
     """Check the move and store it; returns the model's view of the proposal, with the frontend's
     chip under `CHIP_KEY` for the turn loop to lift off. Raises `AppError` (which the tool runner
-    hands the model as a readable refusal) for a move that can't be made."""
+    hands the model as a readable refusal) for a move that can't be made. `shadow` (a check-in's
+    proposal) stores it checked the same way, as what Dime would have done, never sendable."""
     now = now or datetime.now(timezone.utc)
     state = await _board(team, league_info)
 
@@ -674,11 +690,13 @@ async def propose_move(user_id: int, conversation_id: int, team: Any, league_inf
         add_name=add.name if add else None, add_team=add.team if add else None,
         drop_player_id=drop.espn_id if drop else None, drop_nba_id=drop.nba_id if drop else None,
         drop_name=drop.name if drop else None, drop_team=drop.team if drop else None,
-        reason=args.reason.strip(), summary=summary_of(kind, add.name if add else None, drop.name if drop else None, nba_date),
-        projection=projection, state=PROPOSED, expires_at=expires, created_at=now, updated_at=now,
+        reason=args.reason.strip(),
+        summary=summary_of(kind, add.name if add else None, drop.name if drop else None, nba_date, shadow),
+        projection=projection, state=SHADOW if shadow else PROPOSED, expires_at=expires, created_at=now, updated_at=now,
     )
     log.info("ai_proposal_created", proposal_id=row.id, team_id=team.team_id, kind=kind, day=day,
-             add=add.espn_id if add else None, drop=drop.espn_id if drop else None, conversation_id=conversation_id)
+             add=add.espn_id if add else None, drop=drop.espn_id if drop else None, conversation_id=conversation_id,
+             shadow=shadow)
     return {**view_of(row, now), "notes": notes, CHIP_KEY: chip_of(row, now)}
 
 
@@ -795,7 +813,8 @@ def _lineup_problems(state: LineupState, moves: Sequence[Move]) -> list[str]:
 
 
 async def propose_lineup(user_id: int, conversation_id: int, team: Any, league_info: LeagueInfo,
-                         args: ProposeLineupInput, now: Optional[datetime] = None) -> dict[str, Any]:
+                         args: ProposeLineupInput, now: Optional[datetime] = None, *,
+                         shadow: bool = False) -> dict[str, Any]:
     """Check the slot moves against the day's board and store them as one chip; returns the model's
     view with the frontend's chip under `CHIP_KEY`. Raises `AppError` (a readable refusal for the
     model) for moves the Week desk would refuse."""
@@ -818,12 +837,12 @@ async def propose_lineup(user_id: int, conversation_id: int, team: Any, league_i
     row = await _insert(
         user_id=user_id, conversation_id=conversation_id, team_id=team.team_id, kind=LINEUP, day=board.index,
         scoring_period_id=board.scoring_period_id, nba_date=board.nba_date, moves=stored,
-        reason=args.reason.strip(), summary=lineup_summary(stored, board.nba_date, today),
-        projection=lineup_change(state, moves), state=PROPOSED,
+        reason=args.reason.strip(), summary=lineup_summary(stored, board.nba_date, today, shadow),
+        projection=lineup_change(state, moves), state=SHADOW if shadow else PROPOSED,
         expires_at=expires_at_for(LINEUP, board.nba_date, None, now), created_at=now, updated_at=now,
     )
     log.info("ai_proposal_created", proposal_id=row.id, team_id=team.team_id, kind=LINEUP, day=board.index,
-             moves=len(moves), fill=args.fill, conversation_id=conversation_id)
+             moves=len(moves), fill=args.fill, conversation_id=conversation_id, shadow=shadow)
     return {**view_of(row, now), "notes": [], CHIP_KEY: chip_of(row, now)}
 
 
@@ -845,9 +864,7 @@ async def check(proposal_id: int, user_id: int, team: Any, league_info: LeagueIn
     row = await _owned(proposal_id, user_id)
     state = state_of(row, now)
     if state != PROPOSED:
-        words = {SENT: "This move was already sent.", DISMISSED: "This chip was dismissed.",
-                 EXPIRED: "This chip expired: the day it was for has started."}
-        return chip_of(row, now), [words[state]]
+        return chip_of(row, now), [_NOT_PENDING[state] + "."]
     board = await _board(team, league_info)
     if row.kind == LINEUP:
         # The chip's own day's board: today's, or a later day's read as the Week desk's day tab does
@@ -871,13 +888,16 @@ async def get(proposal_id: int, user_id: int) -> AiProposal:
 
 
 async def dismiss(proposal_id: int, user_id: int, now: Optional[datetime] = None) -> dict[str, Any]:
-    """Let a proposed chip go. A sent one can't be dismissed (409)."""
+    """Let a proposed chip go. A sent one can't be dismissed (409), nor a shadow one, which is a
+    check-in's log and was never stageable."""
     now = now or datetime.now(timezone.utc)
     row = await _dismiss(proposal_id, user_id, now)
     if row is None:
         raise NotFoundError("AI_PROPOSAL_NOT_FOUND", "Proposal not found")
     if row.state == SENT:
         raise ConflictError("AI_PROPOSAL_SENT", "This move was already sent")
+    if row.state == SHADOW:
+        raise ConflictError("AI_PROPOSAL_SHADOW", _NOT_PENDING[SHADOW])
     return chip_of(row, now)
 
 
@@ -901,10 +921,7 @@ async def for_send(proposal_id: int, user_id: int, team_id: int, *, kind: str, a
         raise NotFoundError("AI_PROPOSAL_NOT_FOUND", "Proposal not found")
     state = state_of(row, now)
     if state != PROPOSED:
-        raise ConflictError("AI_PROPOSAL_NOT_PENDING",
-                            {SENT: "This move was already sent", DISMISSED: "This chip was dismissed",
-                             EXPIRED: "This chip expired: the day it was for has started"}[state],
-                            data={"state": state})
+        raise ConflictError("AI_PROPOSAL_NOT_PENDING", _NOT_PENDING[state], data={"state": state})
     if kind == LINEUP:
         # Without the board nothing is known to be needed, and nothing matches
         needed = {(m.player_id, m.to_slot_id) for m in live_moves(board, row)} if board is not None and row.kind == LINEUP else set()

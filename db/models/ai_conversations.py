@@ -3,6 +3,8 @@ usr.ai_conversations and usr.ai_turns — the AI agent's chats — usr.ai_spend,
 the ledger its monthly caps sum (migration 0032, the CV AI plan § 1, § 6), and
 usr.ai_proposals, the roster moves the agent proposed as chips (migration 0039), and
 usr.ai_memory, the notes the agent keeps between conversations (migration 0041).
+Migration 0042 adds a conversation's `kind` (a chat, or the conversation a check-in
+started), the `shadow` proposal state and the spend `line` (services/ai/checkins.py).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -31,6 +33,8 @@ class AiConversation(BaseModel):
     user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
     team_id = ForeignKeyField(Team, column_name="team_id", null=True, on_delete="SET NULL")
     title = TextField(null=True)
+    # chat, or checkin: the conversation a check-in started (migration 0042)
+    kind = TextField(default="chat")
     created_at = DateTimeField(default=_now)
     updated_at = DateTimeField(default=_now)
     busy_until = DateTimeField(null=True)
@@ -81,6 +85,9 @@ class AiSpend(BaseModel):
     created_at = DateTimeField(default=_now)
     cost_micros = BigIntegerField()
     settled = BooleanField(default=False)
+    # desk (the AI desk's turns) or autopilot (the check-ins'): each has its own
+    # monthly budget (migration 0042)
+    line = TextField(default="desk")
 
     class Meta:
         table_name = "ai_spend"
@@ -91,7 +98,8 @@ class AiProposal(BaseModel):
     """One move the agent proposed, shown as a chip: an add / drop (`propose_move`; `kind`
     transaction or scheduled, the player columns) or a day's slot moves (`propose_lineup`; `kind`
     lineup, `moves`). Player ids are ESPN's, as the writes take them, with the NBA id beside each.
-    `state` is proposed, sent or dismissed; expired is read off `expires_at`. The send route fills
+    `state` is proposed, sent or dismissed, or shadow (made in a check-in: logged, never
+    staged or sent; migration 0042); expired is read off `expires_at`. The send route fills
     `sent_at` and the write's `audit_id` (a transaction or lineup write) or `pickup_id` (a
     scheduled pickup)."""
 

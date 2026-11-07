@@ -9,6 +9,7 @@ from fastapi import APIRouter, Security
 from core.compute import run_cpu
 from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
+from schemas.autopilot import CheckinRunData, CheckinRunResp, CheckinStarted
 from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
@@ -19,6 +20,7 @@ from schemas.valuation import (
     StandardValuationReq,
     StandardValuationResp,
 )
+from services.ai import checkins
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
 from services.scheduled_pickup_service import ScheduledPickupService
@@ -71,6 +73,27 @@ async def run_move_ledger(req: LedgerRunReq):
     is always safe; a league that fails is reported in `data.leagues`, never raised.
     """
     return respond(await MoveLedgerService.run(req))
+
+
+@router.post("/checkins/run", response_model=CheckinRunResp)
+async def run_checkins():
+    """One tick of Dime's check-ins: start what is due on each switched-on team.
+
+    Called by data-platform's dime_checkins pipeline every fifteen minutes (its
+    route gates on whether any team is switched on). Each team gets at most one
+    check-in a tick, one at a time; a window that closed before its check-in
+    could run is recorded as missed. The check-ins run on here after the
+    response, as detached turns, so this answers in a second or two.
+    """
+    out = await checkins.run_due()
+    started = [CheckinStarted(checkin_id=s.checkin_id, team_id=s.team_id, kind=s.kind, date=s.nba_date)
+               for s in out["started"]]
+    return respond(CheckinRunResp(
+        status=ApiStatus.SUCCESS,
+        message="Check-ins are off" if out["off"] else f"Started {len(started)} check-in(s)",
+        data=CheckinRunData(off=out["off"], teams=out["teams"], started=started, missed=out["missed"],
+                            skipped=out["skipped"], stale=out["stale"]),
+    ))
 
 
 @router.post("/valuation/standard", response_model=StandardValuationResp)

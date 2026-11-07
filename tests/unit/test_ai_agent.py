@@ -915,10 +915,10 @@ class TestSpend:
 @pytest.fixture
 def service_stubs(agent_on, monkeypatch):
     state = SimpleNamespace(claimed=True, released=[], history=conversations.History(), started=[], budget_error=None,
-                            cancelled=[], header_error=None)
+                            cancelled=[], header_error=None, kind="chat")
 
     async def get(conversation_id, user_id):
-        return SimpleNamespace(id=conversation_id, team_id_id=22) if user_id == 42 else None
+        return SimpleNamespace(id=conversation_id, team_id_id=22, kind=state.kind) if user_id == 42 else None
 
     async def claim(conversation_id, user_id, hold):
         return state.claimed
@@ -969,6 +969,20 @@ class TestStartTurn:
         assert (turn.conversation_id, turn.user_id, turn.message, line) == (7, 42, "hello", "[pinned 22 in 7]")
         assert turn.reservation_id == 77
         assert service_stubs.released == [] and service_stubs.cancelled == []
+
+    def test_a_chat_has_the_desk_s_tools_and_a_check_in_s_conversation_keeps_its_own(self, service_stubs):
+        _start()
+        chat, _ = service_stubs.started[0]
+        assert chat.tools is agent.TOOLS and chat.allowed == agent.ALLOWED and chat.checkin_id is None
+        service_stubs.kind = "checkin"
+        _start()
+        follow_up, _ = service_stubs.started[1]
+        # The user's follow-up replays the check-in's history with the tools it was written with, but it is
+        # the user's own turn: no check-in id, so it logs no decisions and its chips are ordinary
+        assert follow_up.tools is agent.CHECKIN_TOOLS and follow_up.allowed == agent.CHECKIN_ALLOWED
+        assert follow_up.checkin_id is None and follow_up.limits == agent.Limits.chat()
+        assert [t["name"] for t in agent.CHECKIN_TOOLS[:len(agent.TOOLS)]] == [t["name"] for t in agent.TOOLS]
+        assert agent.CHECKIN_TOOLS[-1]["name"] == "log_decision" and "log_decision" not in agent.ALLOWED
 
     def test_off_and_invite_only_come_first(self, service_stubs, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_user_ids", [])

@@ -17,6 +17,11 @@ left under either cap. Writing the turn settles the reservation to its real
 cost. One that is never settled (the process died) stays charged at the
 ceiling: the caps err high, never low. The Anthropic Console workspace spend
 limit stays the last line.
+
+Dime's check-ins (services/ai/checkins.py) spend on a line of their own,
+`autopilot`, with one monthly budget for every autopilot team
+(`autopilot_monthly_budget_usd`): the caps above read the `desk` line only, so
+a day of check-ins can't use up the AI desk, and the other way round.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from schemas.common import ApiStatus
 
 # Serializes reservations; any key no other code uses
 _LEDGER_LOCK = 0x41_49_53_50
+DESK, AUTOPILOT = "desk", "autopilot"
 
 
 @dataclass(frozen=True)
@@ -89,13 +95,21 @@ def month_start(now: datetime | None = None) -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _total(query) -> int:
+    return int(query.scalar() or 0)
+
+
 def _sums(user_id: int, since: datetime) -> tuple[int, int]:
-    def total(query) -> int:
-        return int(query.scalar() or 0)
-    mine = total(AiSpend.select(fn.SUM(AiSpend.cost_micros))
-                 .where(AiSpend.user_id == user_id, AiSpend.created_at >= since))
-    everyone = total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(AiSpend.created_at >= since))
+    """The AI desk's line: this user's and everyone's, since `since`."""
+    desk = (AiSpend.created_at >= since) & (AiSpend.line == DESK)
+    mine = _total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(desk & (AiSpend.user_id == user_id)))
+    everyone = _total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(desk))
     return mine, everyone
+
+
+def _autopilot_sum(since: datetime) -> int:
+    return _total(AiSpend.select(fn.SUM(AiSpend.cost_micros))
+                  .where(AiSpend.created_at >= since, AiSpend.line == AUTOPILOT))
 
 
 @db_operation("ai.month_spend")
@@ -170,6 +184,34 @@ async def reserve(user_id: int) -> int:
             log_level="info",
         )
     return outcome
+
+
+@db_operation("ai.reserve_checkin")
+def _reserve_autopilot(user_id: int, since: datetime, amount: int, cap: int) -> int | None:
+    """A check-in's reservation on the autopilot line, or None when the line's budget
+    can't take one more turn's ceiling. Under the same lock as the desk's reservations."""
+    with db.atomic():
+        db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
+        if cap - _autopilot_sum(since) < amount:
+            return None
+        return AiSpend.insert(user_id=user_id, cost_micros=amount, line=AUTOPILOT).execute()
+
+
+async def reserve_autopilot(user_id: int) -> int | None:
+    """Reserve one check-in's ceiling on the autopilot line; None when this month's
+    budget for check-ins is used up (the check-in is skipped, not failed)."""
+    return await _reserve_autopilot(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd),
+                                    _micros(settings.autopilot_monthly_budget_usd))
+
+
+@db_operation("ai.autopilot_month_spend")
+def _autopilot_month(since: datetime) -> int:
+    return _autopilot_sum(since)
+
+
+async def autopilot_month_spend() -> tuple[int, int]:
+    """This month's check-in spend and the line's cap, in micro-dollars."""
+    return await _autopilot_month(month_start()), _micros(settings.autopilot_monthly_budget_usd)
 
 
 @db_operation("ai.cancel_reservation")
