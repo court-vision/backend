@@ -93,14 +93,15 @@ def _team_pref(user_id: int, team_id: int) -> Any:
 
 
 def _write_lineup(user_id: int, team_id: int, values: Mapping[str, Optional[bool]]) -> None:
-    row = _team_pref(user_id, team_id)
-    if row is None:
-        NotificationTeamPreference.create(user=user_id, team_id=team_id, **values)
-        return
-    for k, v in values.items():
-        setattr(row, k, v)
-    row.updated_at = datetime.utcnow()      # the model's own clock (naive UTC)
-    row.save()
+    """The team's lineup override, in one upsert on (user, team_id): two first writes at once (a double
+    click) both land, as apply's own insert does."""
+    now = datetime.utcnow()                 # the model's own clock (naive UTC)
+    update: dict[Any, Any] = {getattr(NotificationTeamPreference, k): v for k, v in values.items()}
+    update[NotificationTeamPreference.updated_at] = now
+    (NotificationTeamPreference.insert(user=user_id, team_id=team_id, created_at=now, updated_at=now, **values)
+     .on_conflict(conflict_target=[NotificationTeamPreference.user, NotificationTeamPreference.team_id],
+                  update=update)
+     .execute())
 
 
 def _snapshot_lineup(user_id: int, team_id: int) -> dict[str, Any]:

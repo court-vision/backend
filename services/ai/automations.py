@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from db.base import run_db
 from db.models.nba.games import Game
@@ -44,6 +45,8 @@ from services.ai import steering as ai_steering
 from services.lineup_editor_service import _slot_name
 from services.scheduled_pickup_service import et_at
 from services.stream_lane_service import StreamLaneService
+
+log = get_logger("ai.automations")
 
 GET_AUTOMATIONS_NAME = "get_automations"
 # The fill's window closes this long before the first tip (data-platform's lineup alerts)
@@ -263,6 +266,8 @@ async def _autopilot(team_id: int) -> dict[str, Any]:
             return {}
         return {"autopilot": await acting.policy_view(team_id, row)}
     except Exception:
+        # The brief goes out without the policy rather than not at all; the failure is still seen
+        log.exception("autopilot_view_failed", team_id=team_id)
         return {}
 
 

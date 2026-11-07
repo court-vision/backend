@@ -162,6 +162,14 @@ class TestTheLevels:
         assert (row.autopilot, row.restore) == (False, None)
         assert row.ai_rows == ["lineup", "daily_actions"] and _lineup(team) == (True, True)
 
+    def test_a_lineup_level_upserts_the_override_and_keeps_its_other_fields(self, team):
+        NotificationTeamPreference.create(user=team.user_id_id, team_id=team.team_id, alert_minutes_before=45)
+        _apply(team, levels={"lineup": "act"})
+        _apply(team, levels={"lineup": "notify"})
+        row = NotificationTeamPreference.get(NotificationTeamPreference.user == team.user_id_id)
+        assert (row.lineup_alerts_enabled, row.auto_lineup_enabled, row.alert_minutes_before) == (True, False, 45)
+        assert NotificationTeamPreference.select().count() == 1
+
     def test_a_double_first_switch_writes_one_row(self, team):
         _apply(team, levels={"lanes": "ai"})
         _apply(team, levels={"lanes": "ai"})
