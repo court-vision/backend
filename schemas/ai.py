@@ -465,8 +465,22 @@ class AiTurnView(ApiModel):
 
 # ---- Dime's check-ins (services/ai/checkins.py; the Dime autopilot plan, step 3) ----
 
-AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night"]
+AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night", "event"]
+# What the user can run from the AI desk: an event check-in starts only for its events
+AiCheckinRunKind = Literal["morning", "weekly", "pre_lock", "night"]
 AiCheckinState = Literal["running", "done", "failed", "missed", "skipped"]
+
+
+class AiCheckinEvent(ApiModel):
+    """Something that came in about a rostered player that this check-in was told about (the Dime
+    autopilot plan, step 6; services/ai/events.py)."""
+
+    source: Literal["availability", "news"]
+    player_id: int = Field(..., description="NBA player id")
+    summary: str = Field(..., description="The server's line about it, as the brief gave it")
+    received_at: datetime
+    verdict: Optional[str] = Field(None, description="availability: the new verdict (out, doubtful, available)")
+    news_id: Optional[int] = Field(None, description="news: the item's id")
 
 
 class AiCheckinSummary(ApiModel):
@@ -475,7 +489,8 @@ class AiCheckinSummary(ApiModel):
     checkin_id: int
     team_id: int
     kind: AiCheckinKind = Field(..., description="morning, weekly (a matchup's first morning), pre_lock (before "
-                                                 "the first tip) or night (the next morning's follow-up)")
+                                                 "the first tip), night (the next morning's follow-up) or event "
+                                                 "(news about a rostered player)")
     date: date_type = Field(..., description="The fantasy day it is about")
     manual: bool = Field(..., description="Run from the AI desk rather than on the schedule")
     state: AiCheckinState
@@ -492,6 +507,9 @@ class AiCheckinSummary(ApiModel):
     agree: int
     disagree: int
     sent: int = Field(0, description="Moves it sent on its own (on automations at AI)")
+    events: list[AiCheckinEvent] = Field(default_factory=list,
+                                         description="What came in that it was told about: an event check-in's "
+                                                     "reason, or what a scheduled one picked up")
 
 
 class AiCheckinSlot(ApiModel):
@@ -613,7 +631,7 @@ class AiCheckinRunReq(ApiModel):
     """Body for POST /v1/internal/ai/checkins: run one now."""
 
     team_id: int = Field(..., gt=0, le=INT4_MAX)
-    kind: Optional[AiCheckinKind] = Field(None, description="Default: by the clock against today's first tip")
+    kind: Optional[AiCheckinRunKind] = Field(None, description="Default: by the clock against today's first tip")
 
 
 class AiCheckinResp(BaseResponse):

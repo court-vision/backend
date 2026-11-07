@@ -15,7 +15,8 @@ rows:
     lanes          stream lanes, which run as the user set them (act); at AI Dime also
                    starts, pauses, stops and steers them
     late_scratch   late scratches and news; at AI an event check-in before the player's
-                   game locks (step 6, which offers it)
+                   game locks (step 6, services/ai/events.py). Its notify and act aren't
+                   built yet
     checkins       Dime's check-ins: off, or ai while the team isn't paused
 
 Below AI a level lives with its automation (lineup's in the notification preferences,
@@ -51,8 +52,7 @@ ROWS = (*AI_ROWS, CHECKINS)
 LABELS = {LINEUP: "Lineup", DAILY_ACTIONS: "Daily actions", LANES: "Stream lanes",
           LATE_SCRATCH: "Late scratches and news", CHECKINS: "Check-ins"}
 
-# What each row doesn't offer, and why (a level not listed is offered). Step 6 offers
-# late_scratch's AI by dropping its entry here.
+# What each row doesn't offer, and why (a level not listed is offered)
 NOT_OFFERED: dict[str, dict[str, str]] = {
     LINEUP: {},
     DAILY_ACTIONS: {
@@ -66,7 +66,6 @@ NOT_OFFERED: dict[str, dict[str, str]] = {
     LATE_SCRATCH: {
         NOTIFY: "Not built yet: an email when news touches a player before his game",
         ACT: "Not built yet: the late-scratch swap",
-        AI: "Comes with event check-ins (step 6)",
     },
     CHECKINS: {
         NOTIFY: "Check-ins are Dime's own",
@@ -74,13 +73,18 @@ NOT_OFFERED: dict[str, dict[str, str]] = {
     },
 }
 
-# Check-in kinds that are events (step 6): what they commit counts under late_scratch
-EVENT_KINDS: frozenset[str] = frozenset()
+# Check-in kinds that are events (step 6; checkins.EVENT): what they commit counts under late_scratch
+EVENT_KINDS: frozenset[str] = frozenset({"event"})
 
 
 def acting_available() -> bool:
     """The server lets Dime send anything itself (DIME_ACTING_ENABLED)."""
     return settings.dime_acting_enabled
+
+
+def events_available() -> bool:
+    """The server starts event check-ins (DIME_EVENTS_ENABLED; services/ai/events.py)."""
+    return settings.dime_events_enabled
 
 
 def offered(row: str, level: str) -> Optional[str]:
@@ -228,6 +232,8 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool) -> list[d
                 note = "Autopilot sets these"
             if paused:
                 note = "Paused: Dime does nothing here until you resume check-ins"
+            elif row == LATE_SCRATCH and not events_available():
+                note = "Nothing starts yet: event check-ins are switched off on the server"
             elif not acting_available():
                 note = "Reviews only: Dime's acting is switched off on the server"
             if row == LINEUP and not lineup_email:

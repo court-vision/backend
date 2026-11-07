@@ -7,7 +7,7 @@ Before a move:
   - Projections: his season projection (get_projections) against what he has done. A big gap on a small sample usually means a slow start, not a new level.
   - Track record: his last full season (query_stats).
   - Role: his minutes and usage now against last season. Lost minutes or a lost starting job is a real signal; the same minutes with cold shooting usually isn't.
-  - Health: whether he is playing hurt or just back from an injury (get_player_status).
+  - Health: whether he is playing hurt or just back from an injury, and what the latest news says about his role (get_player_status, get_player_news).
 - Then say how it weighed in, unless it all points the same way. When the stats win, recommend the move and give the context as a caveat. When the context wins, say you are going against the stats, and why.
 - plan_streams and project_matchup choose the player to give up by his per-game value and the games he has left when you don't name one. Run these checks on their choice, and name a different holder or drop when the context protects him.
 

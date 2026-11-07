@@ -33,7 +33,7 @@ from api.v1.internal import (users, teams, lineups, yahoo, matchups, streamers, 
                              scheduled_pickups, stream_lanes, holds,
                              connections, ai, lineup_snapshots, app_map, move_outcomes)
 from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
-                           schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
+                           schedule, live as live_public, playoffs, sqlmate as public_sqlmate, news as public_news)
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
 # No SENTRY_DSN (dev, tests) -> nothing happens.
@@ -157,6 +157,7 @@ api_v1_public.include_router(schedule.router)
 api_v1_public.include_router(live_public.router)
 api_v1_public.include_router(playoffs.router)
 api_v1_public.include_router(public_sqlmate.router)
+api_v1_public.include_router(public_news.router)
 
 app.include_router(api_v1_public)
 

@@ -374,7 +374,7 @@ class TestRun:
             return result
         monkeypatch.setattr(checkins, "_settle", settle)
         monkeypatch.setattr(agent, "run_turn", run_turn)
-        turn = SimpleNamespace(cost=0, decisions=2, proposals=[1])
+        turn = SimpleNamespace(cost=0, decisions=2, proposals=[1], user_id=42)
         run(checkins._run(turn, "[h]", 7, 23, "morning"))
         return settled
 

@@ -221,8 +221,8 @@ def test_autopilot_takes_the_check_ins_the_switch_and_the_levels(authed_client, 
 
     async def set_autopilot(user_id, team_id, change):
         seen.append((user_id, team_id, change))
-        if change.levels.get("late_scratch") == "ai":
-            raise levels.LevelUnavailable(message="Late scratches and news can't be ai: Comes with event check-ins")
+        if change.levels.get("late_scratch") == "act":
+            raise levels.LevelUnavailable(message="Late scratches and news can't be act: Not built yet")
         return AiAutopilotTeam(team_id=team_id, on=change.checkins is not False, autopilot=bool(change.autopilot),
                                rows=[{"row": "lanes", "label": "Stream lanes", "level": "ai", "note": None,
                                       "options": [{"level": "ai", "available": True, "reason": None}]}])
@@ -237,13 +237,13 @@ def test_autopilot_takes_the_check_ins_the_switch_and_the_levels(authed_client, 
     r = authed_client.put(f"{BASE}/autopilot/21", json={"levels": {"lanes": "ai", "lineup": "notify"}})
     assert r.status_code == 200 and r.json()["message"] == "Automations updated"
     assert r.json()["data"]["rows"][0]["row"] == "lanes"
-    r = authed_client.put(f"{BASE}/autopilot/21", json={"levels": {"late_scratch": "ai"}})
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"levels": {"late_scratch": "act"}})
     assert (r.status_code, r.json()["error_code"]) == (409, "AI_LEVEL_UNAVAILABLE")
-    assert "Comes with event check-ins" in r.json()["message"]
+    assert "Not built yet" in r.json()["message"]
     assert seen == [(42, 21, levels.Change(checkins=False)), (42, 21, levels.Change(checkins=True)),
                     (42, 21, levels.Change(autopilot=True)),
                     (42, 21, levels.Change(levels={"lanes": "ai", "lineup": "notify"})),
-                    (42, 21, levels.Change(levels={"late_scratch": "ai"}))]
+                    (42, 21, levels.Change(levels={"late_scratch": "act"}))]
     # Nothing to change, on and checkins disagreeing, an unknown level or automation never reach the service
     for body in ({}, {"levels": {}}, {"on": True, "checkins": False}, {"levels": {"lanes": "max"}},
                  {"levels": {"trades": "ai"}}, {"mode": "act"}):

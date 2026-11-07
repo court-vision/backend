@@ -160,7 +160,7 @@ class TestTheLevels:
         _apply(team, autopilot=True)
         row = _apply(team, levels={"lanes": "act"})
         assert (row.autopilot, row.restore) == (False, None)
-        assert row.ai_rows == ["lineup", "daily_actions"] and _lineup(team) == (True, True)
+        assert row.ai_rows == ["lineup", "daily_actions", "late_scratch"] and _lineup(team) == (True, True)
 
     def test_a_lineup_level_upserts_the_override_and_keeps_its_other_fields(self, team):
         NotificationTeamPreference.create(user=team.user_id_id, team_id=team.team_id, alert_minutes_before=45)
