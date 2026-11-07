@@ -18,10 +18,9 @@ from services.providers.blocking import run_blocking_provider
 from db.models.teams import Team
 from db.models.nba.games import Game
 from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
-from services import credential_service
+from services import credential_service, steering
 from services.lineup_check_service import LineupCheckService
-from services.lineup_editor_service import move_results, planner_players, slot_counts_of, unfilled_results
-from services.lineup_planner import plan_fill
+from services.lineup_editor_service import move_results, unfilled_results
 from services.lineup_read_service import LineupReadService  # noqa: F401
 from services.providers import get_provider_adapter, unavailable_message
 from services.notification_service import NotificationService
@@ -427,7 +426,7 @@ async def send_test_alert(
 
     state = await adapter.read_lineup(team.team_id, league_info,
                                       fallback_slot_counts=dict(getattr(team.league, "roster_slots", None) or {}))
-    plan = plan_fill(planner_players(state), slot_counts_of(state))
+    plan = await steering.team_fill(team.team_id, state)
     moves = [m.model_dump() for m in move_results(list(plan.moves), state)]
     unfilled = [u.model_dump() for u in unfilled_results(plan)]
     first_game_time = _dt.strptime(state.first_game_time_et, "%H:%M").time() if state.first_game_time_et else None

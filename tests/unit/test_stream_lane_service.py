@@ -679,6 +679,78 @@ def test_stop_cancels_the_lanes_pickup_unless_it_is_being_made(h, monkeypatch):
         run(svc.StreamLaneService.stop(TEAM, 7))
 
 
+# ---- Dime's lane chips (the Dime autopilot plan, step 4) -------------------------------------------
+
+
+@pytest.fixture
+def chip(monkeypatch):
+    """Dime's lane chip, as `for_apply` hands it back once checked; `sent` is what was marked sent."""
+    from services.ai import proposals, steering as ai_steering
+    c = SimpleNamespace(row=SimpleNamespace(id=41, reason="Holder sits out the back-to-back"), asked=[], sent=[],
+                        refuse=None)
+
+    async def for_apply(proposal_id, user_id, team_id, kind, **match):
+        c.asked.append((proposal_id, user_id, team_id, kind, match))
+        if c.refuse:
+            raise c.refuse
+        return c.row
+
+    async def mark_sent(proposal_id, **kw):
+        c.sent.append(proposal_id)
+    monkeypatch.setattr(ai_steering, "for_apply", for_apply)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+    return c
+
+
+@pytest.mark.unit
+def test_dimes_start_is_checked_as_that_start_and_its_event_carries_dimes_reason(h, monkeypatch, chip):
+    monkeypatch.setattr(svc, "datetime", _clock(NOON))
+    run(svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER, proposal_id=41)))
+    assert chip.asked == [(41, 11, 21, "lane", {"op": "start", "holder.espn_id": HOLDER})]
+    _, event = h.inserted[0]
+    assert (event["action"], event["reason"], event["detail"]) == ("started", "dime", chip.row.reason)
+    assert chip.sent == [41]
+
+
+@pytest.mark.unit
+def test_dimes_pause_resume_and_stop_say_dime_did_it(h, monkeypatch, chip):
+    _team_lane(h, monkeypatch, lane(reason=None))
+    run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="paused", proposal_id=41)))
+    step = h.steps[-1]
+    assert (step.fields["reason"], step.fields["detail"]) == ("paused_by_dime", chip.row.reason)
+    assert (step.event["reason"], step.event["detail"]) == ("paused_by_dime", chip.row.reason)
+    assert chip.asked[-1][3:] == ("lane", {"op": "pause", "lane_id": 7}) and chip.sent == [41]
+
+    monkeypatch.setattr(svc, "datetime", _clock(tip(MON) + timedelta(hours=2)))
+    _team_lane(h, monkeypatch, lane(status="paused", next_period=28, next_decision_at=None))
+    run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="active", proposal_id=41)))
+    assert h.steps[-1].event["action"] == "resumed" and h.steps[-1].event["reason"] == "dime"
+    assert chip.asked[-1][4] == {"op": "resume", "lane_id": 7}
+
+    _team_lane(h, monkeypatch, lane())
+    run(svc.StreamLaneService.stop(TEAM, 7, 41))
+    step = h.steps[-1]
+    assert step.fields["status"] == "ended" and step.fields["reason"] == "stopped_by_dime"
+    assert step.event == {"action": "ended", "reason": "stopped_by_dime", "detail": chip.row.reason}
+    assert chip.sent == [41, 41, 41]
+
+
+@pytest.mark.unit
+def test_a_chip_that_isnt_this_step_changes_nothing(h, monkeypatch, chip):
+    from core.errors import AppError, ConflictError
+    _team_lane(h, monkeypatch, lane(reason=None))
+    # A notify-only change is no chip's
+    with pytest.raises(AppError, match="not what this chip proposes"):
+        run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(notify="desk", proposal_id=41)))
+    # A resume of a lane already running is stale
+    with pytest.raises(ConflictError, match="already running"):
+        run(svc.StreamLaneService.update(TEAM, LEAGUE, 7, StreamLaneUpdateReq(status="active", proposal_id=41)))
+    chip.refuse = ConflictError("AI_PROPOSAL_NOT_PENDING", "Already sent")
+    with pytest.raises(ConflictError, match="Already sent"):
+        run(svc.StreamLaneService.stop(TEAM, 7, 41))
+    assert not h.steps and not h.cancelled and chip.sent == []
+
+
 # ---- a settled lane pickup ------------------------------------------------------------------------
 
 

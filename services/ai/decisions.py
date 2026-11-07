@@ -102,7 +102,8 @@ LOG_DECISION: dict[str, Any] = {
         "stream_lane's next decision, a scheduled_pickup, or none for a move no automation is making). "
         "call: hold (keep the plan, or do nothing) or change (you'd do something else). A change to the "
         "lineup or the roster cites the proposal_id propose_lineup or propose_move returned in this "
-        "check-in; a lane change, which no tool makes yet, is said in the summary. summary: what you "
+        "check-in; any other change cites the proposal a tool made for it in this check-in, if one did, "
+        "and is otherwise said in the summary. summary: what you "
         "would do, in a line ('Keep auto-lineup's fill for tonight', 'Stream Herb Jones in lane 2's "
         "spot on Thu instead of Kris Dunn'). reason: why, with the number behind it. The user reads "
         "every one and marks it agree or disagree. Only in a check-in."
@@ -118,7 +119,7 @@ LOG_DECISION: dict[str, Any] = {
             "summary": {"type": "string", "maxLength": SUMMARY_MAX, "description": "What you would do, one line"},
             "reason": {"type": "string", "maxLength": REASON_MAX, "description": "Why, with the number behind it"},
             "proposal_id": {"type": "integer",
-                            "description": "The proposal behind a change (from propose_move / propose_lineup)"},
+                            "description": "The proposal behind a change, made in this check-in"},
         },
         "required": ["team_id", "area", "call", "summary", "reason"],
         "additionalProperties": False,
@@ -170,8 +171,10 @@ def _move_of(p: Any, now: datetime) -> Optional[dict[str, Any]]:
     if p is None or p.id is None:
         return None
     view = proposals.view_of(p, now)
-    return {k: view[k] for k in ("proposal_id", "state", "kind", "date", "add", "drop", "moves", "summary",
-                                 "projection")}
+    # A steering chip (steer, lane, cancel_pickup) carries its `action` in place of add, drop and moves
+    keys = ("proposal_id", "state", "kind", "date", "action", "summary") if "action" in view else \
+        ("proposal_id", "state", "kind", "date", "add", "drop", "moves", "summary", "projection")
+    return {k: view.get(k) for k in keys}
 
 
 # ------------------------------- DB ------------------------------- #

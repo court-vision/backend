@@ -5,6 +5,8 @@ usr.ai_proposals, the roster moves the agent proposed as chips (migration 0039),
 usr.ai_memory, the notes the agent keeps between conversations (migration 0041).
 Migration 0042 adds a conversation's `kind` (a chat, or the conversation a check-in
 started), the `shadow` proposal state and the spend `line` (services/ai/checkins.py).
+Migration 0043 adds the steering chips (`kind` steer, lane, cancel_pickup) and their `action`
+(services/ai/steering.py).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -101,14 +103,15 @@ class AiProposal(BaseModel):
     `state` is proposed, sent or dismissed, or shadow (made in a check-in: logged, never
     staged or sent; migration 0042); expired is read off `expires_at`. The send route fills
     `sent_at` and the write's `audit_id` (a transaction or lineup write) or `pickup_id` (a
-    scheduled pickup)."""
+    scheduled pickup). A steering chip (`kind` steer, lane or cancel_pickup; migration 0043) holds
+    what applying it does in `action`, and is marked sent by the Week desk route that applied it."""
 
     id = BigAutoField(primary_key=True)
     user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
     conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", on_delete="CASCADE")
     turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
     team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
-    kind = TextField()                      # transaction | scheduled | lineup
+    kind = TextField()                      # transaction | scheduled | lineup | steer | lane | cancel_pickup
     day = IntegerField()                    # matchup day index, 0 = the matchup's first day
     scoring_period_id = IntegerField()
     nba_date = DateField()
@@ -124,6 +127,7 @@ class AiProposal(BaseModel):
     summary = TextField()
     projection = BinaryJSONField(null=True)
     moves = BinaryJSONField(null=True)      # lineup chips: the slot moves, as the lineup write takes them
+    action = BinaryJSONField(null=True)     # steering chips: what applying it does (services/ai/steering.py)
     state = TextField(default="proposed")
     expires_at = DateTimeField()
     created_at = DateTimeField(default=_now)

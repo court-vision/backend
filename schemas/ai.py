@@ -247,7 +247,9 @@ class AiChart(ApiModel):
 
 # shadow: made in one of Dime's check-ins (services/ai/checkins.py), checked but never sendable
 AiProposalState = Literal["proposed", "sent", "dismissed", "expired", "shadow"]
-AiProposalKind = Literal["transaction", "scheduled", "lineup"]
+# steer, lane, cancel_pickup: Dime's steering chips (services/ai/steering.py), applied through a
+# Week desk route with `proposal_id`, never staged in the tray
+AiProposalKind = Literal["transaction", "scheduled", "lineup", "steer", "lane", "cancel_pickup"]
 
 
 class AiProposalPlayer(ApiModel):
@@ -273,13 +275,78 @@ class AiProposalMove(ApiModel):
     note: Optional[str] = Field(None, description="The planner's note: his game, 'no game today', 'OUT'")
 
 
+class AiHoldChange(ApiModel):
+    """One hold a steer chip sets (usr.team_holds once applied)."""
+
+    kind: Literal["keep", "block", "override", "pin"]
+    player: AiProposalPlayer
+    share: Optional[float] = Field(None, description="override only: the share of his usual value (0 = he misses)")
+    starts_on: date_type
+    ends_on: date_type
+    effect: str = Field(..., description="What it does, in a line")
+
+
+class AiHoldCleared(AiHoldChange):
+    """A live hold a steer chip clears."""
+
+    hold_id: int
+    reason: str = Field(..., description="Why it was set")
+
+
+class AiSteerAction(ApiModel):
+    """A steer chip: applied with `POST /teams/{team_id}/holds` and its proposal_id."""
+
+    holds: list[AiHoldChange] = []
+    clear: list[AiHoldCleared] = []
+
+
+class AiLaneDay(ApiModel):
+    date: date_type
+    value: float
+    switch: bool = False
+    player: AiProposalPlayer
+
+
+class AiLaneAction(ApiModel):
+    """A lane chip: `op` start (`POST /teams/{team_id}/stream-lanes` with `holder.espn_id` as player_id),
+    pause or resume (`PATCH .../stream-lanes/{lane_id}`), stop (`DELETE .../stream-lanes/{lane_id}`),
+    each with its proposal_id."""
+
+    op: Literal["start", "pause", "resume", "stop"]
+    lane_id: Optional[int] = Field(None, description="The lane; none for a start")
+    holder: AiProposalPlayer = Field(..., description="Who holds the spot (a start: whose spot it streams)")
+    status: Optional[str] = Field(None, description="pause, resume, stop: the lane's status when proposed")
+    end_date: date_type
+    gain: Optional[float] = Field(None, description="start: the projected gain over holding")
+    adds: Optional[int] = None
+    value: Optional[float] = None
+    hold_value: Optional[float] = None
+    adds_left: Optional[int] = None
+    first_decision_at: Optional[datetime] = None
+    days: list[AiLaneDay] = Field(default_factory=list, description="start: who would hold the spot each day")
+
+
+class AiCancelPickupAction(ApiModel):
+    """A cancel_pickup chip: applied with `DELETE /teams/{team_id}/pickups/{pickup_id}` and its proposal_id."""
+
+    pickup_id: int
+    date: date_type
+    add: AiProposalPlayer
+    drop: Optional[AiProposalPlayer] = None
+    lane_id: Optional[int] = Field(None, description="The stream lane that scheduled it, if one did")
+
+
 class AiProposalChip(ApiModel):
     """A move the agent proposed and the server checked: the chip the AI desk shows. Staged, it goes
     into the Week desk's tray (rendered in the AI desk) and is sent by its slider through the Week
     desk's own write with `proposal_id` on the request, which marks it sent: the roster transaction
     (`kind` transaction: `add` / `drop`, today), the scheduled pickup (`kind` scheduled: `add` / `drop`,
     a later day) or the lineup write (`kind` lineup: `moves`, one day's board, today's or a later
-    day's, written at once). Never executed from here."""
+    day's, written at once). Never executed from here.
+
+    Dime's steering chips (`kind` steer, lane, cancel_pickup) change no ESPN roster, so they are
+    never staged: the AI desk applies one with a button through the Week desk's own route for it
+    (`steer`, `lane` or `pickup` says which, and what it does), with `proposal_id`."""
 
     proposal_id: int
     state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, expired, or shadow "
@@ -301,6 +368,10 @@ class AiProposalChip(ApiModel):
     scoring: Optional[str] = Field(None, description="The league's scoring format the change is in")
     expires_at: datetime = Field(..., description="When the chip stops being stageable (the day's first tip, or its rollover)")
     sent_at: Optional[datetime] = None
+    # Dime's steering chips: what applying one does, under its kind (the rest above are empty)
+    steer: Optional[AiSteerAction] = None
+    lane: Optional[AiLaneAction] = None
+    pickup: Optional[AiCancelPickupAction] = None
 
 
 class AiProposal(AiProposalChip):

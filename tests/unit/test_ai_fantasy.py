@@ -532,7 +532,7 @@ def test_a_scheduled_pickups_player_listed_out_is_worth_nothing_under_any_value(
     lanes.category_values = {HOLDER: 0.5, GUARD: 0.1, BIG: 2.0, 10: 3.0, 11: 0.0, 50: 9.0}
     seen, original = {}, fantasy.plan_lanes
 
-    def plan_lanes(board, holder_ids, pool, days, pending, budget, rehold, values=None):
+    def plan_lanes(board, holder_ids, pool, days, pending, budget, rehold, values=None, steer=None):
         seen["pool"] = {f.player_id: f.value for f in pool}
         seen["values"] = values
         return original(board, holder_ids, pool, days, pending, budget, rehold, values)
