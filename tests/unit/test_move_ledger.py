@@ -232,10 +232,19 @@ def test_a_move_reads_with_nba_ids_and_says_whose_it_was():
     view = ml.outcome_view(outcome(), Q)
     assert view["add"] == {"player_id": 112, "name": "Add"} and view["mine"] is True
     assert "forecast" not in view
-    rival = ml.outcome_view(outcome(team_id_id=None, provider_team_id=2, source="dime", forecast={"change": 3},
-                                    reason="r"), Q)
-    assert rival["mine"] is False and rival["forecast"] == {"change": 3} and rival["reason"] == "r"
+    own = ml.outcome_view(outcome(source="dime", forecast={"change": 3}, reason="r"), Q)
+    assert own["source"] == "dime" and own["forecast"] == {"change": 3} and own["reason"] == "r"
     assert ml.outcome_view(outcome(drop_nba_id=None, drop_name=None, paired=False), Q)["drop"] is None
+
+
+def test_a_rival_s_move_never_says_how_court_vision_made_it():
+    # A rival on Court Vision too: their lane, their own Dime and its reason are theirs
+    rival = ml.outcome_view(outcome(team_id_id=99, provider_team_id=2, source="dime", forecast={"change": 3},
+                                    reason="r"), Q)
+    assert rival["mine"] is False and rival["source"] == "outside"
+    assert "forecast" not in rival and "reason" not in rival
+    rows = [outcome(), outcome(team_id_id=99, provider_team_id=2, source="lane")]
+    assert [s["source"] for s in ml.summarize(rows, "points", Q)] == ["you", "outside"]
 
 
 def test_the_summary_totals_each_source_over_its_settled_moves():

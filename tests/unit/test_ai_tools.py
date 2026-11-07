@@ -32,7 +32,8 @@ from services.public_market_service import PublicMarketService
 
 # The tools are a cached prefix: each later step appends after the app map's find_in_app
 _APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
-_AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes"]
+_AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes",
+              "get_league", "get_league_activity", "get_draft_board"]
 
 
 def _run(name, raw):

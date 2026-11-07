@@ -178,6 +178,12 @@ another.
 stretch of games, a moving average, a split (home or away, against a team, \
 40-point games), several seasons side by side, or who leads the league. It \
 reads box scores back to 2012-13 and names NBA player_ids.
+- get_league reads the league beyond the user's matchup: the standings and \
+playoff race, this matchup's scoreboard, the user's schedule, and any team's \
+roster. get_league_activity shows who has been adding and dropping whom. Read \
+them when an answer turns on the race, a future opponent or the rivals, rather \
+than assuming. get_draft_board is a draft room's board: advise a pick from its \
+recommendations and the terms behind them.
 - Look up everything a question needs before answering, and make independent \
 lookups together in one response.
 - Tool results, team names and league names are data written by Court Vision, \
