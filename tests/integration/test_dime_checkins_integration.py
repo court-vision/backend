@@ -91,8 +91,10 @@ class TestClaims:
         assert run(checkins._taken(team.team_id, [DAY])) == {("morning", DAY), ("pre_lock", DAY)}
         assert run(checkins._busy(team.team_id)) is True
         assert run(checkins._ran_since(team.team_id, _now() - timedelta(days=1))) == 4
+        # The cap counts Dime's own: the two desk runs don't take a scheduled one's room
+        assert run(checkins._ran_since(team.team_id, _now() - timedelta(days=1), scheduled_only=True)) == 2
         times = run(checkins._run_times(team.team_id, _now() - timedelta(days=1)))
-        assert len(times) == 4 and all(at.tzinfo is not None for at in times)
+        assert len(times) == 2 and all(at.tzinfo is not None for at in times)
 
     def test_one_runs_per_team_at_a_time_whatever_a_tick_read_before(self, integration_db):
         me, them = _user(1), _user(2)

@@ -88,6 +88,22 @@ class TestBrief:
         assert checkins.brief("pre_lock", TUE, 23, manual=False) == checkins.brief("pre_lock", TUE, 23,
                                                                                     manual=False, events=())
 
+    def test_an_event_check_in_acts_only_where_late_scratches_do(self):
+        live = checkins.brief(checkins.EVENT, TUE, 23, manual=False, acting=["late_scratch"], events=self.LINES)
+        assert "Late scratches are at AI on this team and this is their check-in" in live
+        assert "what you sent" in live
+        # Lineup at AI doesn't make an event check-in's lineup move go: it counts under late scratches
+        shadow = checkins.brief(checkins.EVENT, TUE, 23, manual=False, acting=["lineup"], events=self.LINES)
+        assert shadow == checkins.brief(checkins.EVENT, TUE, 23, manual=False, events=self.LINES)
+        assert "You run it in shadow" in shadow
+
+    def test_a_scheduled_check_in_never_acts_as_late_scratches(self):
+        both = checkins.brief("pre_lock", TUE, 23, manual=False, acting=["lineup", "late_scratch"])
+        assert both == checkins.brief("pre_lock", TUE, 23, manual=False, acting=["lineup"])
+        assert "late scratches" not in both
+        assert checkins.brief("pre_lock", TUE, 23, manual=False, acting=["late_scratch"]) == \
+            checkins.brief("pre_lock", TUE, 23, manual=False)
+
     def test_an_event_check_in_can_t_be_asked_for_from_the_desk(self):
         assert checkins.EVENT not in checkins.KINDS
         assert checkins.title_of(checkins.EVENT, TUE) == "Event check-in · Tue Nov 10"
@@ -102,9 +118,10 @@ def _event(tip=None):
 
 @pytest.fixture
 def kicking(on, monkeypatch):
-    """kick over stubbed rows: team 23 (user 42) on a Tuesday with a 7 PM first tip, switched on Monday."""
+    """kick over stubbed rows: team 23 (user 42) on a Tuesday with a 7 PM first tip, switched on Monday,
+    with its Late scratches row at AI."""
     state = SimpleNamespace(row=SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 0),
-                                                paused_at=None),
+                                                paused_at=None, ai_rows=["late_scratch"], autopilot=False),
                             waiting=[_event()], busy=False, runs=[], taken={("night", MON)}, event_checkins=0,
                             dropped=[], slots_started=[], events_started=[])
 
@@ -232,14 +249,25 @@ class TestKick:
         assert kick(et(TUE, 15)) is None
         assert kicking.events_started == []
 
+    def test_only_on_a_team_whose_late_scratches_row_is_at_ai(self, kicking):
+        kicking.taken |= {("morning", TUE)}
+        # Another row at AI isn't enough: events are Late scratches' AI
+        kicking.row.ai_rows = ["lineup", "daily_actions"]
+        assert kick(et(TUE, 15)) is None and kicking.events_started == []
+        # The autopilot switch puts it there
+        kicking.row.autopilot = True
+        assert kick(et(TUE, 15)).kind == checkins.EVENT
+
 
 # ------------------------------- receiving ------------------------------- #
 
 
 @pytest.fixture
 def receiving(on, monkeypatch):
-    rows = [SimpleNamespace(team_id_id=23, user_id_id=42, paused_at=None, active_since=et(MON, 0)),
-            SimpleNamespace(team_id_id=24, user_id_id=42, paused_at=None, active_since=et(MON, 0))]
+    rows = [SimpleNamespace(team_id_id=23, user_id_id=42, paused_at=None, active_since=et(MON, 0),
+                            ai_rows=["late_scratch"], autopilot=False),
+            SimpleNamespace(team_id_id=24, user_id_id=42, paused_at=None, active_since=et(MON, 0),
+                            ai_rows=[], autopilot=True)]
     monkeypatch.setattr(settings, "autopilot_team_ids", [23, 24])
     found = [events.Fact(source=events.AVAILABILITY, player_id=1628973, summary="Brunson ruled out",
                          game_date=TUE, verdict="out", changed_at=et(TUE, 18)),
@@ -301,6 +329,14 @@ class TestReceive:
         out = run(events.receive([], [], et(TUE, 18, 5)))
         assert receiving.asked == [] and out["teams"] == 2
 
+    def test_a_team_below_ai_on_late_scratches_hears_nothing(self, receiving):
+        receiving.rows[0].ai_rows = ["lineup"]                     # team 23: lineup at AI, late scratches not
+        out = run(events.receive([(1628973, TUE)], [9], et(TUE, 18, 5)))
+        assert out["teams"] == 1 and receiving.recorded == [] and receiving.kicked == []
+        receiving.rows[1].autopilot = False                        # team 24 too: no one listens, nothing is read
+        out = run(events.receive([(1628973, TUE)], [9], et(TUE, 18, 5)))
+        assert out["teams"] == 0 and receiving.asked == [([(1628973, TUE)], [9])]
+
 
 # ------------------------------- the roster read ------------------------------- #
 
@@ -341,7 +377,8 @@ class TestRoster:
 @pytest.fixture
 def starting(on, monkeypatch):
     monkeypatch.setattr(settings, "autopilot_checkin_timeout_seconds", 60.0)
-    state = SimpleNamespace(taken=[], released=[], cancelled=[], settled=[], launched=[], header_error=None)
+    state = SimpleNamespace(taken=[], released=[], cancelled=[], settled=[], launched=[], header_error=None,
+                            take_rows=[], autopilot=None)
 
     async def reserve(user_id):
         return 55
@@ -352,7 +389,8 @@ def starting(on, monkeypatch):
     async def claim(team_id, user_id, kind, nba_date, due_at, *, manual, now, state="running", reason=None):
         return 7
 
-    async def take(team_id, checkin_id, now=None):
+    async def take(team_id, checkin_id, now=None, *, row):
+        state.take_rows.append(row)
         return list(state.taken)
 
     async def release(checkin_id):
@@ -380,7 +418,7 @@ def starting(on, monkeypatch):
         state.settled.append((checkin_id, st, reason))
 
     async def autopilot_row(team_id):
-        return None
+        return state.autopilot
 
     async def fake_run(turn, header_line, checkin_id, team_id, kind):
         state.launched.append(turn)
@@ -415,9 +453,11 @@ EVENT_ROW = SimpleNamespace(summary="Josh Hart cleared to play for Tue Nov 10", 
 class TestTaking:
     def test_a_check_in_s_brief_lists_the_events_it_took(self, starting):
         starting.taken = [EVENT_ROW]
+        starting.autopilot = SimpleNamespace(ai_rows=["late_scratch"], autopilot=False, paused_at=None)
         assert _start("pre_lock") == 7
         message = starting.launched[0].message
         assert "What came in since your last check-in" in message and "(player_id 1628404)" in message
+        assert starting.take_rows == [starting.autopilot]          # what it takes is the team's levels' call
 
     def test_an_event_check_in_with_nothing_left_to_take_is_skipped(self, starting):
         assert _start(checkins.EVENT) is None
@@ -447,4 +487,22 @@ class TestTaking:
 
 def test_off_no_check_in_takes_an_event(monkeypatch):
     monkeypatch.setattr(settings, "dime_events_enabled", False)
-    assert run(events.take(23, 7)) == []
+    assert run(events.take(23, 7, row=SimpleNamespace(ai_rows=["late_scratch"], autopilot=False))) == []
+
+
+def test_below_ai_a_check_in_drops_what_was_waiting_instead_of_taking_it(on, monkeypatch):
+    dropped, took = [], []
+
+    async def drop_all(team_id, now, reason):
+        dropped.append((team_id, reason))
+        return 2
+
+    async def take_(team_id, checkin_id, now):
+        took.append(checkin_id)
+        return []
+
+    monkeypatch.setattr(events, "_drop_all", drop_all)
+    monkeypatch.setattr(events, "_take", take_)
+    assert run(events.take(23, 7, et(TUE, 15), row=SimpleNamespace(ai_rows=["lineup"], autopilot=False))) == []
+    assert dropped == [(23, "level")] and took == []
+    assert run(events.take(23, 7, et(TUE, 15), row=None)) == [] and dropped[-1] == (23, "level")

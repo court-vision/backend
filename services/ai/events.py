@@ -11,9 +11,11 @@ a game not yet tipped (its late-scratch events), the news feed every 5 minutes
 for the items it stored. They carry keys only; the facts are read here from the
 tables the pipelines wrote.
 
-For each team Dime runs (live, allowlisted), an event is recorded for each fact
-about a player on its roster (read from ESPN, kept for a few minutes), once per
-verdict change or news item. Then the team is kicked:
+For each team Dime runs (live, allowlisted) whose Late scratches row is at AI
+(the user put it there, or the autopilot switch is on; services/ai/autonomy.py),
+an event is recorded for each fact about a player on its roster (read from ESPN,
+kept for a few minutes), once per verdict change or news item. Then the team is
+kicked:
 
 - a scheduled check-in that is due now, or opens within
   AUTOPILOT_EVENT_FOLD_MINUTES, takes the events (its brief lists them) rather
@@ -28,8 +30,10 @@ verdict change or news item. Then the team is kicked:
 
 Every check-in takes the team's pending events when it starts, so nothing is
 answered twice and nothing waits past the next one. An event that can no longer
-be answered is dropped: his game tipped (`tipped`), or news more than half a day
-old (`stale`).
+be answered is dropped: his game tipped (`tipped`), news more than half a day
+old (`stale`), or the row left AI before a check-in took it (`level`). What an
+event check-in commits counts under Late scratches (autonomy.rows_of), so it is
+sent only where that row acts.
 
 DIME_EVENTS_ENABLED gates all of it, off by default: off, nothing is recorded,
 no check-in takes an event, and every brief is step 5's.
@@ -51,6 +55,7 @@ from db.models.nba.availability import PlayerAvailability
 from db.models.nba.games import Game
 from db.models.nba.players import Player
 from services import news_service
+from services.ai import autonomy
 from services.scheduled_pickup_service import et_at
 
 AVAILABILITY, NEWS = "availability", "news"
@@ -92,6 +97,13 @@ SOURCE_WORDS = {
 
 def enabled() -> bool:
     return settings.ai_enabled and settings.autopilot_enabled and settings.dime_events_enabled
+
+
+def watches(row: Any) -> bool:
+    """The team takes events: its Late scratches row is at AI (the user put it there, or the
+    autopilot switch is on). Below AI nothing is recorded for it, no event check-in starts, and
+    what was still waiting is dropped when its next check-in starts (`level`)."""
+    return autonomy.at_ai(row, autonomy.LATE_SCRATCH)
 
 
 def _now() -> datetime:
@@ -265,11 +277,23 @@ def _take(team_id: int, checkin_id: int, now: datetime) -> list[AutopilotEvent]:
                 .order_by(AutopilotEvent.received_at, AutopilotEvent.id))
 
 
-async def take(team_id: int, checkin_id: int, now: Optional[datetime] = None) -> list[AutopilotEvent]:
-    """The team's pending events, now the check-in's (stale ones dropped first). Nothing while off."""
+@db_operation("ai.event_drop_all")
+def _drop_all(team_id: int, now: datetime, reason: str) -> int:
+    return (AutopilotEvent.update(state=DROPPED, reason=reason, taken_at=now)
+            .where(AutopilotEvent.team_id == team_id, AutopilotEvent.state == PENDING)
+            .execute())
+
+
+async def take(team_id: int, checkin_id: int, now: Optional[datetime] = None, *, row: Any) -> list[AutopilotEvent]:
+    """The team's pending events, now the check-in's (stale ones dropped first). Nothing while off;
+    on a team whose Late scratches row is no longer at AI (`row`, its usr.autopilot), what was
+    waiting is dropped instead."""
     if not enabled():
         return []
     now = now or _now()
+    if not watches(row):
+        await _drop_all(team_id, now, "level")
+        return []
     await drop_stale(team_id, now)
     return await _take(team_id, checkin_id, now)
 
@@ -366,7 +390,8 @@ async def receive(availability: Sequence[tuple[int, date]], news: Sequence[int],
     if not enabled():
         out["off"] = True
         return out
-    rows = [r for r in await checkins._live() if checkins.allowed(r.team_id_id, r.user_id_id)]
+    # Teams Dime runs whose Late scratches row is at AI; the others hear nothing
+    rows = [r for r in await checkins._live() if checkins.allowed(r.team_id_id, r.user_id_id) and watches(r)]
     out["teams"] = len(rows)
     if not rows or (not availability and not news):
         return out
@@ -401,7 +426,7 @@ async def kick(team_id: int, user_id: int, now: Optional[datetime] = None, *, ro
         return None
     now = now or _now()
     row = row if row is not None else await checkins._autopilot_row(team_id)
-    if row is None or row.paused_at is not None or not checkins.allowed(team_id, user_id):
+    if row is None or row.paused_at is not None or not watches(row) or not checkins.allowed(team_id, user_id):
         return None
     await drop_stale(team_id, now)
     waiting = await pending(team_id)

@@ -160,7 +160,7 @@ class TestTheLevels:
         _apply(team, autopilot=True)
         row = _apply(team, levels={"lanes": "act"})
         assert (row.autopilot, row.restore) == (False, None)
-        assert row.ai_rows == ["lineup", "daily_actions"] and _lineup(team) == (True, True)
+        assert row.ai_rows == ["lineup", "daily_actions", "late_scratch"] and _lineup(team) == (True, True)
 
     def test_a_double_first_switch_writes_one_row(self, team):
         _apply(team, levels={"lanes": "ai"})

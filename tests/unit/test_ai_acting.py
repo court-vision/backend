@@ -77,9 +77,10 @@ class TestLevels:
         assert autonomy.stored(team) == {"daily_actions"}                     # an unknown row is ignored
         assert autonomy.ai_rows(team) == ["daily_actions"]
         on = pilot(autopilot=True, ai_rows=["daily_actions"])
-        # The switch puts every row that offers AI at AI; late scratches wait for step 6
-        assert autonomy.ai_rows(on) == ["lineup", "daily_actions", "lanes"]
-        assert not autonomy.at_ai(on, autonomy.LATE_SCRATCH) and not autonomy.offers_ai(autonomy.CHECKINS)
+        # The switch puts every row that offers AI at AI, late scratches too (step 6's event check-ins)
+        assert autonomy.ai_rows(on) == ["lineup", "daily_actions", "lanes", "late_scratch"]
+        assert autonomy.at_ai(on, autonomy.LATE_SCRATCH) and not autonomy.offers_ai(autonomy.CHECKINS)
+        assert autonomy.ai_rows(pilot(ai_rows=["late_scratch"])) == ["late_scratch"]
 
     def test_dime_acts_only_with_check_ins_on_and_acting_on_on_the_server(self, monkeypatch):
         monkeypatch.setattr(settings, "dime_acting_enabled", True)
@@ -120,7 +121,11 @@ class TestWhatAChipTouches:
         assert not autonomy.chip_acts(team, both)
         assert autonomy.chip_acts(team, chip("lane", action={"op": "stop"}))
         assert autonomy.chip_acts(pilot(ai_rows=["lanes", "lineup"]), both)
-        assert not autonomy.chip_acts(pilot(autopilot=True), chip("lineup"), event=True)   # step 6's row
+        # An event check-in's move acts only where late scratches do, whatever its kind's row says
+        assert not autonomy.chip_acts(pilot(ai_rows=["lineup"]), chip("lineup"), event=True)
+        assert autonomy.chip_acts(pilot(ai_rows=["late_scratch"]), chip("lineup"), event=True)
+        assert autonomy.chip_acts(pilot(autopilot=True), chip("transaction"), event=True)
+        assert autonomy.is_event("event") and not autonomy.is_event("morning")
         assert autonomy.primary({"lanes", "lineup"}) == "lineup"
 
     def test_only_an_add_counts_toward_the_caps(self):
@@ -147,7 +152,7 @@ class TestTheTable:
         assert offered(t["lineup"]) == {}
         assert set(offered(t["daily_actions"])) == {"notify", "act"}
         assert set(offered(t["lanes"])) == {"off", "notify"}
-        assert set(offered(t["late_scratch"])) == {"notify", "act", "ai"}
+        assert set(offered(t["late_scratch"])) == {"notify", "act"}
         assert offered(t["checkins"]) == {"notify": "Check-ins are Dime's own", "act": "Check-ins are Dime's own"}
         # Never set up: lineup from the preferences, lanes run as set, the rest off
         assert {r: t[r]["level"] for r in t} == {"lineup": "notify", "daily_actions": "off", "lanes": "act",
@@ -155,12 +160,18 @@ class TestTheTable:
 
     def test_the_levels_and_notes_of_a_team_at_ai(self, monkeypatch):
         monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        monkeypatch.setattr(settings, "dime_events_enabled", False)
         t = by_row(autonomy.table(pilot(ai_rows=["daily_actions"]), lineup_below_ai="act", lineup_email=True))
         assert (t["daily_actions"]["level"], t["daily_actions"]["note"]) == ("ai", None)
         assert (t["lineup"]["level"], t["checkins"]["level"]) == ("act", "ai")
         on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act", lineup_email=True))
-        assert [on[r]["level"] for r in on] == ["ai", "ai", "ai", "off", "ai"]
+        assert [on[r]["level"] for r in on] == ["ai", "ai", "ai", "ai", "ai"]
         assert on["lineup"]["note"] == "Autopilot sets these"
+        # Late scratches at AI do nothing while the server's event check-ins are off
+        assert on["late_scratch"]["note"] == "Nothing starts yet: event check-ins are switched off on the server"
+        monkeypatch.setattr(settings, "dime_events_enabled", True)
+        on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act", lineup_email=True))
+        assert on["late_scratch"]["note"] == "Autopilot sets these"
         monkeypatch.setattr(settings, "dime_acting_enabled", False)
         off = by_row(autonomy.table(pilot(ai_rows=["lanes"]), lineup_below_ai="act", lineup_email=True))
         assert off["lanes"]["note"] == "Reviews only: Dime's acting is switched off on the server"
@@ -223,8 +234,9 @@ class TestTheCheck:
         assert e.value.status_code == 422
 
     def test_a_level_a_row_doesn_t_offer_is_refused_with_why(self):
-        with pytest.raises(levels.LevelUnavailable, match="Late scratches and news can't be ai: Comes with event"):
-            levels.check(levels.Change(levels={"late_scratch": "ai"}), email=True)
+        with pytest.raises(levels.LevelUnavailable, match="Late scratches and news can't be act: Not built yet"):
+            levels.check(levels.Change(levels={"late_scratch": "act"}), email=True)
+        assert levels.check(levels.Change(levels={"late_scratch": "ai"}), email=True).levels == {"late_scratch": "ai"}
         with pytest.raises(levels.LevelUnavailable, match="Daily actions can't be notify: Not built yet"):
             levels.check(levels.Change(levels={"daily_actions": "notify"}), email=True)
         with pytest.raises(levels.LevelUnavailable, match="lineup email is off"):

@@ -237,10 +237,12 @@ def _ran_since(team_id: int, since: datetime, *, scheduled_only: bool = False) -
 
 @db_operation("ai.checkin_run_times")
 def _run_times(team_id: int, since: datetime) -> list[datetime]:
-    """When each check-in that ran since `since` started: an event kick weighs which of them are
-    still inside the day before each check-in it must leave room for."""
+    """When each check-in Dime started itself since `since` (desk runs don't count, as in the tick):
+    an event kick weighs which of them are still inside the day before each check-in it must leave
+    room for."""
     return [at for (at,) in AiCheckin.select(AiCheckin.started_at)
-            .where(AiCheckin.team_id == team_id, AiCheckin.started_at >= since, AiCheckin.state.in_(_RAN))
+            .where(AiCheckin.team_id == team_id, AiCheckin.started_at >= since, AiCheckin.state.in_(_RAN),
+                   AiCheckin.manual == False)  # noqa: E712
             .tuples()]
 
 
@@ -444,11 +446,16 @@ _STEPS = {
 }
 
 
-def acting_rules(rows: list[str]) -> str:
-    """The rules of a check-in on a team where Dime acts on some automations (the plan's step 5)."""
-    return (
-        f"What you do yourself on this team: {autonomy.words(rows)}. Those automations are at AI; on the others "
-        "you review, as in shadow. Every proposal you make in a check-in is first logged as what you would do; "
+def acting_rules(rows: list[str], *, event: bool = False) -> str:
+    """The rules of a check-in on a team where Dime acts on some automations (the plan's step 5). An
+    event check-in's moves all count under late scratches (autonomy.rows_of), so its rules say that."""
+    what = ("Late scratches are at AI on this team and this is their check-in: every move you make in it counts "
+            "under them, whatever it changes (slots, adds and drops, lanes). "
+            if event else
+            f"What you do yourself on this team: {autonomy.words(rows)}. Those automations are at AI; on the "
+            "others you review, as in shadow. ")
+    return what + (
+        "Every proposal you make in a check-in is first logged as what you would do; "
         "log_decision with call change and its proposal_id is what commits it: on an automation at AI it is sent "
         "now through the user's own write routes if the policy allows (get_automations' autopilot section has "
         "the caps, what you have used and what you did lately); anywhere else it stays a review, never sent. A "
@@ -467,8 +474,14 @@ def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
     who = ("The user asked for it from the AI desk." if manual
            else "It started because news came in about the roster." if kind == EVENT
            else "It started on its schedule.")
+    # What an event check-in commits counts under late scratches alone (autonomy.rows_of), and a
+    # scheduled one's under each move's own row: late scratches act only in event check-ins
+    if kind == EVENT:
+        acting = [autonomy.LATE_SCRATCH] if autonomy.LATE_SCRATCH in (acting or []) else []
+    else:
+        acting = [r for r in acting or [] if r != autonomy.LATE_SCRATCH]
     live = bool(acting)
-    rules = acting_rules(acting) if live else _SHADOW
+    rules = acting_rules(acting, event=kind == EVENT) if live else _SHADOW
     head = (f"[{LABELS[kind]} for team_id {team_id}, about {nba_date.strftime('%A')} {nba_date.isoformat()}. "
             f"{who} {rules}]")
     close = ("End with a short note for the user: what you sent, what you left for them to send, and what you'd "
@@ -517,8 +530,10 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         await spend.cancel(reservation_id)
         return None
     from services.ai import events
+    autopilot: Optional[Autopilot] = None
     try:
-        taken = await events.take(team_id, checkin_id, now)
+        autopilot = await _autopilot_row(team_id)
+        taken = await events.take(team_id, checkin_id, now, row=autopilot)
     except Exception:
         get_logger().exception("ai_checkin_events_failed", checkin_id=checkin_id, team_id=team_id)
         taken = []
@@ -536,7 +551,7 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         await conversations.claim(conversation_id, user_id, hold)
         await _attach(checkin_id, conversation_id)
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
-        acting = autonomy.acting_rows(await _autopilot_row(team_id))
+        acting = autonomy.acting_rows(autopilot if autopilot is not None else await _autopilot_row(team_id))
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
                           message=brief(kind, nba_date, team_id, manual=manual, acting=acting,
                                         events=events.brief_lines(taken)),

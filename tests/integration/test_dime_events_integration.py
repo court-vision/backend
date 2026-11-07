@@ -15,6 +15,8 @@ import json
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 from peewee import IntegrityError
 
@@ -96,6 +98,10 @@ def _record(team, found, now=NOW):
     return run(events.record(team.team_id, team.user_id_id, DAY, found, now))
 
 
+# The team's usr.autopilot as take reads it: Late scratches at AI
+AT_AI = SimpleNamespace(ai_rows=["late_scratch"], autopilot=False, paused_at=None)
+
+
 def _claim(team, kind=checkins.EVENT, state="running"):
     return run(checkins._claim(team.team_id, team.user_id_id, kind, DAY, NOW, manual=False, now=NOW, state=state))
 
@@ -127,18 +133,18 @@ class TestEvents:
     def test_a_check_in_takes_them_and_one_that_fails_to_start_gives_them_back(self, team, night, on):
         _record(team, [_fact(), _fact(pid=HART)])
         checkin_id = _claim(team)
-        taken = run(events.take(team.team_id, checkin_id, NOW))
+        taken = run(events.take(team.team_id, checkin_id, NOW, row=AT_AI))
         assert [e.player_id for e in taken] == [BRUNSON, HART]
         assert all(e.state == "taken" and e.checkin_id_id == checkin_id for e in taken)
         assert run(events.pending(team.team_id)) == []
-        assert run(events.take(team.team_id, checkin_id, NOW)) == []                 # nothing left to take
+        assert run(events.take(team.team_id, checkin_id, NOW, row=AT_AI)) == []          # nothing left to take
         assert run(events.release(checkin_id)) == 2
         assert [e.player_id for e in run(events.pending(team.team_id))] == [BRUNSON, HART]
 
     def test_a_check_in_s_events_show_with_it(self, team, night, on):
         _record(team, [_fact()])
         checkin_id = _claim(team)
-        run(events.take(team.team_id, checkin_id, NOW))
+        run(events.take(team.team_id, checkin_id, NOW, row=AT_AI))
         run(checkins._settle(checkin_id, "done", None, None, 0, NOW))
         summary = run(checkins.summary(checkin_id))
         assert summary["kind"] == "event"
@@ -155,7 +161,14 @@ class TestEvents:
         assert run(events.drop_stale(team.team_id, tip + timedelta(minutes=1))) == 1  # the verdict, tipped
         reasons = sorted(e.reason for e in AutopilotEvent.select())
         assert reasons == ["stale", "tipped"]
-        assert run(events.take(team.team_id, _claim(team), NOW)) == []
+        assert run(events.take(team.team_id, _claim(team), NOW, row=AT_AI)) == []
+
+    def test_below_ai_what_was_waiting_is_dropped_not_taken(self, team, night, on):
+        _record(team, [_fact(), _fact(pid=HART)])
+        below = SimpleNamespace(ai_rows=["lineup"], autopilot=False, paused_at=None)
+        assert run(events.take(team.team_id, _claim(team), NOW, row=below)) == []
+        assert sorted((e.state, e.reason) for e in AutopilotEvent.select()) == [("dropped", "level")] * 2
+        assert run(events.pending(team.team_id)) == []
 
     def test_event_check_ins_are_outside_the_once_a_day_slot(self, team, night):
         first = _claim(team)
