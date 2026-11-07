@@ -491,7 +491,7 @@ class AiCheckinSummary(ApiModel):
     changes: int = Field(..., description="Of those, the ones that would change an automation's plan or the roster")
     agree: int
     disagree: int
-    sent: int = Field(0, description="Moves it sent on its own (where a kind of move acts)")
+    sent: int = Field(0, description="Moves it sent on its own (on automations at AI)")
 
 
 class AiCheckinSlot(ApiModel):
@@ -500,46 +500,43 @@ class AiCheckinSlot(ApiModel):
     due_at: datetime
 
 
-AiAutonomyMode = Literal["shadow", "suggest", "act"]
-AiCapability = Literal["lineup", "streaming", "adds_drops"]
+AiLevel = Literal["off", "notify", "act", "ai"]
+AiAutomationName = Literal["lineup", "daily_actions", "lanes", "late_scratch", "checkins"]
 
 
-class AiAutonomyModes(ApiModel):
-    lineup: AiAutonomyMode = "shadow"
-    streaming: AiAutonomyMode = "shadow"
-    adds_drops: AiAutonomyMode = "shadow"
+class AiLevelOption(ApiModel):
+    """One level of an automation: whether it can be picked, and why not."""
+
+    level: AiLevel
+    available: bool
+    reason: Optional[str] = Field(None, description="Why it can't be picked (not built yet, the account's "
+                                                    "lineup email is off, ...)")
 
 
-class AiAutonomyOwn(ApiModel):
-    """A kind of move's own setting; null follows the team's."""
+class AiAutomationRow(ApiModel):
+    """One automation on the team (services/ai/autonomy.py): off, notify (an email), act (Court Vision does
+    it, no AI) or ai (Dime does it)."""
 
-    lineup: Optional[AiAutonomyMode] = None
-    streaming: Optional[AiAutonomyMode] = None
-    adds_drops: Optional[AiAutonomyMode] = None
-
-
-class AiAutonomy(ApiModel):
-    """How much Dime may do on the team (services/ai/autonomy.py): shadow logs, suggest makes chips, act
-    sends within the policy. `mode` is the team's; `own` a kind of move's, standing in for it when set;
-    `effective` what each kind is now (act reads as suggest while acting is off on the server, and every
-    kind is shadow while the team is paused)."""
-
-    mode: AiAutonomyMode = "shadow"
-    own: AiAutonomyOwn = Field(default_factory=AiAutonomyOwn)
-    effective: AiAutonomyModes = Field(default_factory=AiAutonomyModes)
+    row: AiAutomationName
+    label: str
+    level: AiLevel = Field(..., description="Its level now (at AI while the autopilot switch is on)")
+    options: list[AiLevelOption] = Field(..., description="Every level, in order off, notify, act, ai")
+    note: Optional[str] = Field(None, description="When the row does less than its level says (paused, "
+                                                  "acting off on the server, the lineup email off)")
 
 
 class AiAutopilotTeam(ApiModel):
-    """A team Dime may run check-ins on, its switch, and how much Dime may do there."""
+    """A team Dime may run check-ins on: its check-ins, the autopilot switch and its automations table."""
 
     team_id: int
-    on: bool = Field(..., description="Check-ins run on the schedule")
+    on: bool = Field(..., description="Check-ins run on the schedule (the Check-ins row at AI)")
     active_since: Optional[datetime] = Field(None, description="When it was last switched on or resumed")
     paused_at: Optional[datetime] = None
     paused_by: Optional[Literal["user", "system"]] = None
     paused_reason: Optional[str] = None
     next: Optional[AiCheckinSlot] = Field(None, description="The next scheduled check-in, while on")
-    autonomy: AiAutonomy = Field(default_factory=AiAutonomy)
+    autopilot: bool = Field(False, description="The autopilot switch: every automation that offers AI is at AI")
+    rows: list[AiAutomationRow] = Field(default_factory=list, description="The automations table, in order")
 
 
 class AiActingPolicy(ApiModel):
@@ -557,10 +554,17 @@ class AiActingPolicy(ApiModel):
 class AiActing(ApiModel):
     """Whether Dime can act on its own at all, and the policy it acts within."""
 
-    available: bool = Field(..., description="DIME_ACTING_ENABLED: off, act can't be set and reads as suggest")
+    available: bool = Field(..., description="DIME_ACTING_ENABLED: off, an automation at AI only reviews")
     steering: bool = Field(..., description="DIME_STEERING_ENABLED: Dime's steering chips exist at all")
     writes: bool = Field(..., description="ROSTER_WRITES_ENABLED: writes to ESPN are on")
     policy: AiActingPolicy
+
+
+class AiFeatures(ApiModel):
+    """The user's AI features, for the whole account (services/ai/ai_settings.py)."""
+
+    memory: bool = Field(True, description="Dime keeps notes and reads them back")
+    draft_rooms: bool = Field(True, description="Dime's side of the Draft desk")
 
 
 class AiCheckinsData(ApiModel):
@@ -569,6 +573,7 @@ class AiCheckinsData(ApiModel):
     month_usd: float = Field(..., description="This month's check-in spend, every autopilot team")
     cap_usd: float = Field(..., description="The check-ins' monthly budget, apart from the AI desk's")
     acting: Optional[AiActing] = None
+    features: Optional[AiFeatures] = Field(None, description="The account's AI features")
 
 
 class AiCheckinsResp(BaseResponse):
@@ -589,24 +594,49 @@ class AiCheckinResp(BaseResponse):
 
 
 class AiAutopilotReq(ApiModel):
-    """Body for PUT /v1/internal/ai/autopilot/{team_id}: any of the switch and the modes; what is left out
-    stays as it is."""
+    """Body for PUT /v1/internal/ai/autopilot/{team_id}: the check-ins, the autopilot switch or the levels;
+    what is left out stays as it is."""
 
-    on: Optional[bool] = Field(None, description="true starts (or resumes, a pause Dime made itself included) "
-                                                 "the team's check-ins, false pauses them")
-    mode: Optional[AiAutonomyMode] = Field(None, description="How much Dime may do on the whole team")
-    own: Optional[dict[AiCapability, Optional[AiAutonomyMode]]] = Field(
-        None, description="A kind of move's own mode; null makes it follow the team's again")
+    checkins: Optional[bool] = Field(None, description="true starts (or resumes, a pause Dime made itself "
+                                                       "included) the team's check-ins, false pauses them")
+    on: Optional[bool] = Field(None, description="The same as checkins (step 3's name for it)")
+    autopilot: Optional[bool] = Field(None, description="The autopilot switch. On puts every automation that "
+                                                        "offers AI at AI and turns check-ins and the AI "
+                                                        "features on; off puts back what it changed")
+    levels: Optional[dict[AiAutomationName, AiLevel]] = Field(
+        None, description="Automations to set, to a level each offers. Changing one while autopilot is on "
+                          "turns autopilot off and keeps the rest at AI")
 
     @model_validator(mode="after")
     def _something(self) -> "AiAutopilotReq":
-        if self.on is None and self.mode is None and not self.own:
-            raise ValueError("send on, mode or own")
+        if self.on is not None and self.checkins is not None and self.on != self.checkins:
+            raise ValueError("on and checkins disagree")
+        if self.on is None and self.checkins is None and self.autopilot is None and not self.levels:
+            raise ValueError("send checkins, autopilot or levels")
         return self
 
 
 class AiAutopilotResp(BaseResponse):
     data: Optional[AiAutopilotTeam] = None
+
+
+class AiSettingsReq(ApiModel):
+    """Body for PUT /v1/internal/ai/settings: the features to change; what is left out stays as it is."""
+
+    memory: Optional[bool] = None
+    draft_rooms: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _something(self) -> "AiSettingsReq":
+        if self.memory is None and self.draft_rooms is None:
+            raise ValueError("send memory or draft_rooms")
+        return self
+
+
+class AiSettingsResp(BaseResponse):
+    """Response for GET and PUT /v1/internal/ai/settings."""
+
+    data: Optional[AiFeatures] = None
 
 
 class AiDecisionVerdictReq(ApiModel):

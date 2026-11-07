@@ -25,13 +25,26 @@ from schemas.ai import (
     AiConversationDetail,
     AiConversationSummary,
     AiDecisionVerdictData,
+    AiFeatures,
     AiNote,
     AiProposalCheckData,
     AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, autonomy, checkins, conversations, decisions, guards, memory, proposals, spend
+from services.ai import (
+    agent,
+    ai_settings,
+    autonomy,
+    checkins,
+    conversations,
+    decisions,
+    guards,
+    levels,
+    memory,
+    proposals,
+    spend,
+)
 from services.steering import enabled as steering_enabled
 
 
@@ -218,7 +231,7 @@ class AgentService:
         if not await conversations.set_feedback(turn_id, user_id, value):
             raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
 
-    # ---- Dime's check-ins (services/ai/checkins.py), in shadow ----
+    # ---- Dime's check-ins (services/ai/checkins.py) and its automation levels ----
 
     @staticmethod
     async def checkins(user_id: int, team_id: Optional[int]) -> AiCheckinsData:
@@ -227,9 +240,11 @@ class AgentService:
         teams = await checkins.teams_of(user_id)
         rows = await checkins.inbox(user_id, team_id)
         spent, cap = await spend.autopilot_month_spend()
+        features = await ai_settings.get(user_id)
         return AiCheckinsData(teams=[AiAutopilotTeam(**t) for t in teams],
                               checkins=[AiCheckinSummary(**r) for r in rows],
-                              month_usd=spent / 1e6, cap_usd=cap / 1e6, acting=AiActing(**acting_info()))
+                              month_usd=spent / 1e6, cap_usd=cap / 1e6, acting=AiActing(**acting_info()),
+                              features=AiFeatures(**features.view()))
 
     @staticmethod
     async def run_checkin(user_id: int, team_id: int, kind: Optional[str]) -> AiCheckinSummary:
@@ -238,12 +253,23 @@ class AgentService:
         return AiCheckinSummary(**await checkins.summary(row.id))
 
     @staticmethod
-    async def set_autopilot(user_id: int, team_id: int, on: Optional[bool], mode: Optional[str] = None,
-                            own: Optional[dict[str, Optional[str]]] = None) -> AiAutopilotTeam:
+    async def set_autopilot(user_id: int, team_id: int, change: levels.Change) -> AiAutopilotTeam:
         ensure_access(user_id)
-        await checkins.set_autopilot(user_id, team_id, on, mode, own)
+        await checkins.set_autopilot(user_id, team_id, change)
         teams = {t["team_id"]: t for t in await checkins.teams_of(user_id)}
         return AiAutopilotTeam(**teams[team_id])
+
+    # ---- the account's AI features (services/ai/ai_settings.py) ----
+
+    @staticmethod
+    async def features(user_id: int) -> AiFeatures:
+        ensure_access(user_id)
+        return AiFeatures(**(await ai_settings.get(user_id)).view())
+
+    @staticmethod
+    async def set_features(user_id: int, *, memory: Optional[bool], draft_rooms: Optional[bool]) -> AiFeatures:
+        ensure_access(user_id)
+        return AiFeatures(**(await ai_settings.update(user_id, memory=memory, draft_rooms=draft_rooms)).view())
 
     @staticmethod
     async def decision_verdict(decision_id: int, user_id: int, verdict: Optional[str]) -> AiDecisionVerdictData:

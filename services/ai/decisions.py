@@ -20,10 +20,11 @@ services/ai/checkins.py); a follow-up the user asks in that conversation is an
 ordinary turn and is refused.
 
 A change that cites its proposal is also the commitment (the Dime autopilot plan,
-step 5; services/ai/acting.py): under the team's mode for that kind of move it stays
-logged (shadow), becomes a chip the user can send (suggest), or is sent by the
-server within the policy (act). The decision carries what became of it (`action`).
-With DIME_ACTING_ENABLED off the tool reads as before: no mode can act then.
+step 5; services/ai/acting.py): when every automation the move counts under is at AI
+on the team (services/ai/autonomy.py) the server sends it within the policy, and the
+decision carries what became of it (`action`); otherwise it stays logged as a review,
+what Dime would have done. With DIME_ACTING_ENABLED off the tool reads as before:
+every change is a review then.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from db.base import db_operation
 from db.models.ai_conversations import AiProposal, AiTurn
 from db.models.autopilot import AiCheckin, AiDecision
 from core.settings import settings
-from services.ai import acting, proposals
+from services.ai import acting, autonomy, proposals
 
 LOG_DECISION_NAME = "log_decision"
 GET_DECISIONS_NAME = "get_decisions"
@@ -144,13 +145,13 @@ LOG_DECISION_ACTING: dict[str, Any] = {
         "automation is making). call: hold (keep the plan, or do nothing) or change (do something else). A "
         "change to the lineup or the roster cites the proposal_id propose_lineup or propose_move returned in "
         "this check-in; any other change cites the chip a tool made for it in this check-in, if one did. "
-        "Logging a change that cites its proposal commits that move under the team's mode for its area, which "
-        "the brief gives: shadow keeps it as what you would have done; suggest makes it a chip the user can "
-        "send; act sends it now through the user's own write routes, if the policy allows (get_automations' "
-        "autopilot section has the caps and what you have used). The result's `action` says what happened: "
-        "sent, blocked (the rule; the move is left as a chip for the user), refused (by ESPN or the route) or "
-        "failed. Never say a move was made unless its action says sent, and log as a change only what you'd "
-        "do. summary: what you do or would do, in a line. reason: why, with the number behind it. The user "
+        "Logging a change that cites its proposal commits that move: when every automation it counts under is "
+        "at AI (the brief says which are) it is sent now through the user's own write routes, if the policy "
+        "allows (get_automations' autopilot section has the caps and what you have used); anywhere else it "
+        "is a review, kept as what you would have done and never sent. The result's `action`, present when "
+        "Dime handled the move, says what happened: sent, blocked (the rule; the move is left as a chip for "
+        "the user), refused (by ESPN or the route) or failed. Never say a move was made unless its action "
+        "says sent, and log as a change only what you'd do. summary: what you do or would do, in a line. reason: why, with the number behind it. The user "
         "reads every one and marks it agree or disagree. Only in a check-in."
     ),
 }
@@ -300,11 +301,11 @@ async def log_decision(user_id: int, checkin_id: Optional[int], args: LogDecisio
     row = await _insert(checkin_id=checkin_id, user_id=user_id, team_id=checkin.team_id_id, area=args.area,
                         automation=args.automation, call=args.call, summary=args.summary, reason=args.reason,
                         proposal_id=args.proposal_id, created_at=_now())
-    # A change that cites its move commits it under the team's mode (shadow: nothing happens)
+    # A change that cites its move commits it under the team's levels (a review: nothing happens)
     verdict = None
     if args.call == "change" and proposal is not None:
         verdict = await acting.commit(user_id, checkin, row.id, proposal.id)
-        if verdict.mode != "shadow":
+        if verdict.level != autonomy.REVIEW:
             proposal = await _proposal(proposal.id, checkin.conversation_id_id) or proposal
     done = verdict is not None and verdict.outcome is not None
     block = block_of(row, {"outcome": verdict.outcome, "rule": verdict.rule, "message": verdict.message,
@@ -312,7 +313,7 @@ async def log_decision(user_id: int, checkin_id: Optional[int], args: LogDecisio
     out = {"decision_id": row.id, "logged": True, "call": args.call, "area": args.area,
            "automation": args.automation, "summary": args.summary,
            "move": _move_of(proposal, _now()), DECISION_KEY: block}
-    if verdict is not None and verdict.mode != "shadow":
+    if verdict is not None and verdict.level != autonomy.REVIEW:
         out["action"] = verdict.view()
     return out
 

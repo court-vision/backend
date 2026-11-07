@@ -1,13 +1,15 @@
 """
 Integration: Dime acting on its own against the real schema (migration 0044).
 
-The modes on usr.autopilot (the team's, each kind's own, the check that keeps them to
-shadow / suggest / act) and the settings write that sets them; usr.autopilot_actions
-(its checks, one action per proposal, what the caps and auto-pause count, the reads the
-desk makes); a shadow proposal promoted to a live chip once and only before its day
-starts; the team pausing itself once; a player's recent adds (a Court Vision write or the
-ledger); the `autopilot` source on usr.roster_moves outside the auto-lineup once-a-day
-index; `made_by_autopilot` on usr.scheduled_pickups; and the rollback.
+The levels on usr.autopilot (`ai_rows` and the check that keeps it to the four rows that
+can be at AI, the autopilot switch and what it keeps to put back) and the writer that sets
+them with lineup's levels below AI in the team's notification override, in one go;
+usr.ai_settings (the account's AI features); usr.autopilot_actions (its checks, one action
+per proposal, what the caps and auto-pause count, the reads the desk makes); a shadow
+proposal promoted to a live chip once and only before its day starts; the team pausing
+itself once; a player's recent adds (a Court Vision write or the ledger); the `autopilot`
+source on usr.roster_moves outside the auto-lineup once-a-day index; `made_by_autopilot` on
+usr.scheduled_pickups; and the rollback.
 """
 
 import asyncio
@@ -21,13 +23,14 @@ from peewee import IntegrityError
 from db.base import db
 from db.migrate import MIGRATIONS_DIR
 from db.models.ai_conversations import AiProposal
-from db.models.autopilot import AiDecision, Autopilot, AutopilotAction
+from db.models.autopilot import AiDecision, AiSettings, Autopilot, AutopilotAction
 from db.models.move_outcomes import MoveOutcome
+from db.models.notifications import NotificationTeamPreference
 from db.models.roster_moves import RosterMove
 from db.models.scheduled_pickups import ScheduledPickup
 from db.models.teams import Team
 from db.models.users import User
-from services.ai import acting, checkins, conversations
+from services.ai import acting, ai_settings, checkins, conversations, levels
 
 pytestmark = [pytest.mark.integration]
 
@@ -74,31 +77,107 @@ def _decision(team, checkin_id, proposal):
 
 
 def _action(team, **kw):
-    fields = dict(team_id=team.team_id, user_id=team.user_id_id, capability="adds_drops", kind="transaction",
+    fields = dict(team_id=team.team_id, user_id=team.user_id_id, capability="daily_actions", kind="transaction",
                   nba_date=DAY, adds=1, outcome="sent", message="Sent by Dime: Added Kawhi Leonard")
     fields.update(kw)
     return run(acting._record(**fields))
 
 
-class TestTheModes:
-    def test_a_team_is_shadow_until_told_and_each_mode_is_one_of_three(self, team):
+def _apply(team, **change):
+    return run(levels.apply(team.team_id, team.user_id_id, levels.Change(**change), _now()))
+
+
+def _lineup(team):
+    row = NotificationTeamPreference.get_or_none((NotificationTeamPreference.user == team.user_id_id)
+                                                 & (NotificationTeamPreference.team_id == team.team_id))
+    return None if row is None else (row.lineup_alerts_enabled, row.auto_lineup_enabled)
+
+
+class TestTheLevels:
+    def test_a_team_has_nothing_at_ai_until_told_and_only_four_rows_can_be(self, team):
         Autopilot.create(team_id=team.team_id, user_id=team.user_id_id)
         row = Autopilot.get(Autopilot.team_id == team.team_id)
-        assert (row.mode, row.lineup_mode, row.streaming_mode, row.adds_drops_mode) == ("shadow", None, None, None)
-        for bad in (dict(mode="autopilot"), dict(lineup_mode="always"), dict(adds_drops_mode="")):
+        assert (row.ai_rows, row.autopilot, row.restore) == ([], False, None)
+        for bad in (["checkins"], ["lineup", "trades"]):
             with pytest.raises(IntegrityError), db.atomic():
-                Autopilot.update(**bad).where(Autopilot.team_id == team.team_id).execute()
+                Autopilot.update(ai_rows=bad).where(Autopilot.team_id == team.team_id).execute()
 
-    def test_the_settings_write_sets_the_modes_without_touching_the_switch(self, team):
-        now = _now()
-        made = run(checkins._set_autopilot(team.team_id, team.user_id_id, None, now,
-                                           {"mode": "suggest", "adds_drops_mode": "act"}))
-        assert made.paused_at is not None                      # never switched on: set up paused
-        assert (made.mode, made.adds_drops_mode) == ("suggest", "act")
-        on = run(checkins._set_autopilot(team.team_id, team.user_id_id, True, now, {"adds_drops_mode": None}))
-        assert on.paused_at is None and (on.mode, on.adds_drops_mode) == ("suggest", None)
-        row = Autopilot.get(Autopilot.team_id == team.team_id)
-        assert (row.mode, row.adds_drops_mode, row.paused_at) == ("suggest", None, None)
+    def test_a_row_at_ai_turns_check_ins_on_and_lineup_s_levels_are_the_team_s_override(self, team):
+        made = _apply(team, levels={"daily_actions": "ai"})
+        assert made.ai_rows == ["daily_actions"] and made.paused_at is None and _lineup(team) is None
+        notify = _apply(team, levels={"lineup": "notify"})
+        assert notify.ai_rows == ["daily_actions"] and _lineup(team) == (True, False)
+        ai = _apply(team, levels={"lineup": "ai"})
+        assert ai.ai_rows == ["lineup", "daily_actions"] and _lineup(team) == (True, True)
+        off = _apply(team, levels={"lineup": "off", "daily_actions": "off"})
+        assert off.ai_rows == [] and _lineup(team) == (False, False)
+        assert off.paused_at is None                                    # check-ins are their own row
+        assert NotificationTeamPreference.select().count() == 1         # one override, written in place
+
+    def test_check_ins_alone_set_up_paused_and_resume_a_pause_dime_made(self, team):
+        made = _apply(team, checkins=False)
+        assert made.paused_at is not None and made.paused_by == "user" and made.ai_rows == []
+        on = _apply(team, checkins=True)
+        assert on.paused_at is None
+        Autopilot.update(paused_at=_now(), paused_by="system", paused_reason="2 refused").where(
+            Autopilot.team_id == team.team_id).execute()
+        again = _apply(team, checkins=True)
+        assert (again.paused_at, again.paused_by, again.paused_reason) == (None, None, None)
+        # step 3's switch is the Check-ins row
+        assert run(checkins._set_autopilot(team.team_id, team.user_id_id, False, _now())).paused_by == "user"
+
+    def test_the_switch_puts_everything_at_ai_and_going_off_puts_back_what_it_changed(self, team):
+        NotificationTeamPreference.create(user=team.user_id_id, team_id=team.team_id, lineup_alerts_enabled=False,
+                                          auto_lineup_enabled=None)
+        _apply(team, checkins=False)
+        run(ai_settings.update(team.user_id_id, memory=False))
+        on = _apply(team, autopilot=True)
+        assert on.autopilot is True and on.paused_at is None and on.ai_rows == []
+        assert on.restore == {"lineup": {"lineup_alerts_enabled": False, "auto_lineup_enabled": None},
+                              "checkins_on": False}
+        assert _lineup(team) == (True, True)
+        assert run(ai_settings.get(team.user_id_id)) == ai_settings.AiSettings(memory=True, draft_rooms=True)
+        assert _apply(team, autopilot=True).restore == on.restore          # on again: nothing new to keep
+        off = _apply(team, autopilot=False)
+        assert (off.autopilot, off.restore) == (False, None)
+        assert _lineup(team) == (False, None) and off.paused_at is not None   # as they were
+        assert run(ai_settings.get(team.user_id_id)).memory is True          # the features stay on
+
+    def test_going_off_keeps_lineup_preferences_the_user_changed_while_it_was_on(self, team):
+        NotificationTeamPreference.create(user=team.user_id_id, team_id=team.team_id, lineup_alerts_enabled=False)
+        _apply(team, autopilot=True)
+        NotificationTeamPreference.update(auto_lineup_enabled=False).execute()     # in Notifications
+        _apply(team, autopilot=False)
+        assert _lineup(team) == (True, False)
+
+    def test_going_off_keeps_what_the_user_put_at_ai_themselves(self, team):
+        _apply(team, levels={"lineup": "ai"})
+        _apply(team, autopilot=True)
+        off = _apply(team, autopilot=False)
+        assert off.ai_rows == ["lineup"] and _lineup(team) == (True, True) and off.paused_at is None
+
+    def test_changing_a_row_while_on_turns_the_switch_off_and_keeps_the_rest_at_ai(self, team):
+        _apply(team, autopilot=True)
+        row = _apply(team, levels={"lanes": "act"})
+        assert (row.autopilot, row.restore) == (False, None)
+        assert row.ai_rows == ["lineup", "daily_actions"] and _lineup(team) == (True, True)
+
+    def test_a_double_first_switch_writes_one_row(self, team):
+        _apply(team, levels={"lanes": "ai"})
+        _apply(team, levels={"lanes": "ai"})
+        assert Autopilot.select().where(Autopilot.team_id == team.team_id).count() == 1
+
+
+class TestTheFeatures:
+    def test_both_on_with_no_row_and_a_change_keeps_the_other(self, team):
+        assert run(ai_settings.get(team.user_id_id)) == ai_settings.AiSettings()
+        assert AiSettings.select().count() == 0
+        assert run(ai_settings.update(team.user_id_id, memory=False)) == ai_settings.AiSettings(memory=False)
+        got = run(ai_settings.update(team.user_id_id, draft_rooms=False))
+        assert got == ai_settings.AiSettings(memory=False, draft_rooms=False)
+        assert run(ai_settings.update(team.user_id_id)) == got                 # nothing to change
+        User.delete().where(User.user_id == team.user_id_id).execute()
+        assert AiSettings.select().count() == 0                                # they go with the account
 
 
 class TestTheActionsLog:
@@ -211,11 +290,13 @@ def test_0044_rollback_applies_and_the_forward_file_restores_it(team):
                       status="applied", moves=[])
     try:
         db.execute_sql(rollback)
-        assert "mode" not in _columns("autopilot") and "made_by_autopilot" not in _columns("scheduled_pickups")
-        assert not _columns("autopilot_actions")
+        assert not {"ai_rows", "autopilot", "restore"} & _columns("autopilot")
+        assert "made_by_autopilot" not in _columns("scheduled_pickups")
+        assert not _columns("autopilot_actions") and not _columns("ai_settings")
         assert RosterMove.get().source == "manual"                     # kept, as the old CHECK allows
     finally:
         db.execute_sql(forward)
-    assert {"mode", "lineup_mode", "streaming_mode", "adds_drops_mode"} <= _columns("autopilot")
+    assert {"ai_rows", "autopilot", "restore"} <= _columns("autopilot")
+    assert {"memory", "draft_rooms"} <= _columns("ai_settings")
     assert "outcome" in _columns("autopilot_actions") and "made_by_autopilot" in _columns("scheduled_pickups")
     db.execute_sql(forward)                                            # idempotent

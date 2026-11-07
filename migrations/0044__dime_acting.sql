@@ -2,55 +2,78 @@
 --
 -- Until now a check-in only logged what Dime would do (step 3) and Dime's chips
 -- waited for the user's slider or Apply (step 4). Here a team can let Dime act:
--- when a check-in logs a change and the area may act, the server sends the
--- move itself, through the same routes the user's tray and the Week desk use,
--- within the policy (caps, protected players, churn), and pauses the team when
--- something goes wrong.
+-- when a check-in logs a change on an automation the user put at AI, the server
+-- sends the move itself, through the same routes the user's tray and the Week
+-- desk use, within the policy (caps, protected players, churn), and pauses the
+-- team when something goes wrong.
 --
--- How much Dime may do is a mode: shadow (log only, the default), suggest (the
--- move becomes a chip the user can send) or act (the server sends it). Whether
--- that is one setting for the whole team or one per kind of move is still the
--- user's to decide, so the row holds both and the code reads them in one place
--- (services/ai/autonomy.py `mode_for`):
+-- Each automation has a level, set per team (the plan's "Automation levels"):
+-- off, notify (an email says what is due), act (Court Vision does it, no AI) or
+-- ai (Dime does it). The levels below AI stay where each automation keeps them:
+-- lineup's are the notification preferences (the tip-off email and auto-lineup),
+-- lanes sit at act. What this table stores is the AI part:
 --
---   mode               the team's setting, what one global switch writes
---   lineup_mode        a kind of move's own setting, NULL = the team's;
---   streaming_mode     what one switch per kind of move writes
---   adds_drops_mode
+--   ai_rows     the automations at AI on the team, of lineup, daily_actions,
+--               lanes and late_scratch (an empty array: none)
+--   autopilot   the team's autopilot switch: every automation that offers AI is
+--               at AI while it is on; off, the stored ai_rows count again
+--   restore     what the autopilot switch changed when it came on (the team's
+--               lineup preferences, whether check-ins were on), put back when it
+--               goes off; NULL when there is nothing to put back
+--
+-- Check-ins are on when the row has no paused_at, as in step 3. Below AI, with
+-- check-ins on, Dime reviews an automation and logs what it would change without
+-- sending anything (the old shadow); DIME_ACTING_ENABLED off, every row reviews.
+--
+-- usr.ai_settings holds the user's AI features, for the whole account: memory
+-- (Dime keeps and reads notes) and draft_rooms (Dime's side of the Draft desk),
+-- both on by default; no row reads as both on.
 --
 -- usr.autopilot_actions is the executor's log: one row per change a check-in
--- committed that the area's mode let Dime act on, with the policy's verdict and
--- what became of the write. `outcome` sent (the write or the apply went
--- through), blocked (a rule stopped it before anything was sent; `rule` names
--- it), refused (the route or ESPN said no), failed (ESPN unreachable, a
--- credential error, a crash). The caps count its sent rows; auto-pause counts
--- its refused rows and repeated blocks. A blocked or refused move stays a chip
--- the user can still send.
+-- committed on an automation at AI, with the policy's verdict and what became
+-- of the write. `outcome` sent (the write or the apply went through), blocked (a
+-- rule stopped it before anything was sent; `rule` names it), refused (the route
+-- or ESPN said no), failed (ESPN unreachable, a credential error, a crash). The
+-- caps count its sent rows; auto-pause counts its refused rows and repeated
+-- blocks. A blocked or refused move stays a chip the user can still send.
 --
 -- usr.roster_moves gains the source 'autopilot', every ESPN write Dime made
 -- itself (outside the auto-lineup once-a-day index, as the plan requires), and
 -- usr.scheduled_pickups `made_by_autopilot`, so a pickup Dime scheduled is
 -- written with that source when the executor makes it.
 
-ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'shadow';
-ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS lineup_mode text;
-ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS streaming_mode text;
-ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS adds_drops_mode text;
+ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS ai_rows text[] NOT NULL DEFAULT '{}';
+ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS autopilot boolean NOT NULL DEFAULT false;
+ALTER TABLE usr.autopilot ADD COLUMN IF NOT EXISTS restore jsonb;
 
-ALTER TABLE usr.autopilot DROP CONSTRAINT IF EXISTS autopilot_modes_check;
-ALTER TABLE usr.autopilot ADD CONSTRAINT autopilot_modes_check
-    CHECK (mode IN ('shadow', 'suggest', 'act')
-           AND (lineup_mode IS NULL OR lineup_mode IN ('shadow', 'suggest', 'act'))
-           AND (streaming_mode IS NULL OR streaming_mode IN ('shadow', 'suggest', 'act'))
-           AND (adds_drops_mode IS NULL OR adds_drops_mode IN ('shadow', 'suggest', 'act')));
+ALTER TABLE usr.autopilot DROP CONSTRAINT IF EXISTS autopilot_ai_rows_check;
+ALTER TABLE usr.autopilot ADD CONSTRAINT autopilot_ai_rows_check
+    CHECK (ai_rows <@ ARRAY['lineup', 'daily_actions', 'lanes', 'late_scratch']::text[]);
 
-COMMENT ON COLUMN usr.autopilot.mode IS
-    'How much Dime may do on the team: shadow (log only), suggest (its changes become chips), act (the server '
-    'sends them within the policy). A kind of move''s own *_mode, when set, stands in for it.';
+COMMENT ON COLUMN usr.autopilot.ai_rows IS
+    'The automations at AI on the team (lineup, daily_actions, lanes, late_scratch): Dime does them, acting '
+    'within the policy. The levels below AI live with each automation (lineup: the notification preferences).';
+COMMENT ON COLUMN usr.autopilot.autopilot IS
+    'The autopilot switch: on, every automation that offers AI is at AI; off, ai_rows count again.';
+COMMENT ON COLUMN usr.autopilot.restore IS
+    'What turning autopilot on changed (the lineup preferences, whether check-ins were on), put back when it '
+    'goes off.';
 
 COMMENT ON TABLE usr.autopilot IS
-    'Teams Dime runs check-ins on (with AUTOPILOT_TEAM_IDS). paused_at is the Pause switch; mode and the '
-    '*_mode columns say how much Dime may do (services/ai/autonomy.py).';
+    'Teams Dime runs check-ins on (with AUTOPILOT_TEAM_IDS). paused_at is the Pause switch; ai_rows and '
+    'autopilot say which automations Dime does itself (services/ai/autonomy.py).';
+
+CREATE TABLE IF NOT EXISTS usr.ai_settings (
+    user_id       integer      PRIMARY KEY REFERENCES usr.users (user_id) ON DELETE CASCADE,
+    memory        boolean      NOT NULL DEFAULT true,
+    draft_rooms   boolean      NOT NULL DEFAULT true,
+    created_at    timestamp with time zone NOT NULL DEFAULT now(),
+    updated_at    timestamp with time zone NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE usr.ai_settings IS
+    'The user''s AI features, for the whole account (services/ai/ai_settings.py): memory (Dime keeps and reads '
+    'notes) and draft_rooms (Dime''s side of the Draft desk). No row reads as both on.';
 
 CREATE TABLE IF NOT EXISTS usr.autopilot_actions (
     id            bigint       GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -59,7 +82,7 @@ CREATE TABLE IF NOT EXISTS usr.autopilot_actions (
     checkin_id    bigint       REFERENCES usr.ai_checkins (id) ON DELETE SET NULL,
     decision_id   bigint       REFERENCES usr.ai_decisions (id) ON DELETE SET NULL,
     proposal_id   bigint       REFERENCES usr.ai_proposals (id) ON DELETE SET NULL,
-    capability    text         NOT NULL,
+    capability    text         NOT NULL,              -- the automation it counts under (its row)
     kind          text         NOT NULL,              -- the proposal's kind
     nba_date      date         NOT NULL,              -- the day the move is for (what the day cap counts)
     adds          smallint     NOT NULL DEFAULT 0,    -- players the move adds (what the caps count)
@@ -68,7 +91,8 @@ CREATE TABLE IF NOT EXISTS usr.autopilot_actions (
     message       text         NOT NULL,
     audit_id      integer      REFERENCES usr.roster_moves (id) ON DELETE SET NULL,
     created_at    timestamp with time zone NOT NULL DEFAULT now(),
-    CONSTRAINT autopilot_actions_capability_check CHECK (capability IN ('lineup', 'streaming', 'adds_drops')),
+    CONSTRAINT autopilot_actions_capability_check
+        CHECK (capability IN ('lineup', 'daily_actions', 'lanes', 'late_scratch')),
     CONSTRAINT autopilot_actions_outcome_check CHECK (outcome IN ('sent', 'blocked', 'refused', 'failed')),
     CONSTRAINT autopilot_actions_message_check CHECK (char_length(message) BETWEEN 1 AND 400)
 );
@@ -86,7 +110,7 @@ CREATE INDEX IF NOT EXISTS autopilot_actions_decision
     WHERE decision_id IS NOT NULL;
 
 COMMENT ON TABLE usr.autopilot_actions IS
-    'What Dime did on its own: each committed change the mode let it act on, the policy''s verdict and the '
+    'What Dime did on its own: each committed change on an automation at AI, the policy''s verdict and the '
     'write''s outcome (sent, blocked, refused, failed). The caps and auto-pause read it.';
 
 ALTER TABLE usr.roster_moves

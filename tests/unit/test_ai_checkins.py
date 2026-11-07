@@ -319,23 +319,29 @@ class TestStart:
         assert turn.limits == agent.Limits.checkin()
         assert turn.message.startswith("[Morning check-in for team_id 23")
 
-    def test_every_kind_in_shadow_is_step_3_s_brief_and_a_mode_that_acts_says_so(self, starting, monkeypatch):
+    def test_acting_on_nothing_is_step_3_s_brief_and_rows_at_ai_say_so(self, starting, monkeypatch):
         _start()
         shadow = starting.launched[0][0].message
         assert shadow == checkins.brief("morning", TUE, 23, manual=False)
-        assert checkins._SHADOW in shadow and "How much you may do" not in shadow
+        assert checkins._SHADOW in shadow and "What you do yourself" not in shadow
+        # At AI while acting is off on the server, it still reviews: step 3's brief
+        starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=["lineup"], autopilot=False)
+        _start()
+        assert starting.launched[1][0].message == shadow
         monkeypatch.setattr(settings, "dime_acting_enabled", True)
-        starting.autopilot = SimpleNamespace(paused_at=None, mode="shadow", lineup_mode="act", streaming_mode=None,
-                                             adds_drops_mode="suggest")
         _start()
-        acting = starting.launched[1][0].message
-        assert "lineup act, streaming shadow, adds and drops suggest" in acting
+        acting = starting.launched[2][0].message
+        assert "What you do yourself on this team: lineup (slot moves and pins). Those automations are at AI" in acting
         assert checkins._SHADOW not in acting and "what you sent, what you left for them" in acting
-        # A paused team runs in shadow whatever its modes say
-        starting.autopilot = SimpleNamespace(paused_at=datetime(2025, 11, 10, tzinfo=timezone.utc), mode="act",
-                                             lineup_mode=None, streaming_mode=None, adds_drops_mode=None)
+        # The autopilot switch: every row that offers AI
+        starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=[], autopilot=True)
         _start()
-        assert starting.launched[2][0].message == shadow
+        assert "lineup (slot moves and pins), daily actions" in starting.launched[3][0].message
+        # A paused team only reviews, whatever is at AI
+        starting.autopilot = SimpleNamespace(paused_at=datetime(2025, 11, 10, tzinfo=timezone.utc), ai_rows=["lineup"],
+                                             autopilot=True)
+        _start()
+        assert starting.launched[4][0].message == shadow
 
     def test_a_spent_budget_skips_a_scheduled_one_and_refuses_a_manual_one(self, starting):
         starting.reservation = None
@@ -439,6 +445,20 @@ class TestNextSlot:
         assert (after.kind, after.nba_date) == ("night", TUE)
         assert checkins.next_slot(cal, SimpleNamespace(paused_at=et(TUE, 1), active_since=et(MON, 0)), set(),
                                   et(TUE, 9)) is None
+
+
+class TestTeamView:
+    def test_the_switch_and_the_automations_table_with_lineup_from_the_preferences(self):
+        prefs = SimpleNamespace(lineup_alerts_enabled=True, auto_lineup_enabled=True, alert_minutes_before=30)
+        row = SimpleNamespace(paused_at=None, paused_by=None, paused_reason=None, active_since=et(MON, 0),
+                              ai_rows=["daily_actions"], autopilot=False)
+        view = checkins.team_view(23, row, None, prefs, None)
+        assert view["on"] is True and view["autopilot"] is False and view["next"] is None
+        assert {r["row"]: r["level"] for r in view["rows"]} == {
+            "lineup": "act", "daily_actions": "ai", "lanes": "act", "late_scratch": "off", "checkins": "ai"}
+        never = checkins.team_view(23, None, None, None, None)
+        assert never["on"] is False and never["rows"][0]["level"] == "off"
+        assert not next(o for o in never["rows"][0]["options"] if o["level"] == "ai")["available"]
 
 
 # ------------------------------- decisions ------------------------------- #

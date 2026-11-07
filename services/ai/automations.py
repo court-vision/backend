@@ -17,8 +17,8 @@ Three automations run a Court Vision team without the user:
 - **Scheduled pickups** still pending, each with its pickup_id (cancel_pickup's).
 - **Holds** (step 4, only while steering is on): Dime's live holds, with the
   reason each was set and its hold_id (steer's clear).
-- **Autopilot** (step 5, only on a team where some kind of move suggests or
-  acts): each kind's mode, the policy Dime's own sends are held to, the adds it
+- **Autopilot** (step 5, only on a team where Dime acts on some automation):
+  the automations it acts on, the policy its own sends are held to, the adds it
   has used of its caps, and what it did lately (services/ai/acting.py).
 
 DB reads only, no ESPN call. NBA player ids only, as every tool result.
@@ -254,12 +254,12 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
 
 
 async def _autopilot(team_id: int) -> dict[str, Any]:
-    """How much Dime may do here and what it has used (step 5), under `autopilot`; nothing on a team
-    where every kind of move is in shadow, so the result is step 3's there."""
+    """What Dime acts on here and what it has used of the policy (step 5), under `autopilot`; nothing
+    on a team where Dime acts on no automation, so the result is step 3's there."""
     from services.ai import acting, autonomy
     try:
         row = await acting._autopilot_row(team_id)
-        if autonomy.all_shadow(row):
+        if not autonomy.acting_rows(row):
             return {}
         return {"autopilot": await acting.policy_view(team_id, row)}
     except Exception:

@@ -2,12 +2,13 @@
 Dime acting on its own (the Dime autopilot plan, step 5, "Its own moves").
 
 A check-in decides with `log_decision`. When a decision is a change and cites the
-proposal that checked it, that decision is the commitment, and the team's mode for
-that kind of move (services/ai/autonomy.py) says what happens next:
+proposal that checked it, that decision is the commitment, and the team's automation
+levels (services/ai/autonomy.py) say what happens next:
 
-    shadow   nothing: the proposal stays what Dime would have done (step 3)
-    suggest  the proposal becomes a chip the user can send or apply (`promote`)
-    act      the chip is promoted, held to the policy, and sent by the server
+    review   the move's rows aren't all at AI (or check-ins are paused, or acting is
+             off on the server): the proposal stays what Dime would have done (step 3)
+    ai       every row the move counts under is at AI: the proposal becomes a chip,
+             is held to the policy, and is sent by the server
 
 Sending goes through exactly the routes the user's own sends take, with the chip's
 `proposal_id`, so every check those routes make still runs and the chip is marked
@@ -34,7 +35,7 @@ plan's Guardrails table:
     churn          never drops a player added in the last AUTOPILOT_CHURN_HOURS unless
                    he is out
 
-Every committed change in an area that acts is a row in usr.autopilot_actions:
+Every committed change on rows at AI is a row in usr.autopilot_actions:
 sent, blocked (with the rule), refused (the route or ESPN said no) or failed. One
 per proposal, so a second decision citing the same move never sends it twice. A
 move that is blocked or refused stays a chip the user can still send.
@@ -97,10 +98,11 @@ def _aware(value: datetime) -> datetime:
 
 @dataclass(frozen=True)
 class Verdict:
-    """What became of a committed change: the mode it was handled in and, when Dime acted, the
-    outcome, the rule or error behind it, and the words the user and the model read."""
+    """What became of a committed change: `review` (logged, never sent) or `ai` (Dime handled it)
+    and, when Dime acted, the outcome, the rule or error behind it, and the words the user and the
+    model read."""
 
-    mode: str
+    level: str
     outcome: Optional[str] = None
     rule: Optional[str] = None
     message: str = ""
@@ -109,7 +111,7 @@ class Verdict:
     paused: Optional[str] = None     # the team paused itself on this one: why
 
     def view(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"mode": self.mode, "outcome": self.outcome, "message": self.message}
+        out: dict[str, Any] = {"level": self.level, "outcome": self.outcome, "message": self.message}
         if self.rule:
             out["rule"] = self.rule
         if self.paused:
@@ -350,8 +352,8 @@ P_NOT_ALLOWED, P_NOT_ACTING, P_RESERVE = "dime_not_allowed", "dime_not_acting", 
 
 async def pickup_block(team_id: int, user_id: int) -> Optional[tuple[str, str]]:
     """Whether Dime still sends adds and drops itself on the team, asked when a pickup it scheduled
-    comes due (services/scheduled_pickup_service.py): the switches, the team's pause and the mode as
-    they are now, not as they were when it was scheduled. (reason, sentence) when the pickup may no
+    comes due (services/scheduled_pickup_service.py): the switches, the team's pause and the daily
+    actions level as they are now, not as they were when it was scheduled. (reason, sentence) when the pickup may no
     longer go; None when it may. The add caps aren't asked again: the pickup counted toward them
     when it was scheduled."""
     from services.ai import checkins
@@ -364,8 +366,8 @@ async def pickup_block(team_id: int, user_id: int) -> Optional[tuple[str, str]]:
         return P_PAUSED, "Dime is paused on this team"
     if not checkins.allowed(team_id, user_id):
         return P_NOT_ALLOWED, "This team isn't open to autopilot"
-    if autonomy.effective(autopilot, autonomy.ADDS_DROPS) != autonomy.ACT:
-        return P_NOT_ACTING, "Dime no longer makes adds and drops itself on this team"
+    if not autonomy.at_ai(autopilot, autonomy.DAILY_ACTIONS):
+        return P_NOT_ACTING, "Daily actions aren't at AI on this team any more"
     return None
 
 
@@ -537,9 +539,9 @@ def _lock(team_id: int) -> asyncio.Lock:
 
 async def commit(user_id: int, checkin: AiCheckin, decision_id: int, proposal_id: int,
                  now: Optional[datetime] = None) -> Verdict:
-    """What a check-in's change does under the team's mode: nothing in shadow, a live chip in
-    suggest, and in act the chip held to the policy and sent. Never raises for the move itself:
-    whatever happens is the verdict, which the decision carries."""
+    """What a check-in's change does under the team's levels: a review (nothing sent) unless every
+    row the move counts under acts, and then the chip held to the policy and sent. Never raises for
+    the move itself: whatever happens is the verdict, which the decision carries."""
     async with _lock(checkin.team_id_id):
         return await _commit(user_id, checkin, decision_id, proposal_id, now or _now())
 
@@ -548,58 +550,56 @@ async def _commit(user_id: int, checkin: AiCheckin, decision_id: int, proposal_i
     team_id = checkin.team_id_id
     row = await _proposal(proposal_id)
     if row is None or proposals.team_of(row) != team_id:
-        return Verdict(autonomy.SHADOW)
+        return Verdict(autonomy.REVIEW)
     autopilot = await _autopilot_row(team_id)
-    mode = autonomy.chip_mode(autopilot, row)
-    if mode == autonomy.SHADOW:
-        return Verdict(mode)
+    event = autonomy.is_event(getattr(checkin, "kind", None))
+    if not autonomy.chip_acts(autopilot, row, event=event):
+        return Verdict(autonomy.REVIEW)
+    ai = autonomy.AI
     if row.state == proposals.SHADOW:
         if not await _promote(row.id, live_summary(row), now):
-            return Verdict(autonomy.SHADOW, message="The move's day has started, so it stays logged")
+            return Verdict(autonomy.REVIEW, message="The move's day has started, so it stays logged")
         row = await _proposal(proposal_id)
-    if mode == autonomy.SUGGEST:
-        return Verdict(mode, message="It's a chip for the user to send or apply")
 
     earlier = await _action_of(row.id)
     if earlier is not None:
-        return Verdict(mode, earlier.outcome, earlier.rule, f"Already handled: {earlier.message}",
+        return Verdict(ai, earlier.outcome, earlier.rule, f"Already handled: {earlier.message}",
                        earlier.audit_id, earlier.id)
     if row.state != proposals.PROPOSED:
-        return Verdict(autonomy.SUGGEST, message=f"The chip is {row.state}, so Dime left it")
+        return Verdict(ai, message=f"The chip is {row.state}, so Dime left it")
 
     team, league_info = await _team(team_id, user_id)
     if team is None:
-        return Verdict(autonomy.SHADOW, message="The team is no longer the user's")
-    caps = autonomy.capabilities_of(row)
+        return Verdict(autonomy.REVIEW, message="The team is no longer the user's")
     base = dict(team_id=team_id, user_id=user_id, checkin_id=checkin.id, decision_id=decision_id, proposal_id=row.id,
-                capability=autonomy.primary(caps), kind=row.kind, nba_date=row.nba_date,
-                adds=autonomy.adds_of(row), created_at=now)
+                capability=autonomy.primary(autonomy.rows_of(row, event=event)), kind=row.kind,
+                nba_date=row.nba_date, adds=autonomy.adds_of(row), created_at=now)
 
     verdict: Optional[Verdict] = None
     try:
         block = await blocked_by(team, league_info, row, autopilot, now)
     except Exception as exc:          # a read the policy needs failed: nothing was sent
         outcome, rule, message = _classify(exc)
-        verdict = Verdict(mode, outcome, rule, f"{message}; left as a chip for the user")
+        verdict = Verdict(ai, outcome, rule, f"{message}; left as a chip for the user")
     else:
         if block is not None:
-            verdict = Verdict(mode, BLOCKED, block[0], f"{block[1]}; left as a chip for the user")
+            verdict = Verdict(ai, BLOCKED, block[0], f"{block[1]}; left as a chip for the user")
     if verdict is None:
         try:
             message, audit_id = await _send(team, league_info, row)
-            verdict = Verdict(mode, SENT, None, f"Sent by Dime: {message}", audit_id)
+            verdict = Verdict(ai, SENT, None, f"Sent by Dime: {message}", audit_id)
         except Exception as exc:
             outcome, rule, message = _classify(exc)
             if outcome == FAILED and rule == "error":
                 log.exception("autopilot_send_failed", team_id=team_id, proposal_id=row.id)
-            verdict = Verdict(mode, outcome, rule, f"{message}; left as a chip for the user")
+            verdict = Verdict(ai, outcome, rule, f"{message}; left as a chip for the user")
 
     recorded = await _record(**base, outcome=verdict.outcome, rule=verdict.rule,
                              message=verdict.message[:MESSAGE_MAX], audit_id=verdict.audit_id)
     log.info("autopilot_action", team_id=team_id, proposal_id=row.id, kind=row.kind, outcome=verdict.outcome,
              rule=verdict.rule, audit_id=verdict.audit_id, checkin_id=checkin.id)
     paused = await _after(team, league_info, verdict, now) if verdict.outcome != SENT else None
-    return Verdict(mode, verdict.outcome, verdict.rule, verdict.message, verdict.audit_id,
+    return Verdict(ai, verdict.outcome, verdict.rule, verdict.message, verdict.audit_id,
                    recorded.id if recorded else None, paused)
 
 
@@ -607,14 +607,15 @@ async def _commit(user_id: int, checkin: AiCheckin, decision_id: int, proposal_i
 
 
 async def policy_view(team_id: int, autopilot: Any) -> dict[str, Any]:
-    """The team's modes, the policy and what Dime has used of it, for get_automations (DB reads only)."""
+    """The rows Dime acts on, the policy and what Dime has used of it, for get_automations (DB reads only)."""
     today = schedule_service.get_nba_today()
     week = schedule_service.get_current_matchup(today)
     used_today = await _adds_sent(team_id, today, today)
     used_week = await _adds_sent(team_id, week["start_date"], week["end_date"]) if week else 0
     recent = await _recent(team_id, 8)
     return {
-        "modes": autonomy.effective_modes(autopilot),
+        "acting_on": autonomy.acting_rows(autopilot),
+        "autopilot": autonomy.switch_on(autopilot),
         "policy": {
             "adds_per_day": settings.autopilot_adds_per_day,
             "adds_per_matchup": settings.autopilot_adds_per_matchup,

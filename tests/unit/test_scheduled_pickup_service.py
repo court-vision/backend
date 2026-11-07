@@ -560,10 +560,10 @@ def test_room_left_in_the_matchup_sends(h):
 
 @pytest.fixture
 def dime(h, monkeypatch):
-    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, in act."""
+    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, daily actions at AI."""
     from services.ai import acting
-    d = SimpleNamespace(pilot=SimpleNamespace(team_id=21, user_id=11, mode="act", lineup_mode=None, streaming_mode=None,
-                                              adds_drops_mode=None, paused_at=None, paused_by=None, paused_reason=None))
+    d = SimpleNamespace(pilot=SimpleNamespace(team_id=21, user_id=11, ai_rows=["daily_actions"], autopilot=False,
+                                              restore=None, paused_at=None, paused_by=None, paused_reason=None))
 
     async def autopilot_row(team_id):
         return d.pilot
@@ -583,10 +583,17 @@ def test_a_pickup_dime_scheduled_goes_while_dime_still_acts_and_is_audited_as_it
 
 
 @pytest.mark.unit
+def test_under_the_autopilot_switch_a_pickup_dime_scheduled_goes_too(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows, dime.pilot.autopilot = [], True
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("change, reason", [
     (lambda d, s: setattr(d.pilot, "paused_at", NOW - timedelta(hours=1)), "dime_paused"),
-    (lambda d, s: setattr(d.pilot, "adds_drops_mode", "suggest"), "dime_not_acting"),
-    (lambda d, s: setattr(d.pilot, "mode", "shadow"), "dime_not_acting"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", ["lineup"]), "dime_not_acting"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", []), "dime_not_acting"),
     (lambda d, s: setattr(s, "dime_acting_enabled", False), "dime_acting_off"),
     (lambda d, s: setattr(s, "autopilot_enabled", False), "dime_off"),
     (lambda d, s: setattr(s, "ai_enabled", False), "dime_off"),
@@ -594,7 +601,7 @@ def test_a_pickup_dime_scheduled_goes_while_dime_still_acts_and_is_audited_as_it
 ])
 def test_a_pickup_dime_scheduled_is_skipped_unsent_once_dime_no_longer_acts_there(h, dime, monkeypatch, change, reason):
     arrange_day_before(h)
-    change(dime, svc.settings)       # since it was scheduled: the owner paused Dime, lowered its mode, or a switch went off
+    change(dime, svc.settings)       # since it was scheduled: the owner paused Dime, moved daily actions below AI, or a switch went off
     r = execute(h, row(made_by_autopilot=True))
     assert (r.outcome, r.reason) == ("skipped", reason) and r.detail
     assert h.txn_calls == [] and h.marked == [] and h.reads == []    # nothing read from ESPN, nothing sent

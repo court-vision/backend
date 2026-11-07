@@ -26,7 +26,7 @@ what the Week desk would, and marks the chip sent. In a check-in the chip is a
 shadow proposal like any other: what Dime would have done, never applied.
 
 Whether Dime may apply its own chips is the acting step's (step 5,
-services/ai/acting.py): on a team whose mode lets it act, a check-in's committed
+services/ai/acting.py): on automations at AI on the team, a check-in's committed
 chip is applied by the server through these same routes (`by` dime), and the holds
 and lane events it makes say so. The tools, the chips' routes and the pins a sent
 lineup chip leaves are behind `DIME_STEERING_ENABLED` (off by default).
