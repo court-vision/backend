@@ -6,13 +6,18 @@ note at the user's pick, a recap), the switch for a note at every pick, and the
 user's seat in a mock, which Dime can draft to the end. Every note is an agent turn
 started here by the user, on the AI desk's spend line. Off unless AI_ENABLED and
 DIME_DRAFT_ENABLED are on; the GET never refuses, so the room can hide Dime.
+
+`/ai/draft-notes` is the AI desk's side: the notes of every room, for its Draft
+notes view.
 """
 
 from fastapi import APIRouter, Depends
 
-from api.deps import OwnedDraftSessionContext, get_owned_session
+from api.deps import OwnedDraftSessionContext, UserContext, get_db_user, get_owned_session
 from schemas.common import ApiStatus
 from schemas.dime_draft import (
+    DimeDraftDesk,
+    DimeDraftDeskResp,
     DimeDraftNote,
     DimeDraftNoteReq,
     DimeDraftNoteResp,
@@ -24,6 +29,8 @@ from schemas.dime_draft import (
 from services.ai import draft as dime
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
+# The AI desk's side: every room's notes in one list
+desk_router = APIRouter(prefix="/ai", tags=["AI"])
 
 _ERRORS = {
     403: {"description": "The caller is not on the AI desk's invite list (AI_INVITE_ONLY)"},
@@ -41,7 +48,8 @@ _ERRORS = {
         "recap; each with the board's numbers the server read for it in `facts`), whether a note is being "
         "written now, the switch for a note whenever the user's pick is `lead` picks away or nearer, and "
         "whether Dime holds the user's seat in a mock. Never refuses for a switched-off server or a user "
-        "off the AI desk's list: `available` says whether the room shows Dime at all."
+        "off the AI desk's list: `available` says whether the room shows Dime at all, and `switched_off` "
+        "that the account turned Dime in draft rooms off (Account, AI and automation)."
     ),
     responses={404: _ERRORS[404]},
 )
@@ -58,7 +66,7 @@ async def get_dime(session: OwnedDraftSessionContext = Depends(get_owned_session
         "With `notes` on, the room asks Dime for a note whenever the user's pick is `lead` picks away or "
         "nearer, one per pick. Each note is a turn on the AI desk's budget."
     ),
-    responses=_ERRORS,
+    responses={**_ERRORS, 409: {"description": "The account's Dime in draft rooms switch is off (AI_DRAFT_SWITCHED_OFF)"}},
 )
 async def set_dime(
     req: DimeDraftRoomReq, session: OwnedDraftSessionContext = Depends(get_owned_session)
@@ -83,8 +91,9 @@ async def set_dime(
     responses={
         **_ERRORS,
         409: {"description": "A note is already being written (AI_DRAFT_BUSY), the draft is finished "
-                             "(AI_DRAFT_FINISHED), no pick of the user's is left (AI_DRAFT_NO_PICK), or nothing "
-                             "has been drafted yet (AI_DRAFT_NO_PICKS)"},
+                             "(AI_DRAFT_FINISHED), no pick of the user's is left (AI_DRAFT_NO_PICK), nothing "
+                             "has been drafted yet (AI_DRAFT_NO_PICKS), or the account's Dime in draft rooms "
+                             "switch is off (AI_DRAFT_SWITCHED_OFF)"},
         429: {"description": "The AI desk's monthly budget is used up"},
     },
 )
@@ -110,7 +119,8 @@ async def ask_dime(
     responses={
         **_ERRORS,
         409: {"description": "Not a room Dime can draft in: not a mock, linked to an ESPN lobby, finished, "
-                             "no seat or shape set (AI_DRAFT_NO_SEAT)"},
+                             "no seat or shape set (AI_DRAFT_NO_SEAT), or the account's Dime in draft rooms "
+                             "switch is off (AI_DRAFT_SWITCHED_OFF)"},
     },
 )
 async def set_seat(
@@ -119,3 +129,20 @@ async def set_seat(
     data = await dime.set_seat(session.user_id, session, req.on)
     message = "Dime has your seat" if req.on else "Your seat is yours again"
     return DimeDraftRoomResp(status=ApiStatus.SUCCESS, message=message, data=DimeDraftRoom(**data))
+
+
+@desk_router.get(
+    "/draft-notes",
+    response_model=DimeDraftDeskResp,
+    summary="Dime's notes across the caller's draft rooms, for the AI desk's Draft notes view",
+    description=(
+        "Every plan, pick note and recap Dime wrote in the caller's draft rooms (the newest 300), grouped by "
+        "room: the room with the newest note first, each room's notes newest first. Listed whether or not "
+        "Dime is on in draft rooms now; `enabled` and `switched_off` say whether new ones can be asked for. "
+        "Each note's `conversation_id` opens it on the AI desk."
+    ),
+    responses={403: _ERRORS[403], 503: {"description": "Turned off (AI_DISABLED)"}},
+)
+async def get_desk_notes(user: UserContext = Depends(get_db_user)) -> DimeDraftDeskResp:
+    data = await dime.desk_view(user.user_id)
+    return DimeDraftDeskResp(status=ApiStatus.SUCCESS, message="Dime in your draft rooms", data=DimeDraftDesk(**data))

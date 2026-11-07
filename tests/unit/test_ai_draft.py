@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.errors import ServiceUnavailableError
+from core.errors import ConflictError, ServiceUnavailableError
 from core.settings import settings
 from services.ai import agent, draft, tools
 
@@ -148,6 +148,14 @@ class TestBriefs:
         assert "get_draft_recap for the room" in live and "opponent note" in live and "plan note" in live
         mock = draft.brief(draft.RECAP, _room(), _detail())
         assert "This is a mock" in mock and "opponent note" not in mock
+
+    def test_with_memory_off_nothing_is_recalled_or_saved(self):
+        plan = draft.brief(draft.PLAN, _room(kind="live"), _detail(kind="live"), memory=False)
+        assert "recall" not in plan and "saved to the team's notes" not in plan
+        assert "stays in the room (memory is off" in plan and "set_draft_plan once" in plan
+        for room, detail in ((_room(kind="live"), _detail(kind="live")), (_room(), _detail())):
+            recap = draft.brief(draft.RECAP, room, detail, memory=False)
+            assert "recall" not in recap and "remember" not in recap and "nothing is saved" in recap
 
     def test_titles_name_the_room_and_the_note(self):
         assert draft.title_of(draft.PLAN, _detail()) == "Dime · Atlas mock · plan"
@@ -292,6 +300,42 @@ class TestSwitch:
         assert err.value.error_code == "AI_DRAFT_DISABLED"
         with pytest.raises(ServiceUnavailableError):
             run(draft.set_seat(42, _room(), True))
+
+    def test_the_account_s_switch_off_hides_dime_and_refuses_starts(self, monkeypatch):
+        monkeypatch.setattr(settings, "ai_enabled", True)
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
+        monkeypatch.setattr(settings, "dime_draft_enabled", True)
+
+        async def switches(user_id):
+            assert user_id == 42
+            return SimpleNamespace(draft_rooms=False, memory=True)
+
+        monkeypatch.setattr(draft, "features", switches)
+        view = run(draft.room_view(42, _room()))
+        assert view["switched_off"] is True and view["available"] is False and view["notes"] == []
+        for call in (lambda: draft.start(42, _room(), draft.PLAN), lambda: draft.set_notes(42, _room(), True),
+                     lambda: draft.set_seat(42, _room(), True)):
+            with pytest.raises(ConflictError) as err:
+                run(call())
+            assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF" and err.value.status_code == 409
+
+    def test_the_seat_hands_back_once_the_switch_goes_off(self, monkeypatch):
+        seen: dict = {}
+
+        async def touch(session_id):
+            return draft.SEAT_DRAFTING
+
+        async def seat_off(session_id, reason):
+            seen["reason"] = reason
+
+        async def switches(user_id):
+            return SimpleNamespace(draft_rooms=False, memory=True)
+
+        monkeypatch.setattr(draft, "_touch_seat", touch)
+        monkeypatch.setattr(draft, "_seat_off", seat_off)
+        monkeypatch.setattr(draft, "features", switches)
+        assert run(draft.seat_loop(42, 7)) == "switched_off"
+        assert seen == {"reason": "switched_off"}
 
     def test_on_a_user_off_the_ai_desk_s_list_sees_no_dime(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)

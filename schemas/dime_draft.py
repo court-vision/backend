@@ -1,7 +1,7 @@
 """
 Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py):
 GET/PUT /v1/internal/drafts/{session_id}/dime, POST .../dime/notes and
-POST .../dime/seat.
+POST .../dime/seat, and the AI desk's Draft notes, GET /v1/internal/ai/draft-notes.
 """
 
 from datetime import datetime
@@ -47,7 +47,10 @@ class DimeDraftSeat(ApiModel):
 
 class DimeDraftRoom(ApiModel):
     enabled: bool = Field(description="DIME_DRAFT_ENABLED (and AI_ENABLED) on the server")
-    available: bool = Field(description="enabled, and the caller is on the AI desk's list: the room shows Dime")
+    available: bool = Field(description="enabled, the caller is on the AI desk's list, and their Dime in draft rooms "
+                                        "switch is on: the room shows Dime")
+    switched_off: bool = Field(False, description="enabled and on the list, but the account's Dime in draft rooms "
+                                                  "switch (Account, AI and automation) is off")
     lead: int = Field(description="The room asks for a pick note once the user's pick is this many picks away")
     notes_on: bool = Field(description="A note when each of the user's picks is near")
     seat: DimeDraftSeat
@@ -59,6 +62,28 @@ class DimeDraftRoom(ApiModel):
 
 class DimeDraftRoomResp(BaseResponse):
     data: Optional[DimeDraftRoom] = None
+
+
+class DimeDraftDeskRoom(ApiModel):
+    """One of the user's draft rooms, with the notes Dime wrote in it."""
+
+    room_id: int
+    name: Optional[str] = Field(None, description="The user's own label for the room")
+    kind: str = Field(description="live, manual, mock or import")
+    status: str = Field(description="active, completed or abandoned")
+    team_id: Optional[int] = None
+    last_at: datetime = Field(description="When its newest note was started")
+    notes: list[DimeDraftNote] = Field(default_factory=list, description="Newest first")
+
+
+class DimeDraftDesk(ApiModel):
+    enabled: bool = Field(description="DIME_DRAFT_ENABLED (and AI_ENABLED) on the server")
+    switched_off: bool = Field(description="The account's Dime in draft rooms switch is off (its notes still list)")
+    rooms: list[DimeDraftDeskRoom] = Field(default_factory=list, description="The room with the newest note first")
+
+
+class DimeDraftDeskResp(BaseResponse):
+    data: Optional[DimeDraftDesk] = None
 
 
 class DimeDraftRoomReq(ApiModel):

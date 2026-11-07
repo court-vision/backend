@@ -30,7 +30,12 @@ the room by the user (the button, the notes switch, or the seat), so it spends o
 the AI desk's line. One note runs per room at a time. Nothing here reaches ESPN.
 
 Off (`DIME_DRAFT_ENABLED`, the default) the room's view says so and every start is
-refused; the draft-only tools are in no tool list but a draft conversation's.
+refused; the draft-only tools are in no tool list but a draft conversation's. The
+account's own switch (usr.ai_settings.draft_rooms, on by default) does the same for
+one user: the view reports `switched_off`, a start is refused with 409, and a seat
+Dime holds is handed back before its next pick. With the account's memory off, a
+real draft's plan and recap stay in the room: the briefs ask for no recall or
+remember, and `set_draft_plan` saves nothing.
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ from core.nba_calendar import nba_date_et
 from core.settings import settings
 from db.base import db, db_operation, run_db
 from db.models.dime_draft import AiDraftNote, AiDraftRoom
-from db.models.drafts import DraftPick
+from db.models.drafts import DraftPick, DraftSession
 from schemas.draft import DraftPickCreate, DraftSessionUpdate, MockAdvanceRequest
 
 PLAN, PICK, RECAP = "plan", "pick", "recap"
@@ -63,6 +68,9 @@ SEAT_OFF, SEAT_DRAFTING, SEAT_STOPPING = "off", "drafting", "stopping"
 NOTE_LEAD = 2
 # Notes shown in the room, newest first
 VIEW_NOTES = 40
+# The AI desk's Draft notes view: the newest notes across the user's rooms, by room
+DESK_NOTES = 300
+DESK_ROOMS = 30
 # A note still `running` this long past its turn's own deadline died with its process
 _STALE_MARGIN = timedelta(seconds=60)
 # A seat loop touches its row before every step; one this quiet died with its process
@@ -92,11 +100,29 @@ class DraftOff(ServiceUnavailableError):
     default_message = "Dime isn't drafting yet: it is switched off on the server"
 
 
-def ensure_on(user_id: int) -> None:
+class DraftSwitchedOff(ConflictError):
+    error_code = "AI_DRAFT_SWITCHED_OFF"
+    default_message = "Dime in draft rooms is off for your account. Turn it on in Account, AI and automation"
+
+
+async def features(user_id: int) -> Any:
+    """The account's AI feature switches (usr.ai_settings, services/ai/ai_settings.py): `draft_rooms`
+    and `memory`, both on for an account that never set them."""
+    from services.ai import ai_settings
+    return await ai_settings.get(user_id)
+
+
+async def ensure_on(user_id: int) -> Any:
+    """Refuse a start in the room unless the server, the AI desk's list and the account's draft rooms
+    switch all allow Dime there. Returns the account's switches."""
     from services.ai.agent_service import ensure_access
     ensure_access(user_id)
     if not settings.dime_draft_enabled:
         raise DraftOff(log_level="info")
+    switches = await features(user_id)
+    if not switches.draft_rooms:
+        raise DraftSwitchedOff()
+    return switches
 
 
 # ------------------------------- the tools ------------------------------- #
@@ -477,19 +503,25 @@ def _real(room: OwnedDraftSessionContext) -> bool:
 
 
 def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Optional[dict[str, Any]] = None,
-          plan: Optional[AiDraftNote] = None, seat: bool = False, for_pick: Optional[int] = None) -> str:
+          plan: Optional[AiDraftNote] = None, seat: bool = False, for_pick: Optional[int] = None,
+          memory: bool = True) -> str:
+    """The note's message. With the account's memory off, it asks for no recall or remember (the
+    tools would only answer that memory is off) and a real draft's plan stays in the room."""
     name = f' ("{detail.name}")' if getattr(detail, "name", None) else ""
     where = f"room_id {room.session_id}{name}: {_room_words(room, detail)}"
     rnd = round_of_pick(for_pick, detail.league_size)
     at = f"pick #{for_pick}" + (f" (round {rnd})" if rnd else "")
     if kind == PLAN:
-        save = ("It is also saved to the team's notes as this draft's plan." if _real(room)
+        save = ("It is also saved to the team's notes as this draft's plan." if _real(room) and memory
+                else "This room's plan stays in the room (memory is off for this account)." if _real(room)
                 else "This room's plan stays in the room (a mock, or a room without a team).")
+        recall = ("" if not memory
+                  else f"- recall your notes on team_id {room.team_id} (the league, its managers, earlier drafts).\n"
+                  if room.team_id is not None else "- recall your notes on earlier drafts.\n")
         return (
             f"[Draft plan for {where}. The user asked for it from the Draft desk.]\n\n"
             "Set the plan this draft is played to:\n"
-            + (f"- recall your notes on team_id {room.team_id} (the league, its managers, earlier drafts).\n"
-               if room.team_id is not None else "- recall your notes on earlier drafts.\n")
+            + recall
             + "- get_draft_board for the room: who the board values, ESPN's market, and in a category league "
             "where an average roster stands (category_need lists the category keys).\n"
             "- Decide the plan. In a category league: which categories to concede (none, or up to three that "
@@ -530,6 +562,9 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
     # RECAP
     real = _real(room)
     steps = (
+        "- Memory is off for this account, so nothing is saved: say how the user's seat did against the room "
+        "and why, and if you made its picks (by_dime), what you'd do differently.\n"
+        if not memory else
         f"- recall your notes on team_id {room.team_id}, then remember what the season starts from as one plan "
         "note on that team (where the roster is thin, which categories it should win, the picks to watch), with "
         "a recheck day two weeks into the season.\n"
@@ -587,12 +622,16 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     AI desk's list, it says so and the room hides Dime."""
     from services.ai.agent_service import has_access
     out: dict[str, Any] = {
-        "enabled": enabled(), "available": enabled() and has_access(user_id), "lead": NOTE_LEAD,
+        "enabled": enabled(), "available": False, "switched_off": False, "lead": NOTE_LEAD,
         "notes_on": False, "seat": {"state": SEAT_OFF, "reason": None, "live": False}, "can_seat": None,
         "running": None, "notes": [],
     }
-    if not out["available"]:
+    if not (out["enabled"] and has_access(user_id)):
         return out
+    if not (await features(user_id)).draft_rooms:
+        out["switched_off"] = True
+        return out
+    out["available"] = True
     now = _now()
     await _sweep(room.session_id, _stale_before(now))
     await _drop_undone(room.session_id)
@@ -614,8 +653,49 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     return out
 
 
+@db_operation("ai.draft_notes_of_user")
+def _desk_notes(user_id: int) -> tuple[list[AiDraftNote], dict[int, DraftSession]]:
+    notes = list(AiDraftNote.select().where(AiDraftNote.user_id == user_id)
+                 .order_by(AiDraftNote.id.desc()).limit(DESK_NOTES))
+    ids = {n.session_id_id for n in notes}
+    rooms = {r.id: r for r in DraftSession.select().where(DraftSession.id.in_(ids), DraftSession.user == user_id)} \
+        if ids else {}
+    return notes, rooms
+
+
+async def desk_view(user_id: int) -> dict[str, Any]:
+    """The AI desk's Draft notes: what Dime wrote in the user's draft rooms, by room, the room with the
+    newest note first and each room's notes newest first. Listed whatever the switches say (the notes
+    stay, as memory's do), with the server's and the account's switch beside them. A note whose turn
+    died reads as failed, as its room would sweep it."""
+    from services.ai.agent_service import ensure_access
+    ensure_access(user_id)
+    notes, rooms = await _desk_notes(user_id)
+    stale = _stale_before(_now())
+    out: list[dict[str, Any]] = []
+    by_room: dict[int, dict[str, Any]] = {}
+    for n in notes:
+        room = rooms.get(n.session_id_id)
+        if room is None:
+            continue
+        entry = by_room.get(room.id)
+        if entry is None:
+            if len(out) >= DESK_ROOMS:
+                continue
+            entry = by_room[room.id] = {
+                "room_id": room.id, "name": room.name, "kind": room.kind, "status": room.status,
+                "team_id": room.team_id, "last_at": n.created_at, "notes": [],
+            }
+            out.append(entry)
+        view = note_view(n)
+        if n.state == RUNNING and n.created_at is not None and n.created_at < stale:
+            view.update(state=FAILED, reason="stale")
+        entry["notes"].append(view)
+    return {"enabled": enabled(), "switched_off": not (await features(user_id)).draft_rooms, "rooms": out}
+
+
 async def set_notes(user_id: int, room: OwnedDraftSessionContext, on: bool) -> dict[str, Any]:
-    ensure_on(user_id)
+    await ensure_on(user_id)
     await _set_room(room.session_id, user_id, notes=on)
     return await room_view(user_id, room)
 
@@ -654,7 +734,7 @@ async def start(user_id: int, room: OwnedDraftSessionContext, kind: str, *, seat
     user's coming pick is returned as it is, with no new turn."""
     from services.ai import agent, conversations, spend
 
-    ensure_on(user_id)
+    switches = await ensure_on(user_id)
     if kind not in KINDS:
         raise AppError("AI_DRAFT_INVALID", "A note is a plan, a pick or a recap", status_code=422)
     now = _now()
@@ -699,7 +779,8 @@ async def start(user_id: int, room: OwnedDraftSessionContext, kind: str, *, seat
         header_line = await agent.header(user_id, room.team_id, conversation_id=conversation_id)
         plan = await _plan_of(room.session_id) if kind == PICK else None
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
-                          message=brief(kind, room, detail, board=board, plan=plan, seat=seat, for_pick=for_pick),
+                          message=brief(kind, room, detail, board=board, plan=plan, seat=seat, for_pick=for_pick,
+                                        memory=switches.memory),
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.DRAFT_TOOLS, allowed=agent.DRAFT_ALLOWED, draft_note_id=note_id,
                           limits=agent.Limits.draft())
@@ -745,7 +826,8 @@ async def _run(turn: Any, header_line: str, note_id: int, session_id: int, kind:
 async def set_seat(user_id: int, room: OwnedDraftSessionContext, on: bool) -> dict[str, Any]:
     """Hand Dime the user's seat in a mock (it drafts to the end, pick by pick), or take it back (after
     the pick it is making)."""
-    ensure_on(user_id)
+    if on:
+        await ensure_on(user_id)
     now = _now()
     if on:
         blocker = seatable(room)
@@ -770,6 +852,10 @@ async def seat_loop(user_id: int, session_id: int) -> str:
             seat = await _touch_seat(session_id)
             if seat != SEAT_DRAFTING:
                 reason = "stopped"
+                return reason
+            if not (await features(user_id)).draft_rooms:
+                # The account switched Dime in draft rooms off: hand the seat back before the next pick
+                reason = "switched_off"
                 return reason
             room = await run_db("ai.draft_owned_session", _owned_session, session_id, user_id)
             if room is None:
@@ -849,12 +935,13 @@ async def set_draft_plan(user_id: int, conversation_id: Optional[int], note_id: 
     await _update_note(note.id, plan=args.plan, punts=punts)
     out: dict[str, Any] = {"room_id": room.session_id, "plan": args.plan, "punts": punts,
                            "punts_before": list(note.punts_before or [])}
-    if _real(room):
+    if _real(room) and (await features(user_id)).memory:
         try:
             saved = await memory.remember(
                 memory.Caller(user_id=user_id, conversation_id=conversation_id, today=nba_date_et()),
                 memory.RememberInput(kind="plan", team_id=room.team_id, text=f"Draft plan: {args.plan}"[:500]))
-            out["note_id"] = saved["note_id"]
+            if saved.get("note_id") is not None:
+                out["note_id"] = saved["note_id"]
         except AppError as exc:
             out["note"] = f"Not saved to the team's notes: {exc.message}"
     return out
