@@ -129,7 +129,8 @@ def tick(monkeypatch):
     # Switched on Monday night, after Monday's own check-ins had closed
     state = SimpleNamespace(rows=[SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 23),
                                                   paused_at=None)],
-                            taken=set(), busy=False, ran=0, claims=[], started=[], swept=0)
+                            taken=set(), busy=False, ran=0, ran_scheduled_only=[], claims=[], started=[], swept=0,
+                            broken=set())
 
     async def live():
         return state.rows
@@ -138,12 +139,15 @@ def tick(monkeypatch):
         return {MON: time(19, 30), TUE: time(19)}
 
     async def taken(team_id, days):
+        if team_id in state.broken:
+            raise RuntimeError("the database hiccuped")
         return state.taken
 
     async def busy(team_id):
         return state.busy
 
-    async def ran_since(team_id, since):
+    async def ran_since(team_id, since, *, scheduled_only=False):
+        state.ran_scheduled_only.append(scheduled_only)
         return state.ran
 
     async def claim(team_id, user_id, kind, nba_date, due_at, *, manual, now, state="running", reason=None):
@@ -205,6 +209,18 @@ class TestTick:
         monkeypatch.setattr(settings, "autopilot_team_ids", [23])
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         assert run(checkins.run_due(et(TUE, 9, 30)))["off"] is True and tick.started == []
+
+    def test_the_day_s_cap_counts_scheduled_runs_only(self, tick):
+        # Runs from the desk never use up a scheduled slot: the tick asks for scheduled ones alone
+        run(checkins.run_due(et(TUE, 9, 30)))
+        assert tick.ran_scheduled_only == [True]
+
+    def test_one_team_s_failure_doesn_t_hold_back_the_next(self, tick, monkeypatch):
+        monkeypatch.setattr(settings, "autopilot_team_ids", [23, 24])
+        tick.rows.append(SimpleNamespace(team_id_id=24, user_id_id=42, active_since=et(MON, 23), paused_at=None))
+        tick.broken = {23}
+        out = run(checkins.run_due(et(TUE, 9, 30)))
+        assert out["teams"] == 2 and tick.started == [(24, "night", MON, False)]
 
     def test_yesterday_s_check_ins_no_tick_reached_are_still_recorded_as_missed(self, tick):
         # The scheduler was down from Monday morning to past the rollover: Monday's weekly and
@@ -398,6 +414,10 @@ class TestRunNow:
         with pytest.raises(AuthorizationError):
             run(checkins.run_now(42, 23, now=et(TUE, 10)))
 
+    def test_a_run_from_the_desk_counts_every_check_in_toward_the_day_s_cap(self, now_stubs):
+        run(checkins.run_now(42, 23, now=et(TUE, 10)))
+        assert now_stubs.ran_scheduled_only == [False]
+
     def test_one_started_between_the_check_and_the_claim_is_refused_as_running(self, now_stubs, monkeypatch):
         async def lost(*args, **kwargs):
             return None
@@ -501,6 +521,13 @@ class TestLogDecision:
     def test_a_change_cites_a_proposal_made_in_this_check_in(self, logging_stubs):
         with pytest.raises(AppError, match="wasn't made in this check-in"):
             run(decisions.log_decision(42, 7, _args(call="change", proposal_id=5)))
+        assert logging_stubs.inserted == []
+
+    def test_a_proposal_for_another_of_the_user_s_teams_isn_t_cited(self, logging_stubs):
+        logging_stubs.proposal = SimpleNamespace(id=5, team_id_id=24)
+        with pytest.raises(AppError, match="for another team"):
+            run(decisions.log_decision(42, 7, _args(area="adds_drops", automation="none", call="change",
+                                                    proposal_id=5)))
         assert logging_stubs.inserted == []
 
 

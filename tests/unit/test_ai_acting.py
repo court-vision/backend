@@ -36,8 +36,9 @@ def run(coro):
 
 
 def prop(**kw):
-    """A usr.ai_proposals row (step 4's `action` included)."""
+    """A usr.ai_proposals row (step 4's `action` included, and the team as peewee's `team_id_id` too)."""
     kw.setdefault("action", None)
+    kw.setdefault("team_id_id", kw.get("team_id", 21))
     return _row(**kw)
 
 

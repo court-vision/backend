@@ -11,7 +11,7 @@ and the check-ins' spend line, apart from the desk's caps.
 
 import asyncio
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -19,6 +19,8 @@ from core.errors import AppError, ConflictError
 from core.settings import settings
 from db.models.ai_conversations import AiConversation, AiProposal, AiSpend
 from db.models.autopilot import AiCheckin, AiDecision, Autopilot
+from db.models.nba.games import Game
+from db.models.nba.teams import NBATeam
 from db.models.teams import Team
 from db.models.users import User
 from services.ai import checkins, conversations, decisions, proposals, spend
@@ -130,7 +132,35 @@ class TestClaims:
         assert (row.state, row.reason, row.cost_micros) == ("done", None, 41_000)
 
 
+class TestCalendar:
+    def test_only_fantasy_games_set_a_day_s_first_tip(self, integration_db):
+        for team in ("DET", "BOS"):
+            NBATeam.get_or_create(id=team, defaults={"name": team, "city": team, "conference": "East",
+                                                     "division": "Central"})
+        allstar, regular, playoffs = DAY, DAY + timedelta(days=1), DAY + timedelta(days=2)
+
+        def game(game_id, day, tip):
+            Game.create(game_id=game_id, game_date=day, season="2026-27", home_team="DET", away_team="BOS",
+                        start_time_et=tip)
+        game("0032600001", allstar, time(20))     # All-Star: no check-in that day
+        game("0022600001", regular, time(19))     # the regular season counts
+        game("0012600001", regular, time(12))     # a preseason game the same day doesn't move the tip
+        game("0042600001", playoffs, time(18))    # playoffs: none
+        game("9990000001", playoffs + timedelta(days=1), time(21))  # not yet labelled: kept
+        tips = run(checkins._tips([allstar, regular, playoffs, playoffs + timedelta(days=1)]))
+        assert tips == {regular: time(19), playoffs + timedelta(days=1): time(21)}
+
+
 class TestSwitch:
+    def test_two_first_switches_at_once_both_land(self, integration_db, monkeypatch):
+        me = _user(1)
+        team = _team(me)
+        run(checkins._set_autopilot(team.team_id, me.user_id, False, _now()))
+        # The second request read no row before the first one's insert landed
+        monkeypatch.setattr(checkins.Autopilot, "get_or_none", lambda *a, **k: None)
+        row = run(checkins._set_autopilot(team.team_id, me.user_id, True, _now()))
+        assert row.paused_at is None and Autopilot.select().count() == 1
+
     def test_on_pause_and_resume(self, integration_db):
         me = _user(1)
         team = _team(me)

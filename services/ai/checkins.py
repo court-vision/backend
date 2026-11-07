@@ -51,7 +51,7 @@ from core.nba_calendar import EASTERN
 from core.settings import settings
 from db.base import db_operation
 from db.models.autopilot import AiCheckin, AiDecision, Autopilot, AutopilotAction
-from db.models.nba.games import Game
+from db.models.nba.games import FANTASY_SEASON_TYPES, Game
 from db.models.teams import Team
 from schemas.common import ApiStatus
 from services import schedule_service
@@ -168,7 +168,10 @@ class Calendar:
 @db_operation("ai.checkin_tips")
 def _tips(days: list[date]) -> dict[date, time]:
     rows = (Game.select(Game.game_date, fn.MIN(Game.start_time_et))
-            .where(Game.game_date.in_(days), Game.start_time_et.is_null(False))
+            .where(Game.game_date.in_(days), Game.start_time_et.is_null(False),
+                   # Fantasy games only: no check-in on an All-Star, preseason or playoff day. A game not
+                   # yet labelled counts, as Game.in_season and PlayerGameStats.for_fantasy() keep it.
+                   Game.season_type.in_(FANTASY_SEASON_TYPES) | Game.season_type.is_null())
             .group_by(Game.game_date)
             .tuples())
     return {d: t for d, t in rows if t is not None}
@@ -211,10 +214,14 @@ def _busy(team_id: int) -> bool:
 
 
 @db_operation("ai.checkin_ran_since")
-def _ran_since(team_id: int, since: datetime) -> int:
-    return (AiCheckin.select()
-            .where(AiCheckin.team_id == team_id, AiCheckin.started_at >= since, AiCheckin.state.in_(_RAN))
-            .count())
+def _ran_since(team_id: int, since: datetime, *, scheduled_only: bool = False) -> int:
+    """Check-ins that ran (or are running) on the team since `since`; with `scheduled_only`, not
+    counting the ones the user ran from the desk."""
+    query = AiCheckin.select().where(AiCheckin.team_id == team_id, AiCheckin.started_at >= since,
+                                     AiCheckin.state.in_(_RAN))
+    if scheduled_only:
+        query = query.where(AiCheckin.manual == False)  # noqa: E712
+    return query.count()
 
 
 @db_operation("ai.checkin_claim")
@@ -322,13 +329,18 @@ def _set_autopilot(team_id: int, user_id: int, on: Optional[bool], now: datetime
     modes = modes or {}
     row = Autopilot.get_or_none(Autopilot.team_id == team_id)
     if row is None:
-        # Set up before it is switched on: it starts paused, as the switch left off
-        live = bool(on)
-        return Autopilot.create(team_id=team_id, user_id=user_id, created_at=now, updated_at=now, active_since=now,
-                                paused_at=None if live else now, paused_by=None if live else "user", **modes)
+        # Two first switches at once (a double click, a retry): the second insert is a no-op, and
+        # the row the first wrote goes through the transitions below like any other. Set up before
+        # it is switched on, it starts paused, as the switch left off
+        (Autopilot.insert(team_id=team_id, user_id=user_id, created_at=now, updated_at=now, active_since=now,
+                          paused_at=None if on else now, paused_by=None if on else "user", **modes)
+         .on_conflict_ignore()
+         .execute())
+        row = Autopilot.get(Autopilot.team_id == team_id)
     if modes:
+        # Also the second of two first switches, whose insert was the no-op
         Autopilot.update(updated_at=now, **modes).where(Autopilot.team_id == team_id).execute()
-    if on is True and row.paused_at is not None:
+    if on and row.paused_at is not None:
         # Resumed: what fell due while it was paused is not missed
         (Autopilot.update(paused_at=None, paused_by=None, paused_reason=None, active_since=now, updated_at=now,
                           user_id=user_id)
@@ -529,6 +541,37 @@ async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int
                           reason=reason, cost_micros=cost, decisions=turn.decisions, proposals=len(turn.proposals))
 
 
+async def _tick_team(row: Autopilot, slots: list[Slot], days: list[date], now: datetime,
+                     out: dict[str, Any]) -> None:
+    """One team's share of a tick: the first due check-in started, closed windows recorded as missed."""
+    team_id, user_id = row.team_id_id, row.user_id_id
+    taken = await _taken(team_id, days)
+    busy = await _busy(team_id)
+    # The day's cap counts scheduled check-ins only: runs from the desk never use up a slot
+    ran = await _ran_since(team_id, now - timedelta(days=1), scheduled_only=True)
+    for slot in slots:
+        if (slot.kind, slot.nba_date) in taken:
+            continue
+        state = standing(slot, now, row.active_since)
+        if state == "missed":
+            if await _claim(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now,
+                            state=MISSED, reason="window_closed") is not None:
+                out["missed"] += 1
+        elif state == "due" and not busy:
+            if ran >= settings.autopilot_checkins_per_day:
+                if await _claim(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now,
+                                state=SKIPPED, reason="daily_cap") is not None:
+                    out["skipped"] += 1
+                continue
+            checkin_id = await _start(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False,
+                                      now=now)
+            if checkin_id is None:
+                out["skipped"] += 1
+                continue
+            busy, ran = True, ran + 1
+            out["started"].append(Started(checkin_id, team_id, slot.kind, slot.nba_date))
+
+
 async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
     """One tick of the schedule: close check-ins that died with their process, then for each
     switched-on team start the first check-in that is due (one at a time per team, within the
@@ -550,31 +593,11 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
     slots = cal.slots(cal.today - timedelta(days=1)) + cal.slots()
     days = sorted({s.nba_date for s in slots})
     for row in rows:
-        team_id, user_id = row.team_id_id, row.user_id_id
-        taken = await _taken(team_id, days)
-        busy = await _busy(team_id)
-        ran = await _ran_since(team_id, now - timedelta(days=1))
-        for slot in slots:
-            if (slot.kind, slot.nba_date) in taken:
-                continue
-            state = standing(slot, now, row.active_since)
-            if state == "missed":
-                if await _claim(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now,
-                                state=MISSED, reason="window_closed") is not None:
-                    out["missed"] += 1
-            elif state == "due" and not busy:
-                if ran >= settings.autopilot_checkins_per_day:
-                    if await _claim(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now,
-                                    state=SKIPPED, reason="daily_cap") is not None:
-                        out["skipped"] += 1
-                    continue
-                checkin_id = await _start(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False,
-                                          now=now)
-                if checkin_id is None:
-                    out["skipped"] += 1
-                    continue
-                busy, ran = True, ran + 1
-                out["started"].append(Started(checkin_id, team_id, slot.kind, slot.nba_date))
+        try:
+            await _tick_team(row, slots, days, now, out)
+        except Exception:
+            # One team's failure (its reads, a claim, a start) doesn't hold back the others this tick
+            get_logger().exception("ai_checkins_team_failed", team_id=row.team_id_id)
     get_logger().info("ai_checkins_tick", teams=out["teams"], started=len(out["started"]), missed=out["missed"],
                       skipped=out["skipped"], stale=out["stale"])
     return out
