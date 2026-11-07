@@ -6,7 +6,9 @@ leaves room for a retry), the plan that sets a room's punts (checked by the room
 update) and saves to the team's notes only in a real draft, the pick Dime makes in the
 user's mock seat (recorded `dime`, by the user's seat, at the pick on the clock, once),
 the seat drafting a whole mock with the autopicker running the other seats, the recap's
-read of it, a room Dime drafted in refusing to follow an ESPN draft, and the rollback.
+read of it, a room Dime drafted in refusing to follow an ESPN draft, the account's two
+switches (draft rooms off hides Dime and hands the seat back; memory off keeps a real
+draft's plan in the room), the AI desk's list of every room's notes, and the rollback.
 
 The agent's turn is stubbed: it makes the tool calls a model would, through the real
 tool registry and the real rows.
@@ -33,7 +35,7 @@ from db.models.nba.players import Player
 from db.models.teams import Team
 from db.models.users import User
 from schemas.draft import DraftInitSyncRequest, DraftSessionCreate
-from services.ai import agent, conversations, draft, spend, tools
+from services.ai import agent, ai_settings, conversations, draft, spend, tools
 from services.draft_service import DraftService
 from services.draft_sync_service import DraftSyncService
 from services.scoring.pool import baseline_season
@@ -256,6 +258,25 @@ async def test_a_real_draft_s_plan_is_saved_to_the_team_s_notes(team, pool, monk
         ("plan", team.team_id, "Draft plan: Guards early, bigs late", "dime")]
 
 
+async def test_with_memory_off_a_real_draft_s_plan_stays_in_the_room(team, pool, monkeypatch):
+    await ai_settings.update(team.user_id_id, memory=False)
+    room = await _room(team, kind="manual")
+    seen = []
+
+    async def act(turn):
+        seen.append(turn.message)
+        out = await _tool(turn, "set_draft_plan", {"room_id": room.session_id, "plan": "Guards early, bigs late"})
+        assert not out.is_error, out.content
+        assert "note_id" not in json.loads(out.content)
+        return "Guards early."
+
+    _fake_turn(monkeypatch, act)
+    note = await _settled(await draft.start(team.user_id_id, room, draft.PLAN))
+    assert note.state == "done" and note.plan == "Guards early, bigs late"
+    assert AiMemory.select().count() == 0
+    assert "recall" not in seen[0] and "memory is off" in seen[0]
+
+
 async def test_a_finished_draft_takes_no_plan_and_an_empty_one_no_recap(team, pool, monkeypatch):
     room = await _room(team)
     with pytest.raises(ConflictError) as err:
@@ -413,6 +434,70 @@ async def test_taking_the_seat_back_stops_after_the_pick_being_made(team, pool, 
     assert row.seat == "off" and row.seat_reason == "stopped"
     view = await draft.room_view(team.user_id_id, await _ctx(room.session_id, team.user_id_id))
     assert view["seat"] == {"state": "off", "reason": "stopped", "live": False}
+
+
+async def test_the_seat_hands_back_once_dime_in_draft_rooms_is_switched_off(team, pool, monkeypatch):
+    room = await _room(team)
+
+    async def act(turn):
+        # The user switches Dime in draft rooms off in Account while Dime is making this pick
+        await ai_settings.update(team.user_id_id, draft_rooms=False)
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "draft_pick", {"room_id": room.session_id, "player_id": top, "reason": "Top"})
+        assert not out.is_error, out.content
+        return "Took him."
+
+    _fake_turn(monkeypatch, act)
+    await draft.set_seat(team.user_id_id, room, True)
+    loop = next(t for t in list(draft._RUNNING) if t.get_coro().__name__ == "seat_loop")
+    assert await loop == "switched_off"
+    assert DraftPick.select().where(DraftPick.session == room.session_id, DraftPick.source == "dime").count() == 1
+    assert AiDraftRoom.get_by_id(room.session_id).seat_reason == "switched_off"
+
+
+async def test_switched_off_the_room_shows_no_dime_and_refuses_every_start(team, pool):
+    room = await _room(team)
+    await ai_settings.update(team.user_id_id, draft_rooms=False)
+    view = await draft.room_view(team.user_id_id, room)
+    assert view["switched_off"] is True and view["available"] is False and view["notes"] == []
+    for start in (lambda: draft.start(team.user_id_id, room, draft.PLAN),
+                  lambda: draft.set_notes(team.user_id_id, room, True),
+                  lambda: draft.set_seat(team.user_id_id, room, True)):
+        with pytest.raises(ConflictError) as err:
+            await start()
+        assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    # Taking a seat back never needs the switch
+    assert (await draft.set_seat(team.user_id_id, room, False))["switched_off"] is True
+    await ai_settings.update(team.user_id_id, draft_rooms=True)
+    view = await draft.room_view(team.user_id_id, room)
+    assert view["switched_off"] is False and view["available"] is True
+
+
+async def test_the_ai_desk_lists_every_room_s_notes_by_room(team, pool):
+    first = await _room(team, name="First mock")
+    second = await _room(team)
+    a, _ = await draft._claim(first.session_id, team.user_id_id, draft.PLAN, None, False, {})
+    await draft._settle(a, draft.DONE, None, "Punt FT%.", None, 0)
+    b, _ = await draft._claim(second.session_id, team.user_id_id, draft.PICK, 3, False, {})
+    await draft._settle(b, draft.DONE, None, "Take him.", None, 0)
+    c, _ = await draft._claim(first.session_id, team.user_id_id, draft.RECAP, None, False, {})
+    # A note whose turn died reads as failed here too
+    AiDraftNote.update(created_at=datetime.now(timezone.utc) - timedelta(hours=1)).where(AiDraftNote.id == c).execute()
+    # Another user's room isn't listed
+    other = User.create(email="other@courtvision.dev", clerk_user_id="user_other_draft", created_at=datetime.utcnow())
+    theirs = (await DraftService.create_session(other.user_id, DraftSessionCreate(kind="mock", my_slot=1))).data
+    AiDraftNote.create(session_id=theirs.id, user_id=other.user_id, kind="plan", state="done", text="Theirs")
+
+    desk = await draft.desk_view(team.user_id_id)
+    assert desk["enabled"] is True and desk["switched_off"] is False
+    assert [r["room_id"] for r in desk["rooms"]] == [first.session_id, second.session_id]
+    assert desk["rooms"][0]["name"] == "First mock" and desk["rooms"][0]["kind"] == "mock"
+    assert [(n["kind"], n["state"]) for n in desk["rooms"][0]["notes"]] == [("recap", "failed"), ("plan", "done")]
+    assert desk["rooms"][0]["notes"][0]["reason"] == "stale"
+    # Switched off, the notes still list
+    await ai_settings.update(team.user_id_id, draft_rooms=False)
+    desk = await draft.desk_view(team.user_id_id)
+    assert desk["switched_off"] is True and len(desk["rooms"]) == 2
 
 
 async def test_a_live_room_never_seats_dime(team, pool):
