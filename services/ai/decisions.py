@@ -258,6 +258,10 @@ async def log_decision(user_id: int, checkin_id: Optional[int], args: LogDecisio
         proposal = await _proposal(args.proposal_id, checkin.conversation_id_id)
         if proposal is None:
             raise AppError("AI_DECISION_INVALID", f"Proposal {args.proposal_id} wasn't made in this check-in")
+        if proposal.team_id_id != checkin.team_id_id:
+            # A check-in may propose for another of the user's teams, but its log is about its own
+            raise AppError("AI_DECISION_INVALID", f"Proposal {args.proposal_id} is for another team; this "
+                                                  f"check-in is about team_id {checkin.team_id_id}")
     row = await _insert(checkin_id=checkin_id, user_id=user_id, team_id=checkin.team_id_id, area=args.area,
                         automation=args.automation, call=args.call, summary=args.summary, reason=args.reason,
                         proposal_id=args.proposal_id, created_at=_now())
