@@ -1369,7 +1369,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
-CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.LOG_DECISION]
+CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.CHECKIN_LOG_DECISION]
 CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONLY_TOOLS)
 # Dime's steering tools, after all of those, only while DIME_STEERING_ENABLED (agent.py)
 STEERING_TOOLS: list[dict[str, Any]] = ai_steering.STEERING_TOOLS

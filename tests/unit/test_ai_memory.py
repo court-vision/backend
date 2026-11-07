@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services.ai import agent, memory, tools
+from services.ai import agent, ai_settings, memory, tools
 
 pytestmark = pytest.mark.unit
 
@@ -86,6 +86,12 @@ def store(monkeypatch):
         return fn(*args, **kwargs)
 
     monkeypatch.setattr(memory, "run_db", run_db)
+    s.features = ai_settings.AiSettings()
+
+    async def features(_user_id):
+        return s.features
+
+    monkeypatch.setattr(ai_settings, "get", features)
     return s
 
 
@@ -176,6 +182,26 @@ class TestRecall:
         both = _run(memory.recall(CALLER, memory.RecallInput(query="clarkson", include_retired=True)))["notes"]
         assert both[0]["retired_reason"] == "revised" and both[0]["retired_by"] == "dime"
         assert _run(memory.recall(CALLER, memory.RecallInput(query="nobody")))["note"] == "No notes match."
+
+
+class TestMemoryOff:
+    """The account's memory feature off: the tools answer so, nothing is read or written, and the
+    digest is empty. The user's own notes are still theirs to list."""
+
+    def test_the_tools_say_memory_is_off_and_touch_nothing(self, store):
+        note = store.add(text="Hold Sexton", recheck_on=TODAY)
+        store.features = ai_settings.AiSettings(memory=False)
+        assert _run(memory.recall(CALLER, memory.RecallInput()))["memory"] == "off"
+        assert _run(memory.remember(CALLER, memory.RememberInput(kind="note", text="x")))["memory"] == "off"
+        assert _run(memory.revise(CALLER, memory.ReviseInput(note_id=note.id, text="y")))["memory"] == "off"
+        assert _run(memory.forget(CALLER, memory.ForgetInput(note_id=note.id, reason="no longer true")))["memory"] == "off"
+        assert len(store.rows) == 1 and note.retired_at is None and note.text == "Hold Sexton"
+        assert _run(memory.digest(42, TODAY)) == ""
+        assert [n["text"] for n in _run(memory.list_for_user(42, None))] == ["Hold Sexton"]
+
+    def test_on_by_default(self, store):
+        store.add(text="Hold Sexton")
+        assert _run(memory.digest(42, TODAY)).startswith("Your notes: 1 live")
 
 
 class TestDigest:

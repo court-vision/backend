@@ -25,8 +25,10 @@ Week desk has, with `proposal_id`. The route checks the chip with `for_apply`
 what the Week desk would, and marks the chip sent. In a check-in the chip is a
 shadow proposal like any other: what Dime would have done, never applied.
 
-Whether Dime may apply its own chips is the acting step's (step 5); until then
-the user applies every one. The tools, the chips' routes and the pins a sent
+Whether Dime may apply its own chips is the acting step's (step 5,
+services/ai/acting.py): on automations at AI on the team, a check-in's committed
+chip is applied by the server through these same routes (`by` dime), and the holds
+and lane events it makes say so. The tools, the chips' routes and the pins a sent
 lineup chip leaves are behind `DIME_STEERING_ENABLED` (off by default).
 """
 
@@ -54,6 +56,10 @@ LANE_OPS = ("start", "pause", "resume", "stop")
 # What a chip-made lane event says made it: the reason is Dime's, in the event's detail
 DIME_REASON = "dime"
 LANE_REASONS = {"pause": "paused_by_dime", "stop": "stopped_by_dime", "start": DIME_REASON, "resume": DIME_REASON}
+# ...and what one Dime applied itself says (the autopilot step, services/ai/acting.py)
+AUTOPILOT_REASON = "autopilot"
+AUTOPILOT_LANE_REASONS = {"pause": "paused_by_autopilot", "stop": "stopped_by_autopilot", "start": AUTOPILOT_REASON,
+                          "resume": AUTOPILOT_REASON}
 HOLDS_MAX = 8      # holds one chip sets
 CLEARS_MAX = 12    # holds one chip clears
 REASON_MAX = proposals.REASON_MAX
@@ -569,9 +575,10 @@ def _lookup(action: dict[str, Any], key: str) -> Any:
 
 @db_operation("steering.apply_holds")
 def _apply_holds(row_id: int, team_id: int, user_id: int, holds: list[dict[str, Any]], clears: list[int],
-                 today: date, now: datetime) -> Optional[int]:
+                 today: date, now: datetime, by: str = "user") -> Optional[int]:
     """Mark the chip sent and make its holds, in one transaction: a second apply finds it sent and
-    makes nothing. Returns how many holds it set, or None when the chip was no longer proposed."""
+    makes nothing. Returns how many holds it set, or None when the chip was no longer proposed.
+    `by` is who applied it: the user, or Dime itself (the autopilot step)."""
     from db.models.ai_conversations import AiProposal
     from db.models.team_holds import TeamHold
 
@@ -591,25 +598,25 @@ def _apply_holds(row_id: int, team_id: int, user_id: int, holds: list[dict[str, 
                             nba_player_id=p.get("nba_player_id"), player_name=p["name"], player_team=p.get("team"),
                             share=h.get("share"), starts_on=max(start, today), ends_on=until,
                             reason=(h.get("reason") or "")[:REASON_MAX] or "Set by Dime",
-                            proposal_id=row_id, applied_by="user", created_at=now)
+                            proposal_id=row_id, applied_by=by, created_at=now)
             made += 1
         if clears:
-            (TeamHold.update(cleared_at=now, cleared_by="user")
+            (TeamHold.update(cleared_at=now, cleared_by=by)
              .where((TeamHold.id.in_(clears)) & (TeamHold.team_id == team_id) & TeamHold.cleared_at.is_null(True))
              .execute())
     return made
 
 
-async def apply_holds(team: Any, proposal_id: int, now: Optional[datetime] = None) -> int:
+async def apply_holds(team: Any, proposal_id: int, now: Optional[datetime] = None, *, by: str = "user") -> int:
     """The holds route's apply: the chip's holds made and its clears done, the chip marked sent. Each
-    hold carries the chip's reason."""
+    hold carries the chip's reason. `by` 'dime' when Dime applies its own chip (services/ai/acting.py)."""
     row = await for_apply(proposal_id, team.user_id, team.team_id, STEER)
     now = now or _now()
     action = row.action or {}
     holds = [{**h, "reason": row.reason} for h in action.get("holds") or []]
     clears = [c["hold_id"] for c in action.get("clear") or []]
     made = await _apply_holds(row.id, team.team_id, team.user_id, holds, clears,
-                              schedule_service.get_nba_today(), now)
+                              schedule_service.get_nba_today(), now, by)
     if made is None:
         raise ConflictError("AI_PROPOSAL_NOT_PENDING", "This chip was already applied or has expired")
     log.info("steering_holds_applied", proposal_id=row.id, team_id=team.team_id, holds=made, clears=len(clears))

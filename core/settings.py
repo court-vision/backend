@@ -203,6 +203,25 @@ class Settings(BaseSettings):
     # agent's tools and prompt prefix are exactly step 3's and the chips' routes refuse.
     # Holds already set keep steering the planners either way, until their end dates.
     dime_steering_enabled: bool = False
+    # Dime acting on its own (the Dime autopilot plan, step 5; services/ai/acting.py): on a
+    # team whose mode is act, a change a check-in logs is sent by the server itself, through
+    # the user's own write routes, as source autopilot. Off (the default), act reads as
+    # suggest: Dime's changes become chips the user sends, and the API refuses to set act.
+    # ROSTER_WRITES_ENABLED, AUTOPILOT_ENABLED and the team's Pause still stop it either way.
+    dime_acting_enabled: bool = False
+    # The policy every move Dime sends itself is held to. The caps count Dime's own adds
+    # (lanes keep their own budget, and ESPN's limits still apply); the reserve keeps that many
+    # of ESPN's adds this matchup for the user (injuries). Top N by the board's value and a
+    # player added within the churn window (unless he is out) are never dropped.
+    autopilot_adds_per_day: int = 2
+    autopilot_adds_per_matchup: int = 5
+    autopilot_adds_reserve: int = 1
+    autopilot_protected_top: int = 6
+    autopilot_churn_hours: int = 48
+    # Auto-pause: the team pauses (and the user gets an email) after this many refused writes
+    # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
+    autopilot_pause_refused: int = 2
+    autopilot_pause_same_block: int = 2
     # The connection the agent's query_stats tool reads on (services/ai/stats/
     # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
     # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the

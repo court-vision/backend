@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from api.deps import UserContext, get_db_user
 from core.errors import NotFoundError
 from schemas.ai import (
+    AiAutopilotActionsResp,
     AiAutopilotReq,
     AiAutopilotResp,
     AiCheckinResp,
@@ -31,6 +32,8 @@ from schemas.ai import (
     AiNoteResp,
     AiProposalDismissResp,
     AiProposalResp,
+    AiSettingsReq,
+    AiSettingsResp,
     AiTurnCommentData,
     AiTurnCommentReq,
     AiTurnCommentResp,
@@ -47,6 +50,7 @@ from schemas.common import ApiStatus, BaseResponse
 from services.ai import questions
 from services.ai.agent import Emitter
 from services.ai.agent_service import AgentService
+from services.ai.levels import Change
 from services.ai.service import AiService
 
 router = APIRouter(prefix="/ai", tags=["AI"])
@@ -436,19 +440,89 @@ async def run_checkin(req: AiCheckinRunReq, user: UserContext = Depends(get_db_u
 @router.put(
     "/autopilot/{team_id}",
     response_model=AiAutopilotResp,
-    summary="Switch Dime's scheduled check-ins on or off for a team",
-    description="On starts (or resumes) the team's check-ins; off pauses them. A check-in whose window closed "
-                "while they were off is not counted as missed.",
-    responses=_CHECKIN_ERRORS,
+    summary="Dime's autopilot on a team: the check-ins, the autopilot switch and the automation levels",
+    description=(
+        "One of: `checkins` (or step 3's `on`) starts (or resumes) the team's check-ins and false pauses them (a "
+        "check-in whose window closed while they were off is not counted as missed; resuming also lifts a pause "
+        "Dime made itself). `autopilot` true puts every automation that offers AI at AI, turns check-ins and the "
+        "account's AI features on and the team's lineup email and auto-lineup on; false puts back the lineup "
+        "preferences and check-ins it changed, and the automations the user set at AI count again. `levels` sets "
+        "automations (lineup, daily_actions, lanes, late_scratch, checkins) to off, notify, act or ai, each to a "
+        "level it offers (GET /checkins gives every level's availability and why not); lineup's off, notify "
+        "and act are the team's lineup email and auto-lineup. Changing a level while autopilot is on turns it off "
+        "and keeps the other automations at AI. `autopilot` and `levels` can't be sent together. Setting up a "
+        "team that was never switched on leaves its check-ins off unless something turns them on."
+    ),
+    responses={
+        **_CHECKIN_ERRORS,
+        409: {"description": "A level the automation doesn't offer, with why (AI_LEVEL_UNAVAILABLE)"},
+        422: {"description": "Nothing to change, autopilot with levels, or an unknown automation or level "
+                             "(AI_AUTOPILOT_INVALID)"},
+    },
 )
 async def set_autopilot(
     req: AiAutopilotReq,
     team_id: int = Path(..., gt=0, le=2_147_483_647),
     user: UserContext = Depends(get_db_user),
 ) -> AiAutopilotResp:
-    data = await AgentService.set_autopilot(user.user_id, team_id, req.on)
-    return AiAutopilotResp(status=ApiStatus.SUCCESS, message="Check-ins on" if data.on else "Check-ins paused",
-                           data=data)
+    checkins = req.checkins if req.checkins is not None else req.on
+    change = Change(checkins=checkins, autopilot=req.autopilot, levels=dict(req.levels or {}))
+    data = await AgentService.set_autopilot(user.user_id, team_id, change)
+    if req.autopilot is not None:
+        message = "Autopilot on" if data.autopilot else "Autopilot off"
+    elif checkins is not None and not req.levels:
+        message = "Check-ins on" if data.on else "Check-ins paused"
+    else:
+        message = "Automations updated"
+    return AiAutopilotResp(status=ApiStatus.SUCCESS, message=message, data=data)
+
+
+@router.get(
+    "/actions",
+    response_model=AiAutopilotActionsResp,
+    summary="Everything Dime did on its own",
+    description=(
+        "The moves Dime's check-ins handled themselves on automations at AI, newest first (with `team_id`, that "
+        "team's only): each one sent, or held back (blocked by a rule of the policy, refused by ESPN or the "
+        "route, or failed) and left as a chip, with the automation it counts under, the call Dime logged for it "
+        "and its check-in's conversation."
+    ),
+    responses={**_AGENT_ERRORS, 404: _CHECKIN_ERRORS[404]},
+)
+async def list_actions(
+    team_id: Optional[int] = Query(None, gt=0, le=2_147_483_647),
+    limit: int = Query(100, ge=1, le=200),
+    user: UserContext = Depends(get_db_user),
+) -> AiAutopilotActionsResp:
+    data = await AgentService.actions(user.user_id, team_id, limit)
+    return AiAutopilotActionsResp(status=ApiStatus.SUCCESS, message="Dime's moves", data=data)
+
+
+@router.get(
+    "/settings",
+    response_model=AiSettingsResp,
+    summary="The account's AI features",
+    description="memory (Dime keeps notes and reads them back) and draft_rooms (Dime's side of the Draft desk), "
+                "for the whole account; both on until the user turns one off.",
+    responses=_AGENT_ERRORS,
+)
+async def get_ai_settings(user: UserContext = Depends(get_db_user)) -> AiSettingsResp:
+    data = await AgentService.features(user.user_id)
+    return AiSettingsResp(status=ApiStatus.SUCCESS, message="AI features", data=data)
+
+
+@router.put(
+    "/settings",
+    response_model=AiSettingsResp,
+    summary="Turn the account's AI features on or off",
+    description="Any of memory and draft_rooms; what is left out stays as it is. With memory off, Dime's "
+                "memory tools answer that it is off and its notes stay as they are (What Dime knows still "
+                "lists and edits them).",
+    responses={**_AGENT_ERRORS, 422: {"description": "Nothing to change"}},
+)
+async def set_ai_settings(req: AiSettingsReq, user: UserContext = Depends(get_db_user)) -> AiSettingsResp:
+    data = await AgentService.set_features(user.user_id, memory=req.memory, draft_rooms=req.draft_rooms)
+    return AiSettingsResp(status=ApiStatus.SUCCESS, message="AI features updated", data=data)
 
 
 @router.put(

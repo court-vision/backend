@@ -171,9 +171,11 @@ def test_a_sent_lineup_chip_pins_only_the_players_it_benched(monkeypatch, steeri
         {"espn_id": 2, "name": "B", "role": "start"},
         {"espn_id": 3, "name": "C", "role": "shift"},
     ])
-    assert steering._pin_benched.__wrapped__(row, None) == 1       # the repository function, without run_db
-    assert [(m["kind"], m["player_id"], m["starts_on"], m["ends_on"], m["proposal_id"], m["reason"])
-            for m in made] == [(PIN, 1, D0, D0, 31, "Rest night")]
+    assert steering._pin_benched.__wrapped__(row, None, "user") == 1  # the repository function, without run_db
+    assert [(m["kind"], m["player_id"], m["starts_on"], m["ends_on"], m["proposal_id"], m["reason"], m["applied_by"])
+            for m in made] == [(PIN, 1, D0, D0, 31, "Rest night", "user")]
+    steering._pin_benched.__wrapped__(row, None, "dime")             # a chip Dime sent itself
+    assert made[-1]["applied_by"] == "dime"
 
 
 @pytest.mark.unit

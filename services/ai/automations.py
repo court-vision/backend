@@ -17,6 +17,9 @@ Three automations run a Court Vision team without the user:
 - **Scheduled pickups** still pending, each with its pickup_id (cancel_pickup's).
 - **Holds** (step 4, only while steering is on): Dime's live holds, with the
   reason each was set and its hold_id (steer's clear).
+- **Autopilot** (step 5, only on a team where Dime acts on some automation):
+  the automations it acts on, the policy its own sends are held to, the adds it
+  has used of its caps, and what it did lately (services/ai/acting.py).
 
 DB reads only, no ESPN call. NBA player ids only, as every tool result.
 """
@@ -29,6 +32,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from db.base import run_db
 from db.models.nba.games import Game
@@ -41,6 +45,8 @@ from services.ai import steering as ai_steering
 from services.lineup_editor_service import _slot_name
 from services.scheduled_pickup_service import et_at
 from services.stream_lane_service import StreamLaneService
+
+log = get_logger("ai.automations")
 
 GET_AUTOMATIONS_NAME = "get_automations"
 # The fill's window closes this long before the first tip (data-platform's lineup alerts)
@@ -242,10 +248,27 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
             "add": _player(p.add_player_id, names, p.add_name, p.add_team),
             "drop": _player(p.drop_player_id, names, p.drop_name, p.drop_team),
             "from_stream_lane": p.lane_id is not None,
+            **({"scheduled_by_you": True} if getattr(p, "made_by_autopilot", False) else {}),
         } for p in pickups],
         **({"holds": await _holds(team.team_id, today)} if steering.enabled() else {}),
+        **await _autopilot(team.team_id),
         "notes": notes,
     }
+
+
+async def _autopilot(team_id: int) -> dict[str, Any]:
+    """What Dime acts on here and what it has used of the policy (step 5), under `autopilot`; nothing
+    on a team where Dime acts on no automation, so the result is step 3's there."""
+    from services.ai import acting, autonomy
+    try:
+        row = await acting._autopilot_row(team_id)
+        if not autonomy.acting_rows(row):
+            return {}
+        return {"autopilot": await acting.policy_view(team_id, row)}
+    except Exception:
+        # The brief goes out without the policy rather than not at all; the failure is still seen
+        log.exception("autopilot_view_failed", team_id=team_id)
+        return {}
 
 
 async def _holds(team_id: int, today: date) -> list[dict[str, Any]]:
