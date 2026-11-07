@@ -34,7 +34,7 @@ from services.public_market_service import PublicMarketService
 _APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
 _AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes",
               "get_league", "get_league_activity", "get_draft_board", "get_automations", "get_decisions",
-              "get_player_news", "get_news"]
+              "get_player_news", "get_news", "get_draft_recap"]
 
 
 def _run(name, raw):
@@ -54,7 +54,7 @@ def _stats_resp(message="Player stats fetched successfully"):
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
         defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
-                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS]}
+                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS, *tools.DRAFT_ONLY_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):

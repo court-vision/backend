@@ -52,7 +52,9 @@ from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
 from services import news_service
-from services.ai import app_map, automations, decisions, league, memory, news as ai_news, steering as ai_steering
+from services.ai import (
+    app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news, steering as ai_steering,
+)
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -185,6 +187,9 @@ class ToolContext:
     # The check-in this turn is (services/ai/checkins.py): its proposals are stored in shadow,
     # and only it may log decisions
     checkin_id: Optional[int] = None
+    # The draft note this turn writes (services/ai/draft.py): only it may set the room's plan or
+    # make the user's pick in a mock seat
+    draft_note_id: Optional[int] = None
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -1386,16 +1391,38 @@ async def _cancel_pickup(args: ai_steering.CancelPickupInput, ctx: ToolContext |
                                            shadow=ctx.checkin_id is not None)
 
 
+# Dime in the Draft desk (the Dime autopilot plan, step 7): a room's recap (a read, in every
+# tool list), and the plan and the mock seat's pick, which only a draft note may make.
+
+async def _get_draft_recap(args: ai_draft.DraftRecapInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.get_draft_recap(ctx.user_id, args)
+
+
+async def _set_draft_plan(args: ai_draft.SetDraftPlanInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.set_draft_plan(ctx.user_id, ctx.conversation_id, ctx.draft_note_id, args)
+
+
+async def _draft_pick(args: ai_draft.DraftPickInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.draft_pick(ctx.user_id, ctx.draft_note_id, args)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
 # memory, then the move ledger, then the league tools, then the automations and
-# the check-ins' decisions, then the news. The order is part of every request's
-# cached prefix: append, never reorder.
+# the check-ins' decisions, then the news, then a draft room's recap. The order is
+# part of every request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
     *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS, *ai_news.NEWS_TOOLS,
+    ai_draft.GET_DRAFT_RECAP,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
@@ -1404,6 +1431,9 @@ CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONL
 # Dime's steering tools, after all of those, only while DIME_STEERING_ENABLED (agent.py)
 STEERING_TOOLS: list[dict[str, Any]] = ai_steering.STEERING_TOOLS
 STEERING_TOOL_NAMES = ai_steering.STEERING_TOOL_NAMES
+# A draft note's conversation gets these after the agent's (services/ai/draft.py)
+DRAFT_ONLY_TOOLS: list[dict[str, Any]] = ai_draft.DRAFT_ONLY_TOOLS
+DRAFT_TOOL_NAMES = AGENT_TOOL_NAMES | ai_draft.DRAFT_ONLY_TOOL_NAMES
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
 ROUTER_TOOLS: list[dict[str, Any]] = [TOOLS[0], GET_MY_TEAMS]
@@ -1455,9 +1485,12 @@ _REGISTRY: dict[str, _Tool] = {
     ai_steering.CANCEL_PICKUP_NAME: _Tool(ai_steering.CancelPickupInput, _cancel_pickup),
     ai_news.GET_PLAYER_NEWS_NAME: _Tool(ai_news.PlayerNewsInput, _get_player_news),
     ai_news.GET_NEWS_NAME: _Tool(ai_news.NewsInput, _get_news),
+    ai_draft.GET_DRAFT_RECAP_NAME: _Tool(ai_draft.DraftRecapInput, _get_draft_recap),
+    ai_draft.SET_DRAFT_PLAN_NAME: _Tool(ai_draft.SetDraftPlanInput, _set_draft_plan),
+    ai_draft.DRAFT_PICK_NAME: _Tool(ai_draft.DraftPickInput, _draft_pick),
 }
-assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES == set(_REGISTRY), \
-    "every defined tool needs a handler, and vice versa"
+assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES | DRAFT_TOOL_NAMES \
+    == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
 
 
 @dataclass(frozen=True)

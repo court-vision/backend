@@ -45,6 +45,7 @@ from schemas.draft import (
 from services.draft_service import (
     espn_league_id_of,
     DraftService,
+    SIMULATED_PICK_SOURCES,
     check_length_holds_picks,
     check_slot_in_range,
     duplicate_pick_of,
@@ -367,7 +368,7 @@ class DraftSyncService:
             link = DraftSyncService._link_decision(session, header)
 
             if link is not None and DraftPick.select().where(
-                (DraftPick.session == session_id) & (DraftPick.source == "mock")
+                (DraftPick.session == session_id) & (DraftPick.source.in_(SIMULATED_PICK_SOURCES))
             ).exists():
                 # A room CV has simulated into cannot then start following an
                 # ESPN draft: the pick numbers are already spent, so every INIT

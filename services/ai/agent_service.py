@@ -179,11 +179,14 @@ class AgentService:
                 await spend.cancel(reservation_id)
             await conversations.release(conversation_id)
             raise
-        # A follow-up in a check-in's conversation keeps that conversation's tool list, so its replayed
-        # history matches; it is the user's own turn, so it logs no decisions and its chips can be sent
-        checkin = _kind(row) == conversations.CHECKIN
-        tools = agent.CHECKIN_TOOLS if checkin else agent.TOOLS
-        allowed = agent.CHECKIN_ALLOWED if checkin else agent.ALLOWED
+        # A follow-up in a check-in's (or a draft note's) conversation keeps that conversation's tool list,
+        # so its replayed history matches; it is the user's own turn, so it logs no decisions, sets no plan
+        # and makes no pick, and its chips can be sent
+        kind = _kind(row)
+        checkin = kind == conversations.CHECKIN
+        tools = agent.CHECKIN_TOOLS if checkin else agent.DRAFT_TOOLS if kind == conversations.DRAFT else agent.TOOLS
+        allowed = (agent.CHECKIN_ALLOWED if checkin else agent.DRAFT_ALLOWED if kind == conversations.DRAFT
+                   else agent.ALLOWED)
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
                           reservation_id=reservation_id, build=build, tools=tools, allowed=allowed)
         return agent.start(turn, header_line)

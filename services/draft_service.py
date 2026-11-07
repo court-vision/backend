@@ -325,7 +325,10 @@ def clean_name(name: Optional[str]) -> Optional[str]:
 
 # Picks Court Vision recorded itself, and may therefore unrecord. Everything
 # else in a room that follows an ESPN draft is ESPN's record.
-CV_OWNED_PICK_SOURCES = frozenset({"manual", "mock"})
+CV_OWNED_PICK_SOURCES = frozenset({"manual", "mock", "dime"})
+# Picks a simulation made, never a real draft's: the autopicker's, and Dime's in the
+# user's mock seat. A room holding any can't then follow or import an ESPN draft.
+SIMULATED_PICK_SOURCES = ("mock", "dime")
 
 
 def pick_is_undoable(session: DraftSession, pick: DraftPick) -> bool:
@@ -894,7 +897,9 @@ class DraftService:
 
     @staticmethod
     @db_operation("drafts.add_pick")
-    def add_pick(session_id: int, req: DraftPickCreate) -> DraftPickResponse:
+    def add_pick(session_id: int, req: DraftPickCreate, *, server_source: Optional[str] = None) -> DraftPickResponse:
+        """`server_source` is the provenance only the server may claim (`dime`: Dime made the
+        pick in the user's mock seat, services/ai/draft.py); no route passes it."""
         session = DraftService._session_or_404(session_id)
         # No pick order means no seats: a guessed size would invent a round and
         # slot for every pick and bound the draft at a length nobody set.
@@ -945,7 +950,7 @@ class DraftService:
                     espn_team_id=req.espn_team_id,
                     player_name=player_name,
                     by_me=req.by_me,
-                    source=req.source,
+                    source=server_source or req.source,
                     bid=req.bid,
                 )
             except IntegrityError as exc:
