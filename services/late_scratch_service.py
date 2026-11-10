@@ -22,13 +22,19 @@ Dime's event check-ins (services/ai/events.py), so it is not read here:
    team a day. ROSTER_WRITES_ENABLED off, or the board not writable, makes it a plan.
 
 Every team's outcome comes back (applied, planned, noop, skipped with why, rejected,
-failed), never raised, so data-platform can email the owner what happened and why.
+failed), never raised, so data-platform can email the owner what happened and why: an
+error in one team's pass is that team's `failed` (`unexpected_error`), and one raised
+by the write itself is `write_uncertain`, since ESPN may have taken the lineup before
+it. One team's count-and-write runs at a time (`_team_locks`), so two changes answered
+at once can't both pass the daily cap or the once-per-player check.
 It does not undo a swap when a benched player is upgraded again (tier A never
 displaces tier A, and the once-per-player index holds), touch IR, or add or drop.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
 from datetime import date
 from typing import Optional
 
@@ -54,6 +60,10 @@ from services.providers import get_provider_adapter
 log = get_logger("late_scratch")
 
 SOURCE = "availability"
+
+# One team's count-and-write at a time. This process is the only writer (serve.py runs one
+# uvicorn server), so a lock per team keeps two overlapping changes from both passing the cap.
+_team_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 # ------------------------------- DB (run in the executor) ------------------------------- #
@@ -121,7 +131,14 @@ class LateScratchService:
     @staticmethod
     async def react(req: LineupReactReq) -> LineupReactResp:
         teams = await run_db("late_scratch.teams", _teams)
-        results = [await LateScratchService._team(req, team_id, user_id, level) for team_id, user_id, level in teams]
+        results: list[LineupReactTeam] = []
+        for team_id, user_id, level in teams:
+            try:
+                results.append(await LateScratchService._team(req, team_id, user_id, level))
+            except Exception as exc:  # one team's failure must not cost the rest their results
+                log.error("late_scratch_team_failed", team_id=team_id, player_id=req.player_id, error=str(exc))
+                results.append(LineupReactTeam(team_id=team_id, user_id=user_id, level=level,
+                                               outcome="failed", reason="unexpected_error"))
         swapped = sum(1 for r in results if r.outcome == "applied")
         log.info("late_scratch_react", player_id=req.player_id, verdict=req.verdict,
                  previous_verdict=req.previous_verdict, source=req.source, teams=len(results), applied=swapped)
@@ -193,22 +210,26 @@ class LateScratchService:
         if not state.can_write:
             return done("planned", reason=f"can_write:{state.write_blocked_reason}", moves=moves)
 
-        count, answered = await run_db("late_scratch.swaps_today", _swaps_today, team_id, req.game_date)
-        if req.player_id in answered:
-            return done("skipped", reason="already_swapped", moves=moves)
-        if count >= settings.late_scratch_swaps_per_day:
-            return done("skipped", reason="daily_cap", moves=moves)
+        async with _team_locks[team_id]:
+            count, answered = await run_db("late_scratch.swaps_today", _swaps_today, team_id, req.game_date)
+            if req.player_id in answered:
+                return done("skipped", reason="already_swapped", moves=moves)
+            if count >= settings.late_scratch_swaps_per_day:
+                return done("skipped", reason="daily_cap", moves=moves)
 
-        try:
-            fresh, verified, audit_id = await LineupEditorService._write(
-                user_id=user_id, team_id=team_id, league_info=league_info, state=state,
-                moves=list(plan.moves), source=SOURCE, fallback_slot_counts=roster_slots,
-                trigger_player_id=req.player_id,
-            )
-        except RosterWriteRejected as exc:
-            return done("rejected", reason=exc.message, moves=moves)
-        except ProviderAuthError as exc:
-            return done("rejected", reason=f"PROVIDER_AUTH_EXPIRED: {exc.message}", moves=moves)
-        except RosterWriteUnavailable as exc:
-            return done("failed", reason=exc.message, moves=moves)
+            try:
+                fresh, verified, audit_id = await LineupEditorService._write(
+                    user_id=user_id, team_id=team_id, league_info=league_info, state=state,
+                    moves=list(plan.moves), source=SOURCE, fallback_slot_counts=roster_slots,
+                    trigger_player_id=req.player_id,
+                )
+            except RosterWriteRejected as exc:
+                return done("rejected", reason=exc.message, moves=moves)
+            except ProviderAuthError as exc:
+                return done("rejected", reason=f"PROVIDER_AUTH_EXPIRED: {exc.message}", moves=moves)
+            except RosterWriteUnavailable as exc:
+                return done("failed", reason=exc.message, moves=moves)
+            except Exception as exc:  # e.g. the audit update after ESPN took it: the swap may stand
+                log.error("late_scratch_write_uncertain", team_id=team_id, player_id=req.player_id, error=str(exc))
+                return done("failed", reason="write_uncertain", moves=moves)
         return done("applied", moves=moves, verified=verified, audit_id=audit_id, board=fresh)

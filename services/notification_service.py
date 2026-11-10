@@ -400,6 +400,8 @@ class NotificationService:
         player = result.get("player_name") or "a player"
         verdict = result.get("verdict") or "out"
         applied = result.get("outcome") == "applied"
+        # The write raised after it was sent: ESPN may have taken it.
+        uncertain = result.get("outcome") == "failed" and result.get("reason") == "write_uncertain"
         because = (f"{player} was upgraded to available" if verdict == "available"
                    else f"{player} was ruled {verdict}")
         injury = result.get("injury")
@@ -422,7 +424,7 @@ class NotificationService:
                 heading += UNVERIFIED_SUFFIX
             lines.append(heading)
         else:
-            lines.append("Suggested swap:")
+            lines.append("Sent to ESPN, not confirmed:" if uncertain else "Suggested swap:")
         lines.extend(NotificationService._render_moves(result.get("moves") or []))
         lines.append("")
         if applied:
@@ -433,7 +435,8 @@ class NotificationService:
             why_not = NotificationService._late_scratch_not_made(result)
             if why_not:
                 lines.append(why_not)
-            lines.append("Nothing was changed on ESPN. Make the swap in Court Vision's Week desk or on ESPN.")
+            lines.append("If it isn't on ESPN, make it in Court Vision's Week desk or on ESPN." if uncertain
+                         else "Nothing was changed on ESPN. Make the swap in Court Vision's Week desk or on ESPN.")
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)
@@ -449,6 +452,8 @@ class NotificationService:
             return "Court Vision didn't make it: its lineup writes are switched off right now."
         if outcome == "planned" and reason.startswith("can_write:"):
             return "Court Vision didn't make it: ESPN isn't taking lineup changes for this team right now."
+        if outcome == "failed" and reason == "write_uncertain":
+            return "Court Vision sent it to ESPN but couldn't confirm it went through: check your lineup on ESPN."
         if outcome in ("rejected", "failed"):
             return "Court Vision tried to make it, but ESPN didn't take it" + (f" ({reason})." if reason else ".")
         return None

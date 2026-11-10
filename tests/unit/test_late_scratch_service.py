@@ -8,6 +8,7 @@ verdict changes, one bench guard has a game and one doesn't.
 """
 
 import asyncio
+from collections import defaultdict
 from datetime import date
 from types import SimpleNamespace
 
@@ -92,6 +93,8 @@ def h(monkeypatch):
     monkeypatch.setattr(late, "_swaps_today", lambda team_id, day: h.swaps)
     monkeypatch.setattr(late.settings, "roster_writes_enabled", True)
     monkeypatch.setattr(late.settings, "late_scratch_swaps_per_day", 3)
+    # Each test runs its own event loop; a lock waited on in one can't be waited on in the next.
+    monkeypatch.setattr(late, "_team_locks", defaultdict(asyncio.Lock))
     return h
 
 
@@ -219,3 +222,60 @@ def test_at_notify_the_swap_is_a_plan_for_the_email(h):
     assert (team.level, team.outcome, team.reason) == ("notify", "planned", "notify")
     assert moves(team) == [(3, BE, UT, "start"), (2, UT, BE, "bench")]
     assert h.writer_calls == [] and h.audits == []
+
+
+@pytest.mark.unit
+def test_an_error_in_one_teams_pass_is_that_teams_failure(h, monkeypatch):
+    h.teams = [(22, 7, "act"), (23, 8, "act")]
+    h.reads = [board(), board(), swapped()]
+    calls = []
+
+    def verdicts(ids, day):
+        calls.append(day)
+        if len(calls) == 1:
+            raise RuntimeError("database capacity")
+        return {}
+
+    monkeypatch.setattr(late, "_verdicts", verdicts)
+    first, second = react(change()).teams
+
+    assert (first.team_id, first.user_id, first.outcome, first.reason) == (22, 7, "failed", "unexpected_error")
+    assert (second.team_id, second.outcome) == (23, "applied")
+
+
+@pytest.mark.unit
+def test_a_write_that_raises_after_it_was_sent_is_uncertain(h, monkeypatch):
+    h.reads = [board(), swapped()]
+
+    def audit_update(audit_id, status, **kw):
+        raise RuntimeError("duplicate key value violates unique constraint")
+
+    monkeypatch.setattr(svc, "_audit_update", audit_update)
+    team = react(change()).teams[0]
+
+    assert (team.outcome, team.reason) == ("failed", "write_uncertain")
+    assert moves(team) == [(3, BE, UT, "start"), (2, UT, BE, "bench")]
+    assert len(h.writer_calls) == 1
+
+
+@pytest.mark.unit
+def test_two_changes_answered_at_once_keep_the_daily_cap(h, monkeypatch):
+    monkeypatch.setattr(late.settings, "late_scratch_swaps_per_day", 1)
+    monkeypatch.setattr(late, "_swaps_today",
+                        lambda team_id, day: (sum(1 for _, status in h.updates if status == "applied"), set()))
+    h.reads = [board(), board(), swapped()]
+
+    async def slow_apply(payload):
+        h.writer_calls.append(payload)
+        await asyncio.sleep(0)  # the second change reads the count while the first is at ESPN
+        return WriterResult(True, 200, 200, "{}")
+
+    monkeypatch.setattr(fantasy_writer_client, "apply_lineup", slow_apply)
+
+    async def both():
+        return await asyncio.gather(late.LateScratchService.react(change()), late.LateScratchService.react(change()))
+
+    first, second = (r.data.teams[0] for r in asyncio.run(both()))
+    assert first.outcome == "applied"
+    assert (second.outcome, second.reason) == ("skipped", "daily_cap")
+    assert len(h.writer_calls) == 1
