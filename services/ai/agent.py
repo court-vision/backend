@@ -117,6 +117,8 @@ STATUS: dict[str, str] = {
     "get_automations": "Reading what the automations will do",
     "get_decisions": "Reading its earlier calls",
     "log_decision": "Logging a call",
+    "get_player_news": "Reading the news",
+    "get_news": "Reading the news",
     "steer": "Checking the holds",
     "set_lane": "Checking the lane change",
     "cancel_pickup": "Checking the pickup",

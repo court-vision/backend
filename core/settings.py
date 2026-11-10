@@ -222,6 +222,18 @@ class Settings(BaseSettings):
     # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
     autopilot_pause_refused: int = 2
     autopilot_pause_same_block: int = 2
+    # Dime's event check-ins (the Dime autopilot plan, step 6; services/ai/events.py): when an
+    # availability verdict changes or a news item lands about a player on a team Dime runs, the
+    # team gets a check-in about it, before his game locks. Off (the default) the events route
+    # records nothing and no check-in sees an event, so every check-in is step 5's. Switch it on
+    # once the availability pipeline's dark week passes its gate. At most this many event
+    # check-ins a day per team, and never one that would take a scheduled check-in's place under
+    # AUTOPILOT_CHECKINS_PER_DAY; an event that comes in this close before a scheduled check-in
+    # opens waits for it. A team's roster is read from ESPN at most once per this many seconds.
+    dime_events_enabled: bool = False
+    autopilot_event_checkins_per_day: int = 3
+    autopilot_event_fold_minutes: int = 20
+    autopilot_event_roster_ttl_seconds: int = 600
     # The connection the agent's query_stats tool reads on (services/ai/stats/
     # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
     # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
@@ -456,6 +468,8 @@ class Settings(BaseSettings):
             "autopilot_checkin_max_model_calls": self.autopilot_checkin_max_model_calls,
             "autopilot_checkin_max_tool_calls": self.autopilot_checkin_max_tool_calls,
             "autopilot_checkin_timeout_seconds": self.autopilot_checkin_timeout_seconds,
+            "autopilot_event_checkins_per_day": self.autopilot_event_checkins_per_day,
+            "autopilot_event_roster_ttl_seconds": self.autopilot_event_roster_ttl_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:

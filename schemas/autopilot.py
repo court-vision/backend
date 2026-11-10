@@ -1,14 +1,20 @@
 """
-The check-ins' job (POST /v1/internal/jobs/checkins/run): one tick of Dime's
+The check-ins' jobs: POST /v1/internal/jobs/checkins/run, one tick of Dime's
 schedule, called by data-platform's dime_checkins pipeline every fifteen minutes
-(services/ai/checkins.py). The check-ins it starts run on in the backend; the
-response says what it started, not how they went.
+(services/ai/checkins.py); and POST /v1/internal/jobs/checkins/events, what came
+in about players (a verdict change, a news item), posted by data-platform's
+availability and news pipelines (services/ai/events.py). The check-ins they
+start run on in the backend; the response says what started, not how it went.
 """
 
 from datetime import date
 from typing import Optional
 
+from pydantic import Field
+
 from schemas.common import ApiModel, BaseResponse
+
+INT4_MAX = 2_147_483_647
 
 
 class CheckinStarted(ApiModel):
@@ -29,3 +35,30 @@ class CheckinRunData(ApiModel):
 
 class CheckinRunResp(BaseResponse):
     data: Optional[CheckinRunData] = None
+
+
+class VerdictChangeIn(ApiModel):
+    """A verdict the availability pipeline resolved this tick that changed for a game not yet tipped.
+    The backend reads the verdict itself (nba.player_availability)."""
+
+    player_id: int = Field(..., gt=0, le=INT4_MAX)
+    game_date: date
+
+
+class CheckinEventsReq(ApiModel):
+    """Body for POST /v1/internal/jobs/checkins/events: keys only, the facts are read here."""
+
+    availability: list[VerdictChangeIn] = Field(default_factory=list, max_length=500)
+    news: list[int] = Field(default_factory=list, max_length=500, description="nba.news_items ids just stored")
+
+
+class CheckinEventsData(ApiModel):
+    off: bool                                    # DIME_EVENTS_ENABLED (or AI / autopilot) is off: nothing recorded
+    teams: int                                   # switched-on teams on AUTOPILOT_TEAM_IDS
+    facts: int                                   # the posted keys that are events at all
+    recorded: int                                # new events on a team that rosters the player
+    started: list[CheckinStarted]
+
+
+class CheckinEventsResp(BaseResponse):
+    data: Optional[CheckinEventsData] = None
