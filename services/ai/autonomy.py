@@ -14,13 +14,15 @@ rows:
                    scheduled. Its notify and act aren't built yet
     lanes          stream lanes, which run as the user set them (act); at AI Dime also
                    starts, pauses, stops and steers them
-    late_scratch   late scratches and news; at AI an event check-in before the player's
-                   game locks (step 6, services/ai/events.py). Its notify and act aren't
-                   built yet
+    late_scratch   late scratches and news: an email with the swap a ruling calls for
+                   (notify), Court Vision making that swap (act; services/late_scratch_service.py);
+                   at AI an event check-in before the player's game locks (step 6,
+                   services/ai/events.py)
     checkins       Dime's check-ins: off, or ai while the team isn't paused
 
-Below AI a level lives with its automation (lineup's in the notification preferences,
-services/ai/levels.py; lanes are always act), so what is stored here is the AI part:
+Below AI a level lives with its automation (lineup's and late scratches' in the
+notification preferences, services/ai/levels.py; lanes are always act), so what is
+stored here is the AI part:
 `ai_rows`, and the `autopilot` switch, which puts every row that offers AI at AI while
 it is on (off, the stored rows count again).
 
@@ -63,10 +65,7 @@ NOT_OFFERED: dict[str, dict[str, str]] = {
         OFF: "Lanes are started and stopped one at a time in the Week desk",
         NOTIFY: "Not offered yet",
     },
-    LATE_SCRATCH: {
-        NOTIFY: "Not built yet: an email when news touches a player before his game",
-        ACT: "Not built yet: the late-scratch swap",
-    },
+    LATE_SCRATCH: {},
     CHECKINS: {
         NOTIFY: "Check-ins are Dime's own",
         ACT: "Check-ins are Dime's own",
@@ -196,21 +195,24 @@ def words(rows: Iterable[str]) -> str:
 # ------------------------------- the table ------------------------------- #
 
 
-def level_of(autopilot: Any, row: str, lineup_below_ai: str) -> str:
-    """The row's level now. Below AI, lineup's comes from the notification preferences
-    (`lineup_below_ai`), lanes are act, and the rest are off."""
+def level_of(autopilot: Any, row: str, lineup_below_ai: str, late_scratch_below_ai: str = OFF) -> str:
+    """The row's level now. Below AI, lineup's and late scratches' come from the notification
+    preferences (`lineup_below_ai`, `late_scratch_below_ai`), lanes are act, and the rest are off."""
     if row == CHECKINS:
         return AI if checkins_on(autopilot) else OFF
     if at_ai(autopilot, row):
         return AI
     if row == LINEUP:
         return lineup_below_ai
+    if row == LATE_SCRATCH:
+        return late_scratch_below_ai
     if row == LANES:
         return ACT
     return OFF
 
 
-def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool) -> list[dict[str, Any]]:
+def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
+          late_scratch_below_ai: str = OFF) -> list[dict[str, Any]]:
     """The team's automations table, as the API returns it: each row's level, each level's
     availability and why not, and a note when the row does less than its level says.
     `lineup_email` is whether the account's lineup email is on: without it no team's lineup
@@ -219,7 +221,7 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool) -> list[d
     paused = not checkins_on(autopilot)
     out = []
     for row in ROWS:
-        level = level_of(autopilot, row, lineup_below_ai)
+        level = level_of(autopilot, row, lineup_below_ai, late_scratch_below_ai)
         options = []
         for lv in LEVELS:
             reason = offered(row, lv)

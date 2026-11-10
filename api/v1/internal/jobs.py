@@ -13,7 +13,7 @@ from schemas.autopilot import (
     CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData, CheckinRunResp, CheckinStarted,
 )
 from schemas.common import ApiStatus
-from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp
+from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, LineupReactReq, LineupReactResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
 from schemas.valuation import (
@@ -23,6 +23,7 @@ from schemas.valuation import (
     StandardValuationResp,
 )
 from services.ai import checkins, events
+from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
 from services.scheduled_pickup_service import ScheduledPickupService
@@ -47,6 +48,18 @@ async def evaluate_lineup(req: LineupEvaluateReq):
     Business outcomes are reported in `data.outcome`, never raised.
     """
     return respond(await LineupEditorService.evaluate(req))
+
+
+@router.post("/lineup/react", response_model=LineupReactResp)
+async def react_to_verdict(req: LineupReactReq):
+    """Answer one player's verdict change (out, doubtful or available, before his game)
+    on every team that may swap: bench him or start him when a move answers it, and
+    nothing else on the board.
+
+    Called by data-platform's availability pipeline once per change. Each team's
+    outcome is reported in `data.teams`, never raised.
+    """
+    return respond(await LateScratchService.react(req))
 
 
 @router.post("/pickups/execute", response_model=PickupExecuteResp)

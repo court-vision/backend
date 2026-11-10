@@ -15,6 +15,12 @@ so a lineup change writes the team's override and `ai_rows` in one transaction. 
 account's own email gates every team (the pipeline skips a user whose account-level
 email is off), so lineup's notify, act and AI are refused while it is off.
 
+Late scratches' levels below AI are `late_scratch_level` (migration 0047): the team's
+override, else the account's, else off. The late-scratch swap (services/late_scratch_service.py)
+reads it: notify emails the swap a ruling calls for, act makes it. A late-scratch change
+below AI writes the team's override; at AI it writes nothing there (Dime's event check-ins
+answer instead), so dropping back from AI finds the level the user had.
+
 The switch, coming on, puts every row that offers AI at AI, turns check-ins and both AI
 features on, and turns the team's lineup email and auto-lineup on (the fill is Dime's
 tool), keeping what it changed in `restore`; going off, it puts the lineup preferences
@@ -67,6 +73,18 @@ def lineup_below_ai(prefs: Any, team_pref: Any) -> str:
     return autonomy.ACT if setting.applies else autonomy.NOTIFY
 
 
+LATE_SCRATCH_LEVELS = (autonomy.OFF, autonomy.NOTIFY, autonomy.ACT)
+
+
+def late_scratch_below_ai(prefs: Any, team_pref: Any) -> str:
+    """off, notify or act: the team's override, else the account's level, else off."""
+    for source in (team_pref, prefs):
+        level = getattr(source, "late_scratch_level", None) if source is not None else None
+        if level in LATE_SCRATCH_LEVELS:
+            return level
+    return autonomy.OFF
+
+
 def lineup_prefs_for(level: str) -> dict[str, bool]:
     """What a lineup level writes to the team's override."""
     if level == autonomy.OFF:
@@ -92,9 +110,9 @@ def _team_pref(user_id: int, team_id: int) -> Any:
             .first())
 
 
-def _write_lineup(user_id: int, team_id: int, values: Mapping[str, Optional[bool]]) -> None:
-    """The team's lineup override, in one upsert on (user, team_id): two first writes at once (a double
-    click) both land, as apply's own insert does."""
+def _write_lineup(user_id: int, team_id: int, values: Mapping[str, Any]) -> None:
+    """The team's override (lineup's fields, or late scratches' level), in one upsert on (user, team_id):
+    two first writes at once (a double click) both land, as apply's own insert does."""
     now = datetime.utcnow()                 # the model's own clock (naive UTC)
     update: dict[Any, Any] = {getattr(NotificationTeamPreference, k): v for k, v in values.items()}
     update[NotificationTeamPreference.updated_at] = now
@@ -201,6 +219,8 @@ def apply(team_id: int, user_id: int, change: Change, now: datetime) -> Autopilo
                     rows.discard(r)
                 if r == autonomy.LINEUP:
                     _write_lineup(user_id, team_id, lineup_prefs_for(level))
+                elif r == autonomy.LATE_SCRATCH and level != autonomy.AI:
+                    _write_lineup(user_id, team_id, {"late_scratch_level": level})
 
         (Autopilot.update(ai_rows=[r for r in autonomy.AI_ROWS if r in rows], autopilot=switch, restore=restore,
                           updated_at=now)
