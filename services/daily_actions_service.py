@@ -10,6 +10,12 @@ each carrying exactly what the client stages: the lineup moves, or the pickup an
 the player to drop. Every row is judged against the CURRENT board so each can be
 staged on its own; the client re-reads after any write. Never writes.
 
+The fill reads our availability verdicts for today (services/availability_service.py)
+in place of ESPN's status, so a starter we have ruled out or doubtful before ESPN says
+so is benched for a bench player with a game: that row is a `scratch` ("ruled out,
+swap available"), first in the list. IR stays on ESPN's injury flag, which is what
+ESPN lets onto IR.
+
 The pickup row is a streaming move, not an upgrade engine: the player to drop is
 the lowest-value roster player with no game today, the pickup is the day's best
 free agent, and the value comparison only checks that the two are comparable.
@@ -40,9 +46,11 @@ from schemas.daily_actions import (
     DailyActionsData,
     DailyActionsResp,
 )
+from schemas.availability import Verdict
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
 from services import schedule_service, steering
+from services.availability_service import SITS, SOURCE_WORDS, AvailabilityService, planner_verdicts
 from services.espn_service import EspnService
 from services.lineup_editor_service import (
     _clock,
@@ -68,7 +76,7 @@ DEFAULT_FA_COUNT = 100
 MIN_SAMPLE_GAMES = 3
 # The rolling window the board's values come from (`PlayerValueService.avg_points_for`'s default).
 BOARD_WINDOW_DAYS = 14
-KIND_ORDER = {"ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3, "add": 3}
+KIND_ORDER = {"scratch": -1, "ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3, "add": 3}
 ROSTER_FULL_DETAIL = "Roster full — drop a player first"
 
 
@@ -223,9 +231,12 @@ def build_actions(
     *,
     pickup_game: Optional[tuple[str, Optional[str]]] = None,   # ("vs LAL · 7:30 PM", "19:30")
     drop_next: Optional[str] = None,                           # "next plays Thu"
+    verdicts: Optional[Mapping[int, Verdict]] = None,          # today's, by NBA id
 ) -> list[DailyAction]:
-    """Rows, copy and order: IR housekeeping first, then starts by tip-off, the pickup last."""
+    """Rows, copy and order: a starter we ruled out first, then IR housekeeping, then starts by
+    tip-off, the pickup last."""
     by_id = {p.player_id: p for p in state.players}
+    ruled = verdicts or {}
     out: list[DailyAction] = []
 
     for action in ir:
@@ -256,6 +267,18 @@ def build_actions(
         bench = next((x for x in chain if x.role == "bench"), None)
         evicted = by_id.get(bench.player_id) if bench is not None else None
         detail = " · ".join(x for x in (start.note, _slot_name(start.to_slot_id)) if x)
+        verdict = ruled.get(evicted.nba_player_id) if evicted is not None and evicted.nba_player_id else None
+        if evicted is not None and verdict is not None and verdict.verdict in SITS:
+            why = ", ".join(x for x in (verdict.reason, f"per {SOURCE_WORDS.get(verdict.decided_by or '', 'our sources')}")
+                            if x)
+            out.append(DailyAction(
+                id=f"scratch:{filler.player_id}", kind="scratch",
+                title=f"{evicted.name} ruled {verdict.verdict}: start {filler.name}",
+                detail=" · ".join(x for x in (detail, why) if x) or None,
+                player=_of_roster(filler), counterpart=_of_roster(evicted),
+                moves=move_results(chain, state), game_time_et=filler.game_time_et,
+            ))
+            continue
         if evicted is not None and bench is not None:
             detail += f" over {evicted.name} ({bench.note})"
         out.append(DailyAction(
@@ -293,6 +316,21 @@ def build_actions(
 
 
 # ------------------------------- lookups (failure-tolerant) ------------------------------- #
+
+
+async def _verdicts_for(team_id: int, state: LineupState, today: Optional[date]) -> dict[int, Verdict]:
+    """Today's verdicts on the board's players, by NBA id; none when they can't be read (ESPN's
+    statuses stand)."""
+    ids = [p.nba_player_id for p in state.players if p.nba_player_id is not None]
+    if today is None or not ids:
+        return {}
+    try:
+        found = await AvailabilityService.today(ids, today)
+    except Exception as exc:  # the verdicts sharpen the rows; without them the rows are ESPN's
+        log.warning("daily_actions_verdicts_failed", team_id=team_id, error=f"{type(exc).__name__}: {exc}")
+        return {}
+    return {v.nba_player_id: v for v in found}
+
 
 
 def _drop_evidence(league_info: LeagueInfo, espn_ids: list[int]) -> DropEvidence:
@@ -381,9 +419,13 @@ class DailyActionsService:
 
         players = planner_players(state)
         counts = slot_counts_of(state)
-        # The fill as auto-lineup will make it, with Dime's holds (services/steering.py)
-        holds = await steering.holds_for(team.team_id, date.fromisoformat(state.nba_date)) if state.nba_date else []
-        fill = steering.fill_with(players, counts, holds, date.fromisoformat(state.nba_date) if state.nba_date else None)
+        today = date.fromisoformat(state.nba_date) if state.nba_date else None
+        verdicts = await _verdicts_for(team.team_id, state, today)
+        # The fill as auto-lineup will make it, with Dime's holds (services/steering.py), over our
+        # verdicts; IR on ESPN's own statuses
+        holds = await steering.holds_for(team.team_id, today) if today else []
+        fill_players = planner_players(state, planner_verdicts(list(verdicts.values()), today)) if verdicts else players
+        fill = steering.fill_with(fill_players, counts, holds, today)
         ir = plan_ir(players, counts)
         value_kind = state.players[0].value_kind if state.players else "fpts"
 
@@ -411,7 +453,8 @@ class DailyActionsService:
                 if suggestion.drop is not None:
                     drop_next = _next_game_label(suggestion.drop.team, pool_data, streamer_day)
 
-        actions = build_actions(state, fill, ir, suggestion, pickup_game=pickup_game, drop_next=drop_next)
+        actions = build_actions(state, fill, ir, suggestion, pickup_game=pickup_game, drop_next=drop_next,
+                                verdicts=verdicts)
         message = f"{len(actions)} action(s) today" if actions else "All set for today"
         return DailyActionsResp(status=ApiStatus.SUCCESS, message=message, data=DailyActionsData(
             lineup=state, roster_version=state.roster_version, scoring_period_id=state.scoring_period_id,

@@ -118,3 +118,22 @@ def test_a_second_counted_swap_for_the_same_player_is_refused(team):
     _swap(team, BRUNSON)
     with pytest.raises(IntegrityError):
         _swap(team, BRUNSON)
+
+
+def test_the_matchups_verdicts_by_player_then_day(team):
+    from services import availability_service
+    PlayerAvailability.create(player=HART, game_date=DAY, verdict="doubtful", decided_by="nba_report",
+                              reason="Right Hamstring; Strain")
+    PlayerAvailability.create(player=BRUNSON, game_date=date(2026, 11, 12), verdict="available",
+                              decided_by="espn_injuries")
+    PlayerAvailability.create(player=BRUNSON, game_date=DAY, verdict="out", decided_by="espn_injuries",
+                              previous_verdict="questionable", reason="Left Ankle; Sprain")
+    PlayerAvailability.create(player=BRUNSON, game_date=date(2026, 11, 20), verdict="out", decided_by="espn_injuries")
+
+    found = availability_service.rows([HART, BRUNSON, 99999], DAY, date(2026, 11, 16))
+    assert [(v.nba_player_id, v.game_date, v.verdict) for v in found] == [
+        (HART, "2026-11-10", "doubtful"), (BRUNSON, "2026-11-10", "out"), (BRUNSON, "2026-11-12", "available")]
+    assert found[1].changed_at.tzinfo is not None and found[1].reason == "Left Ankle; Sprain"
+    assert availability_service.planner_verdicts(found, DAY) == {HART: ("doubtful", None),
+                                                                 BRUNSON: ("out", "questionable")}
+    assert availability_service.rows([], DAY, DAY) == []

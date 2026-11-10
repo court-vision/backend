@@ -94,7 +94,14 @@ LAL_HOME = SimpleNamespace(home_team_id="LAL", away_team_id="BOS", start_time_et
 @pytest.fixture
 def harness(monkeypatch):
     h = SimpleNamespace(board=None, pool=NO_POOL, find_calls=[], games=[], game_days={},
-                        sample={}, projected={}, evidence_calls=[], evidence_error=None)
+                        sample={}, projected={}, evidence_calls=[], evidence_error=None,
+                        verdicts=[], verdicts_error=None, verdict_calls=[])
+
+    async def fake_today(nba_ids, game_date):
+        h.verdict_calls.append((sorted(nba_ids), game_date))
+        if h.verdicts_error is not None:
+            raise h.verdicts_error
+        return list(h.verdicts)
 
     async def fake_read(team_id, league_info, **kwargs):
         if isinstance(h.board, Exception):
@@ -122,6 +129,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(svc, "run_db", direct_run_db)
     monkeypatch.setattr(svc, "_games_on", lambda nba_date: h.games)
     monkeypatch.setattr(svc, "_drop_evidence", fake_evidence)
+    monkeypatch.setattr(svc.AvailabilityService, "today", staticmethod(fake_today))
     monkeypatch.setattr(svc.schedule_service, "get_remaining_game_days",
                         lambda team, current_date=None: h.game_days.get(team, []))
     return h
@@ -199,6 +207,54 @@ def test_unfilled_bench_players_are_reported_beside_the_rows(harness):
     resp = read()
     assert rows(resp) == []
     assert [(u.player_id, u.reason) for u in resp.data.unfilled] == [(11, "slot_holder_locked"), (12, "slot_holder_locked")]
+
+
+# ---- our verdicts: a starter ruled out before ESPN says so ----------------------------------
+
+
+def ruled(pid, verdict="out", *, reason="Left Ankle; Sprain", by="espn_injuries", day="2026-10-20"):
+    from schemas.availability import Verdict
+    return Verdict(nba_player_id=pid * 10, game_date=day, verdict=verdict, decided_by=by, reason=reason,
+                   previous_verdict="questionable")
+
+
+@pytest.mark.unit
+def test_a_starter_our_verdict_rules_out_is_a_scratch_row_first(harness):
+    harness.board = state(full_board())                       # ESPN lists everyone healthy
+    harness.verdicts = [ruled(8)]
+    resp = read()
+
+    assert rows(resp) == [("scratch", 11, 8)]
+    row = resp.data.actions[0]
+    assert (row.id, row.title) == ("scratch:11", "P8 ruled out: start P11")
+    assert row.detail == "vs LAL · 7:30 PM · UT · Left Ankle; Sprain, per ESPN's injury list"
+    assert [(m.player_id, m.role) for m in row.moves] == [(11, "start"), (8, "bench")]
+    assert harness.verdict_calls == [([10, 20, 50, 80, 110, 120, 140], date(2026, 10, 20))]
+
+
+@pytest.mark.unit
+def test_doubtful_is_a_scratch_too_and_a_scratch_leads_the_ir_rows(harness):
+    harness.board = state([p for p in full_board({5: player(5, "P5", C, eligible=(C, UT, BE, IR), status="OUT")})
+                           if p.player_id != 14])
+    harness.verdicts = [ruled(8, "doubtful", reason=None, by="nba_report")]
+    resp = read()
+    assert rows(resp) == [("scratch", 11, 8), ("ir_in", 5, None)]
+    assert resp.data.actions[0].detail == "vs LAL · 7:30 PM · UT · per the NBA injury report"
+
+
+@pytest.mark.unit
+def test_ir_stays_on_espns_status_and_other_verdicts_or_days_change_nothing(harness):
+    # Ruled out by us at C with no bench player for C: no swap, and no IR move ESPN would refuse
+    harness.board = state([p for p in full_board() if p.player_id != 14])
+    harness.verdicts = [ruled(5), ruled(1, "questionable"), ruled(2, day="2026-10-21")]
+    assert rows(read()) == []
+
+
+@pytest.mark.unit
+def test_verdicts_that_cant_be_read_leave_espns_rows(harness):
+    harness.board = state(full_board({8: player(8, "P8", UT, game=False)}))
+    harness.verdicts_error = RuntimeError("db down")
+    assert rows(read()) == [("start", 11, 8)]
 
 
 # ---- IR rows ---------------------------------------------------------------------------
