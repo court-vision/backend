@@ -146,6 +146,18 @@ def _action_of(proposal_id: int) -> Optional[AutopilotAction]:
     return AutopilotAction.get_or_none(AutopilotAction.proposal_id == proposal_id)
 
 
+@db_operation("acting.pickup_row")
+def _pickup_committed_under(pickup_id: int) -> Optional[str]:
+    """The automation a pickup Dime scheduled counts under: its chip's action (the chip carries the
+    pickup it became). None when no action names it."""
+    row = (AutopilotAction.select(AutopilotAction.capability)
+           .join(AiProposal, on=(AutopilotAction.proposal_id == AiProposal.id))
+           .where((AiProposal.pickup_id == pickup_id) & (AiProposal.kind == proposals.SCHEDULED)
+                  & (AutopilotAction.outcome == SENT))
+           .order_by(AutopilotAction.id.desc()).first())
+    return row.capability if row is not None else None
+
+
 @db_operation("acting.record")
 def _record(**fields: Any) -> Optional[AutopilotAction]:
     try:
@@ -382,12 +394,14 @@ P_OFF, P_ACTING_OFF, P_PAUSED = "dime_off", "dime_acting_off", "dime_paused"
 P_NOT_ALLOWED, P_NOT_ACTING, P_RESERVE = "dime_not_allowed", "dime_not_acting", "dime_reserve"
 
 
-async def pickup_block(team_id: int, user_id: int) -> Optional[tuple[str, str]]:
+async def pickup_block(team_id: int, user_id: int, pickup_id: Optional[int] = None) -> Optional[tuple[str, str]]:
     """Whether Dime still sends adds and drops itself on the team, asked when a pickup it scheduled
-    comes due (services/scheduled_pickup_service.py): the switches, the team's pause and the daily
-    actions level as they are now, not as they were when it was scheduled. (reason, sentence) when the pickup may no
-    longer go; None when it may. The add caps aren't asked again: the pickup counted toward them
-    when it was scheduled."""
+    comes due (services/scheduled_pickup_service.py): the switches, the team's pause and the level
+    of the automation the pickup was committed under as they are now, not as they were when it was
+    scheduled. That automation is daily actions, or late scratches for a pickup an event check-in
+    scheduled (`pickup_id` finds which; without one, or with no action on record, daily actions).
+    (reason, sentence) when the pickup may no longer go; None when it may. The add caps aren't
+    asked again: the pickup counted toward them when it was scheduled."""
     from services.ai import checkins
     if not settings.ai_enabled or not settings.autopilot_enabled:
         return P_OFF, "Dime is switched off on the server"
@@ -398,8 +412,11 @@ async def pickup_block(team_id: int, user_id: int) -> Optional[tuple[str, str]]:
         return P_PAUSED, "Dime is paused on this team"
     if not checkins.allowed(team_id, user_id):
         return P_NOT_ALLOWED, "This team isn't open to autopilot"
-    if not autonomy.at_ai(autopilot, autonomy.DAILY_ACTIONS):
-        return P_NOT_ACTING, "Daily actions aren't at AI on this team any more"
+    row = await _pickup_committed_under(pickup_id) if pickup_id is not None else None
+    if row != autonomy.LATE_SCRATCH:
+        row = autonomy.DAILY_ACTIONS
+    if not autonomy.at_ai(autopilot, row):
+        return P_NOT_ACTING, f"{autonomy.LABELS[row]} aren't at AI on this team any more"
     return None
 
 

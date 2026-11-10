@@ -560,15 +560,22 @@ def test_room_left_in_the_matchup_sends(h):
 
 @pytest.fixture
 def dime(h, monkeypatch):
-    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, daily actions at AI."""
+    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, daily actions at AI.
+    `committed_under` is the automation the pickup's chip was committed under (None: no action on record)."""
     from services.ai import acting
     d = SimpleNamespace(pilot=SimpleNamespace(team_id=21, user_id=11, ai_rows=["daily_actions"], autopilot=False,
-                                              restore=None, paused_at=None, paused_by=None, paused_reason=None))
+                                              restore=None, paused_at=None, paused_by=None, paused_reason=None),
+                        committed_under=None, asked=[])
 
     async def autopilot_row(team_id):
         return d.pilot
 
+    async def committed_under(pickup_id):
+        d.asked.append(pickup_id)
+        return d.committed_under
+
     monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
+    monkeypatch.setattr(acting, "_pickup_committed_under", committed_under)
     for name, value in (("ai_enabled", True), ("autopilot_enabled", True), ("dime_acting_enabled", True),
                         ("autopilot_team_ids", [21]), ("ai_agent_user_ids", [11]), ("autopilot_adds_reserve", 1)):
         monkeypatch.setattr(svc.settings, name, value)
@@ -605,6 +612,33 @@ def test_a_pickup_dime_scheduled_is_skipped_unsent_once_dime_no_longer_acts_ther
     r = execute(h, row(made_by_autopilot=True))
     assert (r.outcome, r.reason) == ("skipped", reason) and r.detail
     assert h.txn_calls == [] and h.marked == [] and h.reads == []    # nothing read from ESPN, nothing sent
+
+
+@pytest.mark.unit
+def test_a_pickup_an_event_check_in_scheduled_goes_while_late_scratches_are_at_ai(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows, dime.committed_under = ["late_scratch"], "late_scratch"     # daily actions were never at AI here
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+    assert dime.asked == [1] and h.audits[0]["source"] == "autopilot"
+
+
+@pytest.mark.unit
+def test_a_pickup_an_event_check_in_scheduled_is_skipped_once_late_scratches_leave_ai(h, dime):
+    arrange_day_before(h)
+    dime.committed_under = "late_scratch"          # daily actions at AI don't carry a late scratch's pickup
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason) == ("skipped", "dime_not_acting")
+    assert r.detail == "Late scratches and news aren't at AI on this team any more"
+    assert h.txn_calls == [] and h.marked == [] and h.reads == []
+
+
+@pytest.mark.unit
+def test_a_pickup_with_no_action_on_record_is_asked_about_daily_actions(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows = ["late_scratch"]
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason, r.detail) == ("skipped", "dime_not_acting",
+                                               "Daily actions aren't at AI on this team any more")
 
 
 @pytest.mark.unit

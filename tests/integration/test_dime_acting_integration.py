@@ -292,6 +292,27 @@ class TestTheWrites:
             RosterMove.create(user=team.user_id_id, team=team.team_id, nba_date=DAY, source="robot",
                               kind="lineup", status="applied", moves=[])
 
+    def test_a_pickup_knows_the_automation_its_chip_was_committed_under(self, team):
+        checkin_id, conv = _checkin(team)
+        fields = dict(user=team.user_id_id, team=team.team_id, scoring_period_id=21, nba_date=DAY + timedelta(days=1),
+                      add_player_id=6450, add_name="Kawhi Leonard", drop_player_id=4594268,
+                      drop_name="Anthony Edwards", not_before_at=_now() + timedelta(hours=10), made_by_autopilot=True)
+        daily = ScheduledPickup.create(**fields)
+        scratch = ScheduledPickup.create(**{**fields, "add_player_id": 99})
+        refused = ScheduledPickup.create(**{**fields, "add_player_id": 98})
+        unknown = ScheduledPickup.create(**{**fields, "add_player_id": 97})
+        for pickup, capability, outcome in ((daily, "daily_actions", "sent"), (scratch, "late_scratch", "sent"),
+                                            (refused, "late_scratch", "refused")):
+            p = _proposal(team, conv, kind="scheduled", state="sent", pickup_id=pickup.id)
+            _action(team, checkin_id=checkin_id, proposal_id=p.id, kind="scheduled", capability=capability,
+                    outcome=outcome)
+        # A cancel chip names the pickup too, but isn't the chip that scheduled it
+        cancel = _proposal(team, conv, kind="cancel_pickup", state="sent", pickup_id=unknown.id,
+                           action={"pickup_id": unknown.id})
+        _action(team, checkin_id=checkin_id, proposal_id=cancel.id, kind="cancel_pickup", capability="late_scratch")
+        got = [run(acting._pickup_committed_under(r.id)) for r in (daily, scratch, refused, unknown)]
+        assert got == ["daily_actions", "late_scratch", None, None]
+
     def test_a_pickup_says_whether_dime_scheduled_it(self, team):
         fields = dict(user=team.user_id_id, team=team.team_id, scoring_period_id=21, nba_date=DAY + timedelta(days=1),
                       add_player_id=6450, add_name="Kawhi Leonard", drop_player_id=4594268,

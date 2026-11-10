@@ -656,10 +656,10 @@ class ScheduledPickupService:
         by_dime = bool(getattr(row, "made_by_autopilot", False)) and row.audit_id is None
         if by_dime:
             # Dime scheduled this itself: it goes only if Dime still acts on adds and drops here now
-            # (a pause, daily actions below AI or a switch turned off since stops it). A user's pickup
-            # isn't asked.
+            # (a pause, the automation it was committed under below AI, or a switch turned off since
+            # stops it). A user's pickup isn't asked.
             from services.ai import acting
-            stop = await acting.pickup_block(row.team_id, row.user_id)
+            stop = await acting.pickup_block(row.team_id, row.user_id, row.id)
             if stop is not None:
                 return await settle(row, now, SKIPPED, stop[0], detail=stop[1])
 

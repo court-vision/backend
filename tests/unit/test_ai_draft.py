@@ -346,6 +346,80 @@ class TestSwitch:
         assert run(draft.seat_loop(42, 7)) == "switched_off"
         assert seen == {"reason": "switched_off"}
 
+    def _seat(self, monkeypatch, *, busy_starts, busy_looks):
+        """A seat on the clock in a room where `start` finds another note running `busy_starts`
+        times, and `_busy` answers from `busy_looks` (then False). What happened is on the result."""
+        from services import draft_mock_service
+        seen = SimpleNamespace(starts=0, slept=[], looks=list(busy_looks), touched=0, off=None, advanced=[])
+        detail = _detail(my_next_pick=11, picks_until_my_turn=0)
+
+        async def touch(session_id):
+            seen.touched += 1
+            return draft.SEAT_DRAFTING
+
+        async def seat_off(session_id, reason):
+            seen.off = reason
+
+        async def switches(user_id):
+            return SimpleNamespace(draft_rooms=True, memory=True)
+
+        async def owned(name, fn, *args):
+            return _room()
+
+        async def read_detail(session_id):
+            return detail
+
+        async def start(user_id, room, kind, *, seat=False):
+            assert (kind, seat) == (draft.PICK, True)
+            seen.starts += 1
+            if seen.starts <= busy_starts:
+                raise ConflictError("AI_DRAFT_BUSY", "Dime is already writing a note in this room; wait for it")
+            return draft.Started(9, None)
+
+        async def note(note_id):
+            detail.my_next_pick = None          # the pick is in: none of the user's picks are left
+            return SimpleNamespace(state=draft.DONE, took=1)
+
+        async def busy(session_id):
+            return seen.looks.pop(0) if seen.looks else False
+
+        async def sleep(seconds):
+            seen.slept.append(seconds)
+
+        async def advance(session_id, req):
+            seen.advanced.append(req.until)
+
+        monkeypatch.setattr(draft, "_touch_seat", touch)
+        monkeypatch.setattr(draft, "_seat_off", seat_off)
+        monkeypatch.setattr(draft, "features", switches)
+        monkeypatch.setattr(draft, "run_db", owned)
+        monkeypatch.setattr(draft, "_detail", read_detail)
+        monkeypatch.setattr(draft, "start", start)
+        monkeypatch.setattr(draft, "_note", note)
+        monkeypatch.setattr(draft, "_busy", busy)
+        monkeypatch.setattr(draft.asyncio, "sleep", sleep)
+        monkeypatch.setattr(draft_mock_service.DraftMockService, "advance", advance)
+        return seen
+
+    def test_the_seat_waits_for_a_note_being_written_and_then_makes_its_pick(self, monkeypatch):
+        # The user asked for a plan while Dime holds the seat, and the seat's turn comes before it is written
+        seen = self._seat(monkeypatch, busy_starts=1, busy_looks=[True, True, False])
+        assert run(draft.seat_loop(42, 7)) == "done"
+        assert seen.starts == 2 and seen.slept == [draft._BUSY_WAIT] * 3      # looked three times, then picked
+        assert seen.touched >= 5                                               # the seat stayed live while it waited
+        assert seen.advanced == ["end"] and seen.off == "done"
+
+    def test_the_seat_hands_back_when_notes_keep_the_room_busy(self, monkeypatch):
+        seen = self._seat(monkeypatch, busy_starts=99, busy_looks=[])
+        assert run(draft.seat_loop(42, 7)) == "ai_draft_busy"
+        assert seen.starts == draft._BUSY_WAITS + 1 and seen.off == "ai_draft_busy"
+
+    def test_a_wait_ends_at_what_a_note_may_take(self, monkeypatch):
+        monkeypatch.setattr(settings, "dime_draft_timeout_seconds", 4.0)
+        seen = self._seat(monkeypatch, busy_starts=1, busy_looks=[True] * 500)
+        assert run(draft.seat_loop(42, 7)) == "done"                           # `start` sweeps a note that old
+        assert sum(seen.slept) == 4.0 + draft._STALE_MARGIN.total_seconds()
+
     def test_on_a_user_off_the_ai_desk_s_list_sees_no_dime(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
         monkeypatch.setattr(settings, "ai_agent_user_ids", [1])

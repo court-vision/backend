@@ -77,6 +77,10 @@ _STALE_MARGIN = timedelta(seconds=60)
 _SEAT_QUIET = timedelta(seconds=60)
 # A 30-round, 20-team draft is 30 of the user's picks; the loop never runs past this many steps
 _SEAT_STEPS = 200
+# The seat's turn while another note is being written in the room: it looks again this often
+# (seconds), and waits for at most this many notes before one pick
+_BUSY_WAIT = 2.0
+_BUSY_WAITS = 3
 MAX_PLAN = 500
 MAX_REASON = 300
 MAX_PUNTS = 4
@@ -346,6 +350,13 @@ def _sweep(session_id: int, before: datetime) -> int:
             .where(AiDraftNote.session_id == session_id, AiDraftNote.state == RUNNING,
                    AiDraftNote.created_at < before)
             .execute())
+
+
+@db_operation("ai.draft_note_busy")
+def _busy(session_id: int) -> bool:
+    """A note is being written in the room now."""
+    return (AiDraftNote.select(AiDraftNote.id)
+            .where(AiDraftNote.session_id == session_id, AiDraftNote.state == RUNNING).exists())
 
 
 @db_operation("ai.draft_note_get")
@@ -840,6 +851,20 @@ async def set_seat(user_id: int, room: OwnedDraftSessionContext, on: bool) -> di
     return await room_view(user_id, room)
 
 
+async def _wait_for_note(session_id: int) -> None:
+    """The seat's turn came while another note is being written in the room (one the user asked for;
+    a room has one note at a time): wait until it settles, the seat is taken back, or as long as a
+    note may run before `start` sweeps it. The seat's row is touched at each look, so the loop
+    stays live while it waits."""
+    waited = 0.0
+    limit = settings.dime_draft_timeout_seconds + _STALE_MARGIN.total_seconds()
+    while waited < limit:
+        await asyncio.sleep(_BUSY_WAIT)
+        waited += _BUSY_WAIT
+        if await _touch_seat(session_id) != SEAT_DRAFTING or not await _busy(session_id):
+            return
+
+
 async def seat_loop(user_id: int, session_id: int) -> str:
     """Draft the user's seat to the end: the autopicker runs the other seats up to the user's turn,
     Dime makes the pick, and again, until the draft ends, the user takes the seat back, or a step
@@ -847,8 +872,9 @@ async def seat_loop(user_id: int, session_id: int) -> str:
     from services.draft_mock_service import DraftMockService
 
     reason = "failed"
+    steps = waits = 0
     try:
-        for _ in range(_SEAT_STEPS):
+        while steps < _SEAT_STEPS:
             seat = await _touch_seat(session_id)
             if seat != SEAT_DRAFTING:
                 reason = "stopped"
@@ -872,13 +898,25 @@ async def seat_loop(user_id: int, session_id: int) -> str:
                 reason = "done"
                 return reason
             if detail.picks_until_my_turn != 0:
+                steps += 1
                 ran = await DraftMockService.advance(session_id, MockAdvanceRequest(until="my_turn"))
                 stopped = ran.data.stopped_reason if ran.data is not None else None
                 if stopped in ("cap_blocked", "pool_exhausted"):
                     reason = stopped
                     return reason
                 continue
-            started = await start(user_id, room, PICK, seat=True)
+            try:
+                started = await start(user_id, room, PICK, seat=True)
+            except ConflictError as exc:
+                # A note the user asked for is still being written: the pick waits for it rather
+                # than hand the seat back. The wait isn't a step, and every check above runs again
+                # before the pick (the seat taken back, the switch, the room)
+                if exc.error_code != "AI_DRAFT_BUSY" or waits >= _BUSY_WAITS:
+                    raise
+                waits += 1
+                await _wait_for_note(session_id)
+                continue
+            steps, waits = steps + 1, 0
             if started.task is not None:
                 await started.task
             note = await _note(started.note_id)
