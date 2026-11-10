@@ -65,7 +65,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 import pytz
@@ -191,6 +191,12 @@ def et_at(d: date, t: time) -> datetime:
 def rollover_at(d: date) -> datetime:
     """When the ESPN fantasy day `d` begins (3 AM ET, `schedule_service.FANTASY_DAY_ROLLOVER_ET`), as UTC."""
     return et_at(d, ROLLOVER_ET)
+
+
+def _audit_source(row: Any) -> str:
+    """The usr.roster_moves source of the executor's writes for a pickup: 'autopilot' for one Dime
+    scheduled on its own (migration 0044), 'scheduled' for every other."""
+    return "autopilot" if getattr(row, "made_by_autopilot", False) else "scheduled"
 
 
 def _lease_from_now(now: datetime) -> datetime:
@@ -478,7 +484,10 @@ class ScheduledPickupService:
     # ---- the user's routes ----
 
     @staticmethod
-    async def schedule(team, league_info: LeagueInfo, req: SchedulePickupReq) -> ScheduledPickupResp:
+    async def schedule(team, league_info: LeagueInfo, req: SchedulePickupReq, *,
+                       by_autopilot: bool = False) -> ScheduledPickupResp:
+        """`by_autopilot`: Dime schedules its own chip (services/ai/acting.py), through every check
+        made here; the pickup is marked so, and the executor's writes for it are source autopilot."""
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         adapter = get_provider_adapter(league_info.provider)
@@ -530,6 +539,7 @@ class ScheduledPickupService:
             drop_name=holder.name if holder else None, drop_team=holder.team if holder else None,
             scoring_period_id=day, nba_date=nba_date, not_before_at=window.not_before_at,
             deadline_at=window.deadline_at, status=PENDING, created_at=now, updated_at=now,
+            made_by_autopilot=by_autopilot,
         )
         log.info("scheduled_pickup_created", team_id=team.team_id, pickup_id=row.id, add=add, drop=drop,
                  day=day, nba_date=nba_date.isoformat(), rule=window.rule,
@@ -643,6 +653,16 @@ class ScheduledPickupService:
                              lane_status=lane_status)
                 return None
 
+        by_dime = bool(getattr(row, "made_by_autopilot", False)) and row.audit_id is None
+        if by_dime:
+            # Dime scheduled this itself: it goes only if Dime still acts on adds and drops here now
+            # (a pause, daily actions below AI or a switch turned off since stops it). A user's pickup
+            # isn't asked.
+            from services.ai import acting
+            stop = await acting.pickup_block(row.team_id, row.user_id)
+            if stop is not None:
+                return await settle(row, now, SKIPPED, stop[0], detail=stop[1])
+
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)
         except NotFoundError:
@@ -720,6 +740,12 @@ class ScheduledPickupService:
         blocked = budget_block(acq, nba_date, day_adds=day_adds)
         if blocked:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
+        if by_dime and add is not None:
+            # The adds left now, not when Dime scheduled it: the user may have used some since
+            from services.ai import acting
+            reserve = acting.reserve_block(acq, nba_date)
+            if reserve is not None:
+                return await settle(row, now, SKIPPED, acting.P_RESERVE, detail=reserve, team_name=team_name)
 
         try:
             holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
@@ -761,7 +787,8 @@ class ScheduledPickupService:
             fresh, verified, audit_id = await RosterTransactionService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=state,
                 add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-                source="scheduled", before_send=last_check, verify_scoring_period_id=day if period < day else None,
+                source=_audit_source(row), before_send=last_check,
+                verify_scoring_period_id=day if period < day else None,
             )
         except ClaimLost:
             log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
@@ -876,7 +903,7 @@ class ScheduledPickupService:
                 return Seated(note=f"seat:{errors[0].code}")
             _, verified, audit_id = await LineupEditorService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=board,
-                moves=moves, source="scheduled", fallback_slot_counts=slots,
+                moves=moves, source=_audit_source(row), fallback_slot_counts=slots,
             )
             log.info("scheduled_pickup_seated", pickup_id=row.id, team_id=row.team_id, slot=target,
                      day=day, future=board.future, verified=verified, audit_id=audit_id)

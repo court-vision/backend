@@ -726,13 +726,15 @@ def _chip_mismatch() -> AppError:
                     status_code=422, log_level="warning")
 
 
-def _by_dime(chip, op: str) -> dict[str, Any]:
+def _by_dime(chip, op: str, by: str = "user") -> dict[str, Any]:
     """The reason and detail a chip-made step records: Dime's (`DIME_REASON`, or paused/stopped by
-    Dime), with the chip's own reason as the detail. Nothing for the user's own request."""
+    Dime), with the chip's own reason as the detail. Nothing for the user's own request. `by`
+    'dime' is Dime applying its own chip (the autopilot step), which records the autopilot reasons."""
     if chip is None:
         return {}
-    from services.ai.steering import LANE_REASONS
-    return dict(reason=LANE_REASONS[op], detail=chip.reason)
+    from services.ai.steering import AUTOPILOT_LANE_REASONS, LANE_REASONS
+    reasons = AUTOPILOT_LANE_REASONS if by == "dime" else LANE_REASONS
+    return dict(reason=reasons[op], detail=chip.reason)
 
 
 async def _chip_sent(chip) -> None:
@@ -904,7 +906,7 @@ class StreamLaneService:
         )
 
     @staticmethod
-    async def start(team, league_info: LeagueInfo, req: StreamLaneStartReq) -> StreamLaneResp:
+    async def start(team, league_info: LeagueInfo, req: StreamLaneStartReq, *, by: str = "user") -> StreamLaneResp:
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         chip = await _dime_chip(team, req.proposal_id, "start", **{"holder.espn_id": req.player_id})
@@ -929,7 +931,7 @@ class StreamLaneService:
             next_period=start, next_decision_at=window.not_before_at, attempts=0,
             projection=projection.model_dump(mode="json"), created_at=now, updated_at=now,
         ), dict(scoring_period_id=start, nba_date=prepared.days[0].nba_date, action="started", created_at=now,
-                **_by_dime(chip, "start")))
+                **_by_dime(chip, "start", by)))
         if together:
             # The lanes it decides with share their adds and seats with it now: their projections change too.
             await run_db("lane.projections", _set_projections,
@@ -958,7 +960,8 @@ class StreamLaneService:
                                   data=StreamLaneListData(open=open_, recent=recent))
 
     @staticmethod
-    async def update(team, league_info: LeagueInfo, lane_id: int, req: StreamLaneUpdateReq) -> StreamLaneResp:
+    async def update(team, league_info: LeagueInfo, lane_id: int, req: StreamLaneUpdateReq, *,
+                     by: str = "user") -> StreamLaneResp:
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         if lane is None:
             raise NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found")
@@ -981,7 +984,7 @@ class StreamLaneService:
             # is being made right now), and its day is decided again on resume.
             cancelled = await StreamLaneService._cancel_pickups(team, lane, now)
             nxt = min([lane.next_period, *cancelled])
-            dime = _by_dime(chip, "pause")
+            dime = _by_dime(chip, "pause", by)
             changes.update(status=PAUSED, next_period=nxt, next_decision_at=None,
                            **(dime or dict(reason="paused_by_user", detail=None)))
             event = dict(action="paused", scoring_period_id=nxt, **(dime or dict(reason="paused_by_user")))
@@ -994,7 +997,8 @@ class StreamLaneService:
                 message = "The matchup has no day left a pickup could count for — the lane has ended"
             else:
                 changes.update(resumed)
-                event = dict(action="resumed", scoring_period_id=resumed["next_period"], **_by_dime(chip, "resume"))
+                event = dict(action="resumed", scoring_period_id=resumed["next_period"],
+                             **_by_dime(chip, "resume", by))
                 message = "Stream lane resumed"
         if changes:
             if not await run_db("lane.update", _lane_step, lane.id, None, now, changes, event):
@@ -1031,14 +1035,14 @@ class StreamLaneService:
         return dict(status=ACTIVE, next_period=nxt, next_decision_at=window.not_before_at, reason=None, detail=None)
 
     @staticmethod
-    async def stop(team, lane_id: int, proposal_id: Optional[int] = None) -> StreamLaneResp:
+    async def stop(team, lane_id: int, proposal_id: Optional[int] = None, *, by: str = "user") -> StreamLaneResp:
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         if lane is None:
             raise NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found")
         if lane.status == ENDED:
             raise StreamLaneEnded()
         chip = await _dime_chip(team, proposal_id, "stop", lane_id=lane.id)
-        why = _by_dime(chip, "stop") or dict(reason="stopped", detail=None)
+        why = _by_dime(chip, "stop", by) or dict(reason="stopped", detail=None)
         now = datetime.now(timezone.utc)
         # A pickup the lane scheduled goes with it — unless it is being made right now.
         await StreamLaneService._cancel_pickups(team, lane, now)

@@ -555,6 +555,90 @@ def test_room_left_in_the_matchup_sends(h):
     assert execute(h).outcome == "executed"
 
 
+# ---- a pickup Dime scheduled itself ---------------------------------------------------
+
+
+@pytest.fixture
+def dime(h, monkeypatch):
+    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, daily actions at AI."""
+    from services.ai import acting
+    d = SimpleNamespace(pilot=SimpleNamespace(team_id=21, user_id=11, ai_rows=["daily_actions"], autopilot=False,
+                                              restore=None, paused_at=None, paused_by=None, paused_reason=None))
+
+    async def autopilot_row(team_id):
+        return d.pilot
+
+    monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
+    for name, value in (("ai_enabled", True), ("autopilot_enabled", True), ("dime_acting_enabled", True),
+                        ("autopilot_team_ids", [21]), ("ai_agent_user_ids", [11]), ("autopilot_adds_reserve", 1)):
+        monkeypatch.setattr(svc.settings, name, value)
+    return d
+
+
+@pytest.mark.unit
+def test_a_pickup_dime_scheduled_goes_while_dime_still_acts_and_is_audited_as_its(h, dime):
+    arrange_day_before(h)
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+    assert h.audits[0]["source"] == "autopilot"
+
+
+@pytest.mark.unit
+def test_under_the_autopilot_switch_a_pickup_dime_scheduled_goes_too(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows, dime.pilot.autopilot = [], True
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("change, reason", [
+    (lambda d, s: setattr(d.pilot, "paused_at", NOW - timedelta(hours=1)), "dime_paused"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", ["lineup"]), "dime_not_acting"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", []), "dime_not_acting"),
+    (lambda d, s: setattr(s, "dime_acting_enabled", False), "dime_acting_off"),
+    (lambda d, s: setattr(s, "autopilot_enabled", False), "dime_off"),
+    (lambda d, s: setattr(s, "ai_enabled", False), "dime_off"),
+    (lambda d, s: setattr(s, "autopilot_team_ids", []), "dime_not_allowed"),
+])
+def test_a_pickup_dime_scheduled_is_skipped_unsent_once_dime_no_longer_acts_there(h, dime, monkeypatch, change, reason):
+    arrange_day_before(h)
+    change(dime, svc.settings)       # since it was scheduled: the owner paused Dime, moved daily actions below AI, or a switch went off
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason) == ("skipped", reason) and r.detail
+    assert h.txn_calls == [] and h.marked == [] and h.reads == []    # nothing read from ESPN, nothing sent
+
+
+@pytest.mark.unit
+def test_a_pickup_dime_scheduled_is_skipped_when_the_adds_left_are_the_ones_it_keeps_for_the_user(h, dime):
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))         # the user used adds since: 1 left, and Dime keeps 1
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason) == ("skipped", "dime_reserve")
+    assert r.detail == "1 of the league's adds left this matchup; Dime keeps 1 for you"
+    assert h.txn_calls == [] and h.marked == []
+
+
+@pytest.mark.unit
+def test_a_pickup_the_user_scheduled_is_never_asked_about_dime(h, monkeypatch):
+    from services.ai import acting
+
+    async def never(*args):
+        raise AssertionError("asked about Dime")
+
+    monkeypatch.setattr(acting, "pickup_block", never)
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))         # the last add is the user's to use
+    assert execute(h, row(made_by_autopilot=False)).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_a_write_dime_already_sent_is_confirmed_from_the_board_even_after_a_pause(h, dime):
+    arrange_day_before(h)
+    dime.pilot.paused_at = NOW
+    r = execute(h, row(made_by_autopilot=True, audit_id=41))
+    assert (r.outcome, r.reason) == ("failed", "interrupted")      # read, never sent again, as for any pickup
+    assert h.txn_calls == []
+
+
 @pytest.mark.unit
 def test_a_per_day_limit_reads_the_days_adds(h, monkeypatch):
     calls = []

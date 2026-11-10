@@ -27,8 +27,13 @@ conversation (kind `checkin`), the server's brief as its message, the check-in
 tool list (`log_decision` added) and bounds, and its spend on the autopilot line
 (services/ai/spend.py). In shadow nothing reaches ESPN: its proposals are stored
 `shadow`, and every call it makes is a decision (services/ai/decisions.py) the
-user marks agree or disagree. How Dime may act (one switch, or one per kind of
-move) is step 5's; nothing here decides it.
+user marks agree or disagree.
+
+What Dime may do itself on the team is its automation levels (services/ai/autonomy.py;
+the plan's step 5): while no automation Dime acts on is at AI (the default, and always
+with DIME_ACTING_ENABLED off) a check-in is exactly step 3's; otherwise its brief says
+which automations are at AI, and a change it logs on them is sent (services/ai/
+acting.py). The Check-ins row is this switch: on while the team isn't paused.
 """
 
 from __future__ import annotations
@@ -45,12 +50,12 @@ from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from core.settings import settings
 from db.base import db_operation
-from db.models.autopilot import AiCheckin, AiDecision, Autopilot
+from db.models.autopilot import AiCheckin, AiDecision, Autopilot, AutopilotAction
 from db.models.nba.games import FANTASY_SEASON_TYPES, Game
 from db.models.teams import Team
 from schemas.common import ApiStatus
 from services import schedule_service
-from services.ai import agent, conversations, spend
+from services.ai import agent, autonomy, conversations, levels, spend
 from services.scheduled_pickup_service import et_at
 
 MORNING, WEEKLY, PRE_LOCK, NIGHT = "morning", "weekly", "pre_lock", "night"
@@ -281,11 +286,17 @@ def _tallies(checkin_ids: list[int]) -> dict[int, dict[str, int]]:
         return out
     for d in (AiDecision.select(AiDecision.checkin_id, AiDecision.call, AiDecision.verdict)
               .where(AiDecision.checkin_id.in_(checkin_ids))):
-        t = out.setdefault(d.checkin_id_id, {"decisions": 0, "changes": 0, "agree": 0, "disagree": 0})
+        t = out.setdefault(d.checkin_id_id, {"decisions": 0, "changes": 0, "agree": 0, "disagree": 0, "sent": 0})
         t["decisions"] += 1
         t["changes"] += d.call == "change"
         if d.verdict in ("agree", "disagree"):
             t[d.verdict] += 1
+    # The moves it sent on its own (the acting step)
+    for cid, n in (AutopilotAction.select(AutopilotAction.checkin_id, fn.COUNT(AutopilotAction.id))
+                   .where(AutopilotAction.checkin_id.in_(checkin_ids), AutopilotAction.outcome == "sent")
+                   .group_by(AutopilotAction.checkin_id).tuples()):
+        if cid in out:
+            out[cid]["sent"] = int(n)
     return out
 
 
@@ -306,26 +317,14 @@ def _autopilot_teams(user_id: int, team_ids: list[int]) -> list[tuple[int, Optio
     return [(t, rows.get(t)) for t in owned]
 
 
-@db_operation("ai.autopilot_set")
-def _set_autopilot(team_id: int, user_id: int, on: bool, now: datetime) -> Autopilot:
-    row = Autopilot.get_or_none(Autopilot.team_id == team_id)
-    if row is None:
-        # Two first switches at once (a double click, a retry): the second insert is a no-op, and
-        # the row the first wrote goes through the transitions below like any other
-        (Autopilot.insert(team_id=team_id, user_id=user_id, created_at=now, updated_at=now, active_since=now,
-                          paused_at=None if on else now, paused_by=None if on else "user")
-         .on_conflict_ignore()
-         .execute())
-        row = Autopilot.get(Autopilot.team_id == team_id)
-    if on and row.paused_at is not None:
-        # Resumed: what fell due while it was paused is not missed
-        (Autopilot.update(paused_at=None, paused_by=None, paused_reason=None, active_since=now, updated_at=now,
-                          user_id=user_id)
-         .where(Autopilot.team_id == team_id).execute())
-    elif not on and row.paused_at is None:
-        (Autopilot.update(paused_at=now, paused_by="user", paused_reason=None, updated_at=now)
-         .where(Autopilot.team_id == team_id).execute())
-    return Autopilot.get(Autopilot.team_id == team_id)
+@db_operation("ai.autopilot_row")
+def _autopilot_row(team_id: int) -> Optional[Autopilot]:
+    return Autopilot.get_or_none(Autopilot.team_id == team_id)
+
+
+async def _set_autopilot(team_id: int, user_id: int, on: bool, now: datetime) -> Autopilot:
+    """Check-ins on (started, or resumed) or off (paused): the Check-ins row (services/ai/levels.py)."""
+    return await levels.apply(team_id, user_id, levels.Change(checkins=on), now)
 
 
 @db_operation("ai.owned_team_id")
@@ -405,13 +404,35 @@ _STEPS = {
 }
 
 
-def brief(kind: str, nba_date: date, team_id: int, *, manual: bool) -> str:
-    """The check-in's opening message: what it is, the shadow rules, and the steps for its kind."""
+def acting_rules(rows: list[str]) -> str:
+    """The rules of a check-in on a team where Dime acts on some automations (the plan's step 5)."""
+    return (
+        f"What you do yourself on this team: {autonomy.words(rows)}. Those automations are at AI; on the others "
+        "you review, as in shadow. Every proposal you make in a check-in is first logged as what you would do; "
+        "log_decision with call change and its proposal_id is what commits it: on an automation at AI it is sent "
+        "now through the user's own write routes if the policy allows (get_automations' autopilot section has "
+        "the caps, what you have used and what you did lately); anywhere else it stays a review, never sent. A "
+        "move the policy blocks or ESPN refuses is left as a chip for the user; don't try it again in this "
+        "check-in. So propose freely, but log as a change only what you'd do, and never say a move was made "
+        "unless log_decision's action says sent. log_decision records each call you make, holds included. The "
+        "user isn't here while you work: they read this conversation later and mark each call agree or disagree."
+    )
+
+
+def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
+          acting: Optional[list[str]] = None) -> str:
+    """The check-in's opening message: what it is, its rules (shadow, or which automations Dime acts
+    on), and the steps for its kind. Acting on none, it is step 3's brief exactly."""
     who = ("The user asked for it from the AI desk." if manual
            else "It started on its schedule.")
+    live = bool(acting)
+    rules = acting_rules(acting) if live else _SHADOW
     head = (f"[{LABELS[kind]} for team_id {team_id}, about {nba_date.strftime('%A')} {nba_date.isoformat()}. "
-            f"{who} {_SHADOW}]")
-    close = ("End with a short note for the user: what you'd change and what you'd keep, and why, in a few "
+            f"{who} {rules}]")
+    close = ("End with a short note for the user: what you sent, what you left for them to send, and what you'd "
+             "keep, and why, in a few lines. Your decisions show as their own blocks, so don't list them again."
+             if live else
+             "End with a short note for the user: what you'd change and what you'd keep, and why, in a few "
              "lines. Your decisions show as their own blocks, so don't list them again.")
     return f"{head}\n\n{_STEPS[kind]}\n\n{close}"
 
@@ -456,8 +477,9 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         await conversations.claim(conversation_id, user_id, hold)
         await _attach(checkin_id, conversation_id)
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
+        acting = autonomy.acting_rows(await _autopilot_row(team_id))
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
-                          message=brief(kind, nba_date, team_id, manual=manual),
+                          message=brief(kind, nba_date, team_id, manual=manual, acting=acting),
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.CHECKIN_TOOLS, allowed=agent.CHECKIN_ALLOWED, checkin_id=checkin_id,
                           limits=agent.Limits.checkin())
@@ -596,11 +618,14 @@ async def run_now(user_id: int, team_id: int, kind: Optional[str] = None,
     return row
 
 
-async def set_autopilot(user_id: int, team_id: int, on: bool) -> Autopilot:
-    """The AI desk's switch: on starts (or resumes) the team's check-ins, off pauses them."""
+async def set_autopilot(user_id: int, team_id: int, change: levels.Change) -> Autopilot:
+    """The team's automation levels and autopilot switch (services/ai/levels.py). Check-ins on starts
+    (or resumes) them, off pauses them; a pause Dime made itself is lifted the same way."""
     await _ensure_owned(team_id, user_id)
     _ensure_allowed(team_id, user_id)
-    return await _set_autopilot(team_id, user_id, on, _now())
+    prefs, _ = await levels.prefs_of(user_id, [])
+    checked = levels.check(change, email=levels.lineup_email(prefs))
+    return await levels.apply(team_id, user_id, checked, _now())
 
 
 def next_slot(cal: Calendar, row: Optional[Autopilot], taken: set[tuple[str, date]],
@@ -625,14 +650,18 @@ async def teams_of(user_id: int, now: Optional[datetime] = None) -> list[dict[st
         return []
     cal = await calendar(now)
     days = sorted({s.nba_date for s in cal.slots()})
+    prefs, team_prefs = await levels.prefs_of(user_id, [t for t, _ in pairs])
     out = []
     for team_id, row in pairs:
         taken = await _taken(team_id, days) if row is not None else set()
-        out.append(team_view(team_id, row, next_slot(cal, row, taken, now)))
+        out.append(team_view(team_id, row, next_slot(cal, row, taken, now), prefs, team_prefs.get(team_id)))
     return out
 
 
-def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot]) -> dict[str, Any]:
+def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot], prefs: Any = None,
+              team_pref: Any = None) -> dict[str, Any]:
+    """The team's switch, its next check-in and its automations table (`prefs` and `team_pref` are the
+    account's notification preferences and the team's override, which hold lineup's levels below AI)."""
     return {
         "team_id": team_id,
         "on": row is not None and row.paused_at is None,
@@ -642,6 +671,9 @@ def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot]) 
         "paused_reason": row.paused_reason if row is not None else None,
         "next": None if upcoming is None else {"kind": upcoming.kind, "date": upcoming.nba_date,
                                                "due_at": upcoming.due_at},
+        "autopilot": autonomy.switch_on(row),
+        "rows": autonomy.table(row, lineup_below_ai=levels.lineup_below_ai(prefs, team_pref),
+                               lineup_email=levels.lineup_email(prefs)),
     }
 
 
@@ -665,6 +697,7 @@ def summary_of(row: AiCheckin, tally: Optional[dict[str, int]] = None) -> dict[s
         "changes": t.get("changes", 0),
         "agree": t.get("agree", 0),
         "disagree": t.get("disagree", 0),
+        "sent": t.get("sent", 0),
     }
 
 

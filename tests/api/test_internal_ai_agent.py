@@ -211,3 +211,80 @@ def test_a_turn_s_chip_is_a_block_in_the_conversation(authed_client, user, invit
     assert parts[0]["block"]["type"] == "proposal" and parts[0]["block"]["id"] == "p1"
     assert parts[0]["block"]["state"] == "sent" and parts[0]["block"]["drop"]["espn_id"] == 4594268
     assert parts[1] == {"kind": "text", "text": "Kawhi for Edwards."}
+
+
+@pytest.mark.api
+def test_autopilot_takes_the_check_ins_the_switch_and_the_levels(authed_client, user, invited, monkeypatch):
+    from schemas.ai import AiAutopilotTeam
+    from services.ai import levels
+    seen = []
+
+    async def set_autopilot(user_id, team_id, change):
+        seen.append((user_id, team_id, change))
+        if change.levels.get("late_scratch") == "ai":
+            raise levels.LevelUnavailable(message="Late scratches and news can't be ai: Comes with event check-ins")
+        return AiAutopilotTeam(team_id=team_id, on=change.checkins is not False, autopilot=bool(change.autopilot),
+                               rows=[{"row": "lanes", "label": "Stream lanes", "level": "ai", "note": None,
+                                      "options": [{"level": "ai", "available": True, "reason": None}]}])
+    monkeypatch.setattr(AgentService, "set_autopilot", staticmethod(set_autopilot))
+
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"on": False})           # step 3's name for it
+    assert r.status_code == 200 and r.json()["message"] == "Check-ins paused"
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"checkins": True})
+    assert r.status_code == 200 and r.json()["message"] == "Check-ins on"
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"autopilot": True})
+    assert r.status_code == 200 and r.json()["message"] == "Autopilot on" and r.json()["data"]["autopilot"] is True
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"levels": {"lanes": "ai", "lineup": "notify"}})
+    assert r.status_code == 200 and r.json()["message"] == "Automations updated"
+    assert r.json()["data"]["rows"][0]["row"] == "lanes"
+    r = authed_client.put(f"{BASE}/autopilot/21", json={"levels": {"late_scratch": "ai"}})
+    assert (r.status_code, r.json()["error_code"]) == (409, "AI_LEVEL_UNAVAILABLE")
+    assert "Comes with event check-ins" in r.json()["message"]
+    assert seen == [(42, 21, levels.Change(checkins=False)), (42, 21, levels.Change(checkins=True)),
+                    (42, 21, levels.Change(autopilot=True)),
+                    (42, 21, levels.Change(levels={"lanes": "ai", "lineup": "notify"})),
+                    (42, 21, levels.Change(levels={"late_scratch": "ai"}))]
+    # Nothing to change, on and checkins disagreeing, an unknown level or automation never reach the service
+    for body in ({}, {"levels": {}}, {"on": True, "checkins": False}, {"levels": {"lanes": "max"}},
+                 {"levels": {"trades": "ai"}}, {"mode": "act"}):
+        assert authed_client.put(f"{BASE}/autopilot/21", json=body).status_code == 422
+    assert len(seen) == 5
+
+
+def test_dime_s_moves(authed_client, user, invited, monkeypatch):
+    from services.ai import acting
+    asked = []
+
+    async def list_actions(user_id, team_id=None, limit=100):
+        asked.append((user_id, team_id, limit))
+        return [{"action_id": 70, "team_id": 21, "row": "daily_actions", "kind": "transaction", "date": "2026-11-10",
+                 "adds": 1, "outcome": "sent", "rule": None, "message": "Sent by Dime: Added Kawhi Leonard",
+                 "summary": "Add Kawhi", "checkin_id": 9, "conversation_id": 31, "checkin_kind": "morning",
+                 "proposal_id": 5, "at": "2026-11-10T14:00:00+00:00"}]
+    monkeypatch.setattr(acting, "list_actions", list_actions)
+    r = authed_client.get(f"{BASE}/actions?limit=20")
+    assert r.status_code == 200 and r.json()["data"][0]["row"] == "daily_actions"
+    assert r.json()["data"][0]["conversation_id"] == 31 and asked == [(42, None, 20)]
+    assert authed_client.get(f"{BASE}/actions?limit=0").status_code == 422
+
+
+def test_the_account_s_ai_features(authed_client, user, invited, monkeypatch):
+    from services.ai import ai_settings
+    store = {"features": ai_settings.AiSettings()}
+
+    async def get(user_id):
+        return store["features"]
+
+    async def update(user_id, *, memory=None, draft_rooms=None, now=None):
+        f = store["features"]
+        store["features"] = ai_settings.AiSettings(memory=f.memory if memory is None else memory,
+                                                   draft_rooms=f.draft_rooms if draft_rooms is None else draft_rooms)
+        return store["features"]
+    monkeypatch.setattr(ai_settings, "get", get)
+    monkeypatch.setattr(ai_settings, "update", update)
+
+    r = authed_client.get(f"{BASE}/settings")
+    assert r.status_code == 200 and r.json()["data"] == {"memory": True, "draft_rooms": True}
+    r = authed_client.put(f"{BASE}/settings", json={"memory": False})
+    assert r.status_code == 200 and r.json()["data"] == {"memory": False, "draft_rooms": True}
+    assert authed_client.put(f"{BASE}/settings", json={}).status_code == 422
