@@ -1012,11 +1012,12 @@ def recap_of(recap: Any, *, league_team_ids: tuple[int, ...] = ()) -> dict[str, 
     seats = []
     for seat in recap.seats or []:
         mine = by_slot.get(seat.slot, [])
-        gaps = [p.surplus_market for p in mine if p.surplus_market is not None]
-        reaches = sorted((p for p in mine if p.surplus_market is not None and p.surplus_market <= -REACH_PICKS),
-                         key=lambda p: p.surplus_market)
-        steals = sorted((p for p in mine if p.surplus_market is not None and p.surplus_market >= REACH_PICKS),
-                        key=lambda p: -p.surplus_market)
+        # How many picks ahead of ESPN's ADP each pick was made (negative: after it), from the pick
+        # and the ADP themselves
+        ahead = [(p, p.adp - p.overall_pick) for p in mine if p.adp is not None]
+        gaps = [gap for _, gap in ahead]
+        reaches = [p for p, gap in sorted(ahead, key=lambda x: -x[1]) if gap >= REACH_PICKS]
+        steals = [p for p, gap in sorted(ahead, key=lambda x: x[1]) if gap <= -REACH_PICKS]
         entry: dict[str, Any] = {
             "slot": seat.slot,
             "league_team_id": seat.espn_team_id if seat.espn_team_id is not None else (
@@ -1027,7 +1028,7 @@ def recap_of(recap: Any, *, league_team_ids: tuple[int, ...] = ()) -> dict[str, 
             "place": seat.position,
             "value_over_slot": _r(seat.value_over_slot),
             # Positive: its players went that many picks ahead of ESPN's ADP on average
-            "reach": _r(-sum(gaps) / len(gaps)) if gaps else None,
+            "reach": _r(sum(gaps) / len(gaps)) if gaps else None,
             "reaches": [named(p) for p in reaches[:2]],
             "steals": [named(p) for p in steals[:2]],
         }

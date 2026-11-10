@@ -211,14 +211,23 @@ class TestRecap:
     def test_each_seat_says_how_far_it_reached_ahead_of_adp(self):
         out = draft.recap_of(self._recap(), league_team_ids=(11, 12, 13, 14))
         by = {s["slot"]: s for s in out["seats"]}
-        # Seat 2 took ADP 15 at 2 (a steal of 13) and ADP 2 at 7 (a reach of 5): it waited 4 on average
-        assert by[2]["reach"] == -4.0 and by[2]["steals"] == [{"pick": 2, "name": "P2", "adp": 15.0}]
-        assert by[2]["reaches"] == [] and by[2]["league_team_id"] == 12
-        # Seat 4 took ADP 30 at 5: a steal, and nothing ahead of ADP
-        assert by[4]["steals"][0]["pick"] == 5 and by[4]["reach"] == -12.5
+        # Seat 2 took ADP 15 at 2 (13 picks ahead of ADP: a reach) and ADP 2 at 7 (5 after it, short of
+        # a steal): it went 4 ahead on average
+        assert by[2]["reach"] == 4.0 and by[2]["reaches"] == [{"pick": 2, "name": "P2", "adp": 15.0}]
+        assert by[2]["steals"] == [] and by[2]["league_team_id"] == 12
+        # Seat 4 took ADP 30 at 5: a reach, and nothing after ADP
+        assert by[4]["reaches"][0]["pick"] == 5 and by[4]["steals"] == [] and by[4]["reach"] == 12.5
         # A pick with no ADP is left out of the average, not counted as on time
         assert by[1]["reach"] == 0.0
         assert by[3]["mine"] is True and by[3]["grade"] == "C" and by[3]["place"] == 3.0
+
+    def test_a_player_who_fell_well_past_his_adp_is_a_steal(self):
+        recap = self._recap()
+        recap.data.append(_pick(14, 2, 2.0))     # ADP 2 still there at 14: 12 picks after ADP
+        seat = {s["slot"]: s for s in draft.recap_of(recap)["seats"]}[2]
+        assert seat["steals"] == [{"pick": 14, "name": "P14", "adp": 2.0}]
+        assert [p["pick"] for p in seat["reaches"]] == [2]
+        assert seat["reach"] == -1.3             # (13 - 5 - 12) / 3: it waited a pick on average
 
     def test_category_leagues_name_each_seat_s_strongest_and_weakest(self):
         seat = draft.recap_of(self._recap())["seats"][0]
