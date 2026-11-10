@@ -424,7 +424,7 @@ class NotificationService:
                 heading += UNVERIFIED_SUFFIX
             lines.append(heading)
         else:
-            lines.append("Sent to ESPN, not confirmed:" if uncertain else "Suggested swap:")
+            lines.append("Tried on ESPN, not confirmed:" if uncertain else "Suggested swap:")
         lines.extend(NotificationService._render_moves(result.get("moves") or []))
         lines.append("")
         if applied:
@@ -453,7 +453,7 @@ class NotificationService:
         if outcome == "planned" and reason.startswith("can_write:"):
             return "Court Vision didn't make it: ESPN isn't taking lineup changes for this team right now."
         if outcome == "failed" and reason == "write_uncertain":
-            return "Court Vision sent it to ESPN but couldn't confirm it went through: check your lineup on ESPN."
+            return "Court Vision tried to make it but couldn't confirm whether ESPN took it: check your lineup on ESPN."
         if outcome in ("rejected", "failed"):
             return "Court Vision tried to make it, but ESPN didn't take it" + (f" ({reason})." if reason else ".")
         return None
