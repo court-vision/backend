@@ -1,18 +1,27 @@
 """
-usr.autopilot, usr.ai_checkins and usr.ai_decisions -- Dime's check-ins in shadow
-(migration 0042, the Dime autopilot plan, step 3; services/ai/checkins.py).
+usr.autopilot, usr.ai_checkins, usr.ai_decisions, usr.autopilot_actions and
+usr.autopilot_events -- Dime's check-ins (migration 0042, the Dime autopilot plan,
+step 3; services/ai/checkins.py), what it does on its own (migration 0044, step 5;
+services/ai/acting.py) and the events that start a check-in (migration 0045, step 6;
+services/ai/events.py).
 
-A team Dime runs on has an `Autopilot` row (and an entry in AUTOPILOT_TEAM_IDS).
-Each check-in Dime starts itself is an `AiCheckin`, claimed by its insert and
-settled with its turn; each call the check-in makes, holds included, is an
-`AiDecision`, which the user marks agree or disagree. Backend-only.
+A team Dime runs on has an `Autopilot` row (and an entry in AUTOPILOT_TEAM_IDS),
+which also says which automations Dime does itself there (`ai_rows`, and the
+`autopilot` switch; services/ai/autonomy.py). Each check-in Dime starts itself is an `AiCheckin`,
+claimed by its insert and settled with its turn; each call the check-in makes,
+holds included, is an `AiDecision`, which the user marks agree or disagree; a
+change Dime was allowed to act on is an `AutopilotAction`, with the policy's
+verdict and the write's outcome; a verdict change or news item about a rostered player
+is an `AutopilotEvent`, pending until a check-in takes it. Backend-only.
 """
 
 from datetime import datetime, timezone
 
 from peewee import (
-    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, TextField,
+    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, IntegerField,
+    SmallIntegerField, TextField,
 )
+from playhouse.postgres_ext import ArrayField, BinaryJSONField
 
 from db.base import BaseModel
 from db.models.ai_conversations import AiConversation, AiProposal, AiTurn
@@ -25,8 +34,11 @@ def _now() -> datetime:
 
 
 class Autopilot(BaseModel):
-    """One team Dime runs check-ins on. `paused_at` is the Pause switch; `active_since` is
-    when it last started or resumed. How Dime may act is added with the acting step."""
+    """One team Dime runs check-ins on. `paused_at` is the Pause switch (check-ins off);
+    `active_since` is when it last started or resumed. `ai_rows` are the automations at AI
+    (lineup, daily_actions, lanes, late_scratch); `autopilot` puts every one that offers AI
+    there while it is on, and `restore` is what it changed coming on, put back going off
+    (services/ai/autonomy.py reads them)."""
 
     team_id = ForeignKeyField(Team, column_name="team_id", primary_key=True, on_delete="CASCADE")
     user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
@@ -36,6 +48,9 @@ class Autopilot(BaseModel):
     paused_at = DateTimeField(null=True)
     paused_by = TextField(null=True)          # user | system
     paused_reason = TextField(null=True)
+    ai_rows = ArrayField(TextField, default=list)
+    autopilot = BooleanField(default=False)
+    restore = BinaryJSONField(null=True)
 
     class Meta:
         table_name = "autopilot"
@@ -88,4 +103,78 @@ class AiDecision(BaseModel):
 
     class Meta:
         table_name = "ai_decisions"
+        schema = "usr"
+
+
+class AutopilotAction(BaseModel):
+    """A change a check-in committed on an automation at AI: `capability` the automation it counts
+    under (lineup | daily_actions | lanes | late_scratch), the proposal's `kind`, the day it is for, how many players it adds,
+    and what became of it: `outcome` sent | blocked (a rule; `rule` names it) | refused (the route
+    or ESPN) | failed. `audit_id` is the usr.roster_moves row of an ESPN write."""
+
+    id = BigAutoField(primary_key=True)
+    team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    checkin_id = ForeignKeyField(AiCheckin, column_name="checkin_id", null=True, on_delete="SET NULL")
+    decision_id = ForeignKeyField(AiDecision, column_name="decision_id", null=True, on_delete="SET NULL")
+    proposal_id = ForeignKeyField(AiProposal, column_name="proposal_id", null=True, on_delete="SET NULL")
+    capability = TextField()
+    kind = TextField()
+    nba_date = DateField()
+    adds = SmallIntegerField(default=0)
+    outcome = TextField()
+    rule = TextField(null=True)
+    message = TextField()
+    audit_id = IntegerField(null=True)
+    created_at = DateTimeField(default=_now)
+
+    class Meta:
+        table_name = "autopilot_actions"
+        schema = "usr"
+
+
+class AiSettings(BaseModel):
+    """The user's AI features, for the whole account (services/ai/ai_settings.py): `memory` and
+    `draft_rooms`. No row reads as both on."""
+
+    user_id = ForeignKeyField(User, column_name="user_id", primary_key=True, on_delete="CASCADE")
+    memory = BooleanField(default=True)
+    draft_rooms = BooleanField(default=True)
+    created_at = DateTimeField(default=_now)
+    updated_at = DateTimeField(default=_now)
+
+    class Meta:
+        table_name = "ai_settings"
+        schema = "usr"
+
+
+class AutopilotEvent(BaseModel):
+    """Something that came in about a player on a team Dime runs: `source` availability (a
+    verdict change for a game not yet tipped: `verdict`, `previous_verdict`, `changed_at`) or
+    news (`news_item_id`, no FK: see 0045). `summary` is the server's line about it. `state`
+    pending until a check-in takes it (`checkin_id`), or dropped with the `reason`."""
+
+    id = BigAutoField(primary_key=True)
+    team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    source = TextField()
+    player_id = IntegerField()                # nba.players.id
+    nba_date = DateField()
+    game_date = DateField(null=True)
+    game_id = TextField(null=True)
+    tip_at = DateTimeField(null=True)
+    verdict = TextField(null=True)
+    previous_verdict = TextField(null=True)
+    changed_at = DateTimeField(null=True)
+    news_item_id = BigIntegerField(null=True)
+    news_kind = TextField(null=True)
+    summary = TextField()
+    received_at = DateTimeField(default=_now)
+    state = TextField(default="pending")      # pending | taken | dropped
+    reason = TextField(null=True)
+    checkin_id = ForeignKeyField(AiCheckin, column_name="checkin_id", null=True, on_delete="SET NULL")
+    taken_at = DateTimeField(null=True)
+
+    class Meta:
+        table_name = "autopilot_events"
         schema = "usr"

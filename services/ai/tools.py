@@ -51,7 +51,10 @@ from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
-from services.ai import app_map, automations, decisions, league, memory
+from services import news_service
+from services.ai import (
+    app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news, steering as ai_steering,
+)
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -184,6 +187,9 @@ class ToolContext:
     # The check-in this turn is (services/ai/checkins.py): its proposals are stored in shadow,
     # and only it may log decisions
     checkin_id: Optional[int] = None
+    # The draft note this turn writes (services/ai/draft.py): only it may set the room's plan or
+    # make the user's pick in a mock seat
+    draft_note_id: Optional[int] = None
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -232,7 +238,14 @@ TOOLS: list[dict[str, Any]] = [
             "A player's current injury report: status, injury, expected return, "
             "report_date, and report_age_days (never more than 7). injury=null means "
             "Court Vision has no current report, which is not proof of health: say "
-            "there is no current injury information rather than calling the player healthy."
+            "there is no current injury information rather than calling the player healthy. "
+            "availability is the verdict for his game today, or his next one, resolved from "
+            "the NBA box score, ESPN's injury list and ESPN fantasy every few minutes on game "
+            "days: game_date, verdict (out, doubtful, questionable, probable, available), "
+            "final (the box score has spoken), decided_by (the source that won), reason, "
+            "detail (the source's words), expected_return, previous_verdict and changed_at. "
+            "It is newer than injury when they differ. latest_news is his newest news item "
+            "of the last three days (get_player_news for more)."
         ),
         "input_schema": {
             "type": "object",
@@ -297,10 +310,19 @@ async def _get_player_status(args: PlayerStatusInput, ctx: ToolContext | None) -
     resp = await PlayerService.get_player_status(args.player_id)
     # The service returns only a report from the last seven days, with its
     # age already on it; an older one comes back as no report at all.
-    return {
+    out: dict[str, Any] = {
         "player_id": args.player_id,
         "injury": resp.data.model_dump() if resp.data else None,
     }
+    # The availability verdict and the newest news item (the news pipeline plan § 7). A failed read
+    # leaves them out rather than failing the report the player had before them.
+    try:
+        out["availability"] = await news_service.verdict_for(args.player_id, nba_date_et())
+        latest = await news_service.latest_item(args.player_id)
+        out["latest_news"] = latest.view(body_chars=news_service.BODY_CHARS) if latest is not None else None
+    except Exception:
+        get_logger().exception("ai_player_status_news_failed", player_id=args.player_id)
+    return out
 
 
 def points_scoring(scoring: Optional[str], league: Any) -> Optional[str]:
@@ -766,6 +788,7 @@ async def _get_scheduled_pickups(args: TeamInput, ctx: ToolContext | None) -> di
 
     def row(p: Any) -> dict[str, Any]:
         return {
+            "pickup_id": p.id,
             "date": p.nba_date,
             "status": getattr(p.status, "value", p.status),
             "add": {"player_id": p.add.nba_player_id, "name": p.add.name, "team": p.add.team},
@@ -1286,6 +1309,19 @@ async def _get_league(args: league.GetLeagueInput, ctx: ToolContext | None) -> d
     return await league.get_league(team, await load_owned_league_info(team), args)
 
 
+async def _get_player_news(args: ai_news.PlayerNewsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    return await ai_news.get_player_news(args)
+
+
+async def _get_news(args: ai_news.NewsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    roster: Optional[frozenset[int]] = None
+    if args.team_id is not None:
+        team = await _owned_team(ctx, args.team_id)
+        from services.ai import events
+        roster = await events.roster_ids(team.team_id, ctx.user_id)
+    return await ai_news.get_news(args, roster)
+
+
 async def _get_league_activity(args: league.LeagueActivityInput, ctx: ToolContext | None) -> dict[str, Any]:
     return await league.get_league_activity(await _owned_team(ctx, args.team_id), args)
 
@@ -1323,21 +1359,81 @@ async def _log_decision(args: decisions.LogDecisionInput, ctx: ToolContext | Non
     return await decisions.log_decision(ctx.user_id, ctx.checkin_id, args)
 
 
+# Dime's steering (the Dime autopilot plan, step 4): holds, lanes and pickups, each a chip the
+# user applies. Offered only while steering is on (agent.py), so the prefix is unchanged when off.
+
+def _chip_caller(ctx: ToolContext | None, what: str) -> ToolContext:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if ctx.conversation_id is None:
+        raise AppError("AI_NO_CONVERSATION", f"{what} can only be proposed inside a conversation")
+    return ctx
+
+
+async def _steer(args: ai_steering.SteerInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A hold")
+    team, league_info = await _owned(ctx, args.team_id)
+    return await ai_steering.steer(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                                   shadow=ctx.checkin_id is not None)
+
+
+async def _set_lane(args: ai_steering.SetLaneInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A lane change")
+    team, league_info = await _owned(ctx, args.team_id)
+    return await ai_steering.set_lane(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                                      shadow=ctx.checkin_id is not None)
+
+
+async def _cancel_pickup(args: ai_steering.CancelPickupInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A cancelled pickup")
+    team, _ = await _owned(ctx, args.team_id)
+    return await ai_steering.cancel_pickup(ctx.user_id, ctx.conversation_id, team, args,
+                                           shadow=ctx.checkin_id is not None)
+
+
+# Dime in the Draft desk (the Dime autopilot plan, step 7): a room's recap (a read, in every
+# tool list), and the plan and the mock seat's pick, which only a draft note may make.
+
+async def _get_draft_recap(args: ai_draft.DraftRecapInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.get_draft_recap(ctx.user_id, args)
+
+
+async def _set_draft_plan(args: ai_draft.SetDraftPlanInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.set_draft_plan(ctx.user_id, ctx.conversation_id, ctx.draft_note_id, args)
+
+
+async def _draft_pick(args: ai_draft.DraftPickInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.draft_pick(ctx.user_id, ctx.draft_note_id, args)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
 # memory, then the move ledger, then the league tools, then the automations and
-# the check-ins' decisions. The order is part of every request's cached prefix:
-# append, never reorder.
+# the check-ins' decisions, then the news, then a draft room's recap. The order is
+# part of every request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
-    *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS,
+    *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS, *ai_news.NEWS_TOOLS,
+    ai_draft.GET_DRAFT_RECAP,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
-CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.LOG_DECISION]
+CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.CHECKIN_LOG_DECISION]
 CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONLY_TOOLS)
+# Dime's steering tools, after all of those, only while DIME_STEERING_ENABLED (agent.py)
+STEERING_TOOLS: list[dict[str, Any]] = ai_steering.STEERING_TOOLS
+STEERING_TOOL_NAMES = ai_steering.STEERING_TOOL_NAMES
+# A draft note's conversation gets these after the agent's (services/ai/draft.py)
+DRAFT_ONLY_TOOLS: list[dict[str, Any]] = ai_draft.DRAFT_ONLY_TOOLS
+DRAFT_TOOL_NAMES = AGENT_TOOL_NAMES | ai_draft.DRAFT_ONLY_TOOL_NAMES
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
 ROUTER_TOOLS: list[dict[str, Any]] = [TOOLS[0], GET_MY_TEAMS]
@@ -1384,9 +1480,17 @@ _REGISTRY: dict[str, _Tool] = {
     automations.GET_AUTOMATIONS_NAME: _Tool(automations.GetAutomationsInput, _get_automations),
     decisions.GET_DECISIONS_NAME: _Tool(decisions.GetDecisionsInput, _get_decisions),
     decisions.LOG_DECISION_NAME: _Tool(decisions.LogDecisionInput, _log_decision),
+    ai_steering.STEER_NAME: _Tool(ai_steering.SteerInput, _steer),
+    ai_steering.SET_LANE_NAME: _Tool(ai_steering.SetLaneInput, _set_lane),
+    ai_steering.CANCEL_PICKUP_NAME: _Tool(ai_steering.CancelPickupInput, _cancel_pickup),
+    ai_news.GET_PLAYER_NEWS_NAME: _Tool(ai_news.PlayerNewsInput, _get_player_news),
+    ai_news.GET_NEWS_NAME: _Tool(ai_news.NewsInput, _get_news),
+    ai_draft.GET_DRAFT_RECAP_NAME: _Tool(ai_draft.DraftRecapInput, _get_draft_recap),
+    ai_draft.SET_DRAFT_PLAN_NAME: _Tool(ai_draft.SetDraftPlanInput, _set_draft_plan),
+    ai_draft.DRAFT_PICK_NAME: _Tool(ai_draft.DraftPickInput, _draft_pick),
 }
-assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES == set(_REGISTRY), \
-    "every defined tool needs a handler, and vice versa"
+assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES | DRAFT_TOOL_NAMES \
+    == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
 
 
 @dataclass(frozen=True)

@@ -29,11 +29,11 @@ from services.providers.blocking import start_blocking_provider_runtime, stop_bl
 from services.schedule_service import assert_calendar_available
 from api.v1.internal import (users, teams, lineups, yahoo, matchups, streamers, notifications,
                              api_keys, rankings as internal_rankings, sqlmate as internal_sqlmate,
-                             drafts, lineup_editor, jobs, team_streamers, roster_transactions,
-                             scheduled_pickups, stream_lanes,
+                             drafts, dime_draft, lineup_editor, jobs, team_streamers, roster_transactions,
+                             scheduled_pickups, stream_lanes, holds,
                              connections, ai, lineup_snapshots, app_map, move_outcomes)
 from api.v1.public import (rankings, players, games, teams as public_teams, ownership, analytics,
-                           schedule, live as live_public, playoffs, sqlmate as public_sqlmate)
+                           schedule, live as live_public, playoffs, sqlmate as public_sqlmate, news as public_news)
 
 # Sentry must be initialised before the app exists so its ASGI integration wraps it.
 # No SENTRY_DSN (dev, tests) -> nothing happens.
@@ -157,6 +157,7 @@ api_v1_public.include_router(schedule.router)
 api_v1_public.include_router(live_public.router)
 api_v1_public.include_router(playoffs.router)
 api_v1_public.include_router(public_sqlmate.router)
+api_v1_public.include_router(public_news.router)
 
 app.include_router(api_v1_public)
 
@@ -173,6 +174,8 @@ api_v1_internal.include_router(api_keys.router)
 api_v1_internal.include_router(internal_rankings.router)
 api_v1_internal.include_router(internal_sqlmate.router)
 api_v1_internal.include_router(drafts.router)
+api_v1_internal.include_router(dime_draft.router)
+api_v1_internal.include_router(dime_draft.desk_router)
 api_v1_internal.include_router(lineup_editor.router)
 api_v1_internal.include_router(lineup_snapshots.router)
 api_v1_internal.include_router(move_outcomes.router)
@@ -181,6 +184,7 @@ api_v1_internal.include_router(team_streamers.router)
 api_v1_internal.include_router(roster_transactions.router)
 api_v1_internal.include_router(scheduled_pickups.router)
 api_v1_internal.include_router(stream_lanes.router)
+api_v1_internal.include_router(holds.router)
 api_v1_internal.include_router(connections.router)
 api_v1_internal.include_router(ai.router)
 api_v1_internal.include_router(app_map.router)

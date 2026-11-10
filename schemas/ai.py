@@ -10,7 +10,7 @@ the `ai_request` log line.
 from datetime import date as date_type, datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from schemas.app_map import BUILD_PATTERN
 from schemas.common import ApiModel, BaseResponse
@@ -247,7 +247,9 @@ class AiChart(ApiModel):
 
 # shadow: made in one of Dime's check-ins (services/ai/checkins.py), checked but never sendable
 AiProposalState = Literal["proposed", "sent", "dismissed", "expired", "shadow"]
-AiProposalKind = Literal["transaction", "scheduled", "lineup"]
+# steer, lane, cancel_pickup: Dime's steering chips (services/ai/steering.py), applied through a
+# Week desk route with `proposal_id`, never staged in the tray
+AiProposalKind = Literal["transaction", "scheduled", "lineup", "steer", "lane", "cancel_pickup"]
 
 
 class AiProposalPlayer(ApiModel):
@@ -273,13 +275,78 @@ class AiProposalMove(ApiModel):
     note: Optional[str] = Field(None, description="The planner's note: his game, 'no game today', 'OUT'")
 
 
+class AiHoldChange(ApiModel):
+    """One hold a steer chip sets (usr.team_holds once applied)."""
+
+    kind: Literal["keep", "block", "override", "pin"]
+    player: AiProposalPlayer
+    share: Optional[float] = Field(None, description="override only: the share of his usual value (0 = he misses)")
+    starts_on: date_type
+    ends_on: date_type
+    effect: str = Field(..., description="What it does, in a line")
+
+
+class AiHoldCleared(AiHoldChange):
+    """A live hold a steer chip clears."""
+
+    hold_id: int
+    reason: str = Field(..., description="Why it was set")
+
+
+class AiSteerAction(ApiModel):
+    """A steer chip: applied with `POST /teams/{team_id}/holds` and its proposal_id."""
+
+    holds: list[AiHoldChange] = []
+    clear: list[AiHoldCleared] = []
+
+
+class AiLaneDay(ApiModel):
+    date: date_type
+    value: float
+    switch: bool = False
+    player: AiProposalPlayer
+
+
+class AiLaneAction(ApiModel):
+    """A lane chip: `op` start (`POST /teams/{team_id}/stream-lanes` with `holder.espn_id` as player_id),
+    pause or resume (`PATCH .../stream-lanes/{lane_id}`), stop (`DELETE .../stream-lanes/{lane_id}`),
+    each with its proposal_id."""
+
+    op: Literal["start", "pause", "resume", "stop"]
+    lane_id: Optional[int] = Field(None, description="The lane; none for a start")
+    holder: AiProposalPlayer = Field(..., description="Who holds the spot (a start: whose spot it streams)")
+    status: Optional[str] = Field(None, description="pause, resume, stop: the lane's status when proposed")
+    end_date: date_type
+    gain: Optional[float] = Field(None, description="start: the projected gain over holding")
+    adds: Optional[int] = None
+    value: Optional[float] = None
+    hold_value: Optional[float] = None
+    adds_left: Optional[int] = None
+    first_decision_at: Optional[datetime] = None
+    days: list[AiLaneDay] = Field(default_factory=list, description="start: who would hold the spot each day")
+
+
+class AiCancelPickupAction(ApiModel):
+    """A cancel_pickup chip: applied with `DELETE /teams/{team_id}/pickups/{pickup_id}` and its proposal_id."""
+
+    pickup_id: int
+    date: date_type
+    add: AiProposalPlayer
+    drop: Optional[AiProposalPlayer] = None
+    lane_id: Optional[int] = Field(None, description="The stream lane that scheduled it, if one did")
+
+
 class AiProposalChip(ApiModel):
     """A move the agent proposed and the server checked: the chip the AI desk shows. Staged, it goes
     into the Week desk's tray (rendered in the AI desk) and is sent by its slider through the Week
     desk's own write with `proposal_id` on the request, which marks it sent: the roster transaction
     (`kind` transaction: `add` / `drop`, today), the scheduled pickup (`kind` scheduled: `add` / `drop`,
     a later day) or the lineup write (`kind` lineup: `moves`, one day's board, today's or a later
-    day's, written at once). Never executed from here."""
+    day's, written at once). Never executed from here.
+
+    Dime's steering chips (`kind` steer, lane, cancel_pickup) change no ESPN roster, so they are
+    never staged: the AI desk applies one with a button through the Week desk's own route for it
+    (`steer`, `lane` or `pickup` says which, and what it does), with `proposal_id`."""
 
     proposal_id: int
     state: AiProposalState = Field(..., description="proposed (can be staged), sent, dismissed, expired, or shadow "
@@ -301,6 +368,10 @@ class AiProposalChip(ApiModel):
     scoring: Optional[str] = Field(None, description="The league's scoring format the change is in")
     expires_at: datetime = Field(..., description="When the chip stops being stageable (the day's first tip, or its rollover)")
     sent_at: Optional[datetime] = None
+    # Dime's steering chips: what applying one does, under its kind (the rest above are empty)
+    steer: Optional[AiSteerAction] = None
+    lane: Optional[AiLaneAction] = None
+    pickup: Optional[AiCancelPickupAction] = None
 
 
 class AiProposal(AiProposalChip):
@@ -329,6 +400,22 @@ AiDecisionCall = Literal["hold", "change"]
 AiVerdict = Literal["agree", "disagree"]
 
 
+AiActionOutcome = Literal["sent", "blocked", "refused", "failed"]
+
+
+class AiDecisionAction(ApiModel):
+    """What Dime did about a change on its own, on automations at AI (the Dime autopilot plan, step 5;
+    usr.autopilot_actions). A blocked or refused move is left as a chip."""
+
+    outcome: AiActionOutcome = Field(..., description="sent (it went out) · blocked (a rule of the policy stopped it "
+                                                      "before anything was sent) · refused (the route or ESPN said "
+                                                      "no) · failed (ESPN unreachable, credentials, an error)")
+    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, cap_matchup, reserve, protected, "
+                                                  "churn, paused, writes_off, ...) or the error code")
+    message: str = Field(..., description="What happened, in a sentence")
+    at: Optional[datetime] = None
+
+
 class AiDecisionBlock(ApiModel):
     """One call a check-in made (usr.ai_decisions), holds included: shown in its conversation for the user
     to agree or disagree with. A change to the lineup or the roster names the shadow proposal behind it,
@@ -345,6 +432,8 @@ class AiDecisionBlock(ApiModel):
     reason: str
     proposal_id: Optional[int] = Field(None, description="The shadow proposal behind a change")
     verdict: Optional[AiVerdict] = Field(None, description="The user's call on it; null until they make one")
+    action: Optional[AiDecisionAction] = Field(None, description="What Dime did about it on its own, where its row "
+                                                                 "is at AI; null where the change is a review")
 
 
 AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock], Field(discriminator="type")]
@@ -376,17 +465,32 @@ class AiTurnView(ApiModel):
 
 # ---- Dime's check-ins (services/ai/checkins.py; the Dime autopilot plan, step 3) ----
 
-AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night"]
+AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night", "event"]
+# What the user can run from the AI desk: an event check-in starts only for its events
+AiCheckinRunKind = Literal["morning", "weekly", "pre_lock", "night"]
 AiCheckinState = Literal["running", "done", "failed", "missed", "skipped"]
 
 
+class AiCheckinEvent(ApiModel):
+    """Something that came in about a rostered player that this check-in was told about (the Dime
+    autopilot plan, step 6; services/ai/events.py)."""
+
+    source: Literal["availability", "news"]
+    player_id: int = Field(..., description="NBA player id")
+    summary: str = Field(..., description="The server's line about it, as the brief gave it")
+    received_at: datetime
+    verdict: Optional[str] = Field(None, description="availability: the new verdict (out, doubtful, available)")
+    news_id: Optional[int] = Field(None, description="news: the item's id")
+
+
 class AiCheckinSummary(ApiModel):
-    """One check-in: a turn Dime started itself, about one fantasy day, in shadow."""
+    """One check-in: a turn Dime started itself, about one fantasy day."""
 
     checkin_id: int
     team_id: int
     kind: AiCheckinKind = Field(..., description="morning, weekly (a matchup's first morning), pre_lock (before "
-                                                 "the first tip) or night (the next morning's follow-up)")
+                                                 "the first tip), night (the next morning's follow-up) or event "
+                                                 "(news about a rostered player)")
     date: date_type = Field(..., description="The fantasy day it is about")
     manual: bool = Field(..., description="Run from the AI desk rather than on the schedule")
     state: AiCheckinState
@@ -402,6 +506,10 @@ class AiCheckinSummary(ApiModel):
     changes: int = Field(..., description="Of those, the ones that would change an automation's plan or the roster")
     agree: int
     disagree: int
+    sent: int = Field(0, description="Moves it sent on its own (on automations at AI)")
+    events: list[AiCheckinEvent] = Field(default_factory=list,
+                                         description="What came in that it was told about: an event check-in's "
+                                                     "reason, or what a scheduled one picked up")
 
 
 class AiCheckinSlot(ApiModel):
@@ -410,16 +518,98 @@ class AiCheckinSlot(ApiModel):
     due_at: datetime
 
 
+AiLevel = Literal["off", "notify", "act", "ai"]
+AiAutomationName = Literal["lineup", "daily_actions", "lanes", "late_scratch", "checkins"]
+
+
+class AiLevelOption(ApiModel):
+    """One level of an automation: whether it can be picked, and why not."""
+
+    level: AiLevel
+    available: bool
+    reason: Optional[str] = Field(None, description="Why it can't be picked (not built yet, the account's "
+                                                    "lineup email is off, ...)")
+
+
+class AiAutomationRow(ApiModel):
+    """One automation on the team (services/ai/autonomy.py): off, notify (an email), act (Court Vision does
+    it, no AI) or ai (Dime does it)."""
+
+    row: AiAutomationName
+    label: str
+    level: AiLevel = Field(..., description="Its level now (at AI while the autopilot switch is on)")
+    options: list[AiLevelOption] = Field(..., description="Every level, in order off, notify, act, ai")
+    note: Optional[str] = Field(None, description="When the row does less than its level says (paused, "
+                                                  "acting off on the server, the lineup email off)")
+
+
 class AiAutopilotTeam(ApiModel):
-    """A team Dime may run check-ins on, and its switch."""
+    """A team Dime may run check-ins on: its check-ins, the autopilot switch and its automations table."""
 
     team_id: int
-    on: bool = Field(..., description="Check-ins run on the schedule")
+    on: bool = Field(..., description="Check-ins run on the schedule (the Check-ins row at AI)")
     active_since: Optional[datetime] = Field(None, description="When it was last switched on or resumed")
     paused_at: Optional[datetime] = None
     paused_by: Optional[Literal["user", "system"]] = None
     paused_reason: Optional[str] = None
     next: Optional[AiCheckinSlot] = Field(None, description="The next scheduled check-in, while on")
+    autopilot: bool = Field(False, description="The autopilot switch: every automation that offers AI is at AI")
+    rows: list[AiAutomationRow] = Field(default_factory=list, description="The automations table, in order")
+
+
+class AiActingPolicy(ApiModel):
+    """The rules every move Dime sends itself is held to (core/settings.py)."""
+
+    adds_per_day: int
+    adds_per_matchup: int
+    adds_reserve: int = Field(..., description="Adds this matchup Dime leaves for the user (injuries)")
+    protected_top: int = Field(..., description="Dime never drops one of the roster's top this many by value")
+    churn_hours: int = Field(..., description="Nor a player added this recently, unless he is out")
+    pause_refused: int = Field(..., description="It pauses itself after this many refused writes in a day")
+    pause_same_block: int = Field(..., description="...or this many blocks by the same rule in a day")
+
+
+class AiActing(ApiModel):
+    """Whether Dime can act on its own at all, and the policy it acts within."""
+
+    available: bool = Field(..., description="DIME_ACTING_ENABLED: off, an automation at AI only reviews")
+    steering: bool = Field(..., description="DIME_STEERING_ENABLED: Dime's steering chips exist at all")
+    writes: bool = Field(..., description="ROSTER_WRITES_ENABLED: writes to ESPN are on")
+    policy: AiActingPolicy
+
+
+class AiAutopilotActionItem(ApiModel):
+    """One move Dime handled on its own (usr.autopilot_actions), as the AI desk's Dime's moves lists it."""
+
+    action_id: int
+    team_id: int
+    row: Literal["lineup", "daily_actions", "lanes", "late_scratch"] = Field(
+        ..., description="The automation it counts under")
+    kind: str = Field(..., description="The chip's kind: transaction, scheduled, lineup, steer, lane, cancel_pickup")
+    date: date_type = Field(..., description="The fantasy day the move is for")
+    adds: int = Field(0, description="Players it adds (what Dime's caps count)")
+    outcome: AiActionOutcome
+    rule: Optional[str] = Field(None, description="The rule that held it back, or the error code")
+    message: str = Field(..., description="What happened, in a sentence")
+    summary: Optional[str] = Field(None, description="The call Dime logged for it; null once that is gone")
+    checkin_id: Optional[int] = None
+    conversation_id: Optional[int] = Field(None, description="The check-in's conversation, to open it")
+    checkin_kind: Optional[AiCheckinKind] = None
+    proposal_id: Optional[int] = Field(None, description="The chip; a held-back one can still be sent there")
+    at: Optional[datetime] = None
+
+
+class AiAutopilotActionsResp(BaseResponse):
+    """Response for GET /v1/internal/ai/actions."""
+
+    data: Optional[list[AiAutopilotActionItem]] = None
+
+
+class AiFeatures(ApiModel):
+    """The user's AI features, for the whole account (services/ai/ai_settings.py)."""
+
+    memory: bool = Field(True, description="Dime keeps notes and reads them back")
+    draft_rooms: bool = Field(True, description="Dime's side of the Draft desk")
 
 
 class AiCheckinsData(ApiModel):
@@ -427,6 +617,8 @@ class AiCheckinsData(ApiModel):
     checkins: list[AiCheckinSummary] = Field(..., description="Newest first")
     month_usd: float = Field(..., description="This month's check-in spend, every autopilot team")
     cap_usd: float = Field(..., description="The check-ins' monthly budget, apart from the AI desk's")
+    acting: Optional[AiActing] = None
+    features: Optional[AiFeatures] = Field(None, description="The account's AI features")
 
 
 class AiCheckinsResp(BaseResponse):
@@ -439,7 +631,7 @@ class AiCheckinRunReq(ApiModel):
     """Body for POST /v1/internal/ai/checkins: run one now."""
 
     team_id: int = Field(..., gt=0, le=INT4_MAX)
-    kind: Optional[AiCheckinKind] = Field(None, description="Default: by the clock against today's first tip")
+    kind: Optional[AiCheckinRunKind] = Field(None, description="Default: by the clock against today's first tip")
 
 
 class AiCheckinResp(BaseResponse):
@@ -447,13 +639,49 @@ class AiCheckinResp(BaseResponse):
 
 
 class AiAutopilotReq(ApiModel):
-    """Body for PUT /v1/internal/ai/autopilot/{team_id}."""
+    """Body for PUT /v1/internal/ai/autopilot/{team_id}: the check-ins, the autopilot switch or the levels;
+    what is left out stays as it is."""
 
-    on: bool = Field(..., description="true starts (or resumes) the team's check-ins, false pauses them")
+    checkins: Optional[bool] = Field(None, description="true starts (or resumes, a pause Dime made itself "
+                                                       "included) the team's check-ins, false pauses them")
+    on: Optional[bool] = Field(None, description="The same as checkins (step 3's name for it)")
+    autopilot: Optional[bool] = Field(None, description="The autopilot switch. On puts every automation that "
+                                                        "offers AI at AI and turns check-ins and the AI "
+                                                        "features on; off puts back what it changed")
+    levels: Optional[dict[AiAutomationName, AiLevel]] = Field(
+        None, description="Automations to set, to a level each offers. Changing one while autopilot is on "
+                          "turns autopilot off and keeps the rest at AI")
+
+    @model_validator(mode="after")
+    def _something(self) -> "AiAutopilotReq":
+        if self.on is not None and self.checkins is not None and self.on != self.checkins:
+            raise ValueError("on and checkins disagree")
+        if self.on is None and self.checkins is None and self.autopilot is None and not self.levels:
+            raise ValueError("send checkins, autopilot or levels")
+        return self
 
 
 class AiAutopilotResp(BaseResponse):
     data: Optional[AiAutopilotTeam] = None
+
+
+class AiSettingsReq(ApiModel):
+    """Body for PUT /v1/internal/ai/settings: the features to change; what is left out stays as it is."""
+
+    memory: Optional[bool] = None
+    draft_rooms: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _something(self) -> "AiSettingsReq":
+        if self.memory is None and self.draft_rooms is None:
+            raise ValueError("send memory or draft_rooms")
+        return self
+
+
+class AiSettingsResp(BaseResponse):
+    """Response for GET and PUT /v1/internal/ai/settings."""
+
+    data: Optional[AiFeatures] = None
 
 
 class AiDecisionVerdictReq(ApiModel):
@@ -475,7 +703,8 @@ class AiConversationSummary(ApiModel):
     id: int
     title: Optional[str] = Field(None, description="The first message, shortened; null until one is sent")
     team_id: Optional[int] = None
-    kind: Literal["chat", "checkin"] = Field("chat", description="chat (the user's), or a check-in's conversation")
+    kind: Literal["chat", "checkin", "draft"] = Field(
+        "chat", description="chat (the user's), a check-in's conversation, or one of Dime's notes in a draft room")
     created_at: datetime
     updated_at: datetime
     turns: int

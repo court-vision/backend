@@ -62,11 +62,15 @@ class StreamLanePlanReq(ApiModel):
 
 class StreamLaneStartReq(StreamLanePlanReq):
     notify: LaneNotify = "email"                 # desk: the lane never emails
+    # Dime's lane chip being applied (usr.ai_proposals, kind lane, op start on this player): checked,
+    # its reason kept on the started event, and marked sent
+    proposal_id: Optional[int] = Field(None, gt=0)
 
 
 class StreamLaneUpdateReq(ApiModel):
     status: Optional[Literal["active", "paused"]] = None   # pause, or resume
     notify: Optional[LaneNotify] = None
+    proposal_id: Optional[int] = Field(None, gt=0)          # Dime's pause or resume chip on this lane
 
 
 # ------------------------------- responses ------------------------------- #

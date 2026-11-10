@@ -33,7 +33,8 @@ from services.public_market_service import PublicMarketService
 # The tools are a cached prefix: each later step appends after the app map's find_in_app
 _APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
 _AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes",
-              "get_league", "get_league_activity", "get_draft_board", "get_automations", "get_decisions"]
+              "get_league", "get_league_activity", "get_draft_board", "get_automations", "get_decisions",
+              "get_player_news", "get_news", "get_draft_recap"]
 
 
 def _run(name, raw):
@@ -53,7 +54,7 @@ def _stats_resp(message="Player stats fetched successfully"):
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
         defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
-                                       *tools.CHECKIN_ONLY_TOOLS]}
+                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS, *tools.DRAFT_ONLY_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
@@ -171,6 +172,15 @@ class TestGetPlayerStats:
 
 @pytest.mark.unit
 class TestGetPlayerStatus:
+    @pytest.fixture(autouse=True)
+    def no_news(self, monkeypatch):
+        from services import news_service
+
+        async def none(*args, **kwargs):
+            return None
+        monkeypatch.setattr(news_service, "verdict_for", none)
+        monkeypatch.setattr(news_service, "latest_item", none)
+
     def test_no_current_report_is_null_not_healthy(self, monkeypatch):
         """The service answers None for last April's report in September, as for no report at all."""
         async def fake(player_id):
@@ -179,7 +189,7 @@ class TestGetPlayerStatus:
 
         body = json.loads(_run("get_player_status", {"player_id": 1630578}).content)
 
-        assert body == {"player_id": 1630578, "injury": None}
+        assert body == {"player_id": 1630578, "injury": None, "availability": None, "latest_news": None}
 
     def test_a_current_report_keeps_its_date_and_age(self, monkeypatch):
         async def fake(player_id):

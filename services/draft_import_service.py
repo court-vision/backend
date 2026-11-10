@@ -24,7 +24,7 @@ from db.base import db, db_operation
 from db.models.drafts import DraftPick, DraftSession
 from schemas.common import ApiStatus, LeagueInfo
 from schemas.draft import DraftImportResp, DraftImportResponse
-from services.draft_service import DraftService, _session_resp, lock_room
+from services.draft_service import SIMULATED_PICK_SOURCES, DraftService, _session_resp, lock_room
 from services.draft_sync_service import (
     ESPN_AFTER_DRAFT,
     DraftSyncService,
@@ -169,7 +169,7 @@ class DraftImportService:
             link = DraftSyncService._link_decision(session, header)
 
             if DraftPick.select().where(
-                (DraftPick.session == session_id) & (DraftPick.source == "mock")
+                (DraftPick.session == session_id) & (DraftPick.source.in_(SIMULATED_PICK_SOURCES))
             ).exists():
                 # Simulated picks already spent these numbers, so every imported
                 # pick would come back a conflict. A room plays a mock or

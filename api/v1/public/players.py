@@ -7,6 +7,9 @@ from schemas.player_games import PlayerGamesResp
 from schemas.player_trends import PlayerTrendsResp
 from schemas.market import PlayerProjectionResp, PlayerProjectionsResp, SeasonKey
 from schemas.player_profiles import PlayerProfileResp, PlayerSearchResp
+from schemas.news import NewsItemResp, NewsListData, NewsListResp
+from schemas.common import ApiStatus
+from services import news_service
 from services.public_market_service import PublicMarketService
 from services.player_profile_service import PlayerProfileService
 from services.player_service import PlayerService, percentile_pool_window
@@ -331,6 +334,35 @@ async def get_player_status(
 ) -> PlayerStatusResp:
     """Get a player's current injury status."""
     return respond(await PlayerService.get_player_status(player_id=player_id))
+
+
+@router.get(
+    "/{player_id}/news",
+    response_model=NewsListResp,
+    summary="Get player news",
+    description=(
+        "The news items about a player, newest first, from ESPN's injury notes and player news, Rotowire "
+        "and RealGM: source, time, headline, blurb, attribution and link."
+    ),
+    responses={
+        200: {"description": "Player news retrieved successfully"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_player_news(
+    request: Request,
+    player_id: int = Path(..., description="NBA player ID"),
+    days: int = Query(7, ge=1, le=30, description="How far back"),
+    limit: int = Query(20, ge=1, le=50),
+) -> NewsListResp:
+    """The player's news, newest first."""
+    items = await news_service.player_news(player_id, days=days, limit=limit)
+    return respond(NewsListResp(
+        status=ApiStatus.SUCCESS,
+        message=f"{len(items)} item(s)",
+        data=NewsListData(items=[NewsItemResp(**i.view()) for i in items]),
+    ))
 
 
 @router.get(

@@ -196,6 +196,55 @@ class Settings(BaseSettings):
     autopilot_checkin_max_model_calls: int = 12
     autopilot_checkin_max_tool_calls: int = 32
     autopilot_checkin_timeout_seconds: float = 360.0
+    # Dime's steering (the Dime autopilot plan, step 4; services/ai/steering.py): the
+    # steer, set_lane and cancel_pickup tools, the chips they make, and the pins a sent
+    # lineup chip leaves on the players it benches. Off until two weeks of shadow
+    # check-ins on the test team say Dime's calls are worth steering with; off, the
+    # agent's tools and prompt prefix are exactly step 3's and the chips' routes refuse.
+    # Holds already set keep steering the planners either way, until their end dates.
+    dime_steering_enabled: bool = False
+    # Dime acting on its own (the Dime autopilot plan, step 5; services/ai/acting.py): on a
+    # team whose mode is act, a change a check-in logs is sent by the server itself, through
+    # the user's own write routes, as source autopilot. Off (the default), act reads as
+    # suggest: Dime's changes become chips the user sends, and the API refuses to set act.
+    # ROSTER_WRITES_ENABLED, AUTOPILOT_ENABLED and the team's Pause still stop it either way.
+    dime_acting_enabled: bool = False
+    # The policy every move Dime sends itself is held to. The caps count Dime's own adds
+    # (lanes keep their own budget, and ESPN's limits still apply); the reserve keeps that many
+    # of ESPN's adds this matchup for the user (injuries). Top N by the board's value and a
+    # player added within the churn window (unless he is out) are never dropped.
+    autopilot_adds_per_day: int = 2
+    autopilot_adds_per_matchup: int = 5
+    autopilot_adds_reserve: int = 1
+    autopilot_protected_top: int = 6
+    autopilot_churn_hours: int = 48
+    # Auto-pause: the team pauses (and the user gets an email) after this many refused writes
+    # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
+    autopilot_pause_refused: int = 2
+    autopilot_pause_same_block: int = 2
+    # Dime's event check-ins (the Dime autopilot plan, step 6; services/ai/events.py): when an
+    # availability verdict changes or a news item lands about a player on a team Dime runs, the
+    # team gets a check-in about it, before his game locks. Off (the default) the events route
+    # records nothing and no check-in sees an event, so every check-in is step 5's. Switch it on
+    # once the availability pipeline's dark week passes its gate. At most this many event
+    # check-ins a day per team, and never one that would take a scheduled check-in's place under
+    # AUTOPILOT_CHECKINS_PER_DAY; an event that comes in this close before a scheduled check-in
+    # opens waits for it. A team's roster is read from ESPN at most once per this many seconds.
+    dime_events_enabled: bool = False
+    # Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py): a plan before
+    # the draft (set as the room's punts), a note when the user's pick is near, a read of the recap,
+    # and the user's seat in a mock room (Dime makes the user's picks through the room's own pick
+    # path; a live ESPN draft stays advice, since nothing writes a pick to ESPN). Every note is a
+    # turn on the AI desk's spend line, started from the room. Off (the default), the draft routes
+    # refuse and the draft tools are offered nowhere; get_draft_recap, a read, is offered either way.
+    # A note answers one question with the board already read, so it gets a short leash.
+    dime_draft_enabled: bool = False
+    dime_draft_max_model_calls: int = 5
+    dime_draft_max_tool_calls: int = 10
+    dime_draft_timeout_seconds: float = 120.0
+    autopilot_event_checkins_per_day: int = 3
+    autopilot_event_fold_minutes: int = 20
+    autopilot_event_roster_ttl_seconds: int = 600
     # The connection the agent's query_stats tool reads on (services/ai/stats/
     # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
     # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
@@ -430,6 +479,11 @@ class Settings(BaseSettings):
             "autopilot_checkin_max_model_calls": self.autopilot_checkin_max_model_calls,
             "autopilot_checkin_max_tool_calls": self.autopilot_checkin_max_tool_calls,
             "autopilot_checkin_timeout_seconds": self.autopilot_checkin_timeout_seconds,
+            "autopilot_event_checkins_per_day": self.autopilot_event_checkins_per_day,
+            "autopilot_event_roster_ttl_seconds": self.autopilot_event_roster_ttl_seconds,
+            "dime_draft_max_model_calls": self.dime_draft_max_model_calls,
+            "dime_draft_max_tool_calls": self.dime_draft_max_tool_calls,
+            "dime_draft_timeout_seconds": self.dime_draft_timeout_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:

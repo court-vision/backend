@@ -14,7 +14,7 @@ freshness check reads `updated_at`.
 
 from datetime import datetime, timezone
 
-from peewee import AutoField, CharField, DateField, DateTimeField, ForeignKeyField, IntegerField, TextField
+from peewee import AutoField, BooleanField, CharField, DateField, DateTimeField, ForeignKeyField, IntegerField, TextField
 
 from db.base import BaseModel
 from db.models.teams import Team
@@ -55,6 +55,7 @@ class ScheduledPickup(BaseModel):
     updated_at = DateTimeField(default=_now)
     executed_at = DateTimeField(null=True)
     lane_id = IntegerField(null=True)              # usr.stream_lanes row when a lane made it
+    made_by_autopilot = BooleanField(default=False)  # Dime scheduled it on its own: its writes are source autopilot
 
     class Meta:
         table_name = "scheduled_pickups"

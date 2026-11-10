@@ -24,6 +24,10 @@ Rules the tools enforce, not the prompt:
 - **Judgments, not statistics.** A note may hold a number ("2 adds left"), but
   every number the agent states still has to come from a tool in that turn;
   the made-up-number check doesn't count notes as a source.
+- **The user's switch.** With the account's memory feature off (services/ai/
+  ai_settings.py) the four tools answer that memory is off, writing and reading
+  nothing, and the digest is empty. They stay in the tool list so the cached
+  prefix doesn't change. The user's own list and edits are not gated.
 """
 
 from __future__ import annotations
@@ -315,7 +319,18 @@ class Caller:
     today: date
 
 
+OFF = {"memory": "off", "note": "The user turned Dime's memory off (AI and automation settings): you keep and "
+                                "read no notes, so answer without them and don't say you'll remember"}
+
+
+async def _off(user_id: int) -> bool:
+    from services.ai import ai_settings
+    return not (await ai_settings.get(user_id)).memory
+
+
 async def recall(caller: Caller, args: RecallInput) -> dict[str, Any]:
+    if await _off(caller.user_id):
+        return dict(OFF)
     rows = await run_db("ai.memory_recall", select_notes, caller.user_id, team_id=args.team_id, kind=args.kind,
                         query=args.query, include_retired=args.include_retired, limit=args.limit)
     live = await run_db("ai.memory_count", count_live, caller.user_id, args.team_id)
@@ -328,6 +343,8 @@ async def recall(caller: Caller, args: RecallInput) -> dict[str, Any]:
 
 
 async def remember(caller: Caller, args: RememberInput) -> dict[str, Any]:
+    if await _off(caller.user_id):
+        return dict(OFF)
     _check_recheck(args.recheck_on, caller.today)
     live = await run_db("ai.memory_count", count_live, caller.user_id, args.team_id)
     if live >= CAP:
@@ -351,6 +368,8 @@ async def _own_note(caller: Caller, note_id: int) -> AiMemory:
 
 
 async def revise(caller: Caller, args: ReviseInput) -> dict[str, Any]:
+    if await _off(caller.user_id):
+        return dict(OFF)
     old = await _own_note(caller, args.note_id)
     recheck = None if args.clear_recheck else (args.recheck_on if args.recheck_on is not None else old.recheck_on)
     if args.recheck_on is not None:
@@ -367,6 +386,8 @@ async def revise(caller: Caller, args: ReviseInput) -> dict[str, Any]:
 
 
 async def forget(caller: Caller, args: ForgetInput) -> dict[str, Any]:
+    if await _off(caller.user_id):
+        return dict(OFF)
     old = await _own_note(caller, args.note_id)
     if not await run_db("ai.memory_retire", retire_note, old.id, caller.user_id, by="dime",
                         reason=" ".join(args.reason.split())):
@@ -404,6 +425,9 @@ def digest_of(rows: list[Any], today: date) -> str:
 
 
 async def digest(user_id: int, today: date) -> str:
+    """The header's line; empty with no notes or with the user's memory off."""
+    if await _off(user_id):
+        return ""
     rows = await run_db("ai.memory_digest", live_for_digest, user_id)
     return digest_of(rows, today)
 

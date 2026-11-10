@@ -22,6 +22,10 @@ A turn is the router's bounded loop grown up:
 Every turn writes one usr.ai_turns row, failed or not (a failed turn can
 still have cost money), and logs one `ai_turn` line.
 
+A draft note (services/ai/draft.py) is the same again, started from a draft room:
+the server's brief (with the room's board already read), the draft tool list
+(`set_draft_plan` and `draft_pick` added) and a short leash (`Limits.draft`).
+
 A check-in (services/ai/checkins.py) is the same turn started by the server
 instead of the user: its opening message is the server's brief, it runs with
 the check-in's tool list (the agent's plus `log_decision`) and its own bounds
@@ -58,7 +62,8 @@ from services.ai.prompts import AGENT_PROMPT
 from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
 from services.ai.tools import (
-    AGENT_TOOL_NAMES, AGENT_TOOLS, CHECKIN_ONLY_TOOLS, CHECKIN_TOOL_NAMES, ToolContext, list_my_teams, run_tool,
+    AGENT_TOOL_NAMES, AGENT_TOOLS, CHECKIN_ONLY_TOOLS, CHECKIN_TOOL_NAMES, DRAFT_ONLY_TOOLS, DRAFT_TOOL_NAMES,
+    STEERING_TOOLS, ToolContext, list_my_teams, run_tool,
 )
 
 # Progress notes between tool calls come back as `thinking` blocks on Opus 5.5;
@@ -71,12 +76,20 @@ BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
-TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE]
-ALLOWED = AGENT_TOOL_NAMES
+# Dime's steering tools (steer, set_lane, cancel_pickup) come after the display tools, and only
+# while DIME_STEERING_ENABLED: switched off, the prefix is exactly what it was before them
+_STEERING: list[dict[str, Any]] = STEERING_TOOLS if settings.dime_steering_enabled else []
+_STEERING_NAMES = frozenset(t["name"] for t in _STEERING)
+TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE, *_STEERING]
+ALLOWED = AGENT_TOOL_NAMES | _STEERING_NAMES
 # A check-in's conversation: the same tools, then the check-in's own, appended so the
 # rest of the prefix is the AI desk's
 CHECKIN_TOOLS: list[dict[str, Any]] = [*TOOLS, *CHECKIN_ONLY_TOOLS]
-CHECKIN_ALLOWED = CHECKIN_TOOL_NAMES
+CHECKIN_ALLOWED = CHECKIN_TOOL_NAMES | _STEERING_NAMES
+# A draft note's conversation (services/ai/draft.py): the same tools, then the room's plan and the
+# mock seat's pick, appended the same way
+DRAFT_TOOLS: list[dict[str, Any]] = [*TOOLS, *DRAFT_ONLY_TOOLS]
+DRAFT_ALLOWED = DRAFT_TOOL_NAMES | _STEERING_NAMES
 
 # What the user sees while a tool runs
 STATUS: dict[str, str] = {
@@ -112,6 +125,14 @@ STATUS: dict[str, str] = {
     "get_automations": "Reading what the automations will do",
     "get_decisions": "Reading its earlier calls",
     "log_decision": "Logging a call",
+    "get_player_news": "Reading the news",
+    "get_news": "Reading the news",
+    "get_draft_recap": "Reading the draft recap",
+    "set_draft_plan": "Setting the draft plan",
+    "draft_pick": "Making the pick",
+    "steer": "Checking the holds",
+    "set_lane": "Checking the lane change",
+    "cancel_pickup": "Checking the pickup",
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
     "show_place": "Pointing out where",
@@ -141,6 +162,13 @@ class Limits:
         return cls(settings.autopilot_checkin_max_model_calls, settings.autopilot_checkin_max_tool_calls,
                    settings.autopilot_checkin_timeout_seconds, settings.ai_agent_turn_max_usd)
 
+    @classmethod
+    def draft(cls) -> "Limits":
+        """A draft note answers one question with the board already in its brief, while the user waits
+        at the pick, so it gets fewer steps than a chat answer and a shorter clock."""
+        return cls(settings.dime_draft_max_model_calls, settings.dime_draft_max_tool_calls,
+                   settings.dime_draft_timeout_seconds, settings.ai_agent_turn_max_usd)
+
 
 @dataclass(frozen=True)
 class TurnResult:
@@ -166,6 +194,8 @@ class Turn:
     allowed: frozenset[str] = ALLOWED
     # The check-in this turn is (usr.ai_checkins): its proposals are shadow, and it logs decisions
     checkin_id: Optional[int] = None
+    # The draft note this turn writes (usr.ai_draft_notes): only it may set the room's plan or pick
+    draft_note_id: Optional[int] = None
     limits: Limits = field(default_factory=Limits.chat)
     run: _Run = field(default_factory=_Run)
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -325,7 +355,8 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         return {"type": "tool_result", "tool_use_id": block.id, "content": shown.summary}
 
     outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id,
-                                                        build=turn.build, checkin_id=turn.checkin_id),
+                                                        build=turn.build, checkin_id=turn.checkin_id,
+                                                        draft_note_id=turn.draft_note_id),
                              allowed=turn.allowed)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}

@@ -245,7 +245,10 @@ class TestTick:
 def starting(monkeypatch):
     monkeypatch.setattr(settings, "autopilot_checkin_timeout_seconds", 60.0)
     state = SimpleNamespace(reservation=55, claim=7, cancelled=[], released=[], settled=[], claims=[],
-                            created=[], launched=[], header_error=None)
+                            created=[], launched=[], header_error=None, autopilot=None)
+
+    async def autopilot_row(team_id):
+        return state.autopilot
 
     async def reserve(user_id):
         return state.reservation
@@ -293,6 +296,7 @@ def starting(monkeypatch):
     monkeypatch.setattr(agent, "header", header)
     monkeypatch.setattr(checkins, "_settle", settle)
     monkeypatch.setattr(checkins, "_run", fake_run)
+    monkeypatch.setattr(checkins, "_autopilot_row", autopilot_row)
     return state
 
 
@@ -314,6 +318,30 @@ class TestStart:
         assert turn.checkin_id == 7 and turn.reservation_id == 55 and turn.conversation_id == 31
         assert turn.limits == agent.Limits.checkin()
         assert turn.message.startswith("[Morning check-in for team_id 23")
+
+    def test_acting_on_nothing_is_step_3_s_brief_and_rows_at_ai_say_so(self, starting, monkeypatch):
+        _start()
+        shadow = starting.launched[0][0].message
+        assert shadow == checkins.brief("morning", TUE, 23, manual=False)
+        assert checkins._SHADOW in shadow and "What you do yourself" not in shadow
+        # At AI while acting is off on the server, it still reviews: step 3's brief
+        starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=["lineup"], autopilot=False)
+        _start()
+        assert starting.launched[1][0].message == shadow
+        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        _start()
+        acting = starting.launched[2][0].message
+        assert "What you do yourself on this team: lineup (slot moves and pins). Those automations are at AI" in acting
+        assert checkins._SHADOW not in acting and "what you sent, what you left for them" in acting
+        # The autopilot switch: every row that offers AI
+        starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=[], autopilot=True)
+        _start()
+        assert "lineup (slot moves and pins), daily actions" in starting.launched[3][0].message
+        # A paused team only reviews, whatever is at AI
+        starting.autopilot = SimpleNamespace(paused_at=datetime(2025, 11, 10, tzinfo=timezone.utc), ai_rows=["lineup"],
+                                             autopilot=True)
+        _start()
+        assert starting.launched[4][0].message == shadow
 
     def test_a_spent_budget_skips_a_scheduled_one_and_refuses_a_manual_one(self, starting):
         starting.reservation = None
@@ -346,7 +374,7 @@ class TestRun:
             return result
         monkeypatch.setattr(checkins, "_settle", settle)
         monkeypatch.setattr(agent, "run_turn", run_turn)
-        turn = SimpleNamespace(cost=0, decisions=2, proposals=[1])
+        turn = SimpleNamespace(cost=0, decisions=2, proposals=[1], user_id=42)
         run(checkins._run(turn, "[h]", 7, 23, "morning"))
         return settled
 
@@ -419,6 +447,20 @@ class TestNextSlot:
                                   et(TUE, 9)) is None
 
 
+class TestTeamView:
+    def test_the_switch_and_the_automations_table_with_lineup_from_the_preferences(self):
+        prefs = SimpleNamespace(lineup_alerts_enabled=True, auto_lineup_enabled=True, alert_minutes_before=30)
+        row = SimpleNamespace(paused_at=None, paused_by=None, paused_reason=None, active_since=et(MON, 0),
+                              ai_rows=["daily_actions"], autopilot=False)
+        view = checkins.team_view(23, row, None, prefs, None)
+        assert view["on"] is True and view["autopilot"] is False and view["next"] is None
+        assert {r["row"]: r["level"] for r in view["rows"]} == {
+            "lineup": "act", "daily_actions": "ai", "lanes": "act", "late_scratch": "off", "checkins": "ai"}
+        never = checkins.team_view(23, None, None, None, None)
+        assert never["on"] is False and never["rows"][0]["level"] == "off"
+        assert not next(o for o in never["rows"][0]["options"] if o["level"] == "ai")["available"]
+
+
 # ------------------------------- decisions ------------------------------- #
 
 
@@ -479,7 +521,8 @@ class TestLogDecision:
         block = out[decisions.DECISION_KEY]
         assert block == {"decision_id": 60, "area": "lineup", "automation": "auto_lineup", "call": "hold",
                          "summary": "Keep auto-lineup's fill", "reason": "Every starter plays tonight",
-                         "proposal_id": None, "verdict": None}
+                         "proposal_id": None, "verdict": None, "action": None}
+        assert "action" not in out          # a hold commits nothing
         assert logging_stubs.inserted[0]["team_id"] == 23 and logging_stubs.inserted[0]["checkin_id"] == 7
 
     def test_only_a_running_check_in_on_its_own_team_logs(self, logging_stubs):
@@ -515,13 +558,19 @@ class TestRefreshHistory:
 
         async def of_conversation(conversation_id, user_id):
             return [row]
+
+        async def actions_of(decision_ids):
+            assert decision_ids == [60]
+            return {60: {"outcome": "sent", "rule": None, "message": "Sent by Dime", "at": None}}
         monkeypatch.setattr(decisions, "_of_conversation", of_conversation)
+        monkeypatch.setattr(decisions.acting, "actions_of", actions_of)
         part = {"kind": "block", "block": {"type": "decision", "id": "d1", "decision_id": 60, "verdict": None}}
         text = {"kind": "text", "text": "hi"}
         out = run(decisions.refresh_history([[text, part]], 31, 42))
         assert out[0][0] == text
         assert out[0][1]["block"]["verdict"] == "agree" and out[0][1]["block"]["id"] == "d1"
         assert out[0][1]["block"]["type"] == "decision"
+        assert out[0][1]["block"]["action"]["outcome"] == "sent"      # what Dime did about it, as it stands
 
     def test_a_chat_without_decisions_reads_nothing(self, monkeypatch):
         async def boom(*a):

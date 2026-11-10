@@ -453,7 +453,8 @@ def load_writes(cv_teams: dict[int, int], days: list[DayRoster]) -> list[CvWrite
     for r in rows:
         pickup = pickups.get(r.id)
         proposal = proposals_by_audit.get(r.id) or (proposals_by_pickup.get(pickup.id) if pickup else None)
-        if proposal is not None:
+        if proposal is not None or r.source == "autopilot":
+            # A chip the user sent, or a move Dime sent itself (services/ai/acting.py)
             source = "dime"
         elif pickup is not None:
             source = "lane" if pickup.lane_id is not None else "scheduled"

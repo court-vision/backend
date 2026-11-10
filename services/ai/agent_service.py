@@ -18,19 +18,54 @@ from core.errors import AuthorizationError, ConflictError, NotFoundError
 from core.settings import settings
 from db.base import run_db
 from schemas.ai import (
+    AiActing,
+    AiAutopilotActionItem,
     AiAutopilotTeam,
     AiCheckinsData,
     AiCheckinSummary,
     AiConversationDetail,
     AiConversationSummary,
     AiDecisionVerdictData,
+    AiFeatures,
     AiNote,
     AiProposalCheckData,
     AiProposalChip,
     AiTurnView,
     AiUsageData,
 )
-from services.ai import agent, checkins, conversations, decisions, guards, memory, proposals, spend
+from services.ai import (
+    acting,
+    agent,
+    ai_settings,
+    autonomy,
+    checkins,
+    conversations,
+    decisions,
+    guards,
+    levels,
+    memory,
+    proposals,
+    spend,
+)
+from services.steering import enabled as steering_enabled
+
+
+def acting_info() -> dict:
+    """Whether Dime can act on its own, and the policy it acts within (the autopilot plan, step 5)."""
+    return {
+        "available": autonomy.acting_available(),
+        "steering": steering_enabled(),
+        "writes": settings.roster_writes_enabled,
+        "policy": {
+            "adds_per_day": settings.autopilot_adds_per_day,
+            "adds_per_matchup": settings.autopilot_adds_per_matchup,
+            "adds_reserve": settings.autopilot_adds_reserve,
+            "protected_top": settings.autopilot_protected_top,
+            "churn_hours": settings.autopilot_churn_hours,
+            "pause_refused": settings.autopilot_pause_refused,
+            "pause_same_block": settings.autopilot_pause_same_block,
+        },
+    }
 
 
 def has_access(user_id: int) -> bool:
@@ -144,11 +179,14 @@ class AgentService:
                 await spend.cancel(reservation_id)
             await conversations.release(conversation_id)
             raise
-        # A follow-up in a check-in's conversation keeps that conversation's tool list, so its replayed
-        # history matches; it is the user's own turn, so it logs no decisions and its chips can be sent
-        checkin = _kind(row) == conversations.CHECKIN
-        tools = agent.CHECKIN_TOOLS if checkin else agent.TOOLS
-        allowed = agent.CHECKIN_ALLOWED if checkin else agent.ALLOWED
+        # A follow-up in a check-in's (or a draft note's) conversation keeps that conversation's tool list,
+        # so its replayed history matches; it is the user's own turn, so it logs no decisions, sets no plan
+        # and makes no pick, and its chips can be sent
+        kind = _kind(row)
+        checkin = kind == conversations.CHECKIN
+        tools = agent.CHECKIN_TOOLS if checkin else agent.DRAFT_TOOLS if kind == conversations.DRAFT else agent.TOOLS
+        allowed = (agent.CHECKIN_ALLOWED if checkin else agent.DRAFT_ALLOWED if kind == conversations.DRAFT
+                   else agent.ALLOWED)
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message, history=history,
                           reservation_id=reservation_id, build=build, tools=tools, allowed=allowed)
         return agent.start(turn, header_line)
@@ -198,7 +236,7 @@ class AgentService:
         if not await conversations.set_feedback(turn_id, user_id, value):
             raise NotFoundError("AI_TURN_NOT_FOUND", "Turn not found")
 
-    # ---- Dime's check-ins (services/ai/checkins.py), in shadow ----
+    # ---- Dime's check-ins (services/ai/checkins.py) and its automation levels ----
 
     @staticmethod
     async def checkins(user_id: int, team_id: Optional[int]) -> AiCheckinsData:
@@ -207,9 +245,11 @@ class AgentService:
         teams = await checkins.teams_of(user_id)
         rows = await checkins.inbox(user_id, team_id)
         spent, cap = await spend.autopilot_month_spend()
+        features = await ai_settings.get(user_id)
         return AiCheckinsData(teams=[AiAutopilotTeam(**t) for t in teams],
                               checkins=[AiCheckinSummary(**r) for r in rows],
-                              month_usd=spent / 1e6, cap_usd=cap / 1e6)
+                              month_usd=spent / 1e6, cap_usd=cap / 1e6, acting=AiActing(**acting_info()),
+                              features=AiFeatures(**features.view()))
 
     @staticmethod
     async def run_checkin(user_id: int, team_id: int, kind: Optional[str]) -> AiCheckinSummary:
@@ -218,11 +258,29 @@ class AgentService:
         return AiCheckinSummary(**await checkins.summary(row.id))
 
     @staticmethod
-    async def set_autopilot(user_id: int, team_id: int, on: bool) -> AiAutopilotTeam:
+    async def set_autopilot(user_id: int, team_id: int, change: levels.Change) -> AiAutopilotTeam:
         ensure_access(user_id)
-        await checkins.set_autopilot(user_id, team_id, on)
+        await checkins.set_autopilot(user_id, team_id, change)
         teams = {t["team_id"]: t for t in await checkins.teams_of(user_id)}
         return AiAutopilotTeam(**teams[team_id])
+
+    @staticmethod
+    async def actions(user_id: int, team_id: Optional[int], limit: int) -> list[AiAutopilotActionItem]:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return [AiAutopilotActionItem(**a) for a in await acting.list_actions(user_id, team_id, limit)]
+
+    # ---- the account's AI features (services/ai/ai_settings.py) ----
+
+    @staticmethod
+    async def features(user_id: int) -> AiFeatures:
+        ensure_access(user_id)
+        return AiFeatures(**(await ai_settings.get(user_id)).view())
+
+    @staticmethod
+    async def set_features(user_id: int, *, memory: Optional[bool], draft_rooms: Optional[bool]) -> AiFeatures:
+        ensure_access(user_id)
+        return AiFeatures(**(await ai_settings.update(user_id, memory=memory, draft_rooms=draft_rooms)).view())
 
     @staticmethod
     async def decision_verdict(decision_id: int, user_id: int, verdict: Optional[str]) -> AiDecisionVerdictData:

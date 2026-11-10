@@ -131,6 +131,7 @@ def test_the_source_check_refuses_an_unknown_source(team):
 def test_0035_rollback_applies_and_the_forward_file_restores_it(integration_db):
     forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.rollback.sql").read_text()
+    acting_forward = (Path(MIGRATIONS_DIR) / "0044__dime_acting.sql").read_text()
     assert _tables() == set(NEW_TABLES) and _trigger_column()
     try:
         with db.atomic():
@@ -139,6 +140,8 @@ def test_0035_rollback_applies_and_the_forward_file_restores_it(integration_db):
     finally:
         with db.atomic():
             db.execute_sql(forward)                 # the chain's state is untouched
+            db.execute_sql(acting_forward)          # 0044 widened the source CHECK after it ('autopilot')
     assert _tables() == set(NEW_TABLES) and _trigger_column()
     with db.atomic():
         db.execute_sql(forward)                     # idempotent: a second apply is a no-op
+        db.execute_sql(acting_forward)

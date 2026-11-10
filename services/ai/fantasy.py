@@ -65,6 +65,7 @@ from services.scheduled_pickup_service import et_at
 from services.scoring.category_rank import compute_category_scores
 from services.scoring.category_value import rankable_categories
 from services.scoring.models import CategoryTeamScoreData, StatLine
+from services.steering import holds_for, lane_steer
 from services.stream_lane_service import (
     PoolPlayer,
     StreamLaneService,
@@ -771,6 +772,9 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     def value_of(espn_id: int, default: float) -> float:
         return default if values is None else float(values.get(espn_id, 0.0))
 
+    # Dime's holds (services/steering.py) steer this plan as they steer the lanes': keeps, blocks, overrides
+    steer = lane_steer(await holds_for(team.team_id, base_date), [d.nba_date for d in days])
+
     def games_of(p: Any) -> int:
         """His NBA team's games left: his whatever today's listing, as the projection's drop rule
         counts them (a player out today may be back; the plan itself values him at nothing while out)."""
@@ -796,7 +800,10 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
                 holders.append(p)
                 chosen_by[p.player_id] = "named"
     else:
-        candidates = [p for p in board.players if p.lineup_slot_id != IR_SLOT_ID and p.player_id not in leaving]
+        candidates = [p for p in board.players if p.lineup_slot_id != IR_SLOT_ID and p.player_id not in leaving
+                      and p.player_id not in steer.kept]
+        if any(p.player_id in steer.kept for p in board.players):
+            notes.append("The drop rule passes over the players your keep holds keep.")
         evidence = await _evidence_for(league_info, [p.player_id for p in candidates])
         ranked = []
         for p in candidates:
@@ -832,13 +839,16 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
             notes.append(f"Player {nba} is not a free agent the plan can take (rostered, out, or unknown).")
         else:
             named.add(eid)
+            if eid in steer.no_add:
+                notes.append(f"{in_pool[eid].name} has a block hold: the plan won't add him on its days.")
     # The pool the planner sees: the best under the value, plus the candidates named and the players
     # scheduled pickups bring in (the plan's roster-to-be needs their games and positions).
     keep = named | {pk.add_player_id for pk in pending}
     ranked_pool = sorted(pool, key=lambda f: (-value_of(f.player_id, f.value), f.player_id))
     kept = ranked_pool[:POOL_CAP] + [f for f in ranked_pool[POOL_CAP:] if f.player_id in keep]
 
-    plan = await run_cpu("ai.plan_lanes", plan_lanes, board, holder_ids, kept, days, pending, budget, rehold, values)
+    plan = await run_cpu("ai.plan_lanes", plan_lanes, board, holder_ids, kept, days, pending, budget, rehold, values,
+                         steer)
 
     def who(eid: int) -> dict[str, Any]:
         p = on_board.get(eid) or in_pool.get(eid)
