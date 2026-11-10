@@ -14,9 +14,11 @@ Two rules hold everything else up:
 
 Every function scopes by `user_id`: another user's conversation reads as missing.
 
-A conversation's `kind` is `chat` (the user started it) or `checkin` (one of
+A conversation's `kind` is `chat` (the user started it), `checkin` (one of
 Dime's check-ins started it, services/ai/checkins.py, with its title set at
-creation). The AI desk lists the chats; the check-ins are listed apart.
+creation) or `draft` (one of Dime's notes in a draft room, services/ai/draft.py).
+The AI desk lists the chats; the check-ins are listed apart, and a draft note's
+conversation opens from its room.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from services.ai import spend
 
 TITLE_LENGTH = 80
 OK = "ok"
-CHAT, CHECKIN = "chat", "checkin"
+CHAT, CHECKIN, DRAFT = "chat", "checkin", "draft"
 
 
 def _now() -> datetime:
