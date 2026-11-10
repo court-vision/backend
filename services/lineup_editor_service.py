@@ -5,12 +5,15 @@ the private fantasy-writer, verify by re-reading, and audit in usr.roster_moves.
 Three entry points share one write chain:
 
     read_state    GET  /teams/{id}/lineup         the editor's board
-    plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes)
+    plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes), with Dime's holds
     apply_manual  POST /teams/{id}/lineup/moves   the user's own moves, for today or a later day
                                                   (an AI desk lineup chip sends through it too,
                                                   with `proposal_id`)
     evaluate      POST /jobs/lineup/evaluate      the alerts pipeline: plan, and
                                                   apply it for auto-lineup users
+
+Every fill reads the team's holds (services/steering.py): a player Dime pinned stays
+where he is, and one it expects to miss counts as out. The user's own moves never do.
 
 Business failures raise the `Roster*` errors below (rendered by the global
 handlers with real statuses — see core/responses.ERROR_CODE_STATUS); `evaluate`
@@ -52,13 +55,13 @@ from schemas.lineup_editor import (
     LineupUnfilled,
     MoveErrorResp,
 )
-from services import fantasy_writer_client
+from services import fantasy_writer_client, steering
 from services.fantasy_writer_client import (
     FantasyWriterAuthRejected,
     FantasyWriterRejected,
     FantasyWriterUnavailable,
 )
-from services.lineup_planner import Move, Plan, PlannerPlayer, plan_fill, validate_moves
+from services.lineup_planner import Move, Plan, PlannerPlayer, validate_moves
 from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
 from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
 from services.providers.writers import espn_lineup_payload
@@ -235,7 +238,7 @@ class LineupEditorService:
             return LineupPlanResp(status=ApiStatus.SUCCESS,
                                   message=unavailable_message("lineup_editing", league_info.provider), data=None)
         state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
-        plan = plan_fill(planner_players(state), slot_counts_of(state))
+        plan = await steering.team_fill(team.team_id, state)   # the fill, with Dime's pins and overrides
         return LineupPlanResp(status=ApiStatus.SUCCESS, message=plan.summary, data=LineupPlanData(
             moves=move_results(list(plan.moves), state), unfilled=unfilled_results(plan), summary=plan.summary,
             scoring_period_id=state.scoring_period_id, nba_date=state.nba_date, roster_version=state.roster_version,
@@ -285,6 +288,8 @@ class LineupEditorService:
         if req.proposal_id is not None:
             from services.ai import proposals
             await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
+            # Dime benched them on purpose: auto-lineup's fill leaves them benched that day
+            await steering.pin_benched(req.proposal_id)
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,
@@ -320,7 +325,8 @@ class LineupEditorService:
             return done("skipped", reason="provider_not_supported")
 
         state = await adapter.read_lineup(req.team_id, league_info, fallback_slot_counts=roster_slots)
-        plan = plan_fill(planner_players(state), slot_counts_of(state))
+        # Dime's holds steer the fill: a pinned player stays put, one it expects to miss counts as out
+        plan = await steering.team_fill(req.team_id, state)
         if plan.is_noop:
             if req.apply and state.can_write and state.nba_date:
                 # Recorded so the daily dedup sees today as handled

@@ -6,7 +6,9 @@ credentials hydrated only here, at the provider boundary. The executor itself is
 the pipeline-token route in `jobs.py`.
 """
 
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 
 from api.deps import OwnedTeamContext, get_owned_team, load_owned_league_info
 from core.responses import respond
@@ -41,8 +43,13 @@ async def list_pickups(team: OwnedTeamContext = Depends(get_owned_team)):
 
 
 @router.delete("/{team_id}/pickups/{pickup_id}", response_model=ScheduledPickupResp)
-async def cancel_pickup(pickup_id: int, team: OwnedTeamContext = Depends(get_owned_team)):
+async def cancel_pickup(pickup_id: int, team: OwnedTeamContext = Depends(get_owned_team),
+                        proposal_id: Optional[int] = Query(None, gt=0)):
     """Cancel a pending pickup. 404 when it is not this team's; 409 SCHEDULED_PICKUP_NOT_PENDING
     when it already ran (or was cancelled); 409 SCHEDULED_PICKUP_IN_PROGRESS while an attempt is
-    making it — its outcome follows in a few minutes, and a deferred pickup can be cancelled again."""
-    return respond(await ScheduledPickupService.cancel(team, pickup_id))
+    making it — its outcome follows in a few minutes, and a deferred pickup can be cancelled again.
+
+    `proposal_id`: Dime's cancel_pickup chip for this pickup (the Dime autopilot plan, step 4),
+    checked first (409 AI_PROPOSAL_NOT_PENDING, 422 AI_PROPOSAL_MISMATCH, 409 AI_STEERING_OFF) and
+    marked sent once the pickup is cancelled."""
+    return respond(await ScheduledPickupService.cancel(team, pickup_id, proposal_id))

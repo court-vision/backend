@@ -51,7 +51,7 @@ from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
 from services import move_ledger
-from services.ai import app_map, automations, decisions, league, memory
+from services.ai import app_map, automations, decisions, league, memory, steering as ai_steering
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
     PlanStreamsInput,
@@ -766,6 +766,7 @@ async def _get_scheduled_pickups(args: TeamInput, ctx: ToolContext | None) -> di
 
     def row(p: Any) -> dict[str, Any]:
         return {
+            "pickup_id": p.id,
             "date": p.nba_date,
             "status": getattr(p.status, "value", p.status),
             "add": {"player_id": p.add.nba_player_id, "name": p.add.name, "team": p.add.team},
@@ -1323,6 +1324,38 @@ async def _log_decision(args: decisions.LogDecisionInput, ctx: ToolContext | Non
     return await decisions.log_decision(ctx.user_id, ctx.checkin_id, args)
 
 
+# Dime's steering (the Dime autopilot plan, step 4): holds, lanes and pickups, each a chip the
+# user applies. Offered only while steering is on (agent.py), so the prefix is unchanged when off.
+
+def _chip_caller(ctx: ToolContext | None, what: str) -> ToolContext:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    if ctx.conversation_id is None:
+        raise AppError("AI_NO_CONVERSATION", f"{what} can only be proposed inside a conversation")
+    return ctx
+
+
+async def _steer(args: ai_steering.SteerInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A hold")
+    team, league_info = await _owned(ctx, args.team_id)
+    return await ai_steering.steer(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                                   shadow=ctx.checkin_id is not None)
+
+
+async def _set_lane(args: ai_steering.SetLaneInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A lane change")
+    team, league_info = await _owned(ctx, args.team_id)
+    return await ai_steering.set_lane(ctx.user_id, ctx.conversation_id, team, league_info, args,
+                                      shadow=ctx.checkin_id is not None)
+
+
+async def _cancel_pickup(args: ai_steering.CancelPickupInput, ctx: ToolContext | None) -> dict[str, Any]:
+    ctx = _chip_caller(ctx, "A cancelled pickup")
+    team, _ = await _owned(ctx, args.team_id)
+    return await ai_steering.cancel_pickup(ctx.user_id, ctx.conversation_id, team, args,
+                                           shadow=ctx.checkin_id is not None)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
@@ -1338,6 +1371,9 @@ AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
 CHECKIN_ONLY_TOOLS: list[dict[str, Any]] = [decisions.LOG_DECISION]
 CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONLY_TOOLS)
+# Dime's steering tools, after all of those, only while DIME_STEERING_ENABLED (agent.py)
+STEERING_TOOLS: list[dict[str, Any]] = ai_steering.STEERING_TOOLS
+STEERING_TOOL_NAMES = ai_steering.STEERING_TOOL_NAMES
 
 # The router resolves names; it never loads stats (docs/AI_PHASE1_PLAN.md § 4)
 ROUTER_TOOLS: list[dict[str, Any]] = [TOOLS[0], GET_MY_TEAMS]
@@ -1384,8 +1420,11 @@ _REGISTRY: dict[str, _Tool] = {
     automations.GET_AUTOMATIONS_NAME: _Tool(automations.GetAutomationsInput, _get_automations),
     decisions.GET_DECISIONS_NAME: _Tool(decisions.GetDecisionsInput, _get_decisions),
     decisions.LOG_DECISION_NAME: _Tool(decisions.LogDecisionInput, _log_decision),
+    ai_steering.STEER_NAME: _Tool(ai_steering.SteerInput, _steer),
+    ai_steering.SET_LANE_NAME: _Tool(ai_steering.SetLaneInput, _set_lane),
+    ai_steering.CANCEL_PICKUP_NAME: _Tool(ai_steering.CancelPickupInput, _cancel_pickup),
 }
-assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES == set(_REGISTRY), \
+assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES == set(_REGISTRY), \
     "every defined tool needs a handler, and vice versa"
 
 

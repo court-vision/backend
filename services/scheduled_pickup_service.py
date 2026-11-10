@@ -559,7 +559,12 @@ class ScheduledPickupService:
         )
 
     @staticmethod
-    async def cancel(team, pickup_id: int) -> ScheduledPickupResp:
+    async def cancel(team, pickup_id: int, proposal_id: Optional[int] = None) -> ScheduledPickupResp:
+        chip = None
+        if proposal_id is not None:
+            # Dime's cancel_pickup chip: checked to be this very pickup before anything changes
+            from services.ai.steering import for_apply
+            chip = await for_apply(proposal_id, team.user_id, team.team_id, "cancel_pickup", pickup_id=pickup_id)
         found = await run_db("pickup.cancel", _cancel_pickup, team.team_id, pickup_id, datetime.now(timezone.utc))
         if found is None:
             raise NotFoundError("SCHEDULED_PICKUP_NOT_FOUND", "Scheduled pickup not found")
@@ -568,7 +573,10 @@ class ScheduledPickupService:
             raise ScheduledPickupInProgress(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
         if prior != PENDING:
             raise ScheduledPickupNotPending(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
-        log.info("scheduled_pickup_cancelled", team_id=team.team_id, pickup_id=pickup_id)
+        log.info("scheduled_pickup_cancelled", team_id=team.team_id, pickup_id=pickup_id, proposal_id=proposal_id)
+        if chip is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(chip.id, pickup_id=pickup_id)
         return ScheduledPickupResp(status=ApiStatus.SUCCESS, message=f"Pickup of {row.add_name} cancelled",
                                    data=to_schema(row))
 

@@ -14,7 +14,9 @@ Three automations run a Court Vision team without the user:
 - **Stream lanes**: each open lane, the spot it streams, when it decides next and
   for which day, and its plan (who holds the spot each day, what each adds, the
   gain over holding).
-- **Scheduled pickups** still pending.
+- **Scheduled pickups** still pending, each with its pickup_id (cancel_pickup's).
+- **Holds** (step 4, only while steering is on): Dime's live holds, with the
+  reason each was set and its hold_id (steer's clear).
 
 DB reads only, no ESPN call. NBA player ids only, as every tool result.
 """
@@ -34,7 +36,8 @@ from db.models.nba.players import Player
 from db.models.notifications import NotificationPreference, NotificationTeamPreference
 from db.models.roster_moves import RosterMove
 from db.models.scheduled_pickups import ScheduledPickup
-from services import schedule_service
+from services import schedule_service, steering
+from services.ai import steering as ai_steering
 from services.lineup_editor_service import _slot_name
 from services.scheduled_pickup_service import et_at
 from services.stream_lane_service import StreamLaneService
@@ -234,10 +237,22 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
         "late_scratch": [_write_view(w, names) for w in late],
         "lanes": [_lane_view(lane, names) for lane in open_lanes],
         "pickups": [{
+            "pickup_id": p.id,
             "date": p.nba_date.isoformat(),
             "add": _player(p.add_player_id, names, p.add_name, p.add_team),
             "drop": _player(p.drop_player_id, names, p.drop_name, p.drop_team),
             "from_stream_lane": p.lane_id is not None,
         } for p in pickups],
+        **({"holds": await _holds(team.team_id, today)} if steering.enabled() else {}),
         "notes": notes,
     }
+
+
+async def _holds(team_id: int, today: date) -> list[dict[str, Any]]:
+    """Dime's live holds on the team (services/steering.py), with their reasons and hold_ids for
+    `steer`'s clear. Only while steering is on, so the result is as before when it is off."""
+    try:
+        rows = await steering.live_rows(team_id, today)
+    except Exception:
+        return []
+    return [ai_steering.hold_view(r) for r in rows]
