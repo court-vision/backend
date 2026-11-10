@@ -70,7 +70,7 @@ async def get_daily_actions(team: OwnedTeamContext = Depends(get_owned_team)):
 @router.get("/{team_id}/availability", response_model=TeamAvailabilityResp)
 async def get_team_availability(
     start: date = Query(..., description="First game date (ISO)"),
-    end: date = Query(..., description=f"Last game date (ISO); start to end spans at most {MAX_DAYS} days"),
+    end: date = Query(..., description=f"Last game date (ISO); start to end covers at most {MAX_DAYS} dates, both included"),
     nba_ids: list[int] = Query(
         default=[], description=f"NBA player ids, the matchup's two rosters (at most {MAX_PLAYERS})",
     ),
@@ -81,7 +81,7 @@ async def get_team_availability(
     verdict that day has no row: ESPN's own status stands for him. Never reads ESPN."""
     if end < start or (end - start).days >= MAX_DAYS:
         raise AppError("AVAILABILITY_RANGE_INVALID",
-                       f"end must be on or after start, and start to end may span at most {MAX_DAYS} days",
+                       f"end must be on or after start, and start to end may cover at most {MAX_DAYS} dates, both included",
                        status_code=422)
     if len(nba_ids) > MAX_PLAYERS:
         raise AppError("AVAILABILITY_TOO_MANY_PLAYERS", f"At most {MAX_PLAYERS} players", status_code=422)
