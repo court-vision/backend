@@ -637,6 +637,29 @@ class TestUngroundedPlaces:
         text = '**I would add him today before his game tonight against Boston** for **31.5**.'
         assert agent.ungrounded_places(text, [], []) == 0
 
+    def test_emphasis_is_not_a_place(self):
+        # Two fantasy answers of the kind that counted 3 and 6 made-up places on Nov 3
+        text = ("**Add Kyrie Irving, drop Jalen Duren.** The chip below sends it from the tray. "
+                "**My call:** hold Giddey, and **don't** chase the blocks.")
+        assert agent.made_up_places(text, [], []) == []
+
+    def test_a_place_is_where_the_answer_sends_you(self):
+        assert agent.placed_names("Make the move in the **Waiver Wire** tab.") == ["Waiver Wire"]
+        assert agent.placed_names('Click "Add player", then **Send**.') == ["Add player", "Send"]
+        assert agent.placed_names("Go to Week › **Market** › ONE DAY.") == ["Market"]
+        assert agent.placed_names("Use the **Week** desk: open **Market** (P).") == ["Week", "Market"]
+
+    def test_a_cue_in_another_sentence_does_not_count(self):
+        assert agent.placed_names("Open the tray. **Hold** him for now.") == []
+
+    def test_made_up_places_are_named_in_the_turn_log(self, monkeypatch):
+        logged = {}
+        monkeypatch.setattr(agent, "get_logger", lambda: type("L", (), {"info": lambda self, *a, **kw: logged.update(kw)})())
+        turn = agent.Turn(conversation_id=1, user_id=2, message="where?", history=conversations.History())
+        agent._log_turn(turn, "ok", 10, 0, 3, 2, made_up=["Waiver Wire", "Add player"])
+        assert logged["ungrounded_places"] == 2
+        assert logged["made_up_places"] == ["Waiver Wire", "Add player"]
+
 
 # ---- display ----
 

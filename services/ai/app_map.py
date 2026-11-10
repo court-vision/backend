@@ -56,24 +56,48 @@ TRAIL_WEIGHT = 3.0
 K1 = 1.2
 B = 0.75
 
+# The words a question is made of rather than about ("where can I see…", "how do I get…")
 _STOP = frozenset(
-    "a an and are at be by can do does for from how i in is it me my of on or "
-    "the this that to what where which with you your".split()
+    "a about all also am an and any are at be been by can could did do does done for from get go "
+    "has have he her his how i if in into is it its just know look me most my need not now of off on "
+    "or our people please right see should show so some tell that the their them there they this to up "
+    "us use want was way we were what when where which who why will with would you your".split()
 )
+# Phrasal verbs, joined so their parts don't match apart ("pick up" isn't a draft pick)
+_PHRASES = (
+    (re.compile(r"\bpick(?:s|ed|ing)?[\s-]+up\b"), "pickup"),
+    (re.compile(r"\bline[\s-]+up\b"), "lineup"),
+    (re.compile(r"\bturn(?:s|ed|ing)?\s+(on|off)\b"), r"\1"),
+)
+_CONTRACTION = re.compile(r"['’](?:s|re|ll|ve|d|m|t)\b")
+# The consonants -ing and -ed double ("dropped", "setting"), and no others ("adding", "passing")
+_DOUBLED = re.compile(r"([bgmnpt])\1$")
+
+
+def _stem(w: str) -> str:
+    """A light stemmer: plurals, -ing, -ed and a final e, so "scheduled",
+    "scheduling" and "schedule" are one word (as are "games" and "game")."""
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 4 and re.search(r"(?:ch|sh|x|ss)es$", w):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    for suffix, keep in (("ing", 3), ("ed", 3)):
+        if w.endswith(suffix) and len(w) - len(suffix) >= keep and re.search(r"[aeiouy]", w[:-len(suffix)]):
+            w = _DOUBLED.sub(r"\1", w[:-len(suffix)])
+            break
+    if len(w) > 4 and w.endswith("e"):
+        w = w[:-1]
+    return w
 
 
 def tokens(text: str) -> list[str]:
-    """Lowercase words, stop words out, plurals folded ("players" → "player")."""
-    out = []
-    for w in re.findall(r"[a-z0-9]+", text.lower()):
-        if w in _STOP:
-            continue
-        if len(w) > 4 and w.endswith("ies"):
-            w = w[:-3] + "y"
-        elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
-            w = w[:-1]
-        out.append(w)
-    return out
+    """Lowercase words, stop words out, stemmed ("players" → "player", "playing" → "play")."""
+    text = _CONTRACTION.sub("", text.lower())
+    for pattern, joined in _PHRASES:
+        text = pattern.sub(joined, text)
+    return [_stem(w) for w in re.findall(r"[a-z0-9]+", text) if len(w) > 1 and w not in _STOP]
 
 
 class _Bm25:
@@ -107,6 +131,22 @@ def _step_words(step) -> str:
     return f"{step.within or ''} {step.role}" if step.example else step.name
 
 
+# Clerk's sign-in, where a desk sends a visitor it doesn't know
+_SIGN_IN = re.compile(r"^/sign-(?:in|up)\b")
+
+
+def _reachable(screen: MapScreen) -> bool:
+    """A screen the account's pass landed on at sign-in is a desk that lost the
+    session, not a place to send anyone: its "link" is the sign-in page."""
+    return not (screen.signed_in and _SIGN_IN.match(screen.url))
+
+
+def _place(screen: MapScreen) -> tuple:
+    """Where a screen is, with its data left out: its desk and its steps, a step
+    named by data standing for any row of its list."""
+    return (screen.desk, *((s.within, s.role) if s.example else (s.role, s.name) for s in screen.trail))
+
+
 def _steps(desk_label: str, screen: MapScreen) -> str:
     """ "Week › Market P › ONE DAY": the clicks from the desk's front, as a user reads them."""
     parts = [desk_label]
@@ -122,6 +162,58 @@ def _cut(tree: str, limit: int = TREE_CHARS) -> str:
     return head[: head.rfind("\n")] + "\n- …" if "\n" in head else head + "…"
 
 
+# A tree line: "- role \"name\" [state]" or "- role: text" or "- text: …"
+_LINE = re.compile(r"^\s*- (?:[\w-]+(?: \"(?P<name>.*)\")?(?: \[[^\]]*\])*:? ?)(?P<text>.*)$")
+
+
+def _words(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", _CONTRACTION.sub("", text.lower())))
+
+
+class _Copy:
+    """The app's own copy, found in a screen's tree. Only words the source writes
+    for users count, so a crawled player row or a conversation's text (made of
+    the app's words: "stream", "pickup") doesn't make a screen look relevant. A
+    phrase of the copy counts wherever a line has it; a single word only as a
+    line's whole text ("Theme", "SLATE"), since alone it is as often data's."""
+
+    def __init__(self, texts: list[str]):
+        self.single: set[tuple[str, ...]] = set()
+        self.starts: dict[str, set[tuple[str, ...]]] = {}
+        for text in texts:
+            w = _words(text)
+            if len(w) == 1:
+                self.single.add(w)
+            elif w:
+                self.starts.setdefault(w[0], set()).add(w)
+
+    def tokens_in(self, tree: str) -> Counter:
+        """The copy's words in a tree, each weighed by how much of its line the
+        copy makes up: a control's own name counts in full, a phrase of the
+        copy inside a line of data (a conversation's answer) barely."""
+        out: Counter = Counter()
+        for line in tree.splitlines():
+            m = _LINE.match(line)
+            if not m:
+                continue
+            for part in (m.group("name"), m.group("text")):
+                w = _words(part or "")
+                if not w:
+                    continue
+                # A control's key hint ("Market P", "Pin P") is not part of its name
+                bare = w[:-1] if len(w) > 1 and len(w[-1]) == 1 else w
+                if w in self.single or bare in self.single:
+                    out.update(tokens(" ".join(bare)))
+                    continue
+                found = [phrase for i, word in enumerate(w) for phrase in self.starts.get(word, ())
+                         if w[i:i + len(phrase)] == phrase]
+                weight = min(1.0, sum(len(p) for p in found) / len(bare))
+                for phrase in found:
+                    for t in tokens(" ".join(phrase)):
+                        out[t] += weight
+        return out
+
+
 @dataclass
 class LoadedMap:
     """One build's map, parsed, with its search index."""
@@ -131,6 +223,8 @@ class LoadedMap:
     map: AppMapUpload
     # Which upload of the build this is: a later crawl of it replaces the row
     uploaded_at: Optional[datetime] = None
+    # The screens a user can be sent to (`_reachable`)
+    screens: list[MapScreen] = field(init=False, repr=False)
     _screens: _Bm25 = field(init=False, repr=False)
     _unseen: list[tuple[str, Optional[str], str]] = field(init=False, repr=False)
     _unseen_index: _Bm25 = field(init=False, repr=False)
@@ -138,19 +232,11 @@ class LoadedMap:
     def __post_init__(self):
         m = self.map
         desks = {d.id: d for d in m.desks}
-        # The app's own words: everything its source writes for users, its desks' words, its controls' names
-        vocab: set[str] = set()
-        for c in m.copy_:
-            for s in (*c.seen, *c.unseen):
-                vocab.update(tokens(s))
-        for d in m.desks:
-            vocab.update(tokens(f"{d.label} {d.note} {' '.join(d.keywords)}"))
-        for s in m.screens:
-            for step in s.trail:
-                vocab.update(tokens(_step_words(step)))
+        self.screens = [s for s in m.screens if _reachable(s)]
+        copy = _Copy([text for c in m.copy_ for text in (*c.seen, *c.unseen)])
 
         docs = []
-        for s in m.screens:
+        for s in self.screens:
             desk = desks.get(s.desk)
             doc: Counter = Counter()
             trail = " ".join(_step_words(step) for step in s.trail) or (desk.label if desk else s.desk)
@@ -158,7 +244,7 @@ class LoadedMap:
                 doc[t] += TRAIL_WEIGHT
             if desk:
                 doc.update(tokens(f"{desk.label} {desk.note} {' '.join(desk.keywords)}"))
-            doc.update(t for t in tokens(s.tree) if t in vocab)
+            doc.update(copy.tokens_in(s.tree))
             docs.append(doc)
         self._screens = _Bm25(docs)
 
@@ -169,19 +255,33 @@ class LoadedMap:
         """Every desk with its note, keys and the views a link opens: the model's bearings."""
         out = []
         for d in self.map.desks:
-            views = [s.title for s in self.map.screens if s.desk == d.id and len(s.trail) == 1 and s.link]
+            views = [s.title for s in self.screens if s.desk == d.id and len(s.trail) == 1 and s.link]
             out.append({"id": d.id, "label": d.label, "href": d.href, "note": d.note, "keys": d.keys,
                         "needs": d.needs, "views": list(dict.fromkeys(views))})
         return out
 
     def search(self, query: str, desk: Optional[str] = None, limit: int = SCREENS) -> list[MapScreen]:
+        """The best screens for `query`, one per place: the same control reached
+        through another row of data, or crawled again signed out, is the same
+        answer and would only crowd out the next one."""
         q = tokens(query)
         ranked = sorted(
             ((score, i) for i, score in enumerate(self._screens.scores(q))
-             if score > 0 and (desk is None or self.map.screens[i].desk == desk)),
+             if score > 0 and (desk is None or self.screens[i].desk == desk)),
             key=lambda x: (-x[0], x[1]),
         )
-        return [self.map.screens[i] for _, i in ranked[:limit]]
+        out: list[MapScreen] = []
+        places: set[tuple] = set()
+        for _, i in ranked:
+            screen = self.screens[i]
+            place = _place(screen)
+            if place in places:
+                continue
+            places.add(place)
+            out.append(screen)
+            if len(out) == limit:
+                break
+        return out
 
     def search_unseen(self, query: str, desk: Optional[str] = None, limit: int = UNSEEN) -> list[dict[str, Any]]:
         q = tokens(query)
