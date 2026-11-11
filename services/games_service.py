@@ -1,7 +1,21 @@
 """
 Service for game-related operations.
+
+Today's slate carries each game's live score, status, period and clock. They
+come from the live pipeline's newest score snapshot of the game
+(nba.live_game_score_snapshots), which is the game as its live box score had it
+within the last 30 seconds. They used to be read from the NBA's scoreboard file
+on every request, and that file moves about once in ten minutes (the median
+gap between changes was 600 s in every game of 2026-11-09), so the slate still
+showed a tip time for minutes after the tip and held each score for ten.
+
+The scoreboard is still asked when the snapshots cannot answer: before the
+pipeline's window opens there are none, and one that has stopped moving for a
+game not yet final means the pipeline is not running. Then each game takes
+whichever of the two is further along.
 """
 
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 
 import pytz
@@ -9,6 +23,7 @@ import pytz
 from services.schedule_service import get_upcoming_games_on_date
 from core.logging import get_logger
 from db.models.nba.games import Game
+from db.models.nba.live_game_score_snapshots import LatestSnapshot, LiveGameScoreSnapshot
 from db.base import DB_RUNTIME_ERRORS, run_db
 from services.providers.blocking import run_blocking_provider
 from schemas.common import ApiStatus
@@ -20,6 +35,63 @@ from core.nba_calendar import nba_date_et as _get_nba_today  # noqa: E402
 
 
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}
+
+# The live pipeline snapshots every game it reads each 30 s. A game not yet
+# final whose newest snapshot is older than this has gone six polls without
+# one: the pipeline is down or cannot read it, and the scoreboard is asked.
+SNAPSHOT_FRESH_SECONDS = 180
+
+
+def needs_scoreboard(game_ids: list[str], snapshots: Mapping[str, LatestSnapshot], now: datetime) -> bool:
+    """Whether the stored snapshots leave any of these games without a current word.
+
+    `now` is UTC and naive, like `captured_at`. A final game's snapshot does
+    not age: the pipeline stops reading a game once its final box score is
+    stored, and the last snapshot taken is the final score.
+    """
+    for game_id in game_ids:
+        snapshot = snapshots.get(game_id)
+        if snapshot is None:
+            return True
+        if snapshot.game_status != 3 and (now - snapshot.captured_at).total_seconds() > SNAPSHOT_FRESH_SECONDS:
+            return True
+    return False
+
+
+def _progress(status, period, home, away) -> tuple[int, int, int]:
+    """How far along a game is: its status, then its period, then the points on the board."""
+    return (status or 1, period or 0, (home or 0) + (away or 0))
+
+
+def live_fields(game: Mapping, snapshot: LatestSnapshot | None, listed: Mapping | None) -> dict:
+    """A stored game's live score, status, period and clock; nothing with no word on it.
+
+    `snapshot` is the live pipeline's newest and `listed` the game's entry on
+    the NBA scoreboard, when that was read. The snapshot is the fresher by
+    minutes whenever the pipeline is running, so it stands unless the
+    scoreboard is strictly further along.
+    """
+    if listed is not None and (
+        snapshot is None
+        or _progress(listed.get("game_status"), listed.get("period"), listed.get("home_score"), listed.get("away_score"))
+        > _progress(snapshot.game_status, snapshot.period, snapshot.home_score, snapshot.away_score)
+    ):
+        return {
+            "home_score": listed["home_score"],
+            "away_score": listed["away_score"],
+            "status": _GAME_STATUS_MAP.get(listed["game_status"], game["status"]),
+            "period": listed["period"],
+            "game_clock": listed["game_clock"],
+        }
+    if snapshot is None:
+        return {}
+    return {
+        "home_score": snapshot.home_score,
+        "away_score": snapshot.away_score,
+        "status": _GAME_STATUS_MAP.get(snapshot.game_status, game["status"]),
+        "period": snapshot.period,
+        "game_clock": snapshot.game_clock,
+    }
 
 
 class GamesService:
@@ -45,13 +117,29 @@ class GamesService:
         ]
 
     @staticmethod
+    def _stored_today(game_date: date) -> tuple[list[dict], dict[str, LatestSnapshot]]:
+        """Today's stored games and the live pipeline's newest snapshot of each, on one connection."""
+        stored = GamesService._stored_games(game_date)
+        try:
+            snapshots = LiveGameScoreSnapshot.latest_by_game(game["game_id"] for game in stored)
+        except DB_RUNTIME_ERRORS:
+            raise
+        except Exception as e:
+            # The scoreboard can still answer for every game.
+            get_logger().warning("live_snapshot_overlay_failed", error=str(e), date=game_date.isoformat())
+            snapshots = {}
+        return stored, snapshots
+
+    @staticmethod
     async def get_games_on_date(game_date: date) -> GamesOnDateResp:
         """
         Get all games on a specific date.
 
-        For today's NBA date, live scoreboard data (scores, status, period,
-        game_clock) is overlaid on top of the DB records so callers always
-        get the freshest available state without a separate endpoint.
+        For today's NBA date, each game's live score, status, period and clock
+        are overlaid on top of the DB records (which are written once at
+        scheduling time and once when the game is complete), so callers get
+        the freshest available state without a separate endpoint. See the
+        module docstring for where they come from.
 
         Args:
             game_date: Date to query
@@ -62,39 +150,34 @@ class GamesService:
         log = get_logger()
 
         try:
-            stored = await run_db("games.on_date", GamesService._stored_games, game_date)
+            today = game_date == _get_nba_today()
+            snapshots: dict[str, LatestSnapshot] = {}
+            if today:
+                stored, snapshots = await run_db("games.on_date", GamesService._stored_today, game_date)
+            else:
+                stored = await run_db("games.on_date", GamesService._stored_games, game_date)
 
             if stored:
-                game_list = [GameInfo(**game) for game in stored]
-
-                # For today, overlay live scores/status/period/clock from the
-                # NBA live scoreboard. The DB record may be stale since games
-                # are only written once (at scheduling time) or once complete.
-                if game_date == _get_nba_today():
+                scoreboard: dict[str, dict] = {}
+                if today and needs_scoreboard([g["game_id"] for g in stored], snapshots, datetime.utcnow()):
                     from pipelines.extractors.nba_api import NBAApiExtractor
                     try:
                         extractor = NBAApiExtractor()
                         live_games = await run_blocking_provider(
                             "nba", "games_scoreboard", extractor.get_scoreboard_games, game_date
                         )
-                        live_by_id = {g["game_id"]: g for g in live_games}
-
-                        game_list = [
-                            GameInfo(
-                                **{
-                                    **g,
-                                    "home_score": live_by_id[g["game_id"]]["home_score"] if g["game_id"] in live_by_id else g["home_score"],
-                                    "away_score": live_by_id[g["game_id"]]["away_score"] if g["game_id"] in live_by_id else g["away_score"],
-                                    "status": _GAME_STATUS_MAP.get(live_by_id[g["game_id"]]["game_status"], g["status"]) if g["game_id"] in live_by_id else g["status"],
-                                    "period": live_by_id[g["game_id"]]["period"] if g["game_id"] in live_by_id else None,
-                                    "game_clock": live_by_id[g["game_id"]]["game_clock"] if g["game_id"] in live_by_id else None,
-                                }
-                            )
-                            for g in stored
-                        ]
+                        scoreboard = {g["game_id"]: g for g in live_games}
                     except Exception as e:
                         log.warning("live_scoreboard_overlay_failed", error=str(e), date=game_date.isoformat())
-                        # Fall through with stale DB data rather than failing the request
+                        # Fall through with the snapshots there are (or the
+                        # stale DB data) rather than failing the request
+
+                game_list = [
+                    GameInfo(**{**g, **live_fields(g, snapshots.get(g["game_id"]), scoreboard.get(g["game_id"]))})
+                    if today
+                    else GameInfo(**g)
+                    for g in stored
+                ]
             else:
                 games = get_upcoming_games_on_date(game_date)
                 game_list = [

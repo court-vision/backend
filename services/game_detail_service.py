@@ -52,11 +52,15 @@ def score_history(game_id: str) -> list[GameScoreSnapshot]:
     (first tip 3 PM) carried 870 of them, 0-0 each, and its margin chart was
     three-quarters flat line.
 
-    Of a run of identical snapshots only the first and the last are kept: the
-    league's scoreboard feed, which the snapshots read, moved about every ten
-    minutes that night, so a game's ~300 in-play snapshots held 15 distinct
-    scores. Keeping both ends of each run keeps its time on the clock, so a
-    chart drawn by `captured_at` is the same line, at a tenth of the body.
+    Of a run of snapshots with the same score only the first and the last are
+    kept. Keeping both ends of each run keeps its time on the clock, so a chart
+    drawn by `captured_at` is the same line. A snapshot is the game as its live
+    box score had it (data-platform's live pipeline, since 2026-11), so through
+    play the clock differs in every one and a run lasts only while the score
+    holds: stoppages and the breaks between periods. Until then the snapshots
+    were the league's scoreboard feed's, which moved about every ten minutes:
+    a game's ~300 in-play snapshots held 15 distinct scores, and the history
+    of a game from those nights is that coarse for good.
     """
     rows = [
         GameScoreSnapshot(
@@ -75,9 +79,7 @@ def score_history(game_id: str) -> list[GameScoreSnapshot]:
     ]
 
     def same(a: GameScoreSnapshot, b: GameScoreSnapshot) -> bool:
-        return (a.home_score, a.away_score, a.period, a.game_clock, a.game_status) == (
-            b.home_score, b.away_score, b.period, b.game_clock, b.game_status,
-        )
+        return (a.home_score, a.away_score, a.game_status) == (b.home_score, b.away_score, b.game_status)
 
     return [
         snap
