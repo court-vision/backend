@@ -25,9 +25,9 @@ never the user: "Optimize today" plans with them (it is the fill), but the desk'
 own moves are never refused for one, and the user clears any from the Week desk.
 
 The rules (`steer_fill`, `lane_steer`, `blocking`) are pure and table-tested; the
-reads fail soft, since a missing hold must never stop auto-lineup or a lane. All of
-it is behind `DIME_STEERING_ENABLED` (`enabled`, off by default): switched off, the
-planners read no holds at all.
+reads fail soft, since a missing hold must never stop auto-lineup or a lane. There
+is no switch: a hold steers from the day it is set through its last day, and only
+Dime's chips (the AI desk's accounts) and a sent lineup chip make one.
 """
 
 from __future__ import annotations
@@ -196,18 +196,9 @@ async def live_rows(team_id: int, today: Optional[date] = None) -> list[Any]:
     return await _live(team_id, today or schedule_service.get_nba_today())
 
 
-def enabled() -> bool:
-    """`DIME_STEERING_ENABLED`: off, no hold steers anything (the planners read none), no chip is
-    applied and no pin is made, so everything runs as it did before Dime could steer."""
-    from core.settings import settings
-    return settings.dime_steering_enabled
-
-
 async def holds_for(team_id: int, today: Optional[date] = None) -> list[Hold]:
-    """The team's holds in force today or later, while steering is on. Never raises: a failed read
-    is no holds, logged, so auto-lineup and the lanes carry on as they would without Dime."""
-    if not enabled():
-        return []
+    """The team's holds in force today or later. Never raises: a failed read is no holds, logged,
+    so auto-lineup and the lanes carry on as they would without Dime."""
     try:
         return [hold_of(r) for r in await live_rows(team_id, today)]
     except Exception as exc:
@@ -264,11 +255,9 @@ def _pin_benched(row: Any, now: datetime, by: str) -> int:
 
 async def pin_benched(proposal_id: int, now: Optional[datetime] = None, *, by: str = "user") -> None:
     """A sent lineup chip's benched players, pinned for its day: the fill won't start them again.
-    `by` is who sent the chip: 'user', or 'dime' when Dime sent it itself. Only while steering is
-    on; never raises (the lineup write is done)."""
+    `by` is who sent the chip: 'user', or 'dime' when Dime sent it itself. Never raises (the lineup
+    write is done)."""
     from db.models.ai_conversations import AiProposal
-    if not enabled():
-        return
     try:
         row = await run_db("steering.pin_row", lambda pid: AiProposal.get_or_none(AiProposal.id == pid), proposal_id)
         if row is None or row.kind != "lineup":

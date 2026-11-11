@@ -53,7 +53,7 @@ class CheckinEventsReq(ApiModel):
 
 
 class CheckinEventsData(ApiModel):
-    off: bool                                    # DIME_EVENTS_ENABLED (or AI / autopilot) is off: nothing recorded
+    off: bool                                    # AI_ENABLED or AUTOPILOT_ENABLED is off: nothing recorded
     teams: int                                   # switched-on teams on AUTOPILOT_TEAM_IDS
     facts: int                                   # the posted keys that are events at all
     recorded: int                                # new events on a team that rosters the player

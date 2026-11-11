@@ -18,7 +18,6 @@ import pytest
 from peewee import IntegrityError
 
 from core.errors import ConflictError
-from core.settings import settings
 from db.base import db
 from db.models.ai_conversations import AiProposal
 from db.models.team_holds import TeamHold, live_holds
@@ -39,11 +38,6 @@ def run(coro):
 
 def _now():
     return datetime.now(timezone.utc)
-
-
-@pytest.fixture
-def on(monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
 
 
 @pytest.fixture
@@ -110,7 +104,7 @@ class TestTheChips:
             _chip(team, "trade", {"x": 1})
         _chip(team, "transaction", None, add_player_id=6450, add_name="Kawhi Leonard")
 
-    def test_applying_a_steer_chip_makes_its_holds_and_clears_once(self, integration_db, team, on, monkeypatch):
+    def test_applying_a_steer_chip_makes_its_holds_and_clears_once(self, integration_db, team, monkeypatch):
         monkeypatch.setattr(ai_steering.schedule_service, "get_nba_today", lambda: DAY)
         old = _hold(team, kind="block", player_id=6450, player_name="Kawhi Leonard")
         chip = _chip(team, action={
@@ -138,7 +132,7 @@ class TestTheChips:
         got = run(steering.holds_for(team.team_id, DAY))
         assert [(h.kind, h.share, h.player_id) for h in got] == [("override", 0.0, 4594268)]
 
-    def test_a_shadow_or_expired_chip_is_never_applied(self, integration_db, team, on):
+    def test_a_shadow_or_expired_chip_is_never_applied(self, integration_db, team):
         owned = type("T", (), {"team_id": team.team_id, "user_id": team.user_id_id})()
         for chip in (_chip(team, action={"holds": [], "clear": []}, state="shadow"),
                      _chip(team, action={"holds": [], "clear": []}, expires_at=_now() - timedelta(minutes=1))):
@@ -154,7 +148,7 @@ class TestTheChips:
         again = run(steering.clear(team.team_id, h.id, by="dime"))
         assert again.cleared_by == "user" and again.cleared_at == first.cleared_at
 
-    def test_a_sent_lineup_chip_pins_the_players_it_benched_for_its_day(self, integration_db, team, on):
+    def test_a_sent_lineup_chip_pins_the_players_it_benched_for_its_day(self, integration_db, team):
         chip = _chip(team, "lineup", None, reason="Rest night for Edwards", moves=[
             {"espn_id": 4594268, "nba_player_id": 1630162, "name": "Anthony Edwards", "team": "MIN", "role": "bench",
              "from_slot_id": 0, "from_slot": "PG", "to_slot_id": 12, "to_slot": "BE"},

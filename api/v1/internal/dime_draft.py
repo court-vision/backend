@@ -4,8 +4,9 @@ Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py).
 `/drafts/{session_id}/dime` is Dime's side of one draft room: its notes (a plan, a
 note at the user's pick, a recap), the switch for a note at every pick, and the
 user's seat in a mock, which Dime can draft to the end. Every note is an agent turn
-started here by the user, on the AI desk's spend line. Off unless AI_ENABLED and
-DIME_DRAFT_ENABLED are on; the GET never refuses, so the room can hide Dime.
+started here by the user, on the AI desk's spend line. It comes with the AI desk
+(AI_ENABLED and the account's place on its list); the GET never refuses, so the room
+can hide Dime.
 
 `/ai/draft-notes` is the AI desk's side: the notes of every room, for its Draft
 notes view.
@@ -35,7 +36,7 @@ desk_router = APIRouter(prefix="/ai", tags=["AI"])
 _ERRORS = {
     403: {"description": "The caller is not on the AI desk's invite list (AI_INVITE_ONLY)"},
     404: {"description": "No such room, or it is not the caller's (DRAFT_SESSION_NOT_FOUND)"},
-    503: {"description": "Turned off (AI_DISABLED, AI_DRAFT_DISABLED)"},
+    503: {"description": "Turned off (AI_DISABLED)"},
 }
 
 

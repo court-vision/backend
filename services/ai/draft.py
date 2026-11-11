@@ -29,11 +29,12 @@ Every note is one agent turn in its own conversation (kind `draft`), started fro
 the room by the user (the button, the notes switch, or the seat), so it spends on
 the AI desk's line. One note runs per room at a time. Nothing here reaches ESPN.
 
-Off (`DIME_DRAFT_ENABLED`, the default) the room's view says so and every start is
-refused; the draft-only tools are in no tool list but a draft conversation's. The
-account's own switch (usr.ai_settings.draft_rooms, on by default) does the same for
-one user: the view reports `switched_off`, a start is refused with 409, and a seat
-Dime holds is handed back before its next pick. With the account's memory off, a
+Dime in the room comes with the AI desk: with AI_ENABLED off, or for an account not
+on AI_AGENT_USER_IDS, the room's view says so and every start is refused. The
+draft-only tools are in no tool list but a draft conversation's. The account's own
+switch (usr.ai_settings.draft_rooms, on by default) turns it off for one user: the
+view reports `switched_off`, a start is refused with 409, and a seat Dime holds is
+handed back before its next pick. With the account's memory off, a
 real draft's plan and recap stay in the room: the briefs ask for no recall or
 remember, and `set_draft_plan` saves nothing.
 """
@@ -50,7 +51,7 @@ from peewee import IntegrityError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from api.deps import OwnedDraftSessionContext, _owned_session
-from core.errors import AppError, ConflictError, ServiceUnavailableError
+from core.errors import AppError, ConflictError
 from core.logging import get_logger
 from core.nba_calendar import nba_date_et
 from core.settings import settings
@@ -96,12 +97,8 @@ def _now() -> datetime:
 
 
 def enabled() -> bool:
-    return settings.ai_enabled and settings.dime_draft_enabled
-
-
-class DraftOff(ServiceUnavailableError):
-    error_code = "AI_DRAFT_DISABLED"
-    default_message = "Dime isn't drafting yet: it is switched off on the server"
+    """The server has Dime at all (AI_ENABLED): the draft has no switch of its own."""
+    return settings.ai_enabled
 
 
 class DraftSwitchedOff(ConflictError):
@@ -117,12 +114,10 @@ async def features(user_id: int) -> Any:
 
 
 async def ensure_on(user_id: int) -> Any:
-    """Refuse a start in the room unless the server, the AI desk's list and the account's draft rooms
-    switch all allow Dime there. Returns the account's switches."""
+    """Refuse a start in the room unless the AI desk is on for the account (AI_ENABLED and its list)
+    and the account's draft rooms switch allows Dime there. Returns the account's switches."""
     from services.ai.agent_service import ensure_access
     ensure_access(user_id)
-    if not settings.dime_draft_enabled:
-        raise DraftOff(log_level="info")
     switches = await features(user_id)
     if not switches.draft_rooms:
         raise DraftSwitchedOff()

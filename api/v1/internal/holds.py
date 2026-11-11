@@ -4,8 +4,9 @@ list the live ones, apply a `steer` chip (its holds set and its clears done, the
 chip marked sent), clear one. Clerk-authenticated; ownership via `get_owned_team`.
 No ESPN call: holds steer Court Vision's own automations, never ESPN directly.
 
-While steering is switched off (`DIME_STEERING_ENABLED`) the list is empty and a
-chip can't be applied (409 AI_STEERING_OFF); a hold can always be cleared.
+Only Dime's chips make a hold, so only an account on the AI desk gets new ones
+(`enabled` in the answer); a hold already set is listed and can be cleared by anyone
+who owns the team.
 """
 
 from fastapi import APIRouter, Depends
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/teams", tags=["holds"])
 async def list_holds(team: OwnedTeamContext = Depends(get_owned_team)):
     """The team's live holds (today's or later, not cleared), by first day, each with what it
     does and Dime's reason."""
-    return respond(await ai_steering.desk_holds(team.team_id))
+    return respond(await ai_steering.desk_holds(team))
 
 
 @router.post("/{team_id}/holds", response_model=TeamHoldsResp)
@@ -34,10 +35,10 @@ async def apply_holds(req: ApplyHoldsReq, team: OwnedTeamContext = Depends(get_o
     and the holds it clears are cleared, in one transaction, and the chip is marked sent.
     Returns the team's live holds then. 404 AI_PROPOSAL_NOT_FOUND (not the caller's, or not
     this team's); 409 AI_PROPOSAL_NOT_PENDING (already applied, dismissed, expired, or a
-    check-in's shadow); 422 AI_PROPOSAL_MISMATCH (not a steer chip); 409 AI_STEERING_OFF.
+    check-in's shadow); 422 AI_PROPOSAL_MISMATCH (not a steer chip).
     """
     made = await ai_steering.apply_holds(team, req.proposal_id)
-    return respond(await ai_steering.desk_holds(team.team_id, f"{made} hold(s) set"))
+    return respond(await ai_steering.desk_holds(team, f"{made} hold(s) set"))
 
 
 @router.delete("/{team_id}/holds/{hold_id}", response_model=TeamHoldsResp)
@@ -47,4 +48,4 @@ async def clear_hold(hold_id: int, team: OwnedTeamContext = Depends(get_owned_te
     row = await steering.clear(team.team_id, hold_id, by="user")
     if row is None:
         raise NotFoundError("HOLD_NOT_FOUND", "Hold not found")
-    return respond(await ai_steering.desk_holds(team.team_id, f"Hold on {row.player_name} cleared"))
+    return respond(await ai_steering.desk_holds(team, f"Hold on {row.player_name} cleared"))

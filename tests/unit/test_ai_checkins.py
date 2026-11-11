@@ -319,29 +319,33 @@ class TestStart:
         assert turn.limits == agent.Limits.checkin()
         assert turn.message.startswith("[Morning check-in for team_id 23")
 
-    def test_acting_on_nothing_is_step_3_s_brief_and_rows_at_ai_say_so(self, starting, monkeypatch):
+    def test_acting_on_nothing_is_step_3_s_brief_and_rows_at_ai_say_so(self, starting):
         _start()
         shadow = starting.launched[0][0].message
         assert shadow == checkins.brief("morning", TUE, 23, manual=False)
         assert checkins._SHADOW in shadow and "What you do yourself" not in shadow
-        # At AI while acting is off on the server, it still reviews: step 3's brief
+        # A row at AI is acted on from then: no server switch stands between
         starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=["lineup"], autopilot=False)
         _start()
-        assert starting.launched[1][0].message == shadow
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
-        _start()
-        acting = starting.launched[2][0].message
+        acting = starting.launched[1][0].message
         assert "What you do yourself on this team: lineup (slot moves and pins). Those automations are at AI" in acting
         assert checkins._SHADOW not in acting and "what you sent, what you left for them" in acting
         # The autopilot switch: every row that offers AI
         starting.autopilot = SimpleNamespace(paused_at=None, ai_rows=[], autopilot=True)
         _start()
-        assert "lineup (slot moves and pins), daily actions" in starting.launched[3][0].message
+        assert "lineup (slot moves and pins), daily actions" in starting.launched[2][0].message
         # A paused team only reviews, whatever is at AI
         starting.autopilot = SimpleNamespace(paused_at=datetime(2025, 11, 10, tzinfo=timezone.utc), ai_rows=["lineup"],
                                              autopilot=True)
         _start()
-        assert starting.launched[4][0].message == shadow
+        assert starting.launched[3][0].message == shadow
+
+    def test_every_check_in_is_told_to_steer_an_automation_rather_than_work_around_it(self, starting):
+        # Steering has no switch: the review step names the chips in every brief
+        for kind in ("morning", "weekly"):
+            assert "steer it rather than work around it" in checkins.brief(kind, TUE, 23, manual=False)
+        assert "steer it: a pin, or an override at zero" in checkins.brief("event", TUE, 23, manual=False,
+                                                                          events=["- X ruled out (player_id 1)"])
 
     def test_a_spent_budget_skips_a_scheduled_one_and_refuses_a_manual_one(self, starting):
         starting.reservation = None

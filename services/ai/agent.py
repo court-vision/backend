@@ -76,9 +76,8 @@ BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "display": "updates", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_TOKENS = 32_000  # per call: thinking counts toward it, and a cut-off answer is a failed turn
 BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what you have."
-# Dime's steering tools (steer, set_lane, cancel_pickup) come after the display tools, and only
-# while DIME_STEERING_ENABLED: switched off, the prefix is exactly what it was before them
-_STEERING: list[dict[str, Any]] = STEERING_TOOLS if settings.dime_steering_enabled else []
+# Dime's steering tools (steer, set_lane, cancel_pickup) come after the display tools
+_STEERING: list[dict[str, Any]] = STEERING_TOOLS
 _STEERING_NAMES = frozenset(t["name"] for t in _STEERING)
 TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE, *_STEERING]
 ALLOWED = AGENT_TOOL_NAMES | _STEERING_NAMES

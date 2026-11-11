@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.settings import settings
 from services import steering
 from services.lineup_planner import PlannerPlayer, plan_fill
 from services.multi_stream_planner import Streamer, plan_streams
@@ -34,11 +33,6 @@ def hold(kind, pid, start=D0, end=None, *, share=None, hid=1, reason="why"):
 def pp(pid, slot, eligible=(PG, UT, BE), *, game=True, status=None, locked=False, value=10.0):
     return PlannerPlayer(player_id=pid, name=f"P{pid}", slot_id=slot, eligible_slot_ids=frozenset(eligible),
                          has_game=game, injury_status=status, locked=locked, value=value)
-
-
-@pytest.fixture
-def steering_on(monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
 
 
 # ---- the rules ------------------------------------------------------------------------------
@@ -134,15 +128,7 @@ def _row(**kw):
 
 
 @pytest.mark.unit
-def test_switched_off_no_hold_is_read_at_all(monkeypatch):
-    async def never(team_id, today=None):
-        raise AssertionError("read while off")
-    monkeypatch.setattr(steering, "live_rows", never)
-    assert asyncio.run(steering.holds_for(21, D0)) == []
-
-
-@pytest.mark.unit
-def test_switched_on_the_live_holds_are_read_and_a_failed_read_is_no_holds(monkeypatch, steering_on):
+def test_the_live_holds_are_read_and_a_failed_read_is_no_holds(monkeypatch):
     async def rows(team_id, today=None):
         return [_row(), _row(id=8, kind=OVERRIDE, share=0.5)]
     monkeypatch.setattr(steering, "live_rows", rows)
@@ -156,7 +142,7 @@ def test_switched_on_the_live_holds_are_read_and_a_failed_read_is_no_holds(monke
 
 
 @pytest.mark.unit
-def test_a_sent_lineup_chip_pins_only_the_players_it_benched(monkeypatch, steering_on):
+def test_a_sent_lineup_chip_pins_only_the_players_it_benched(monkeypatch):
     made = []
 
     class FakeHold:
@@ -179,11 +165,28 @@ def test_a_sent_lineup_chip_pins_only_the_players_it_benched(monkeypatch, steeri
 
 
 @pytest.mark.unit
-def test_switched_off_a_sent_lineup_chip_pins_nobody(monkeypatch):
-    async def never(*a, **kw):
-        raise AssertionError("read while off")
-    monkeypatch.setattr(steering, "run_db", never)
+def test_a_pin_that_cant_be_made_never_fails_the_lineup_write(monkeypatch):
+    async def broken(*a, **kw):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(steering, "run_db", broken)
     asyncio.run(steering.pin_benched(31))
+
+
+@pytest.mark.unit
+def test_only_a_lineup_chip_pins(monkeypatch):
+    reads, made = [], []
+
+    async def run_db(name, fn, *a):
+        reads.append(name)
+        return SimpleNamespace(id=31, kind="transaction")
+
+    async def pin(row, now, by):
+        made.append(row.id)
+        return 1
+    monkeypatch.setattr(steering, "run_db", run_db)
+    monkeypatch.setattr(steering, "_pin_benched", pin)
+    asyncio.run(steering.pin_benched(31))
+    assert reads == ["steering.pin_row"] and made == []
 
 
 # ---- the planners ---------------------------------------------------------------------------

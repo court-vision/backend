@@ -56,7 +56,6 @@ POOL_SIZE = 100
 @pytest.fixture
 def on(monkeypatch, integration_db):
     monkeypatch.setattr(settings, "ai_enabled", True)
-    monkeypatch.setattr(settings, "dime_draft_enabled", True)
     monkeypatch.setattr(settings, "ai_monthly_budget_usd", 100.0)
     monkeypatch.setattr(settings, "ai_agent_turn_max_usd", 1.0)
 

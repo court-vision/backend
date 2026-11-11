@@ -15,8 +15,8 @@ Three automations run a Court Vision team without the user:
   for which day, and its plan (who holds the spot each day, what each adds, the
   gain over holding).
 - **Scheduled pickups** still pending, each with its pickup_id (cancel_pickup's).
-- **Holds** (step 4, only while steering is on): Dime's live holds, with the
-  reason each was set and its hold_id (steer's clear).
+- **Holds** (step 4): Dime's live holds, with the reason each was set and its
+  hold_id (steer's clear).
 - **Autopilot** (step 5, only on a team where Dime acts on some automation):
   the automations it acts on, the policy its own sends are held to, the adds it
   has used of its caps, and what it did lately (services/ai/acting.py).
@@ -250,7 +250,7 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
             "from_stream_lane": p.lane_id is not None,
             **({"scheduled_by_you": True} if getattr(p, "made_by_autopilot", False) else {}),
         } for p in pickups],
-        **({"holds": await _holds(team.team_id, today)} if steering.enabled() else {}),
+        "holds": await _holds(team.team_id, today),
         **await _autopilot(team.team_id),
         "notes": notes,
     }
@@ -273,7 +273,7 @@ async def _autopilot(team_id: int) -> dict[str, Any]:
 
 async def _holds(team_id: int, today: date) -> list[dict[str, Any]]:
     """Dime's live holds on the team (services/steering.py), with their reasons and hold_ids for
-    `steer`'s clear. Only while steering is on, so the result is as before when it is off."""
+    `steer`'s clear. A failed read is none."""
     try:
         rows = await steering.live_rows(team_id, today)
     except Exception:

@@ -47,15 +47,27 @@ def rows(monkeypatch):
     return held
 
 
+@pytest.fixture
+def on_the_ai_desk(monkeypatch):
+    monkeypatch.setattr(settings, "ai_enabled", True)
+    monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
+
+
 @pytest.mark.api
-def test_switched_off_the_list_is_empty_and_says_so(authed_client, owned, rows):
+@pytest.mark.parametrize("ai_enabled, desk_users", [(True, []), (True, [7]), (False, [42])])
+def test_an_account_dime_cant_steer_for_still_sees_its_holds(authed_client, owned, rows, monkeypatch, ai_enabled,
+                                                             desk_users):
+    # No new hold can come (so the Week desk stops polling), but one already set still steers and lists
+    monkeypatch.setattr(settings, "ai_enabled", ai_enabled)
+    monkeypatch.setattr(settings, "ai_agent_user_ids", desk_users)
     r = authed_client.get("/v1/internal/teams/7/holds")
-    assert r.status_code == 200 and r.json()["data"] == {"enabled": False, "holds": []}
+    data = r.json()["data"]
+    assert r.status_code == 200 and data["enabled"] is False
+    assert [h["hold_id"] for h in data["holds"]] == [5]
 
 
 @pytest.mark.api
-def test_the_list_says_what_each_hold_does_and_why(authed_client, owned, rows, monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
+def test_the_list_says_what_each_hold_does_and_why(authed_client, owned, rows, on_the_ai_desk):
     r = authed_client.get("/v1/internal/teams/7/holds")
     data = r.json()["data"]
     assert r.status_code == 200 and data["enabled"] is True
@@ -67,8 +79,7 @@ def test_the_list_says_what_each_hold_does_and_why(authed_client, owned, rows, m
 
 
 @pytest.mark.api
-def test_applying_a_steer_chip_returns_the_holds_then(authed_client, owned, rows, monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
+def test_applying_a_steer_chip_returns_the_holds_then(authed_client, owned, rows, monkeypatch, on_the_ai_desk):
     asked = []
 
     async def apply(team, proposal_id, now=None):
@@ -82,16 +93,12 @@ def test_applying_a_steer_chip_returns_the_holds_then(authed_client, owned, rows
 
 
 @pytest.mark.api
-@pytest.mark.parametrize("error, status, code", [
-    (ai_steering.SteeringOff(), 409, "AI_STEERING_OFF"),
-    (ConflictError("AI_PROPOSAL_NOT_PENDING", "Already applied"), 409, "AI_PROPOSAL_NOT_PENDING"),
-])
-def test_a_chip_that_cant_be_applied_is_refused(authed_client, owned, rows, monkeypatch, error, status, code):
+def test_a_chip_that_cant_be_applied_is_refused(authed_client, owned, rows, monkeypatch):
     async def apply(team, proposal_id, now=None):
-        raise error
+        raise ConflictError("AI_PROPOSAL_NOT_PENDING", "Already applied")
     monkeypatch.setattr(ai_steering, "apply_holds", apply)
     r = authed_client.post("/v1/internal/teams/7/holds", json={"proposal_id": 41})
-    assert r.status_code == status and r.json()["error_code"] == code
+    assert r.status_code == 409 and r.json()["error_code"] == "AI_PROPOSAL_NOT_PENDING"
 
 
 @pytest.mark.api
@@ -102,7 +109,6 @@ def test_a_bad_body_is_fastapis_422(authed_client, owned):
 
 @pytest.mark.api
 def test_clearing_a_hold(authed_client, owned, rows, monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
     cleared = []
 
     async def clear(team_id, hold_id, *, by="user", now=None):

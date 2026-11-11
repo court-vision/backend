@@ -39,7 +39,8 @@ class TeamHold(ApiModel):
 
 
 class TeamHoldsData(ApiModel):
-    enabled: bool = Field(..., description="Dime's steering is on: off, no hold steers anything and none is listed")
+    enabled: bool = Field(..., description="Dime can set holds for this account (it is on the AI desk); "
+                                           "a hold already set is listed either way")
     holds: list[TeamHold] = []                    # live, by first day
 
 

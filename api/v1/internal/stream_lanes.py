@@ -10,9 +10,9 @@ boundary. The decisions themselves run in the scheduled-pickups executor
 Dime's lane chips (the Dime autopilot plan, step 4) are applied through these same
 routes with `proposal_id` (the start and update bodies, the stop's query): the chip
 must be the caller's, this team's, still proposed, and this very action (start on
-this player, pause / resume / stop of this lane), else 409 AI_PROPOSAL_NOT_PENDING,
-422 AI_PROPOSAL_MISMATCH, or 409 AI_STEERING_OFF while steering is switched off. The
-step records Dime's reason, and the chip is marked sent.
+this player, pause / resume / stop of this lane), else 409 AI_PROPOSAL_NOT_PENDING
+or 422 AI_PROPOSAL_MISMATCH. The step records Dime's reason, and the chip is marked
+sent.
 """
 
 from typing import Optional

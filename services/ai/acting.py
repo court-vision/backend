@@ -23,8 +23,7 @@ The policy (`blocked_by`), checked just before the send, every rule a line in th
 plan's Guardrails table:
 
     switches       AI_ENABLED, AUTOPILOT_ENABLED, the team's Pause and allowlist,
-                   ROSTER_WRITES_ENABLED for an ESPN write, DIME_STEERING_ENABLED for
-                   a steering chip
+                   ROSTER_WRITES_ENABLED for an ESPN write
     caps           Dime's own adds: AUTOPILOT_ADDS_PER_DAY on the move's day and
                    AUTOPILOT_ADDS_PER_MATCHUP over the matchup (lanes keep their own
                    budget, and ESPN's limits still apply at the write)
@@ -78,11 +77,11 @@ AUTOPILOT = "autopilot"          # usr.roster_moves.source of every ESPN write D
 
 # The policy's rules, as `rule` names them
 R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED = "ai_off", "autopilot_off", "paused", "not_allowed"
-R_WRITES_OFF, R_STEERING_OFF, R_EXPIRED = "writes_off", "steering_off", "expired"
+R_WRITES_OFF, R_EXPIRED = "writes_off", "expired"
 R_CAP_DAY, R_CAP_MATCHUP, R_RESERVE, R_PROTECTED, R_CHURN = "cap_day", "cap_matchup", "reserve", "protected", "churn"
 R_CREDENTIALS = "credentials"
 # Switches: off, they stop Dime, but trying wasn't Dime's mistake, so they never count toward auto-pause
-SWITCHES = frozenset({R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED, R_WRITES_OFF, R_STEERING_OFF, R_EXPIRED})
+SWITCHES = frozenset({R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED, R_WRITES_OFF, R_EXPIRED})
 # The chips whose send is an ESPN write (a lane start writes nothing at once, but its pickups will)
 _WRITES = frozenset({proposals.TRANSACTION, proposals.SCHEDULED, proposals.LINEUP})
 MESSAGE_MAX = 400
@@ -345,8 +344,6 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     if row.kind in _WRITES or (row.kind == proposals.LANE and (row.action or {}).get("op") == "start"):
         if not settings.roster_writes_enabled:
             return R_WRITES_OFF, "Roster writes are switched off on the server"
-    if row.kind in proposals.STEERING_KINDS and not steering.enabled():
-        return R_STEERING_OFF, "Dime's steering is switched off on the server"
     if row.kind not in (proposals.TRANSACTION, proposals.SCHEDULED):
         return None
 
@@ -390,7 +387,7 @@ def reserve_block(acq: Any, day: date) -> Optional[str]:
 
 
 # A pickup Dime scheduled itself, re-checked when it comes due: its reasons (usr.scheduled_pickups.reason)
-P_OFF, P_ACTING_OFF, P_PAUSED = "dime_off", "dime_acting_off", "dime_paused"
+P_OFF, P_PAUSED = "dime_off", "dime_paused"
 P_NOT_ALLOWED, P_NOT_ACTING, P_RESERVE = "dime_not_allowed", "dime_not_acting", "dime_reserve"
 
 
@@ -405,8 +402,6 @@ async def pickup_block(team_id: int, user_id: int, pickup_id: Optional[int] = No
     from services.ai import checkins
     if not settings.ai_enabled or not settings.autopilot_enabled:
         return P_OFF, "Dime is switched off on the server"
-    if not autonomy.acting_available():
-        return P_ACTING_OFF, "Dime's acting is switched off on the server"
     autopilot = await _autopilot_row(team_id)
     if autopilot is None or autopilot.paused_at is not None:
         return P_PAUSED, "Dime is paused on this team"
@@ -500,8 +495,6 @@ def _classify(exc: BaseException) -> tuple[str, str, str]:
         return REFUSED, "espn_rejected", f"ESPN refused it: {exc.message}"
     if isinstance(exc, AppError):
         code = exc.error_code or "error"
-        if code == "AI_STEERING_OFF":
-            return BLOCKED, R_STEERING_OFF, exc.message
         if 400 <= (exc.status_code or 500) < 500:
             return REFUSED, code, exc.message
         return FAILED, code, exc.message

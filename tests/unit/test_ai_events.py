@@ -34,7 +34,6 @@ def run(coro):
 def on(monkeypatch):
     monkeypatch.setattr(settings, "ai_enabled", True)
     monkeypatch.setattr(settings, "autopilot_enabled", True)
-    monkeypatch.setattr(settings, "dime_events_enabled", True)
     monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
     monkeypatch.setattr(settings, "autopilot_team_ids", [23])
     monkeypatch.setattr(settings, "autopilot_checkins_per_day", 6)
@@ -245,7 +244,7 @@ class TestKick:
         monkeypatch.setattr(settings, "autopilot_team_ids", [])
         assert kick(et(TUE, 15)) is None
         monkeypatch.setattr(settings, "autopilot_team_ids", [23])
-        monkeypatch.setattr(settings, "dime_events_enabled", False)
+        monkeypatch.setattr(settings, "autopilot_enabled", False)
         assert kick(et(TUE, 15)) is None
         assert kicking.events_started == []
 
@@ -321,7 +320,7 @@ class TestReceive:
         assert receiving.recorded == [] and out["recorded"] == 0
 
     def test_off_nothing_is_read_or_recorded(self, receiving, monkeypatch):
-        monkeypatch.setattr(settings, "dime_events_enabled", False)
+        monkeypatch.setattr(settings, "autopilot_enabled", False)
         out = run(events.receive([(1628973, TUE)], [9], et(TUE, 18, 5)))
         assert out["off"] is True and receiving.asked == [] and receiving.recorded == []
 
@@ -480,14 +479,21 @@ class TestTaking:
         monkeypatch.setattr(events, "forget_roster", forgot.append)
         run(checkins._after(23, 42))
         assert kicked == [(23, 42)] and forgot == [23]
-        monkeypatch.setattr(settings, "dime_events_enabled", False)
+        monkeypatch.setattr(settings, "autopilot_enabled", False)
         run(checkins._after(23, 42))
         assert kicked == [(23, 42)]
 
 
-def test_off_no_check_in_takes_an_event(monkeypatch):
-    monkeypatch.setattr(settings, "dime_events_enabled", False)
+@pytest.mark.parametrize("ai, autopilot", [(False, True), (True, False)])
+def test_with_a_kill_switch_off_no_check_in_takes_an_event(monkeypatch, ai, autopilot):
+    monkeypatch.setattr(settings, "ai_enabled", ai)
+    monkeypatch.setattr(settings, "autopilot_enabled", autopilot)
+    assert not events.enabled()
     assert run(events.take(23, 7, row=SimpleNamespace(ai_rows=["late_scratch"], autopilot=False))) == []
+
+
+def test_events_have_no_switch_of_their_own(on):
+    assert events.enabled()
 
 
 def test_below_ai_a_check_in_drops_what_was_waiting_instead_of_taking_it(on, monkeypatch):

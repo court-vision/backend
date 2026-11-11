@@ -576,7 +576,7 @@ def dime(h, monkeypatch):
 
     monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
     monkeypatch.setattr(acting, "_pickup_committed_under", committed_under)
-    for name, value in (("ai_enabled", True), ("autopilot_enabled", True), ("dime_acting_enabled", True),
+    for name, value in (("ai_enabled", True), ("autopilot_enabled", True),
                         ("autopilot_team_ids", [21]), ("ai_agent_user_ids", [11]), ("autopilot_adds_reserve", 1)):
         monkeypatch.setattr(svc.settings, name, value)
     return d
@@ -601,7 +601,6 @@ def test_under_the_autopilot_switch_a_pickup_dime_scheduled_goes_too(h, dime):
     (lambda d, s: setattr(d.pilot, "paused_at", NOW - timedelta(hours=1)), "dime_paused"),
     (lambda d, s: setattr(d.pilot, "ai_rows", ["lineup"]), "dime_not_acting"),
     (lambda d, s: setattr(d.pilot, "ai_rows", []), "dime_not_acting"),
-    (lambda d, s: setattr(s, "dime_acting_enabled", False), "dime_acting_off"),
     (lambda d, s: setattr(s, "autopilot_enabled", False), "dime_off"),
     (lambda d, s: setattr(s, "ai_enabled", False), "dime_off"),
     (lambda d, s: setattr(s, "autopilot_team_ids", []), "dime_not_allowed"),

@@ -572,8 +572,8 @@ class AiActingPolicy(ApiModel):
 class AiActing(ApiModel):
     """Whether Dime can act on its own at all, and the policy it acts within."""
 
-    available: bool = Field(..., description="DIME_ACTING_ENABLED: off, an automation at AI only reviews")
-    steering: bool = Field(..., description="DIME_STEERING_ENABLED: Dime's steering chips exist at all")
+    available: bool = Field(..., description="AI_ENABLED and AUTOPILOT_ENABLED, the server's kill switches: "
+                                             "off, nothing at AI runs or sends")
     writes: bool = Field(..., description="ROSTER_WRITES_ENABLED: writes to ESPN are on")
     policy: AiActingPolicy
 
