@@ -298,22 +298,24 @@ class TestTools:
 
 
 class TestSwitch:
-    def test_off_the_room_shows_no_dime_and_starts_are_refused(self, monkeypatch):
-        monkeypatch.setattr(settings, "ai_enabled", True)
+    def test_with_the_ai_off_the_room_shows_no_dime_and_starts_are_refused(self, monkeypatch):
+        # The draft has no switch of its own: it comes and goes with the AI desk
+        monkeypatch.setattr(settings, "ai_enabled", False)
         monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
-        monkeypatch.setattr(settings, "dime_draft_enabled", False)
+        assert draft.enabled() is False
         view = run(draft.room_view(42, _room()))
         assert view["enabled"] is False and view["available"] is False and view["notes"] == []
         with pytest.raises(ServiceUnavailableError) as err:
             run(draft.start(42, _room(), draft.PLAN))
-        assert err.value.error_code == "AI_DRAFT_DISABLED"
+        assert err.value.error_code == "AI_DISABLED"
         with pytest.raises(ServiceUnavailableError):
             run(draft.set_seat(42, _room(), True))
+        monkeypatch.setattr(settings, "ai_enabled", True)
+        assert draft.enabled() is True
 
     def test_the_account_s_switch_off_hides_dime_and_refuses_starts(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
         monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
-        monkeypatch.setattr(settings, "dime_draft_enabled", True)
 
         async def switches(user_id):
             assert user_id == 42
@@ -423,6 +425,5 @@ class TestSwitch:
     def test_on_a_user_off_the_ai_desk_s_list_sees_no_dime(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
         monkeypatch.setattr(settings, "ai_agent_user_ids", [1])
-        monkeypatch.setattr(settings, "dime_draft_enabled", True)
         view = run(draft.room_view(42, _room()))
         assert view["enabled"] is True and view["available"] is False

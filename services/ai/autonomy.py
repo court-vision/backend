@@ -26,9 +26,11 @@ stored here is the AI part:
 `ai_rows`, and the `autopilot` switch, which puts every row that offers AI at AI while
 it is on (off, the stored rows count again).
 
-Dime sends a move itself (`acts`) only when its row is at AI, check-ins are on and
-DIME_ACTING_ENABLED is on. Otherwise a check-in's change is a review: logged as what
-Dime would have done and never sent (step 3's shadow). A move counts under the row of
+Dime sends a move itself (`acts`) only when its row is at AI and check-ins are on.
+Otherwise a check-in's change is a review: logged as what Dime would have done and never
+sent (step 3's shadow). There is no server switch for acting alone: the send is held to
+the policy (services/ai/acting.py), which is where AUTOPILOT_TEAM_IDS and the kill
+switches (AI_ENABLED, AUTOPILOT_ENABLED) stop it. A move counts under the row of
 its kind (`rows_of`): slot moves and pins under lineup, adds and drops under
 daily_actions, lanes and their holds under lanes, and whatever an event check-in
 commits under late_scratch. A chip that touches two rows acts only if both do.
@@ -77,13 +79,10 @@ EVENT_KINDS: frozenset[str] = frozenset({"event"})
 
 
 def acting_available() -> bool:
-    """The server lets Dime send anything itself (DIME_ACTING_ENABLED)."""
-    return settings.dime_acting_enabled
-
-
-def events_available() -> bool:
-    """The server starts event check-ins (DIME_EVENTS_ENABLED; services/ai/events.py)."""
-    return settings.dime_events_enabled
+    """The server's kill switches are on (AI_ENABLED and AUTOPILOT_ENABLED): off, no check-in starts
+    and nothing is sent, whatever a team's rows say. Acting and event check-ins have no switch of
+    their own: which teams is AUTOPILOT_TEAM_IDS, and which automations is each team's rows at AI."""
+    return settings.ai_enabled and settings.autopilot_enabled
 
 
 def offered(row: str, level: str) -> Optional[str]:
@@ -121,8 +120,8 @@ def checkins_on(autopilot: Any) -> bool:
 
 
 def acts(autopilot: Any, row: str) -> bool:
-    """Dime sends this row's moves itself: at AI, check-ins on, and acting on on the server."""
-    return at_ai(autopilot, row) and checkins_on(autopilot) and acting_available()
+    """Dime sends this row's moves itself: at AI, with check-ins on."""
+    return at_ai(autopilot, row) and checkins_on(autopilot)
 
 
 def acting_rows(autopilot: Any) -> list[str]:
@@ -234,10 +233,8 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
                 note = "Autopilot sets these"
             if paused:
                 note = "Paused: Dime does nothing here until you resume check-ins"
-            elif row == LATE_SCRATCH and not events_available():
-                note = "Nothing starts yet: event check-ins are switched off on the server"
             elif not acting_available():
-                note = "Reviews only: Dime's acting is switched off on the server"
+                note = "Nothing runs: autopilot is switched off on the server"
             if row == LINEUP and not lineup_email:
                 note = (f"{note}. " if note else "") + "Auto-lineup doesn't run: your account's lineup email is off"
         if row == CHECKINS and paused and getattr(autopilot, "paused_by", None) == "system":

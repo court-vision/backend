@@ -28,8 +28,9 @@ shadow proposal like any other: what Dime would have done, never applied.
 Whether Dime may apply its own chips is the acting step's (step 5,
 services/ai/acting.py): on automations at AI on the team, a check-in's committed
 chip is applied by the server through these same routes (`by` dime), and the holds
-and lane events it makes say so. The tools, the chips' routes and the pins a sent
-lineup chip leaves are behind `DIME_STEERING_ENABLED` (off by default).
+and lane events it makes say so. Steering has no switch of its own: the tools come
+with the AI desk (AI_ENABLED and the account's place on AI_AGENT_USER_IDS), and a
+hold steers from the day it is set.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.errors import AppError, ConflictError, NotFoundError
 from core.logging import get_logger
+from core.settings import settings
 from db.base import db, db_operation, run_db
 from schemas.common import LeagueInfo
 from services import schedule_service, steering
@@ -69,7 +71,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-enabled = steering.enabled
+def available(user_id: int) -> bool:
+    """Whether Dime can steer for this account: the AI desk is on and the account is on it. Only
+    then can a new hold appear, so only then does the Week desk keep its list fresh. Holds already
+    set steer, and are listed, either way."""
+    return settings.ai_enabled and user_id in settings.ai_agent_user_ids
 
 
 class _Input(BaseModel):
@@ -539,17 +545,10 @@ async def cancel_pickup(user_id: int, conversation_id: int, team: Any, args: Can
 # ------------------------------- applying a chip ------------------------------- #
 
 
-class SteeringOff(ConflictError):
-    error_code = "AI_STEERING_OFF"
-    default_message = "Dime's steering is switched off, so its chips can't be applied"
-
-
 async def for_apply(proposal_id: int, user_id: int, team_id: int, kind: str, **match: Any) -> Any:
     """The steering chip a Week desk route says it is applying, checked before anything changes: the
     caller's, this team's, still proposed and unexpired, of `kind`, and the same action (each `match`
     key equal in its `action`). A mismatch is refused, so a chip never does what it doesn't show."""
-    if not enabled():
-        raise SteeringOff()
     now = _now()
     row = await proposals.get(proposal_id, user_id)
     if proposals.team_of(row) != team_id:
@@ -626,13 +625,12 @@ async def apply_holds(team: Any, proposal_id: int, now: Optional[datetime] = Non
 # ------------------------------- the Week desk's list ------------------------------- #
 
 
-async def desk_holds(team_id: int, message: Optional[str] = None) -> Any:
-    """The holds route's answer: the team's live holds, each with what it does and its reason; none
-    while steering is off (none steers anything then)."""
+async def desk_holds(team: Any, message: Optional[str] = None) -> Any:
+    """The holds route's answer: the team's live holds, each with what it does and its reason, and
+    whether Dime can set more for this account (`enabled`)."""
     from schemas.common import ApiStatus
     from schemas.team_hold import TeamHold, TeamHoldPlayer, TeamHoldsData, TeamHoldsResp
-    on = enabled()
-    rows = await steering.live_rows(team_id) if on else []
+    rows = await steering.live_rows(team.team_id)
     holds = []
     for r in rows:
         share = float(r.share) if r.share is not None else None
@@ -645,7 +643,7 @@ async def desk_holds(team_id: int, message: Optional[str] = None) -> Any:
             created_at=r.created_at,
         ))
     return TeamHoldsResp(status=ApiStatus.SUCCESS, message=message or f"{len(holds)} hold(s)",
-                         data=TeamHoldsData(enabled=on, holds=holds))
+                         data=TeamHoldsData(enabled=available(team.user_id), holds=holds))
 
 
 # ------------------------------- the chip's check ------------------------------- #
@@ -654,8 +652,6 @@ async def desk_holds(team_id: int, message: Optional[str] = None) -> Any:
 async def problems(row: Any, team: Any) -> list[str]:
     """Why a proposed steering chip can't be applied as it stands; [] when it can."""
     from db.models.stream_lanes import StreamLane
-    if not enabled():
-        return [SteeringOff.default_message + "."]
     action = row.action or {}
     if row.kind == CANCEL_PICKUP:
         pk = await run_db("ai.steer_pickup", _team_pickup, team.team_id, action.get("pickup_id"))

@@ -46,7 +46,7 @@ class DimeDraftSeat(ApiModel):
 
 
 class DimeDraftRoom(ApiModel):
-    enabled: bool = Field(description="DIME_DRAFT_ENABLED (and AI_ENABLED) on the server")
+    enabled: bool = Field(description="AI_ENABLED on the server")
     available: bool = Field(description="enabled, the caller is on the AI desk's list, and their Dime in draft rooms "
                                         "switch is on: the room shows Dime")
     switched_off: bool = Field(False, description="enabled and on the list, but the account's Dime in draft rooms "
@@ -77,7 +77,7 @@ class DimeDraftDeskRoom(ApiModel):
 
 
 class DimeDraftDesk(ApiModel):
-    enabled: bool = Field(description="DIME_DRAFT_ENABLED (and AI_ENABLED) on the server")
+    enabled: bool = Field(description="AI_ENABLED on the server")
     switched_off: bool = Field(description="The account's Dime in draft rooms switch is off (its notes still list)")
     rooms: list[DimeDraftDeskRoom] = Field(default_factory=list, description="The room with the newest note first")
 

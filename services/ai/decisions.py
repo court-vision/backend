@@ -23,8 +23,7 @@ A change that cites its proposal is also the commitment (the Dime autopilot plan
 step 5; services/ai/acting.py): when every automation the move counts under is at AI
 on the team (services/ai/autonomy.py) the server sends it within the policy, and the
 decision carries what became of it (`action`); otherwise it stays logged as a review,
-what Dime would have done. With DIME_ACTING_ENABLED off the tool reads as before:
-every change is a review then.
+what Dime would have done.
 """
 
 from __future__ import annotations
@@ -39,7 +38,6 @@ from core.errors import AppError, NotFoundError
 from db.base import db_operation
 from db.models.ai_conversations import AiProposal, AiTurn
 from db.models.autopilot import AiCheckin, AiDecision
-from core.settings import settings
 from services.ai import acting, autonomy, proposals
 
 LOG_DECISION_NAME = "log_decision"
@@ -104,17 +102,20 @@ class GetDecisionsInput(BaseModel):
 LOG_DECISION: dict[str, Any] = {
     "name": LOG_DECISION_NAME,
     "description": (
-        "Log one call this check-in makes, holds included: nothing is sent, the log is what you would "
-        "have done. area: lineup (the day's slots), streaming (lanes and stream pickups), adds_drops "
-        "(your own adds and drops), other. automation: whose plan you reviewed (auto_lineup's fill, a "
-        "stream_lane's next decision, a scheduled_pickup, or none for a move no automation is making). "
-        "call: hold (keep the plan, or do nothing) or change (you'd do something else). A change to the "
-        "lineup or the roster cites the proposal_id propose_lineup or propose_move returned in this "
-        "check-in; any other change cites the proposal a tool made for it in this check-in, if one did, "
-        "and is otherwise said in the summary. summary: what you "
-        "would do, in a line ('Keep auto-lineup's fill for tonight', 'Stream Herb Jones in lane 2's "
-        "spot on Thu instead of Kris Dunn'). reason: why, with the number behind it. The user reads "
-        "every one and marks it agree or disagree. Only in a check-in."
+        "Log one call this check-in makes, holds included. area: lineup (the day's slots), streaming (lanes "
+        "and stream pickups), adds_drops (your own adds and drops), other. automation: whose plan you reviewed "
+        "(auto_lineup's fill, a stream_lane's next decision, a scheduled_pickup, or none for a move no "
+        "automation is making). call: hold (keep the plan, or do nothing) or change (do something else). A "
+        "change to the lineup or the roster cites the proposal_id propose_lineup or propose_move returned in "
+        "this check-in; any other change cites the chip a tool made for it in this check-in, if one did. "
+        "Logging a change that cites its proposal commits that move: when every automation it counts under is "
+        "at AI (the brief says which are) it is sent now through the user's own write routes, if the policy "
+        "allows (get_automations' autopilot section has the caps and what you have used); anywhere else it "
+        "is a review, kept as what you would have done and never sent. The result's `action`, present when "
+        "Dime handled the move, says what happened: sent, blocked (the rule; the move is left as a chip for "
+        "the user), refused (by ESPN or the route) or failed. Never say a move was made unless its action "
+        "says sent, and log as a change only what you'd do. summary: what you do or would do, in a line. reason: why, with the number behind it. The user "
+        "reads every one and marks it agree or disagree. Only in a check-in."
     ),
     "input_schema": {
         "type": "object",
@@ -134,28 +135,7 @@ LOG_DECISION: dict[str, Any] = {
     },
 }
 
-# With acting switched on (DIME_ACTING_ENABLED, the plan's step 5), a logged change is also the
-# commitment, so the tool says so; off, the check-in prefix is exactly step 3's
-LOG_DECISION_ACTING: dict[str, Any] = {
-    **LOG_DECISION,
-    "description": (
-        "Log one call this check-in makes, holds included. area: lineup (the day's slots), streaming (lanes "
-        "and stream pickups), adds_drops (your own adds and drops), other. automation: whose plan you reviewed "
-        "(auto_lineup's fill, a stream_lane's next decision, a scheduled_pickup, or none for a move no "
-        "automation is making). call: hold (keep the plan, or do nothing) or change (do something else). A "
-        "change to the lineup or the roster cites the proposal_id propose_lineup or propose_move returned in "
-        "this check-in; any other change cites the chip a tool made for it in this check-in, if one did. "
-        "Logging a change that cites its proposal commits that move: when every automation it counts under is "
-        "at AI (the brief says which are) it is sent now through the user's own write routes, if the policy "
-        "allows (get_automations' autopilot section has the caps and what you have used); anywhere else it "
-        "is a review, kept as what you would have done and never sent. The result's `action`, present when "
-        "Dime handled the move, says what happened: sent, blocked (the rule; the move is left as a chip for "
-        "the user), refused (by ESPN or the route) or failed. Never say a move was made unless its action "
-        "says sent, and log as a change only what you'd do. summary: what you do or would do, in a line. reason: why, with the number behind it. The user "
-        "reads every one and marks it agree or disagree. Only in a check-in."
-    ),
-}
-CHECKIN_LOG_DECISION = LOG_DECISION_ACTING if settings.dime_acting_enabled else LOG_DECISION
+CHECKIN_LOG_DECISION = LOG_DECISION
 
 GET_DECISIONS: dict[str, Any] = {
     "name": GET_DECISIONS_NAME,

@@ -35,8 +35,9 @@ old (`stale`), or the row left AI before a check-in took it (`level`). What an
 event check-in commits counts under Late scratches (autonomy.rows_of), so it is
 sent only where that row acts.
 
-DIME_EVENTS_ENABLED gates all of it, off by default: off, nothing is recorded,
-no check-in takes an event, and every brief is step 5's.
+There is no switch for events alone: they follow the team (AUTOPILOT_TEAM_IDS and
+its Late scratches row). With AI_ENABLED or AUTOPILOT_ENABLED off nothing is
+recorded and no check-in takes an event.
 """
 
 from __future__ import annotations
@@ -96,7 +97,8 @@ SOURCE_WORDS = {
 
 
 def enabled() -> bool:
-    return settings.ai_enabled and settings.autopilot_enabled and settings.dime_events_enabled
+    """The server's kill switches; which teams take events is `watches` and the allowlist."""
+    return autonomy.acting_available()
 
 
 def watches(row: Any) -> bool:

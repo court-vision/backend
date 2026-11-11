@@ -50,6 +50,6 @@ async def cancel_pickup(pickup_id: int, team: OwnedTeamContext = Depends(get_own
     making it — its outcome follows in a few minutes, and a deferred pickup can be cancelled again.
 
     `proposal_id`: Dime's cancel_pickup chip for this pickup (the Dime autopilot plan, step 4),
-    checked first (409 AI_PROPOSAL_NOT_PENDING, 422 AI_PROPOSAL_MISMATCH, 409 AI_STEERING_OFF) and
-    marked sent once the pickup is cancelled."""
+    checked first (409 AI_PROPOSAL_NOT_PENDING, 422 AI_PROPOSAL_MISMATCH) and marked sent once the
+    pickup is cancelled."""
     return respond(await ScheduledPickupService.cancel(team, pickup_id, proposal_id))

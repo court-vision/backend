@@ -33,16 +33,14 @@ tool list (`log_decision` added) and bounds, and its spend on the autopilot line
 user marks agree or disagree.
 
 What Dime may do itself on the team is its automation levels (services/ai/autonomy.py;
-the plan's step 5): while no automation Dime acts on is at AI (the default, and always
-with DIME_ACTING_ENABLED off) a check-in is exactly step 3's; otherwise its brief says
-which automations are at AI, and a change it logs on them is sent (services/ai/
-acting.py). The Check-ins row is this switch: on while the team isn't paused.
+the plan's step 5): while no automation Dime acts on is at AI (the default) a check-in
+is step 3's shadow; otherwise its brief says which automations are at AI, and a change
+it logs on them is sent (services/ai/acting.py). The Check-ins row is this switch: on while the team isn't paused.
 
 Every check-in takes the team's pending events when it starts (events.take), so
 a scheduled one about to run lists them in its brief rather than another turn
 starting for them. Events come in only for a team whose Late scratches row is at
-AI (or with autopilot on), and with DIME_EVENTS_ENABLED off there are none, and
-every brief is as before.
+AI (or with autopilot on); anywhere else there are none.
 """
 
 from __future__ import annotations
@@ -373,13 +371,8 @@ _SHADOW = (
     "call agree or disagree."
 )
 
-_REVIEW_PLANS = (
-    "- Judge each automation's plan: auto-lineup's fill, each lane's next decision, each scheduled pickup. "
-    "Log one decision for each, a hold when you'd keep it. For a lineup or roster change, propose it first "
-    "and cite the proposal; a lane change is said in the summary.\n"
-)
-# With Dime's steering on (DIME_STEERING_ENABLED, the plan's step 4), a change to an automation's plan
-# is a chip too: steer it with holds, or change the lane or the pickup, and cite that
+# A change to an automation's plan is a chip too (Dime's steering, the plan's step 4): steer it with
+# holds, or change the lane or the pickup, and cite that
 _REVIEW_STEER = (
     "- Judge each automation's plan: auto-lineup's fill, each lane's next decision, each scheduled pickup, "
     "and your own holds (get_automations lists them). Log one decision for each, a hold when you'd keep it. "
@@ -388,7 +381,7 @@ _REVIEW_STEER = (
     "that no longer fits), set_lane, or cancel_pickup, and cite that chip.\n"
 )
 _REVIEW = (
-    (_REVIEW_STEER if settings.dime_steering_enabled else _REVIEW_PLANS) +
+    _REVIEW_STEER +
     "- Then look for what no automation does: an add or drop worth making (run your playbook's checks "
     "first, and project_matchup it). Log it as a change with automation none, or log that you'd stand pat.\n"
     "- remember what the follow-up should check (a thesis, a player to watch), with a recheck day."
@@ -438,8 +431,8 @@ _STEPS = {
         "already makes it.\n"
         "- If he will miss more than that game (a long absence, a lost role), weigh an add or a drop: run your "
         "playbook's checks and project_matchup it first, or hold and say why.\n" +
-        ("- To keep an automation from undoing your call, steer it: a pin, or an override at zero for the days "
-         "he is out, ending when he is due back.\n" if settings.dime_steering_enabled else "") +
+        "- To keep an automation from undoing your call, steer it: a pin, or an override at zero for the days "
+        "he is out, ending when he is due back.\n"
         "- Log one decision for each player named: a change citing its proposal, or a hold and why.\n"
         "- remember what the follow-up should check, with a recheck day."
     ),

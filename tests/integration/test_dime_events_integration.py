@@ -47,7 +47,6 @@ def run(coro):
 def on(monkeypatch):
     monkeypatch.setattr(settings, "ai_enabled", True)
     monkeypatch.setattr(settings, "autopilot_enabled", True)
-    monkeypatch.setattr(settings, "dime_events_enabled", True)
 
 
 @pytest.fixture

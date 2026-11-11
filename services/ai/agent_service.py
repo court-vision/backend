@@ -47,14 +47,12 @@ from services.ai import (
     proposals,
     spend,
 )
-from services.steering import enabled as steering_enabled
 
 
 def acting_info() -> dict:
     """Whether Dime can act on its own, and the policy it acts within (the autopilot plan, step 5)."""
     return {
         "available": autonomy.acting_available(),
-        "steering": steering_enabled(),
         "writes": settings.roster_writes_enabled,
         "policy": {
             "adds_per_day": settings.autopilot_adds_per_day,

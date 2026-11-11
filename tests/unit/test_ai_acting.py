@@ -4,7 +4,7 @@ levels, and Dime acting on its own (the Dime autopilot plan, step 5), without Po
 the model.
 
 Covers the levels (a row at AI by the user or by the autopilot switch, acting only with check-ins
-on and DIME_ACTING_ENABLED on), which rows a chip counts under, the automations table (every
+on), which rows a chip counts under, the automations table (every
 level's availability and why not, the notes), a settings change's checks, the commitment (a
 review does nothing; at AI the move is held to the policy and sent through the user's own
 routes, once), every rule of the policy, auto-pause and its email, and the decision a check-in
@@ -70,8 +70,7 @@ def team_pref(alerts=None, auto=None):
 
 
 class TestLevels:
-    def test_a_row_is_at_ai_when_the_user_put_it_there_or_the_switch_is_on(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+    def test_a_row_is_at_ai_when_the_user_put_it_there_or_the_switch_is_on(self):
         assert autonomy.ai_rows(None) == [] and not autonomy.at_ai(None, autonomy.LINEUP)
         team = pilot(ai_rows=["daily_actions", "bogus"])
         assert autonomy.stored(team) == {"daily_actions"}                     # an unknown row is ignored
@@ -82,15 +81,22 @@ class TestLevels:
         assert autonomy.at_ai(on, autonomy.LATE_SCRATCH) and not autonomy.offers_ai(autonomy.CHECKINS)
         assert autonomy.ai_rows(pilot(ai_rows=["late_scratch"])) == ["late_scratch"]
 
-    def test_dime_acts_only_with_check_ins_on_and_acting_on_on_the_server(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+    def test_dime_acts_on_a_row_at_ai_while_check_ins_are_on(self):
+        # No server switch for acting alone: a row at AI acts, on any settings
         team = pilot(ai_rows=["lineup", "lanes"])
         assert autonomy.acting_rows(team) == ["lineup", "lanes"]
         assert autonomy.acts(team, autonomy.LINEUP) and not autonomy.acts(team, autonomy.DAILY_ACTIONS)
         paused = pilot(ai_rows=["lineup"], paused_at=NOW)
         assert autonomy.acting_rows(paused) == [] and autonomy.ai_rows(paused) == ["lineup"]
-        monkeypatch.setattr(settings, "dime_acting_enabled", False)
-        assert autonomy.acting_rows(team) == []                              # every change is a review
+        assert autonomy.acting_rows(None) == []                              # never set up: every change is a review
+
+    @pytest.mark.parametrize("ai, autopilot, on", [(True, True, True), (False, True, False), (True, False, False)])
+    def test_the_server_s_kill_switches_are_the_only_ones(self, monkeypatch, ai, autopilot, on):
+        monkeypatch.setattr(settings, "ai_enabled", ai)
+        monkeypatch.setattr(settings, "autopilot_enabled", autopilot)
+        assert autonomy.acting_available() is on
+        for gone in ("dime_steering_enabled", "dime_acting_enabled", "dime_events_enabled", "dime_draft_enabled"):
+            assert not hasattr(settings, gone)
 
     def test_the_brief_s_words(self):
         assert autonomy.words(["lineup", "lanes"]) == (
@@ -114,8 +120,7 @@ class TestWhatAChipTouches:
         # Whatever an event check-in commits counts under late scratches
         assert rows(chip("transaction"), event=True) == {"late_scratch"}
 
-    def test_a_chip_acts_only_if_every_row_it_touches_does(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+    def test_a_chip_acts_only_if_every_row_it_touches_does(self):
         team = pilot(ai_rows=["lanes"])
         both = chip("steer", action={"holds": [{"kind": "pin"}, {"kind": "keep"}]})
         assert not autonomy.chip_acts(team, both)
@@ -145,7 +150,7 @@ def offered(row):
 
 class TestTheTable:
     def test_every_row_says_which_levels_it_offers_and_why_not(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        monkeypatch.setattr(settings, "ai_enabled", True)
         t = by_row(autonomy.table(None, lineup_below_ai="notify", lineup_email=True))
         assert list(t) == ["lineup", "daily_actions", "lanes", "late_scratch", "checkins"]
         assert [o["level"] for o in t["lineup"]["options"]] == ["off", "notify", "act", "ai"]
@@ -165,25 +170,27 @@ class TestTheTable:
         assert at_ai["late_scratch"]["level"] == "ai"
 
     def test_the_levels_and_notes_of_a_team_at_ai(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
-        monkeypatch.setattr(settings, "dime_events_enabled", False)
+        monkeypatch.setattr(settings, "ai_enabled", True)
         t = by_row(autonomy.table(pilot(ai_rows=["daily_actions"]), lineup_below_ai="act", lineup_email=True))
         assert (t["daily_actions"]["level"], t["daily_actions"]["note"]) == ("ai", None)
         assert (t["lineup"]["level"], t["checkins"]["level"]) == ("act", "ai")
         on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act", lineup_email=True))
         assert [on[r]["level"] for r in on] == ["ai", "ai", "ai", "ai", "ai"]
         assert on["lineup"]["note"] == "Autopilot sets these"
-        # Late scratches at AI do nothing while the server's event check-ins are off
-        assert on["late_scratch"]["note"] == "Nothing starts yet: event check-ins are switched off on the server"
-        monkeypatch.setattr(settings, "dime_events_enabled", True)
-        on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act", lineup_email=True))
+        # Late scratches follow the team like every other row: event check-ins have no switch of their own
         assert on["late_scratch"]["note"] == "Autopilot sets these"
-        monkeypatch.setattr(settings, "dime_acting_enabled", False)
-        off = by_row(autonomy.table(pilot(ai_rows=["lanes"]), lineup_below_ai="act", lineup_email=True))
-        assert off["lanes"]["note"] == "Reviews only: Dime's acting is switched off on the server"
+        # A kill switch off on the server, a row at AI says nothing runs
+        for switch in ("autopilot_enabled", "ai_enabled"):
+            monkeypatch.setattr(settings, switch, False)
+            off = by_row(autonomy.table(pilot(ai_rows=["lanes", "late_scratch"]), lineup_below_ai="act",
+                                        lineup_email=True))
+            assert off["lanes"]["note"] == off["late_scratch"]["note"] == \
+                "Nothing runs: autopilot is switched off on the server"
+            assert off["daily_actions"]["note"] is None                     # not at AI: nothing to say
+            monkeypatch.setattr(settings, switch, True)
 
     def test_paused_and_a_pause_dime_made_itself(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        monkeypatch.setattr(settings, "ai_enabled", True)
         mine = by_row(autonomy.table(pilot(ai_rows=["lanes"], paused_at=NOW, paused_by="user"),
                                      lineup_below_ai="off", lineup_email=True))
         assert mine["lanes"]["note"].startswith("Paused") and mine["checkins"]["level"] == "off"
@@ -193,7 +200,7 @@ class TestTheTable:
         assert its["checkins"]["note"] == "Dime paused itself: 2 refused today"
 
     def test_the_account_s_lineup_email_off_closes_every_lineup_level_but_off(self, monkeypatch):
-        monkeypatch.setattr(settings, "dime_acting_enabled", True)
+        monkeypatch.setattr(settings, "ai_enabled", True)
         t = by_row(autonomy.table(pilot(ai_rows=["lineup"]), lineup_below_ai="off", lineup_email=False))
         assert set(offered(t["lineup"])) == {"notify", "act", "ai"}
         assert "lineup email is off" in offered(t["lineup"])["ai"]
@@ -268,8 +275,8 @@ CHECKIN = SimpleNamespace(id=9, team_id_id=21)
 def h(monkeypatch):
     """Every switch on, team 21's daily actions at AI, one shadow add/drop for today; the DB, the board and
     the send faked."""
-    for k, v in dict(dime_acting_enabled=True, ai_enabled=True, autopilot_enabled=True, roster_writes_enabled=True,
-                     dime_steering_enabled=True, autopilot_team_ids=[21], ai_agent_user_ids=[11],
+    for k, v in dict(ai_enabled=True, autopilot_enabled=True, roster_writes_enabled=True,
+                     autopilot_team_ids=[21], ai_agent_user_ids=[11],
                      autopilot_adds_per_day=2, autopilot_adds_per_matchup=5, autopilot_adds_reserve=1,
                      autopilot_protected_top=1, autopilot_churn_hours=48, autopilot_pause_refused=2,
                      autopilot_pause_same_block=2, frontend_url="https://courtvision.dev/").items():
@@ -374,11 +381,10 @@ class TestCommit:
         assert v == acting.Verdict("review")
         assert h.rows[31].state == "shadow" and h.promoted == [] and h.sends == [] and h.recorded == []
 
-    def test_with_acting_off_on_the_server_or_check_ins_paused_it_is_a_review(self, h, monkeypatch):
+    def test_with_check_ins_paused_or_the_team_never_set_up_it_is_a_review(self, h):
         h.autopilot = pilot(autopilot=True, paused_at=NOW)
         assert commit() == acting.Verdict("review")
-        h.autopilot = pilot(autopilot=True)
-        monkeypatch.setattr(settings, "dime_acting_enabled", False)
+        h.autopilot = None
         assert commit() == acting.Verdict("review")
         assert h.rows[31].state == "shadow" and h.sends == []
 
@@ -476,18 +482,14 @@ class TestPolicy:
             assert (v.outcome, v.rule, v.paused) == ("blocked", "writes_off", None)
         assert h.paused == [] and h.sends == []
 
-    def test_a_steering_chip_waits_for_steering_and_writes_nothing(self, h, monkeypatch):
+    def test_a_steering_chip_is_applied_and_writes_nothing_to_espn(self, h, monkeypatch):
         steer = prop(state="shadow", kind="steer", add_player_id=None, drop_player_id=None,
                     action={"holds": [{"kind": "keep", "player": {"name": "Nikola Jokic"}, "starts_on": "2026-10-21",
                                        "ends_on": "2026-10-22"}], "clear": []})
         h.rows[31] = steer
         h.autopilot = pilot(ai_rows=["lanes"])                            # a keep hold counts under lanes
         monkeypatch.setattr(settings, "roster_writes_enabled", False)     # not an ESPN write: no matter
-        monkeypatch.setattr(settings, "dime_steering_enabled", False)
-        assert commit().rule == "steering_off"
-        monkeypatch.setattr(settings, "dime_steering_enabled", True)
-        h.rows[32] = prop(**{**vars(steer), "id": 32, "state": "shadow"})
-        v = commit(32)
+        v = commit()
         assert v.outcome == "sent" and h.recorded[-1]["capability"] == "lanes" and h.recorded[-1]["adds"] == 0
 
     def test_a_paused_or_closed_team_and_a_server_switch_stop_it(self, h, monkeypatch):
@@ -544,8 +546,6 @@ class TestClassify:
         from services.lineup_editor_service import RosterWriteDisabled
         assert acting._classify(ProviderAuthError("espn"))[:2] == ("failed", "credentials")
         assert acting._classify(RosterWriteDisabled())[:2] == ("blocked", "writes_off")
-        assert acting._classify(AppError("AI_STEERING_OFF", "Steering is off", status_code=409))[:2] == \
-            ("blocked", "steering_off")
         assert acting._classify(AppError("ROSTER_STALE", "The roster changed", status_code=409)) == \
             ("refused", "ROSTER_STALE", "The roster changed")
         assert acting._classify(AppError("PROVIDER_UNAVAILABLE", "ESPN is down", status_code=502))[:2] == \

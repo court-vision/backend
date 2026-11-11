@@ -7,8 +7,8 @@ Covers the inputs, the three chips (steer checks each hold against the roster an
 notes what it overlaps; set_lane plans a start as the Week desk's preview does and checks a
 lane's state; cancel_pickup needs a pending pickup of the team's), their two shapes (the
 model's view with NBA ids only, the frontend's chip with ESPN ids, which the API schema
-takes), applying one (`for_apply` refuses anything but this very chip, still proposed, while
-steering is on), and the re-check before applying.
+takes), applying one (`for_apply` refuses anything but this very chip, still proposed), and
+the re-check before applying.
 """
 
 import asyncio
@@ -34,11 +34,6 @@ def run(coro):
     return asyncio.run(coro)
 
 
-@pytest.fixture
-def on(monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", True)
-
-
 def live(**kw):
     base = dict(id=5, kind="keep", player_id=JOKIC, nba_player_id=NBA_JOKIC, player_name="Nikola Jokic",
                 player_team="DEN", share=None, starts_on=TODAY, ends_on=TOMORROW, reason="Top-5 player",
@@ -48,7 +43,7 @@ def live(**kw):
 
 
 @pytest.fixture
-def chips(monkeypatch, on):
+def chips(monkeypatch):
     h = SimpleNamespace(board=state(board()), live=[], pending=[], inserted=[])
     identities = {
         NBA_KAWHI: SimpleNamespace(nba_id=NBA_KAWHI, name="Kawhi Leonard", espn_id=KAWHI, team="LAC"),
@@ -300,7 +295,7 @@ def test_a_pickup_is_cancelled_only_while_pending_and_before_its_deadline(chips,
 
 
 @pytest.fixture
-def applying(monkeypatch, on):
+def applying(monkeypatch):
     h = SimpleNamespace(row=row(id=41, kind="steer", add_player_id=None, drop_player_id=None, action={
         "holds": [{"kind": "keep", "player": {"espn_id": JOKIC, "nba_player_id": NBA_JOKIC, "name": "Nikola Jokic",
                                               "team": "DEN"}, "share": None, "starts_on": "2026-10-21",
@@ -341,14 +336,6 @@ def test_a_chip_is_applied_only_as_itself(applying, monkeypatch):
 
 
 @pytest.mark.unit
-def test_switched_off_no_chip_is_applied(applying, monkeypatch):
-    monkeypatch.setattr(settings, "dime_steering_enabled", False)
-    with pytest.raises(mod.SteeringOff) as e:
-        run(mod.for_apply(41, 11, 21, "steer"))
-    assert e.value.error_code == "AI_STEERING_OFF" and e.value.status_code == 409
-
-
-@pytest.mark.unit
 def test_applying_holds_sets_them_with_the_chip_s_reason_and_clears_its_clears(applying, monkeypatch):
     seen = {}
 
@@ -371,7 +358,7 @@ def test_applying_holds_sets_them_with_the_chip_s_reason_and_clears_its_clears(a
 
 
 @pytest.mark.unit
-def test_the_re_check_says_why_a_chip_can_no_longer_be_applied(monkeypatch, on):
+def test_the_re_check_says_why_a_chip_can_no_longer_be_applied(monkeypatch):
     async def live_rows(team_id, today=None):
         return [live(id=5)]
     monkeypatch.setattr(rules, "live_rows", live_rows)
@@ -386,8 +373,6 @@ def test_the_re_check_says_why_a_chip_can_no_longer_be_applied(monkeypatch, on):
     monkeypatch.setattr(mod, "_team_pickup", lambda team_id, pid: SimpleNamespace(status="cancelled"))
     assert run(mod.problems(row(kind="cancel_pickup", action={"pickup_id": 70}), TEAM)) == \
         ["That pickup is no longer pending."]
-    monkeypatch.setattr(settings, "dime_steering_enabled", False)
-    assert run(mod.problems(steer_row, TEAM)) == [mod.SteeringOff.default_message + "."]
 
 
 # ---- what reads a steering chip -------------------------------------------------------------
@@ -411,13 +396,27 @@ def test_the_header_and_a_decision_read_a_steering_chip():
 
 
 @pytest.mark.unit
-def test_switched_off_the_agent_is_offered_no_steering_tool_and_calls_none():
+def test_the_agent_is_offered_the_steering_tools_after_everything_it_had():
     from services.ai import agent, tools
-    assert not {t["name"] for t in agent.TOOLS} & mod.STEERING_TOOL_NAMES
-    assert not (agent.ALLOWED | agent.CHECKIN_ALLOWED) & mod.STEERING_TOOL_NAMES
+    names = [t["name"] for t in agent.TOOLS]
+    steering = [t["name"] for t in mod.STEERING_TOOLS]
+    # Appended, so the prefix before them is the one every conversation already cached
+    assert names[-len(steering):] == steering
+    assert names[:len(tools.AGENT_TOOLS)] == [t["name"] for t in tools.AGENT_TOOLS]
+    for allowed in (agent.ALLOWED, agent.CHECKIN_ALLOWED, agent.DRAFT_ALLOWED):
+        assert mod.STEERING_TOOL_NAMES <= allowed
+    # ...and nowhere else: a caller without them in its list can't reach one
     out = run(tools.run_tool("steer", {"team_id": 21, "reason": "keep him", "holds": [{"kind": "keep", "player_id": 1}]},
-                             ctx=tools.ToolContext(user_id=11, conversation_id=7), allowed=agent.ALLOWED))
+                             ctx=tools.ToolContext(user_id=11, conversation_id=7), allowed=tools.AGENT_TOOL_NAMES))
     assert out.is_error and out.content == "Unknown tool: steer"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ai_enabled, desk_users, can", [(True, [11], True), (True, [12], False), (False, [11], False)])
+def test_dime_can_steer_only_for_an_account_on_the_ai_desk(monkeypatch, ai_enabled, desk_users, can):
+    monkeypatch.setattr(settings, "ai_enabled", ai_enabled)
+    monkeypatch.setattr(settings, "ai_agent_user_ids", desk_users)
+    assert mod.available(11) is can
 
 
 @pytest.mark.unit
