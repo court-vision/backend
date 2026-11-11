@@ -131,6 +131,13 @@ class Settings(BaseSettings):
     fantasy_writer_token: Optional[SecretStr] = None
     fantasy_writer_timeout_seconds: float = 30.0  # > the writer's own 20 s ESPN timeout
     fantasy_writer_max_in_flight: int = 2
+    # The late-scratch swap (POST /jobs/lineup/react, services/late_scratch_service.py):
+    # a verdict change benches a ruled-out starter or starts a bench player now
+    # available, as source 'availability', on each team whose Late scratches level
+    # is act (notify only plans it, for the email). A team gets at most
+    # LATE_SCRATCH_SWAPS_PER_DAY a day, one per player, and ROSTER_WRITES_ENABLED
+    # off turns each into a plan.
+    late_scratch_swaps_per_day: int = 3
 
     # AI layer (docs/AI_LAYER_PLAN.md). AI_ENABLED is the kill switch: off, every
     # AI route answers 503 AI_DISABLED before any model call, so shipping the code

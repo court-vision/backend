@@ -115,18 +115,32 @@ def _slot_name(slot_id: int) -> str:
     return name if isinstance(name, str) and name else str(slot_id)
 
 
-def planner_players(state: LineupState) -> list[PlannerPlayer]:
+# Our verdict (nba.player_availability) as the planner's status word; `unknown` keeps ESPN's
+VERDICT_STATUS: dict[str, str] = {
+    "out": "OUT", "doubtful": "DOUBTFUL", "questionable": "QUESTIONABLE", "probable": "PROBABLE",
+    "available": "ACTIVE",
+}
+
+
+def planner_players(state: LineupState,
+                    verdicts: Optional[dict[int, tuple[str, Optional[str]]]] = None) -> list[PlannerPlayer]:
+    """The board as planner players. `verdicts` (NBA id -> (verdict, previous verdict)) puts our
+    availability verdict in place of ESPN's status for the players it names."""
     out: list[PlannerPlayer] = []
     for p in state.players:
         note = None
         if p.has_game_today:
             when = _clock(p.game_time_et)
             note = f"{p.opponent or 'game'}{' · ' + when if when else ''}"
+        status, previous = p.injury_status, None
+        verdict = (verdicts or {}).get(p.nba_player_id) if p.nba_player_id is not None else None
+        if verdict is not None and verdict[0] in VERDICT_STATUS:
+            status, previous = VERDICT_STATUS[verdict[0]], VERDICT_STATUS.get(verdict[1] or "")
         out.append(PlannerPlayer(
             player_id=p.player_id, name=p.name, slot_id=p.lineup_slot_id,
             eligible_slot_ids=frozenset(p.eligible_slot_ids), has_game=p.has_game_today,
-            injury_status=p.injury_status, locked=p.locked, value=p.avg_points, game_note=note,
-            injured=p.injured,
+            injury_status=status, locked=p.locked, value=p.avg_points, game_note=note,
+            injured=p.injured, previous_status=previous,
         ))
     return out
 
@@ -177,13 +191,15 @@ writer_payload = espn_lineup_payload
 
 
 def _audit_insert(user_id: int, team_id: int, nba_date: date, period: Optional[int], source: str,
-                  moves: list[dict], key: Optional[str], kind: str = "lineup") -> int:
+                  moves: list[dict], key: Optional[str], kind: str = "lineup",
+                  trigger_player_id: Optional[int] = None) -> int:
     """Seed the audit row as an in-flight failure; the write chain settles it. `kind` is
-    'lineup' (slot moves) or 'transaction' (add/drop, see roster_transaction_service)."""
+    'lineup' (slot moves) or 'transaction' (add/drop, see roster_transaction_service);
+    `trigger_player_id` is the NBA id whose verdict an 'availability' row answers."""
     from db.models.roster_moves import RosterMove
     row = RosterMove.create(user=user_id, team=team_id, nba_date=nba_date, scoring_period_id=period,
                             source=source, kind=kind, status="failed", moves=moves, error="in_flight",
-                            idempotency_key=key)
+                            idempotency_key=key, trigger_player_id=trigger_player_id)
     return int(row.id)
 
 
@@ -367,13 +383,15 @@ class LineupEditorService:
 
     @staticmethod
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
-                     moves: list[Move], source: str, fallback_slot_counts) -> tuple[LineupState, bool, int]:
+                     moves: list[Move], source: str, fallback_slot_counts,
+                     trigger_player_id: Optional[int] = None) -> tuple[LineupState, bool, int]:
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, moves)
+        trigger = {"trigger_player_id": trigger_player_id} if trigger_player_id is not None else {}
         audit_id = await run_db("lineup.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
-                                _moves_json(moves), key)
+                                _moves_json(moves), key, **trigger)
         writer = get_roster_writer(league_info.provider)
         try:
             result = await writer.apply_lineup(league_info, state, moves, key)

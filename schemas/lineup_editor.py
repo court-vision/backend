@@ -2,16 +2,17 @@
 Today's lineup as ESPN sees it — slots, eligibility, per-game locks — and the
 moves that change it.
 
-Three consumers share these shapes: the `/teams/{id}/lineup` read behind the
+Four consumers share these shapes: the `/teams/{id}/lineup` read behind the
 manual editor, the manual `POST .../lineup/moves` write, and the
 pipeline-token `POST /jobs/lineup/evaluate` route the data-platform alerts
-pipeline calls for every opted-in team. Slot ids are ESPN's
+pipeline calls for every opted-in team, and `POST /jobs/lineup/react`, its
+late-scratch swap after a verdict change. Slot ids are ESPN's
 (`utils.espn_helpers.POSITION_MAP`): 0-11 active, 12 bench, 13 IR.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal, Optional
 
 from pydantic import Field
@@ -213,3 +214,51 @@ class LineupEvaluationData(ApiModel):
 
 class LineupEvaluationResp(BaseResponse):
     data: Optional[LineupEvaluationData] = None
+
+
+# ------------------------------- The late-scratch swap ------------------------------- #
+
+ReactionVerdict = Literal["out", "doubtful", "available"]
+
+
+class LineupReactReq(ApiModel):
+    """One verdict change from data-platform's availability pipeline, for a game that
+    has not tipped (the news plan's late-scratch pass). Posted once per change."""
+
+    player_id: int = Field(gt=0)                 # NBA player id
+    game_date: date
+    verdict: ReactionVerdict
+    previous_verdict: Optional[str] = Field(default=None, max_length=12)
+    reason: Optional[str] = Field(default=None, max_length=100)    # "Left Ankle; Sprain"
+    source: Optional[str] = Field(default=None, max_length=16)     # the source that decided it (decided_by)
+    changed_at: Optional[datetime] = None
+
+
+class LineupReactTeam(ApiModel):
+    """What the change did to one team: the outcomes are evaluate's (`applied`,
+    `planned` at notify or when writes are off, `noop` when no move answers it,
+    `skipped` with why, `rejected` / `failed` when ESPN or the writer said no).
+    `level` is the team's Late scratches level (notify or act)."""
+
+    team_id: int
+    user_id: int
+    level: Literal["notify", "act"] = "act"
+    outcome: EvaluationOutcome
+    reason: Optional[str] = None
+    player_name: Optional[str] = None
+    moves: list[LineupMoveResult] = []
+    verified: Optional[bool] = None
+    nba_date: Optional[str] = None
+    first_game_time_et: Optional[str] = None
+    team_name: str = ""
+    audit_id: Optional[int] = None
+
+
+class LineupReactData(ApiModel):
+    player_id: int
+    verdict: ReactionVerdict
+    teams: list[LineupReactTeam] = []            # every team at notify or act, rostering him or not
+
+
+class LineupReactResp(BaseResponse):
+    data: Optional[LineupReactData] = None

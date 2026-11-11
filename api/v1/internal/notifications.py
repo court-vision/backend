@@ -130,6 +130,7 @@ def get_preferences(user: UserContext = Depends(get_db_user)):
             alert_injured_active=prefs.alert_injured_active,
             alert_minutes_before=prefs.alert_minutes_before,
             auto_lineup_enabled=prefs.auto_lineup_enabled,
+            late_scratch_level=prefs.late_scratch_level,
             email=prefs.email,
         )
     else:
@@ -165,6 +166,8 @@ def update_preferences(
         prefs.alert_injured_active = req.alert_injured_active
         prefs.alert_minutes_before = req.alert_minutes_before
         prefs.auto_lineup_enabled = req.auto_lineup_enabled
+        if req.late_scratch_level is not None:
+            prefs.late_scratch_level = req.late_scratch_level
         prefs.email = req.email
         prefs.save()
     else:
@@ -176,6 +179,7 @@ def update_preferences(
             alert_injured_active=req.alert_injured_active,
             alert_minutes_before=req.alert_minutes_before,
             auto_lineup_enabled=req.auto_lineup_enabled,
+            late_scratch_level=req.late_scratch_level or "off",
             email=req.email,
         )
 
@@ -186,6 +190,7 @@ def update_preferences(
         alert_injured_active=prefs.alert_injured_active,
         alert_minutes_before=prefs.alert_minutes_before,
         auto_lineup_enabled=prefs.auto_lineup_enabled,
+        late_scratch_level=prefs.late_scratch_level,
         email=prefs.email,
     )
 
@@ -217,6 +222,7 @@ def get_team_preferences(user: UserContext = Depends(get_db_user)):
             alert_injured_active=row.alert_injured_active,
             alert_minutes_before=row.alert_minutes_before,
             auto_lineup_enabled=row.auto_lineup_enabled,
+            late_scratch_level=row.late_scratch_level,
             email=row.email,
         )
         for row in rows
@@ -284,6 +290,7 @@ def upsert_team_preference(
         alert_injured_active=row.alert_injured_active,
         alert_minutes_before=row.alert_minutes_before,
         auto_lineup_enabled=row.auto_lineup_enabled,
+        late_scratch_level=row.late_scratch_level,
         email=row.email,
     )
 

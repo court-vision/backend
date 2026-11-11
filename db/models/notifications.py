@@ -41,6 +41,8 @@ class NotificationPreference(BaseModel):
     alert_minutes_before = IntegerField(default=90)
     # Auto-set my lineup: apply the fill plan before tip-off instead of only emailing it
     auto_lineup_enabled = BooleanField(default=False)
+    # Late scratches below AI (migration 0047): off | notify (email the swap) | act (make it)
+    late_scratch_level = CharField(max_length=8, default="off")
     email = CharField(max_length=255, null=True)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
@@ -118,6 +120,7 @@ class NotificationTeamPreference(BaseModel):
     alert_injured_active = BooleanField(null=True, default=None)
     alert_minutes_before = IntegerField(null=True, default=None)
     auto_lineup_enabled = BooleanField(null=True, default=None)
+    late_scratch_level = CharField(max_length=8, null=True, default=None)   # null = the account's
     email = CharField(max_length=255, null=True, default=None)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)

@@ -1,5 +1,5 @@
 """
-/v1/internal/jobs/lineup/evaluate and /jobs/pickups/execute: the pipeline-token
+/v1/internal/jobs/lineup/evaluate, /jobs/lineup/react and /jobs/pickups/execute: the pipeline-token
 routes. No Clerk user — a missing or wrong bearer is refused, the right one reaches
 the (stubbed) service.
 """
@@ -10,8 +10,9 @@ import pytest
 
 from core import pipeline_auth
 from schemas.common import ApiStatus
-from schemas.lineup_editor import LineupEvaluationData, LineupEvaluationResp
+from schemas.lineup_editor import LineupEvaluationData, LineupEvaluationResp, LineupReactData, LineupReactResp
 from schemas.scheduled_pickup import PickupExecuteData, PickupExecuteResp
+from services import late_scratch_service as late
 from services import lineup_editor_service as svc
 from services import scheduled_pickup_service as pickups
 
@@ -54,6 +55,40 @@ def test_unconfigured_token_is_a_500(client, monkeypatch):
     monkeypatch.setattr(pipeline_auth, "PIPELINE_API_TOKEN", None)
     r = client.post("/v1/internal/jobs/lineup/evaluate", json=BODY, headers={"Authorization": "Bearer x"})
     assert r.status_code == 500
+
+
+# ---- /v1/internal/jobs/lineup/react ----------------------------------------------
+
+REACT = "/v1/internal/jobs/lineup/react"
+CHANGE = {"player_id": 1628973, "game_date": "2026-11-10", "verdict": "out", "previous_verdict": "questionable",
+          "reason": "Left Ankle; Sprain", "source": "espn_injuries", "changed_at": "2026-11-10T22:04:00Z"}
+
+
+@pytest.mark.api
+def test_react_missing_or_wrong_bearer_is_refused(client, token):
+    assert client.post(REACT, json=CHANGE).status_code in (401, 403)
+    assert client.post(REACT, json=CHANGE, headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+@pytest.mark.api
+def test_react_reaches_the_service(client, token, monkeypatch):
+    seen = []
+
+    async def fake(req):
+        seen.append(req)
+        return LineupReactResp(status=ApiStatus.SUCCESS, message="0 of 0 team(s) swapped",
+                               data=LineupReactData(player_id=req.player_id, verdict=req.verdict))
+
+    monkeypatch.setattr(late.LateScratchService, "react", staticmethod(fake))
+    r = client.post(REACT, json=CHANGE, headers={"Authorization": "Bearer pipe-token"})
+    assert r.status_code == 200 and r.json()["data"] == {"player_id": 1628973, "verdict": "out", "teams": []}
+    assert seen[0].previous_verdict == "questionable" and str(seen[0].game_date) == "2026-11-10"
+
+
+@pytest.mark.api
+def test_react_refuses_a_verdict_it_does_not_answer(client, token):
+    r = client.post(REACT, json={**CHANGE, "verdict": "questionable"}, headers={"Authorization": "Bearer pipe-token"})
+    assert r.status_code == 422
 
 
 # ---- /v1/internal/jobs/pickups/execute ------------------------------------------

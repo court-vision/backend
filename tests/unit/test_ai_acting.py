@@ -152,11 +152,17 @@ class TestTheTable:
         assert offered(t["lineup"]) == {}
         assert set(offered(t["daily_actions"])) == {"notify", "act"}
         assert set(offered(t["lanes"])) == {"off", "notify"}
-        assert set(offered(t["late_scratch"])) == {"notify", "act"}
+        assert offered(t["late_scratch"]) == {}
         assert offered(t["checkins"]) == {"notify": "Check-ins are Dime's own", "act": "Check-ins are Dime's own"}
-        # Never set up: lineup from the preferences, lanes run as set, the rest off
+        # Never set up: lineup and late scratches from the preferences, lanes run as set, the rest off
         assert {r: t[r]["level"] for r in t} == {"lineup": "notify", "daily_actions": "off", "lanes": "act",
                                                  "late_scratch": "off", "checkins": "off"}
+        t = by_row(autonomy.table(None, lineup_below_ai="act", lineup_email=False, late_scratch_below_ai="act"))
+        assert t["late_scratch"]["level"] == "act"
+        assert offered(t["late_scratch"]) == {}     # its own email: the account's lineup email doesn't gate it
+        at_ai = by_row(autonomy.table(pilot(ai_rows=["late_scratch"]), lineup_below_ai="act", lineup_email=True,
+                                      late_scratch_below_ai="notify"))
+        assert at_ai["late_scratch"]["level"] == "ai"
 
     def test_the_levels_and_notes_of_a_team_at_ai(self, monkeypatch):
         monkeypatch.setattr(settings, "dime_acting_enabled", True)
@@ -234,8 +240,7 @@ class TestTheCheck:
         assert e.value.status_code == 422
 
     def test_a_level_a_row_doesn_t_offer_is_refused_with_why(self):
-        with pytest.raises(levels.LevelUnavailable, match="Late scratches and news can't be act: Not built yet"):
-            levels.check(levels.Change(levels={"late_scratch": "act"}), email=True)
+        assert levels.check(levels.Change(levels={"late_scratch": "act"}), email=False).levels == {"late_scratch": "act"}
         assert levels.check(levels.Change(levels={"late_scratch": "ai"}), email=True).levels == {"late_scratch": "ai"}
         with pytest.raises(levels.LevelUnavailable, match="Daily actions can't be notify: Not built yet"):
             levels.check(levels.Change(levels={"daily_actions": "notify"}), email=True)
@@ -699,3 +704,15 @@ class TestTheDecisionCarriesTheAction:
         out = run(decisions.log_decision(11, 7, self.args()))
         assert out["action"]["level"] == "ai" and out["action"]["outcome"] is None
         assert out[decisions.DECISION_KEY]["action"] is None
+
+
+class TestLateScratchBelowAi:
+    """Late scratches' level below AI: the team's override, else the account's, else off."""
+
+    def test_the_override_wins_then_the_account(self):
+        account = SimpleNamespace(late_scratch_level="notify")
+        assert levels.late_scratch_below_ai(None, None) == "off"
+        assert levels.late_scratch_below_ai(account, None) == "notify"
+        assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level=None)) == "notify"
+        assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level="act")) == "act"
+        assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level="off")) == "off"

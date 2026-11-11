@@ -4,8 +4,9 @@ Notification Service
 Emails users about today's lineup: either the fill plan the backend suggested
 (`send_lineup_alert`) or the moves auto-lineup already applied to ESPN
 (`send_auto_lineup_summary`) — what became of a scheduled pickup
-(`send_scheduled_pickup_result`, a stream lane's included), and a stream lane
-that paused or missed a day (`send_stream_lane_notice`). Sends through Resend
+(`send_scheduled_pickup_result`, a stream lane's included), a stream lane
+that paused or missed a day (`send_stream_lane_notice`), and the late-scratch
+swap a verdict change made or suggests (`send_late_scratch_result`). Sends through Resend
 when configured; otherwise logs the email and reports success (the stub path
 for dev and tests).
 
@@ -21,7 +22,9 @@ and `reason`.
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from core.logging import get_logger
 from core.settings import settings
@@ -32,6 +35,14 @@ AUTO_LINEUP_DISCLAIMER = (
 )
 UNVERIFIED_SUFFIX = " (not yet confirmed by ESPN — please check your roster)"
 SIGNATURE = "-- Court Vision"
+# Who decided a verdict (nba.player_availability.decided_by), as the email names it
+VERDICT_SOURCES = {
+    "nba_report": "the NBA injury report",
+    "nba_boxscore": "the NBA box score",
+    "espn_injuries": "ESPN's injury list",
+    "espn_fantasy": "ESPN fantasy",
+    "news": "the news",
+}
 
 
 @dataclass
@@ -176,6 +187,37 @@ class NotificationService:
             to=email,
             action=notice.get("action"),
             reason=notice.get("reason"),
+            subject=subject,
+        )
+
+        return self._send_email(email, subject, body)
+
+    def send_late_scratch_result(
+        self,
+        user,
+        team,
+        result: dict,
+        prefs=None,
+    ) -> NotificationResult:
+        """
+        Email the user the swap a late scratch made on their ESPN lineup, or suggests.
+
+        Args:
+            result: The backend's LineupReactTeam as a dict plus the change it answers:
+                `outcome` (applied, or planned / rejected / failed: a suggestion),
+                `level` (notify | act), `reason`, `player_name`, `verdict` (out |
+                doubtful | available), `injury` (the reason, "Left Ankle; Sprain"),
+                `source` (decided_by), `changed_at` (ISO), `moves`, `verified`.
+        """
+        email = self._recipient(user, prefs)
+        subject, body = self._build_late_scratch_email(self._team_name(team), result)
+
+        self.log.info(
+            "sending_late_scratch_result",
+            to=email,
+            outcome=result.get("outcome"),
+            verdict=result.get("verdict"),
+            move_count=len(result.get("moves") or []),
             subject=subject,
         )
 
@@ -351,6 +393,83 @@ class NotificationService:
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)
+
+    @staticmethod
+    def _build_late_scratch_email(team_name: str, result: dict) -> tuple[str, str]:
+        """Subject and body for one late-scratch swap: made (applied) or suggested (planned)."""
+        player = result.get("player_name") or "a player"
+        verdict = result.get("verdict") or "out"
+        applied = result.get("outcome") == "applied"
+        # The write raised after it was sent: ESPN may have taken it.
+        uncertain = result.get("outcome") == "failed" and result.get("reason") == "write_uncertain"
+        because = (f"{player} was upgraded to available" if verdict == "available"
+                   else f"{player} was ruled {verdict}")
+        injury = result.get("injury")
+        source = VERDICT_SOURCES.get(result.get("source") or "", result.get("source"))
+        why = ", ".join(x for x in (injury, f"per {source}" if source else None) if x)
+        when = NotificationService._format_clock(result.get("changed_at"))
+        line = f"Because {because}" + (f" ({why})" if why else "") + (f" at {when}" if when else "") + ":"
+
+        if verdict == "available":
+            subject = (f"{player} is available: Court Vision started him for {team_name}" if applied
+                       else f"{player} is available: a lineup swap for {team_name}")
+        else:
+            subject = (f"{player} ruled {verdict}: Court Vision benched him for {team_name}" if applied
+                       else f"{player} ruled {verdict}: a lineup swap for {team_name}")
+
+        lines = [f"Team: {team_name}", "", line, ""]
+        if applied:
+            heading = "Applied to ESPN:"
+            if result.get("verified") is False:
+                heading += UNVERIFIED_SUFFIX
+            lines.append(heading)
+        else:
+            lines.append("Tried on ESPN, not confirmed:" if uncertain else "Suggested swap:")
+        lines.extend(NotificationService._render_moves(result.get("moves") or []))
+        lines.append("")
+        if applied:
+            lines.append("Only this swap was made; the rest of your lineup is as you set it.")
+            if verdict != "available":
+                lines.append(f"If {player} is upgraded again before his game, this swap is not undone.")
+        else:
+            why_not = NotificationService._late_scratch_not_made(result)
+            if why_not:
+                lines.append(why_not)
+            lines.append("If it isn't on ESPN, make it in Court Vision's Week desk or on ESPN." if uncertain
+                         else "Nothing was changed on ESPN. Make the swap in Court Vision's Week desk or on ESPN.")
+        lines.append("")
+        lines.append(SIGNATURE)
+        return subject, "\n".join(lines)
+
+    @staticmethod
+    def _late_scratch_not_made(result: dict) -> Optional[str]:
+        """Why a swap the team's Act level asked for wasn't made; None at Notify."""
+        if result.get("level") != "act":
+            return None
+        outcome = result.get("outcome")
+        reason = result.get("reason") or ""
+        if outcome == "planned" and reason == "writes_disabled":
+            return "Court Vision didn't make it: its lineup writes are switched off right now."
+        if outcome == "planned" and reason.startswith("can_write:"):
+            return "Court Vision didn't make it: ESPN isn't taking lineup changes for this team right now."
+        if outcome == "failed" and reason == "write_uncertain":
+            return "Court Vision tried to make it but couldn't confirm whether ESPN took it: check your lineup on ESPN."
+        if outcome in ("rejected", "failed"):
+            return "Court Vision tried to make it, but ESPN didn't take it" + (f" ({reason})." if reason else ".")
+        return None
+
+    @staticmethod
+    def _format_clock(iso_time) -> Optional[str]:
+        """\"4:30 PM ET\" from an ISO timestamp (UTC when it has no zone); None when it is not one."""
+        if not iso_time:
+            return None
+        try:
+            at = iso_time if isinstance(iso_time, datetime) else datetime.fromisoformat(str(iso_time))
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=ZoneInfo("UTC"))
+        return at.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p ET")
 
     @staticmethod
     def _format_day(iso_date) -> str:

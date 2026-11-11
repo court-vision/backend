@@ -190,7 +190,8 @@ class _Path:
     evicted: Optional[PlannerPlayer]
 
 
-def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: Mapping[int, int]) -> Optional[_Path]:
+def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: Mapping[int, int], *,
+               evictable: Optional[frozenset[int]] = None, allow_empty: bool = True) -> Optional[_Path]:
     """Shortest alternating path from the bench into an eligible slot.
 
     BFS over (slot, mover). A slot with spare capacity ends the path; a full slot
@@ -199,6 +200,10 @@ def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: 
     eligible active slot and the search continues. Among the shortest paths an
     empty slot beats an eviction, then the worst holder (tier C before B before
     A2, lowest value) is the one who sits.
+
+    `evictable` limits who may sit to those ids, and `allow_empty=False` refuses a
+    path that ends in a spare slot: `plan_reaction` uses both to find the chain
+    that benches one player and nothing else.
     """
     occupants = _occupants(board)
     start_slots = sorted(s for s in filler.eligible_slot_ids if s in ACTIVE_SLOT_IDS and capacity.get(s, 0) > 0)
@@ -221,16 +226,17 @@ def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: 
         slot = slots[-1]
         holders = occupants.get(slot, [])
         if len(holders) < capacity.get(slot, 0):
-            candidate = ((0, 0, 0.0, slot), _Path(slots, shifters, None))
-            if best is None or candidate[0] < best[0]:
-                best, best_depth = candidate, depth
+            if allow_empty:
+                candidate = ((0, 0, 0.0, slot), _Path(slots, shifters, None))
+                if best is None or candidate[0] < best[0]:
+                    best, best_depth = candidate, depth
             continue
         # BFS is depth-monotone: any candidate found here is at `best_depth` or is the first.
         shifting = {s.player_id for s in shifters}
         for holder in holders:
             if holder.locked or holder.player_id in shifting:
                 continue
-            if holder.tier > filler.tier:
+            if holder.tier > filler.tier and (evictable is None or holder.player_id in evictable):
                 candidate = ((1, -holder.tier, holder.value, slot), _Path(slots, shifters, holder))
                 if best is None or candidate[0] < best[0]:
                     best, best_depth = candidate, depth
@@ -285,16 +291,21 @@ def _unfilled_reason(filler: PlannerPlayer, board: Sequence[PlannerPlayer],
 # ------------------------------- public API ------------------------------- #
 
 
+def _fillers(board: Iterable[PlannerPlayer]) -> list[PlannerPlayer]:
+    """Bench players who may start, best first: plan_fill's order."""
+    return sorted(
+        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_A2, TIER_B)),
+        key=lambda p: (p.tier, -p.value, p.name),
+    )
+
+
 def plan_fill(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> Plan:
     capacity = _active_capacity(slot_counts)
     board = list(players)
     moves: list[Move] = []
     unfilled: list[Unfilled] = []
 
-    fillers = sorted(
-        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_A2, TIER_B)),
-        key=lambda p: (p.tier, -p.value, p.name),
-    )
+    fillers = _fillers(board)
     for filler in fillers:
         current = _by_id(board)[filler.player_id]
         if current.slot_id != BENCH_SLOT_ID:
@@ -310,6 +321,42 @@ def plan_fill(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) 
         board = apply_moves(board, path_moves)
 
     return Plan(tuple(moves), tuple(unfilled), _summary(moves, unfilled, _by_id(players)))
+
+
+def plan_reaction(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int], trigger_player_id: int) -> Plan:
+    """The moves that answer one player's verdict change, and nothing else (the news
+    plan's late-scratch pass). `players` carry the new verdict already.
+
+    A starter now out or doubtful sits only when the whole board's fill would bench
+    him, and then only for the first bench player, in plan_fill's order, who can
+    take his slot directly or through shifts. A bench player now available starts
+    when the fill would start him, by his own chain. Whatever else the board wants
+    (an empty slot, an idle starter) belongs to the morning pass or the user, so a
+    hand-set lineup is not re-planned by a news event. Empty = no reaction.
+    """
+    capacity = _active_capacity(slot_counts)
+    board = list(players)
+    trigger = _by_id(board).get(trigger_player_id)
+    if trigger is None or trigger.locked:
+        return Plan((), (), _summary((), (), {}))
+    full = plan_fill(board, slot_counts).moves
+    moves: list[Move] = []
+    if trigger.slot_id in ACTIVE_SLOT_IDS:
+        if any(m.player_id == trigger_player_id and m.to_slot_id == BENCH_SLOT_ID for m in full):
+            only = frozenset({trigger_player_id})
+            for filler in _fillers(board):
+                if filler.tier >= trigger.tier:
+                    break
+                path = _find_path(filler, board, capacity, evictable=only, allow_empty=False)
+                if path is not None and path.evicted is not None:
+                    moves = _apply_path(filler, path)
+                    break
+    elif trigger.slot_id == BENCH_SLOT_ID:
+        if any(m.player_id == trigger_player_id and m.from_slot_id == BENCH_SLOT_ID for m in full):
+            path = _find_path(trigger, board, capacity)
+            if path is not None:
+                moves = _apply_path(trigger, path)
+    return Plan(tuple(moves), (), _summary(moves, (), _by_id(players)))
 
 
 def _summary(moves: Sequence[Move], unfilled: Sequence[Unfilled], names: Mapping[int, PlannerPlayer]) -> str:
