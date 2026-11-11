@@ -12,9 +12,11 @@ showed a tip time for minutes after the tip and held each score for ten.
 The scoreboard is still asked when the snapshots cannot answer: before the
 pipeline's window opens there are none, and one that has stopped moving for a
 game not yet final means the pipeline is not running. Then each game takes
-whichever of the two is further along.
+whichever of the two is further along. Neither is taken over a stored row that
+is further along than both: a final the game log has written since stands.
 """
 
+import re
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 
@@ -22,7 +24,7 @@ import pytz
 
 from services.schedule_service import get_upcoming_games_on_date
 from core.logging import get_logger
-from db.models.nba.games import Game
+from db.models.nba.games import Game, STATUS_ORDER
 from db.models.nba.live_game_score_snapshots import LatestSnapshot, LiveGameScoreSnapshot
 from db.base import DB_RUNTIME_ERRORS, run_db
 from services.providers.blocking import run_blocking_provider
@@ -63,6 +65,32 @@ def _progress(status, period, home, away) -> tuple[int, int, int]:
     return (status or 1, period or 0, (home or 0) + (away or 0))
 
 
+_GAME_CLOCK = re.compile(r"^PT(\d+)M(\d+(?:\.\d+)?)S$")
+
+
+def _clock_seconds(clock) -> float | None:
+    """Seconds left in the period on an NBA game clock ("PT06M30.00S"); None for anything else."""
+    match = _GAME_CLOCK.match(clock) if isinstance(clock, str) else None
+    return int(match[1]) * 60 + float(match[2]) if match else None
+
+
+def _further_along(listed: Mapping, snapshot: LatestSnapshot) -> bool:
+    """Whether the scoreboard's entry is strictly later than the snapshot.
+
+    Level on status, period and points in play (a stretch with no score), the
+    one with less of the period left on its clock is the later. A clock that
+    cannot be read settles nothing, and the snapshot stands.
+    """
+    theirs = _progress(listed.get("game_status"), listed.get("period"), listed.get("home_score"), listed.get("away_score"))
+    ours = _progress(snapshot.game_status, snapshot.period, snapshot.home_score, snapshot.away_score)
+    if theirs != ours:
+        return theirs > ours
+    if snapshot.game_status != 2:
+        return False
+    theirs_left, ours_left = _clock_seconds(listed.get("game_clock")), _clock_seconds(snapshot.game_clock)
+    return theirs_left is not None and ours_left is not None and theirs_left < ours_left
+
+
 def live_fields(game: Mapping, snapshot: LatestSnapshot | None, listed: Mapping | None) -> dict:
     """A stored game's live score, status, period and clock; nothing with no word on it.
 
@@ -70,28 +98,26 @@ def live_fields(game: Mapping, snapshot: LatestSnapshot | None, listed: Mapping 
     the NBA scoreboard, when that was read. The snapshot is the fresher by
     minutes whenever the pipeline is running, so it stands unless the
     scoreboard is strictly further along.
+
+    Nothing either when the stored row is further along than the word chosen.
+    The game log closes a game with its final score whether or not the live
+    pipeline saw the end of it, and a snapshot left mid-game by a pipeline that
+    stopped would otherwise reopen it whenever the scoreboard could not be
+    read, or no longer listed the game.
     """
-    if listed is not None and (
-        snapshot is None
-        or _progress(listed.get("game_status"), listed.get("period"), listed.get("home_score"), listed.get("away_score"))
-        > _progress(snapshot.game_status, snapshot.period, snapshot.home_score, snapshot.away_score)
-    ):
-        return {
-            "home_score": listed["home_score"],
-            "away_score": listed["away_score"],
-            "status": _GAME_STATUS_MAP.get(listed["game_status"], game["status"]),
-            "period": listed["period"],
-            "game_clock": listed["game_clock"],
-        }
-    if snapshot is None:
+    if listed is not None and (snapshot is None or _further_along(listed, snapshot)):
+        # Before the tip the scoreboard says period 0 and clock "": null, as a snapshot has them.
+        status, period, clock = listed["game_status"], listed["period"] or None, listed["game_clock"] or None
+        home, away = listed["home_score"], listed["away_score"]
+    elif snapshot is not None:
+        status, period, clock = snapshot.game_status, snapshot.period, snapshot.game_clock
+        home, away = snapshot.home_score, snapshot.away_score
+    else:
         return {}
-    return {
-        "home_score": snapshot.home_score,
-        "away_score": snapshot.away_score,
-        "status": _GAME_STATUS_MAP.get(snapshot.game_status, game["status"]),
-        "period": snapshot.period,
-        "game_clock": snapshot.game_clock,
-    }
+    status = _GAME_STATUS_MAP.get(status, game["status"])
+    if STATUS_ORDER.get(status, 0) < STATUS_ORDER.get(game["status"], 0):
+        return {}
+    return {"home_score": home, "away_score": away, "status": status, "period": period, "game_clock": clock}
 
 
 class GamesService:

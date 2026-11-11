@@ -121,6 +121,22 @@ def test_a_scoreboard_further_along_than_a_stalled_snapshot_is_taken(ahead) -> N
     assert fields["game_clock"] == "PT09M00.00S"
 
 
+def test_level_with_a_stalled_snapshot_the_clock_says_which_is_the_later() -> None:
+    """A stretch with no score: the same period and points, and only the clock has moved."""
+    stalled = snapshot(period=4, clock="PT05M00.00S", home=101, away=99, age=900)
+    level = dict(period=4, home=101, away=99)
+
+    def clock(snap, board_clock):
+        return live_fields(stored(KNICKS), snap, listed(KNICKS, clock=board_clock, **level))["game_clock"]
+
+    assert clock(stalled, "PT01M00.00S") == "PT01M00.00S"
+    assert clock(stalled, "PT07M30.00S") == "PT05M00.00S"
+    assert clock(stalled, "PT05M00.00S") == "PT05M00.00S"
+    # A clock that cannot be read settles nothing, whichever side lacks it: the snapshot stands.
+    assert clock(stalled, "") == "PT05M00.00S"
+    assert clock(snapshot(period=4, clock=None, home=101, away=99, age=900), "PT01M00.00S") is None
+
+
 def test_with_no_snapshot_the_scoreboard_is_the_games_state_as_it_was() -> None:
     assert live_fields(stored(KNICKS), None, listed(KNICKS)) == {
         "home_score": 28, "away_score": 25, "status": "in_progress", "period": 1, "game_clock": "PT00M00.00S",
@@ -129,6 +145,19 @@ def test_with_no_snapshot_the_scoreboard_is_the_games_state_as_it_was() -> None:
 
 def test_with_no_word_on_a_game_the_stored_row_is_left_alone() -> None:
     assert live_fields(stored(KNICKS), None, None) == {}
+
+
+def test_a_stored_final_stands_against_an_unfinished_word() -> None:
+    """The pipeline stopped mid-game and the game log has since closed the game: the slate must not reopen it."""
+    final = {**stored(KNICKS), "status": "final", "home_score": 110, "away_score": 106}
+    stalled = snapshot(period=3, home=80, away=77, age=7200)
+
+    assert live_fields(final, stalled, None) == {}
+    assert live_fields(final, stalled, listed(KNICKS, period=4, clock="PT02M00.00S", home=101, away=99)) == {}
+    assert live_fields(final, None, listed(KNICKS)) == {}
+    # A final word still overlays it: its period is what prints "Final/OT".
+    closed = live_fields(final, snapshot(status=3, period=5, clock=None, home=110, away=106), None)
+    assert (closed["status"], closed["period"], closed["home_score"]) == ("final", 5, 110)
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +231,9 @@ def test_before_the_pipelines_window_the_scoreboard_is_read_as_it_was(slate) -> 
     games = slate.get()
 
     assert slate.scoreboard_reads == 1
+    # Its period 0 and clock "" before the tip are null, as a snapshot of the same game has them.
     assert (games[KNICKS].status, games[KNICKS].period, games[KNICKS].game_clock, games[KNICKS].home_score) == (
-        "scheduled", 0, "", 0)
+        "scheduled", None, None, 0)
     # A stored game the scoreboard does not list is left as stored.
     assert (games[LAKERS].status, games[LAKERS].home_score, games[LAKERS].period) == ("scheduled", None, None)
 
@@ -236,6 +266,17 @@ def test_a_scoreboard_that_cannot_be_read_leaves_the_snapshots_there_are(slate) 
     assert slate.scoreboard_reads == 1
     assert (games[KNICKS].status, games[KNICKS].home_score) == ("in_progress", 49)
     assert (games[LAKERS].status, games[LAKERS].home_score) == ("scheduled", None)
+
+
+def test_a_game_the_log_has_closed_is_not_reopened_by_a_stalled_snapshot(slate) -> None:
+    slate.games = [{**stored(KNICKS), "status": "final", "home_score": 110, "away_score": 106}]
+    slate.snapshots = {KNICKS: snapshot(period=3, home=80, away=77, age=7200)}
+
+    for scoreboard in (RuntimeError("NBA live API timeout"), []):    # unreadable, or no longer listing the game
+        slate.scoreboard = scoreboard
+        game = slate.get()[KNICKS]
+        assert (game.status, game.home_score, game.away_score, game.period) == ("final", 110, 106, None)
+    assert slate.scoreboard_reads == 2
 
 
 def test_another_date_is_the_stored_games_with_no_overlay_and_no_snapshot_read(slate) -> None:
