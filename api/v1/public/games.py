@@ -36,8 +36,9 @@ async def get_games_on_date(
     """Get all games on a specific date."""
     today = nba_date_et()
     if game_date == today:
-        # Today's slate carries the live scoreboard overlay: never cached, and no
-        # cache headers, exactly as before.
+        # Today's slate carries each game's live score and clock (the live
+        # pipeline's newest snapshot): never cached, and no cache headers,
+        # exactly as before.
         return respond(await GamesService.get_games_on_date(game_date))
     # Two or more nights back the games are final. Last night's stay on the
     # short TTL: the post-game run that writes their final scores can still be

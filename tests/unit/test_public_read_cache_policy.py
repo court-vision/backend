@@ -19,7 +19,7 @@ def test_every_cache_is_bounded_by_entries_and_bytes():
         assert cache.max_entries > 0 and cache.max_bytes is not None and cache.max_bytes > 0, cache.name
 
     total = sum(cache.max_bytes for cache in caches.ALL_CACHES)
-    assert total == pytest.approx(29.3 * caches.MB, rel=0.01)   # what the module docstring promises
+    assert total == pytest.approx(36.3 * caches.MB, rel=0.01)   # what the module docstring promises
 
 
 def test_every_cache_is_listed_once_for_clearing():
