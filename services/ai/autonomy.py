@@ -234,7 +234,7 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
             if paused:
                 note = "Paused: Dime does nothing here until you resume check-ins"
             elif not acting_available():
-                note = "Nothing runs: Dime is switched off on the server"
+                note = "Nothing runs: autopilot is switched off on the server"
             if row == LINEUP and not lineup_email:
                 note = (f"{note}. " if note else "") + "Auto-lineup doesn't run: your account's lineup email is off"
         if row == CHECKINS and paused and getattr(autopilot, "paused_by", None) == "system":

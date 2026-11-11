@@ -185,7 +185,7 @@ class TestTheTable:
             off = by_row(autonomy.table(pilot(ai_rows=["lanes", "late_scratch"]), lineup_below_ai="act",
                                         lineup_email=True))
             assert off["lanes"]["note"] == off["late_scratch"]["note"] == \
-                "Nothing runs: Dime is switched off on the server"
+                "Nothing runs: autopilot is switched off on the server"
             assert off["daily_actions"]["note"] is None                     # not at AI: nothing to say
             monkeypatch.setattr(settings, switch, True)
 
