@@ -23,10 +23,11 @@ row per team, not an exception.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional
 
 from core.errors import (
     AppError,
@@ -65,6 +66,7 @@ from services.lineup_planner import Move, Plan, PlannerPlayer, validate_moves
 from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
 from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
 from services.providers.writers import espn_lineup_payload
+from services.write_readback import read_until_shown
 from utils.constants import PROVIDER_AUTH_MESSAGES
 from utils.espn_helpers import POSITION_MAP
 
@@ -409,11 +411,25 @@ class LineupEditorService:
                          provider_status=exc.espn_status, error=exc.message)
             raise RosterWriteUnavailable() from exc
 
-        try:
-            fresh = await get_provider_adapter(league_info.provider).read_lineup(
+        def read() -> Awaitable[LineupState]:
+            return get_provider_adapter(league_info.provider).read_lineup(
                 team_id, league_info, fallback_slot_counts=fallback_slot_counts,
                 scoring_period_id=state.scoring_period_id if state.future else None,
             )
+
+        def shows(board: LineupState) -> bool:
+            after = {p.player_id: p.lineup_slot_id for p in board.players}
+            return all(after.get(m.player_id) == m.to_slot_id for m in moves)
+
+        try:
+            # ESPN's reads can trail the write: read again a little later while it doesn't show yet.
+            fresh, verified, reads = await read_until_shown(read, shows)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the write to show (Dime's turn timing out, a shutdown).
+            # ESPN took it: settle the row the same way before the cancellation goes on.
+            await run_db("lineup.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error="verify_read_cancelled")
+            raise
         except Exception as exc:
             # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
             # `failed` seed would drop it out of the counted statuses, and the next auto run would
@@ -424,12 +440,10 @@ class LineupEditorService:
                         espn_status=result.espn_status, error=str(exc))
             return state, False, audit_id
 
-        after = {p.player_id: p.lineup_slot_id for p in fresh.players}
-        verified = all(after.get(m.player_id) == m.to_slot_id for m in moves)
         await run_db("lineup.audit_update", _audit_update, audit_id,
                      "applied" if verified else "applied_unverified", provider_status=result.espn_status)
         log.info("lineup_write_applied", team_id=team_id, source=source, move_count=len(moves), verified=verified,
-                 espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
+                 reads=reads, espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
         return fresh, verified, audit_id
 
 
