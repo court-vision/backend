@@ -27,6 +27,7 @@ behave the same (James, 2026-10-23).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -374,6 +375,12 @@ class RosterTransactionService:
         try:
             # ESPN's reads can trail the write: read again a little later while it doesn't show yet.
             fresh, verified, reads = await read_until_shown(read, shows)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the transaction to show: ESPN took it, so settle the row
+            # the same way before the cancellation goes on (same as the lineup chain).
+            await run_db("roster_txn.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error="verify_read_cancelled")
+            raise
         except Exception as exc:
             # ESPN took the transaction and only the read-back failed: settle the row as applied,
             # just unverified, and hand back the pre-write board (same as the lineup chain).

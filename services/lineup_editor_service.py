@@ -23,6 +23,7 @@ row per team, not an exception.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import date, datetime
@@ -423,6 +424,12 @@ class LineupEditorService:
         try:
             # ESPN's reads can trail the write: read again a little later while it doesn't show yet.
             fresh, verified, reads = await read_until_shown(read, shows)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the write to show (Dime's turn timing out, a shutdown).
+            # ESPN took it: settle the row the same way before the cancellation goes on.
+            await run_db("lineup.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error="verify_read_cancelled")
+            raise
         except Exception as exc:
             # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
             # `failed` seed would drop it out of the counted statuses, and the next auto run would

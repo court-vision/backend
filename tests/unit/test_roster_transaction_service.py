@@ -82,7 +82,7 @@ def harness(monkeypatch):
     async def fake_read(team_id, league_info, **kwargs):
         h.read_days.append(kwargs.get("scoring_period_id"))     # None: today's board
         nxt = h.reads.pop(0)
-        if isinstance(nxt, Exception):
+        if isinstance(nxt, BaseException):
             raise nxt
         return nxt
 
@@ -465,6 +465,23 @@ def test_after_the_tip_the_read_back_waits_on_tomorrows_board(harness, monkeypat
     assert resp.data.verified is True and resp.data.counts_from == "2026-10-21"
     assert harness.read_days == [None, 2, 2, 2, None]    # the board, tomorrow's to check, two read-backs, today's to hand back
     assert harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
+def test_an_add_drop_cancelled_while_waiting_to_show_still_settles_the_audit(harness, monkeypatch):
+    """ESPN took the transaction; a cancel during the wait for it to show settles the row and goes on."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (30,))
+    harness.reads = [state(board()), state(board(), version="v1")]   # the read-back still shows the old roster
+    harness.pool = {KAWHI: pool()}
+
+    async def turn():
+        async with asyncio.timeout(0.05):
+            await svc.RosterTransactionService.apply(TEAM, LEAGUE, req(add=KAWHI, drop=EDWARDS))
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(turn())
+    assert harness.updates == [(1, "applied_unverified", 200, "verify_read_cancelled")]
 
 
 @pytest.mark.unit
