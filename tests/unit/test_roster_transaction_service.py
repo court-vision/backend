@@ -433,6 +433,41 @@ def test_unverified_when_the_add_is_missing_from_the_board(harness):
 
 
 @pytest.mark.unit
+def test_a_read_back_that_trails_the_add_drop_is_read_again_until_it_shows(harness, monkeypatch):
+    """ESPN's first read after the transaction can still show the old roster; a later one shows the swap."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0, 0))
+    after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(board(), version="v1"), state(board(), version="v1"), state(after, version="v2")]
+    harness.pool = {KAWHI: pool()}
+    resp = apply(req(add=KAWHI, drop=EDWARDS))
+
+    assert resp.data.verified is True and resp.data.lineup.roster_version == "v2"
+    assert not resp.message.endswith("not yet confirmed")
+    assert harness.read_days == [None, None, None, None] and harness.reads == []
+    assert harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
+def test_after_the_tip_the_read_back_waits_on_tomorrows_board(harness, monkeypatch):
+    """The after-tip swap is checked on tomorrow's board, so that is the board read again."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0))
+    monkeypatch.setattr(svc, "_now", lambda: EVENING)
+    today = [player(JOKIC, "Nikola Jokic"), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)]
+    tomorrow = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(today), state(today, period=2, nba_date="2026-10-21"),
+                     state(today, period=2, nba_date="2026-10-21"),
+                     state(tomorrow, period=2, nba_date="2026-10-21", version="t2"), state(today, version="v1")]
+    harness.pool = {KAWHI: pool()}
+    resp = apply(req(add=KAWHI, drop=EDWARDS))
+
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-21"
+    assert harness.read_days == [None, 2, 2, 2, None]    # the board, tomorrow's to check, two read-backs, today's to hand back
+    assert harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
 def test_a_failed_verify_read_still_settles_the_audit(harness):
     """ESPN took the transaction; only the read-back died. The row must leave `in_flight`."""
     harness.reads = [state(board()), ProviderTimeout("espn")]

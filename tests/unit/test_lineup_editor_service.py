@@ -209,6 +209,31 @@ def test_manual_apply_reports_unverified_when_the_reread_disagrees(harness):
 
 
 @pytest.mark.unit
+def test_a_read_back_that_trails_the_write_is_read_again_until_it_shows(harness, monkeypatch):
+    """ESPN's first read after the write can still show the old board; the next one shows the swap."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0, 0))
+    harness.reads = [state(board()), state(board(), version="v1"), state(after_swap(), version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+
+    assert resp.data.verified is True and resp.data.lineup.roster_version == "v2"
+    assert "not yet confirmed" not in resp.message
+    assert len(harness.read_periods) == 3 and harness.reads == []    # the gate's read, then two read-backs
+    assert harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
+def test_a_write_espn_never_shows_is_unverified_after_the_last_read_back(harness, monkeypatch):
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0))
+    harness.reads = [state(board()), state(board(), version="v1"), state(board(), version="v1"), state(board(), version="v1")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+
+    assert resp.data.verified is False and "not yet confirmed" in resp.message
+    assert len(harness.read_periods) == 4 and harness.updates[-1][1] == "applied_unverified"
+
+
+@pytest.mark.unit
 def test_a_failed_verify_read_still_settles_the_audit_as_applied(harness):
     """ESPN took the write; only the read-back died. The row must leave `in_flight`."""
     harness.reads = [state(board()), ProviderTimeout("espn")]

@@ -75,6 +75,20 @@ def no_team_holds(request, monkeypatch):
     yield
 
 
+# ---- Reading a write back ----
+
+@pytest.fixture(autouse=True)
+def one_readback(monkeypatch):
+    """A write chain reads ESPN again while its read-back doesn't show the write yet
+    (services/write_readback.py), sleeping up to 5 s. A test reads back once unless it
+    sets its own `READBACK_DELAYS_S`, so a stubbed read queue sized for one read-back
+    still fits and no test waits."""
+    from services import write_readback
+
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", ())
+    yield
+
+
 # ---- The captured draft ----
 
 @pytest.fixture(scope="session")
