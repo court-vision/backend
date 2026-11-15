@@ -45,6 +45,13 @@ def test_the_playbook_carries_the_checks_before_a_move():
     assert "run your playbook's checks" in prompts.AGENT_PROMPT
 
 
+def test_the_playbook_holds_the_draft_rules_chat_and_the_draft_room_share():
+    # One agent: the draft room's notes and a chat about a draft read the same rules
+    assert "\nDrafts:\n" in prompts.PLAYBOOK
+    assert "The same judgment applies in a draft room and in chat about a draft." in prompts.PLAYBOOK
+    assert "In a draft held after the season has started" in prompts.PLAYBOOK
+
+
 def test_the_rules_no_longer_ask_for_a_caveat_on_fpts():
     assert "not the user's league scoring" not in prompts.AGENT_PROMPT
     assert "Never add a caveat about which formula a number uses" in prompts.AGENT_PROMPT

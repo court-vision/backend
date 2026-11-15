@@ -231,6 +231,36 @@ def test_get_draft_board_shows_the_recommendations_with_every_term(room):
                                       "my_rank": 3, "of": 4}]
 
 
+def test_a_board_in_season_carries_this_season_s_games_and_says_how_old_adp_is(room, monkeypatch):
+    from schemas.draft import DraftInSeasonResp
+    from services.draft_board_service import DraftBoardService
+
+    board = _board()
+    board.data[1].season_gp, board.data[1].season_fpts_avg = 12, 48.5
+    board.meta.in_season = DraftInSeasonResp(games_from=date(2026, 11, 15), prior_games=10, blended=250,
+                                             season_only=3, injured=40, injured_since_projection=12)
+    board.meta.market_as_of = date(2026, 10, 31)
+
+    async def get_board(scoring, picked_ids=(), my_ids=(), session=None):
+        return board
+
+    monkeypatch.setattr(DraftBoardService, "get_board", get_board)
+    body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
+
+    assert body["in_season"] == {"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31"}
+    rec = body["recommendations"][0]
+    assert (rec["season_gp"], rec["season_fpts_avg"]) == (12, 48.5)
+    guard = next(r for r in body["best_available"] if r["name"] == "Guard One")
+    assert (guard["season_gp"], guard["season_fpts_avg"]) == (12, 48.5)
+    # Nobody else has played, so they carry neither
+    assert "season_gp" not in next(r for r in body["best_available"] if r["name"] == "Big One")
+
+
+def test_a_preseason_board_carries_neither(room):
+    body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
+    assert "in_season" not in body and "season_gp" not in body["recommendations"][0]
+
+
 def test_best_available_can_be_one_position(room):
     body = json.loads(_run("get_draft_board", {"room_id": 5, "position": "G", "available": 5}).content)
     assert [r["name"] for r in body["best_available"]] == ["Guard One"] and body["position"] == "G"

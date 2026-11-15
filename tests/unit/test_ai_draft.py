@@ -125,6 +125,18 @@ class TestBriefs:
         assert board["category_need"][0]["category"] == "blk"
         assert "draft_pick" not in text
 
+    def test_a_note_in_season_says_what_the_board_s_numbers_carry(self):
+        board = _board(in_season={"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31"})
+        for seat in (False, True):
+            text = draft.brief(draft.PICK, _room(), _detail(), board=board, seat=seat, for_pick=11)
+            assert "This draft is held during the season" in text
+            assert "count only the games from 2026-11-15 on" in text and "playbook's draft rules" in text
+            carried = json.loads(text.split("cite these numbers):\n", 1)[1].split("\n\n", 1)[0])
+            assert carried["in_season"]["games_from"] == "2026-11-15"
+        # Before the season the brief says nothing of it
+        text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), for_pick=11)
+        assert "during the season" not in text
+
     def test_a_pick_note_ahead_of_the_pick_says_how_far(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(picks_until_my_turn=2), for_pick=11)
         assert "is in 2 picks" in text and "No plan is set for this room." in text
