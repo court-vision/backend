@@ -83,6 +83,17 @@ def matchup_room(acq: AcquisitionState) -> Optional[int]:
     return max(0, acq.limit - acq.matchup_used)
 
 
+def matchup_allowance(acq: Optional[AcquisitionState], game_days: Optional[int]) -> Optional[int]:
+    """The adds the league allows over the current matchup: a per-matchup limit as set, or a
+    per-day limit once for each of the matchup's `game_days` (days with at least one game); None
+    when the league sets no limit, or a per-day limit's game days are unknown."""
+    if acq is None or acq.limit is None:
+        return None
+    if acq.per == "matchup":
+        return acq.limit
+    return acq.limit * game_days if game_days is not None else None
+
+
 def season_room(acq: AcquisitionState) -> Optional[int]:
     """Adds left this season; None when the season has no cap."""
     if acq.season_limit is None:

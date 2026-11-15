@@ -24,7 +24,6 @@ from db.base import db
 from db.migrate import MIGRATIONS_DIR
 from db.models.ai_conversations import AiProposal
 from db.models.autopilot import AiDecision, AiSettings, Autopilot, AutopilotAction
-from db.models.move_outcomes import MoveOutcome
 from db.models.notifications import NotificationTeamPreference
 from db.models.roster_moves import RosterMove
 from db.models.scheduled_pickups import ScheduledPickup
@@ -266,23 +265,17 @@ class TestTheWrites:
         row = Autopilot.get(Autopilot.team_id == team.team_id)
         assert (row.paused_by, row.paused_reason) == ("system", "2 of its moves were refused today")
 
-    def test_a_recent_add_is_a_court_vision_write_or_a_ledger_move(self, team):
-        since, since_day = _now() - timedelta(hours=48), DAY - timedelta(days=2)
-        assert run(acting._recent_adds(team.team_id, 6450, since, since_day)) is False
-        RosterMove.create(user=team.user_id_id, team=team.team_id, nba_date=DAY, source="manual", kind="transaction",
-                          status="rejected", moves=[{"action": "add", "player_id": 6450}], created_at=_now())
-        assert run(acting._recent_adds(team.team_id, 6450, since, since_day)) is False        # it didn't go through
-        RosterMove.create(user=team.user_id_id, team=team.team_id, nba_date=DAY, source="autopilot", kind="transaction",
-                          status="applied", moves=[{"action": "add", "player_id": 6450},
-                                                   {"action": "drop", "player_id": 1}], created_at=_now())
-        assert run(acting._recent_adds(team.team_id, 6450, since, since_day)) is True
-        assert run(acting._recent_adds(team.team_id, 1, since, since_day)) is False           # a drop isn't an add
-        MoveOutcome.create(provider="espn", provider_league_id="1234", season=2027, provider_team_id=1,
-                           team_name="Mine", scoring_period_id=20, nba_date=DAY - timedelta(days=1),
-                           add_player_id=99, paired=False, source="outside", team_id=team.team_id,
-                           format="points", windows={})
-        assert run(acting._recent_adds(team.team_id, 99, since, since_day)) is True
-        assert run(acting._recent_adds(team.team_id, 99, since, DAY)) is False
+    def test_a_day_s_pending_pickups_are_counted_whoever_made_them(self, team):
+        tomorrow = DAY + timedelta(days=1)
+        fields = dict(user=team.user_id_id, team=team.team_id, scoring_period_id=21, nba_date=tomorrow,
+                      add_player_id=6450, add_name="Kawhi Leonard", not_before_at=_now() + timedelta(hours=10))
+        assert run(acting._pending_on(team.team_id, tomorrow)) == 0
+        ScheduledPickup.create(**fields)
+        ScheduledPickup.create(**{**fields, "add_player_id": 99, "made_by_autopilot": True})
+        ScheduledPickup.create(**{**fields, "add_player_id": 98, "status": "executed"})       # already made
+        ScheduledPickup.create(**{**fields, "add_player_id": 97, "nba_date": DAY, "scoring_period_id": 20})
+        assert run(acting._pending_on(team.team_id, tomorrow)) == 2
+        assert run(acting._pending_on(team.team_id, DAY)) == 1
 
     def test_dime_s_writes_are_their_own_source_outside_auto_lineup_s_once_a_day(self, team):
         for _ in range(2):

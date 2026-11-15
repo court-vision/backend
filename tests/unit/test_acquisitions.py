@@ -16,6 +16,7 @@ from services.acquisitions import (
     count_adds,
     in_current_matchup,
     is_limit_refusal,
+    matchup_allowance,
     matchup_room,
     parse_acquisitions,
     season_room,
@@ -79,6 +80,15 @@ def test_no_adds_yet_this_matchup_counts_zero():
 @pytest.mark.unit
 def test_a_per_day_limit_has_no_matchup_room():
     assert matchup_room(acq(per="day", limit=1)) is None
+
+
+@pytest.mark.unit
+def test_a_matchup_s_allowance_is_the_set_number_or_one_day_s_limit_per_day_with_games():
+    assert matchup_allowance(acq(per="matchup", limit=7), None) == 7
+    assert matchup_allowance(acq(per="day", limit=1), 6) == 6      # a week with a day without games
+    assert matchup_allowance(acq(per="day", limit=2), 7) == 14
+    assert matchup_allowance(acq(per="day", limit=1), None) is None
+    assert matchup_allowance(acq(per="matchup", limit=None), 7) is None and matchup_allowance(None, 7) is None
 
 
 # ---- the budget ------------------------------------------------------------------------

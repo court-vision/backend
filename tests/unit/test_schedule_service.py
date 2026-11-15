@@ -99,6 +99,17 @@ def test_2026_27_calendar(season):
 
 @pytest.mark.unit
 @pytest.mark.skipif(not HAS_26_27, reason="schedule26-27.json not generated yet")
+def test_days_with_games_skip_a_night_without_any(season):
+    season("2026-27")
+    assert ss.days_with_games(date(2026, 10, 26), date(2026, 11, 1)) == 7
+    assert ss.days_with_games(date(2026, 11, 2), date(2026, 11, 8)) == 6          # election day, Nov 3
+    assert ss.days_with_games(date(2026, 11, 23), date(2026, 11, 29)) == 6        # Thanksgiving
+    assert ss.days_with_games(date(2026, 11, 5), date(2026, 11, 5)) == 1
+    assert ss.days_with_games(date(2026, 11, 3), date(2026, 11, 3)) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not HAS_26_27, reason="schedule26-27.json not generated yet")
 def test_streaming_matchup_is_week_one_before_opening_night(season):
     season("2026-27")
     wk1 = ss.get_matchup_by_number(1)
