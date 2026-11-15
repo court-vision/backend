@@ -55,10 +55,12 @@ Pure, apart from `load_season_rows` and `load_live_injuries`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from services.draft_congestion import SampleWeek
+from services.schedule_service import FANTASY_DAY_ROLLOVER_ET
 from services.scoring.category_rank import PoolRow
 
 # The prior's weight, in games of this season (see the module docstring)
@@ -252,14 +254,28 @@ def load_live_injuries(as_of: date) -> dict[int, str]:
     return out
 
 
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def fantasy_day(stamp: datetime) -> date:
+    """The fantasy day a stored timestamp falls on. Rooms store naive UTC
+    (datetime.utcnow()), and the fantasy day turns at 3 AM ET, so a first pick
+    at 9 PM ET on Oct 19 is Oct 19, not the Oct 20 its UTC date says."""
+    aware = stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+    local = aware.astimezone(_EASTERN)
+    if local.time() < FANTASY_DAY_ROLLOVER_ET:
+        return local.date() - timedelta(days=1)
+    return local.date()
+
+
 def drafted_on(
     started_at: Optional[datetime], created_at: Optional[datetime], status: Optional[str], today: date
 ) -> Optional[date]:
-    """The day a room's draft happens: its first pick; for a room still waiting
-    for one, today (a room made in October for a November draft drafts in
-    season); for a finished room that never recorded one, the day it was made."""
+    """The fantasy day a room's draft happens: its first pick; for a room still
+    waiting for one, today (a room made in October for a November draft drafts
+    in season); for a finished room that never recorded one, the day it was made."""
     if started_at is not None:
-        return started_at.date()
+        return fantasy_day(started_at)
     if status == "active":
         return today
-    return created_at.date() if created_at is not None else None
+    return fantasy_day(created_at) if created_at is not None else None

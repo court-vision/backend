@@ -55,6 +55,18 @@ def test_the_day_a_room_drafts():
     assert ins.drafted_on(None, None, "completed", TODAY) is None
 
 
+def test_a_room_s_stored_utc_times_count_on_the_fantasy_day():
+    # 9 PM ET on the eve of opening night is stored as 01:00 UTC on opening night
+    eve = datetime(2026, 10, 20, 1)
+    assert ins.fantasy_day(eve) == date(2026, 10, 19)
+    assert ins.games_from(TODAY, OPENING, END, kind="live", started=ins.drafted_on(eve, None, "completed", TODAY)) is None
+    # Before 3 AM ET is still the day before; from 3 AM it is the new day
+    assert ins.fantasy_day(datetime(2026, 11, 15, 7, 59)) == date(2026, 11, 14)
+    assert ins.fantasy_day(datetime(2026, 11, 15, 8, 0)) == date(2026, 11, 15)
+    # The made-at fallback converts the same way
+    assert ins.drafted_on(None, eve, "completed", TODAY) == date(2026, 10, 19)
+
+
 # ---- the blend ----
 
 def test_this_season_counts_by_games_played_against_the_priors_ten():
