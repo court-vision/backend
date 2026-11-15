@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Collection, Optional
 
 import pytz
 
@@ -46,7 +46,7 @@ from schemas.roster_transaction import (
     RosterTransactionReq,
     RosterTransactionResp,
 )
-from services import fantasy_writer_client
+from services import fantasy_writer_client, roster_protection
 from services.espn_service import EspnService, PoolEntry
 from services.fantasy_writer_client import (
     FantasyWriterAuthRejected,
@@ -83,6 +83,7 @@ class RosterTransactionInvalid(AppError):
     one of: nothing_to_do, same_player, drop_not_on_roster, drop_locked,
     add_already_on_roster, add_not_found, add_on_waivers, add_not_available, add_locked,
     drop_is_lane_holder (an active stream lane holds its spot with that player),
+    drop_protected (the user protected that player: services/roster_protection.py),
     drop_is_scheduled (a pending scheduled pickup already drops that player — `apply` only:
     the pickup executor, which reuses `_validate` and `_write`, is the one making that drop)."""
 
@@ -197,8 +198,10 @@ class RosterTransactionService:
                                                    scoring_period_id=next_day)
             except Exception as exc:
                 log.warning("roster_transaction_tomorrow_read_failed", team_id=team.team_id, error=str(exc))
+        protected = await roster_protection.ids(team.team_id) if drop is not None else frozenset()
         holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                      check_locks=next_day is None, roster=roster)
+                                                                      check_locks=next_day is None, roster=roster,
+                                                                      protected=protected)
         if drop is not None and holder is not None and drop in await run_db("txn.lane_holder", _lane_holders,
                                                                             team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
@@ -271,7 +274,7 @@ class RosterTransactionService:
     @staticmethod
     async def _validate(league_info: LeagueInfo, state: LineupState, add: Optional[int], drop: Optional[int],
                         *, for_future_day: bool = False, check_locks: bool = True,
-                        roster: Optional[LineupState] = None,
+                        roster: Optional[LineupState] = None, protected: Collection[int] = (),
                         ) -> tuple[Optional[LineupPlayer], Optional[PoolEntry]]:
         """The board's answer for the drop and ESPN's pool answer for the add — or the
         first reason the request cannot go. Only the add needs the pool lookup.
@@ -283,7 +286,8 @@ class RosterTransactionService:
         swap made after the day's first tip as next-day business, so today's locks are
         not consulted — ESPN's own answer is — while a waiver period still refuses.
         `roster` is the board whose roster the move is checked against when that is not
-        `state`'s (tomorrow's, for an add after today's first tip); the pool stays today's."""
+        `state`'s (tomorrow's, for an add after today's first tip); the pool stays today's.
+        `protected` is the team's protected players (ESPN ids, `roster_protection.ids`): none is a drop."""
         skip_locks = for_future_day or not check_locks
         if add is None and drop is None:
             raise _invalid("nothing_to_do", "Choose a player to add or a player to drop")
@@ -296,6 +300,8 @@ class RosterTransactionService:
             holder = on_board.get(drop)
             if holder is None:
                 raise _invalid("drop_not_on_roster", "That player is not on your roster", drop)
+            if drop in protected:
+                raise _invalid(roster_protection.DROP_PROTECTED, roster_protection.refusal_words(holder.name), drop)
             if holder.locked and not skip_locks:
                 raise _invalid("drop_locked", f"{holder.name} is locked for today and cannot be dropped", drop)
 
@@ -333,19 +339,25 @@ class RosterTransactionService:
         (the pickup executor's last check); when it raises, nothing is sent and the audit row says so.
         `verify_scoring_period_id` is the day whose board the write is checked against (today's when
         None): the executor's swap the day before is next-day business on ESPN, so today's board
-        still shows the player dropped and only day D's shows the swap."""
+        still shows the player dropped and only day D's shows the swap.
+
+        The roster lock is checked here, last, right before the writer: every add/drop Court Vision
+        sends comes through this chain, so a protected drop never reaches ESPN whatever asked for it
+        (`roster_protection.guard`, which also refuses when the protections can't be read)."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
         audit_id = await run_db("roster_txn.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
                                 moves, key, kind="transaction")
-        if before_send is not None:
-            try:
+        try:
+            await roster_protection.guard(team_id, drop, next((m["name"] for m in moves if m.get("action") == "drop"),
+                                                              None))
+            if before_send is not None:
                 await before_send(audit_id)
-            except Exception as exc:
-                await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed", error=f"not_sent: {exc}")
-                raise
+        except Exception as exc:
+            await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed", error=f"not_sent: {exc}")
+            raise
         try:
             result = await get_roster_writer(league_info.provider).apply_transaction(league_info, state, add, drop, key)
         except FantasyWriterRejected as exc:

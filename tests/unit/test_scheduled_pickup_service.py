@@ -1278,3 +1278,76 @@ def test_after_the_tip_the_manual_add_is_the_executors_next_day_swap(h, monkeypa
     assert resp.data.verified is True and resp.data.counts_from == "2026-10-22"
     assert resp.data.lineup.scoring_period_id == 2 and h.txn_calls[0]["scoring_period_id"] == 2
     assert h.audits[0]["source"] == "manual" and h.updates[-1][1] == "applied"
+
+
+# ---- the roster lock -------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_drop_protected_since_scheduling_becomes_add_only_with_a_seat_free(h, protect):
+    """Protecting cancels the pickup; this is one an attempt had claimed at that moment."""
+    arrange_day_before(h)                                    # Jokic and Edwards: 2 of 4 seats
+    protect({21: [EDWARDS]})
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("executed", "drop_protected")
+    assert h.txn_calls[0]["drop_player_id"] is None and h.txn_calls[0]["add_player_id"] == KAWHI
+
+
+@pytest.mark.unit
+def test_a_protected_drop_without_a_seat_is_skipped_and_nothing_is_sent(h, protect):
+    arrange_day_before(h)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN"),
+                            player(3, "Three", BE), player(4, "Four", BE)])             # 4 of 4 seats
+    protect({21: [EDWARDS]})
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected") and h.txn_calls == [] and h.audits == []
+
+
+@pytest.mark.unit
+def test_a_stream_lanes_switch_never_drops_a_protected_holder(h, protect, monkeypatch):
+    """An add alone would leave the lane's spot to no one: skipped, and the lane ends at its next decision."""
+    arrange_day_before(h)
+    protect({21: [EDWARDS]})
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled",
+                        staticmethod(lambda *a, **k: asyncio.sleep(0, result=None)))
+    r = execute(h, row(lane_id=7))
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected") and h.txn_calls == []
+    assert r.detail == "Anthony Edwards is protected: unprotect him in the Week desk to drop him"
+
+
+@pytest.mark.unit
+def test_a_drop_whose_protection_cant_be_read_waits(h, monkeypatch):
+    from services import roster_protection
+
+    async def down(team_id):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(roster_protection, "ids", down)
+    arrange_day_before(h)
+    assert execute(h).outcome == "deferred"
+    assert [d[2] for d in h.deferred] == ["protections_unread"] and h.txn_calls == []
+
+
+@pytest.mark.unit
+def test_a_drop_protected_under_the_attempt_is_refused_before_espn_and_never_marked_sent(h, monkeypatch):
+    """Protected between this attempt's own check and the write: the write chain's check refuses it
+    before the in-flight mark, so the row settles skipped instead of waiting on a write that never left."""
+    from services import roster_protection
+    reads = []
+
+    async def protected_on_the_second_read(team_id):
+        reads.append(team_id)
+        return frozenset() if len(reads) == 1 else frozenset({EDWARDS})
+    monkeypatch.setattr(roster_protection, "ids", protected_on_the_second_read)
+    arrange_day_before(h)
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected")
+    assert h.txn_calls == [] and h.marked == [] and h.updates[0][1] == "failed"
+
+
+@pytest.mark.unit
+def test_schedule_refuses_to_drop_a_protected_player(scheduling, protect):
+    protect({21: [EDWARDS]})
+    with pytest.raises(svc.ScheduledPickupInvalid) as exc:
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert exc.value.data["reason"] == "drop_protected" and scheduling.inserted == []
+    assert exc.value.message == "Anthony Edwards is protected: unprotect him in the Week desk to drop him"

@@ -785,3 +785,57 @@ def _clock(now):
         def now(cls, tz=None):
             return now if tz is None else now.astimezone(tz)
     return Clock
+
+
+# ---- the roster lock -------------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_protected_players_spot_cant_be_streamed(h, monkeypatch, protect):
+    """A lane drops its spot's player at its first switch; Dime's lane chips come through here too."""
+    monkeypatch.setattr(svc, "datetime", _clock(NOON))
+    protect({21: [HOLDER]})
+    for call in (svc.StreamLaneService.plan(TEAM, LEAGUE, StreamLanePlanReq(player_id=HOLDER)),
+                 svc.StreamLaneService.start(TEAM, LEAGUE, StreamLaneStartReq(player_id=HOLDER))):
+        with pytest.raises(svc.StreamLaneInvalid) as exc:
+            run(call)
+        assert exc.value.data["reason"] == "holder_protected"
+        assert exc.value.message.startswith("Holder is protected, and a lane would drop him")
+    assert not h.inserted
+
+
+@pytest.mark.unit
+def test_a_lane_whose_holder_is_protected_ends_at_its_next_decision(h, protect):
+    """Protecting him stops the lane; this ends one whose pickup was being made at that moment."""
+    protect({21: [HOLDER]})
+    assert decide(h, lane(), tip(MON)) is None
+    assert h.reads == 0
+    (rec,) = h.recorded
+    assert (rec.fields["status"], rec.fields["reason"]) == ("ended", "stopped_for_protected")
+
+
+@pytest.mark.unit
+def test_a_protected_holders_lane_waits_out_its_pending_pickup_first(h, protect):
+    """Who holds the spot isn't known until that pickup settles (the check before ESPN refuses it)."""
+    protect({21: [HOLDER]})
+    h.lane_pending = True
+    decide(h, lane(), tip(MON))
+    assert not h.recorded and h.steps[0].fields["reason"] == "pickup_pending"
+
+
+@pytest.mark.unit
+def test_no_decision_is_made_while_the_protections_cant_be_read(h, monkeypatch):
+    from services import roster_protection
+
+    async def down(team_id):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(roster_protection, "ids", down)
+    decide(h, lane(), tip(MON))
+    assert h.reads == 0 and not h.recorded and h.steps[0].fields["reason"] == "protections_unread"
+
+
+@pytest.mark.unit
+def test_a_stop_for_a_protection_says_why(h, monkeypatch):
+    _team_lane(h, monkeypatch, lane())
+    run(svc.StreamLaneService.stop(TEAM, 7, why=dict(reason="stopped_for_protected", detail=None)))
+    assert (h.steps[0].fields["status"], h.steps[0].fields["reason"]) == ("ended", "stopped_for_protected")

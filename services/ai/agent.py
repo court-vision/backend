@@ -258,6 +258,12 @@ def _team_facts(teams: list[dict[str, Any]], pinned: Optional[int]) -> str:
     line = "The user's teams: " + "; ".join(facts) + "."
     if pinned is not None and any(t["team_id"] == pinned for t in teams):
         line += f" Pinned team: team_id {pinned}."
+    # The roster lock: who is never a drop, said before Dime plans a move rather than after a refusal
+    kept = [f"team_id {t['team_id']}: " + ", ".join(
+        p["name"] + (f" (player_id {p['player_id']})" if p.get("player_id") is not None else "")
+        for p in t["protected"]) for t in teams if t.get("protected")]
+    if kept:
+        line += " Protected by the user, so never a drop: " + "; ".join(kept) + "."
     return line
 
 

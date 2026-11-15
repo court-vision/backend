@@ -521,6 +521,26 @@ def test_the_header_lists_teams_by_id_and_format_only(monkeypatch):
 
 
 @pytest.mark.unit
+def test_the_header_names_the_players_the_user_protected(monkeypatch):
+    """The roster lock, said before Dime plans a move rather than after a chip is refused."""
+    async def teams(user_id):
+        return [{"team_id": 22, "provider": "espn", "season": 2027, "scoring": "points",
+                 "protected": [{"player_id": 1630578, "name": "Alperen Sengun"}, {"player_id": None, "name": "Rookie"}]},
+                {"team_id": 23, "provider": "espn", "season": 2027, "scoring": "points", "protected": []}]
+
+    async def season():
+        return "NBA season: 2026-27 starts 2026-10-20."
+    monkeypatch.setattr(agent, "list_my_teams", teams)
+    monkeypatch.setattr(agent, "_season_line", season)
+
+    line = asyncio.run(agent.header(42, None))
+
+    assert line.endswith("Protected by the user, so never a drop: team_id 22: Alperen Sengun (player_id 1630578), "
+                         "Rookie.]")
+    assert "team_id 23:" not in line
+
+
+@pytest.mark.unit
 def test_the_header_ends_with_what_became_of_the_conversation_s_proposals(monkeypatch):
     from services.ai import proposals
 

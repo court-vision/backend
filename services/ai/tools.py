@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Literal, Optional, Union
+from typing import Any, Awaitable, Callable, Collection, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -41,7 +41,7 @@ from db.models.nba.games import Game
 from db.models.nba.player_game_stats import PlayerGameStats
 from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.players import Player
-from schemas.common import ApiStatus, LeagueInfo
+from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.streamer import StreamerMode
 from core.nba_calendar import nba_date_et
 from core.settings import settings
@@ -50,7 +50,7 @@ from services.game_context import GameContext
 from services.matchup_service import MatchupService
 from services.public_market_service import PublicMarketService, _snapshot_date
 from services.schedule_service import get_matchup_by_number, get_streaming_matchup
-from services import move_ledger
+from services import move_ledger, roster_protection
 from services import news_service
 from services.ai import (
     app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news, steering as ai_steering,
@@ -344,6 +344,8 @@ async def list_my_teams(user_id: int) -> list[dict[str, Any]]:
     it; the router's view carries everything but the names (`routing.describe_view`),
     and the agent's header everything but the names (`agent._team_facts`)."""
     resp = await TeamService.get_teams(user_id)
+    # The players each team's user protected (the roster lock): never a drop, so Dime plans around them
+    protected = await roster_protection.for_teams([team.team_id for team in (resp.data or [])])
     teams = []
     for team in (resp.data or []):
         scoring = team.league.scoring_type if team.league else team.league_info.scoring_preview
@@ -356,6 +358,7 @@ async def list_my_teams(user_id: int) -> list[dict[str, Any]]:
             "season": team.league_info.year,
             "scoring": scoring,
             "points_scoring": points_scoring(scoring, team.league),
+            "protected": [{"player_id": p.nba_player_id, "name": p.name} for p in protected.get(team.team_id, [])],
         })
     return teams
 
@@ -399,7 +402,8 @@ def _injury(injured: bool, status: Optional[str]) -> Optional[str]:
     return status or ("injured" if injured else None)
 
 
-def _roster_row(p: Any) -> dict[str, Any]:
+def _roster_row(p: Any, protected: Collection[int] = ()) -> dict[str, Any]:
+    """A roster player for the model; `protected` (ESPN ids) marks the ones the user protected."""
     return {
         "player_id": p.nba_player_id,
         "name": p.name,
@@ -409,6 +413,7 @@ def _roster_row(p: Any) -> dict[str, Any]:
         "avg_value": p.avg_points,
         "games_left": p.games_remaining,
         "injury": _injury(p.injured, p.injury_status),
+        **({"protected": True} if p.player_id in protected else {}),
     }
 
 
@@ -437,11 +442,15 @@ def _categories(md: Any) -> Optional[list[dict[str, Any]]]:
 
 
 async def _get_matchup(args: MatchupInput, ctx: ToolContext | None) -> dict[str, Any]:
-    await _owned(ctx, args.team_id)
+    _, league_info = await _owned(ctx, args.team_id)
     resp = await MatchupService.get_matchup_by_team_id(ctx.user_id, args.team_id, args.window)
     md = resp.data
     if md is None:
         return {"team_id": args.team_id, "matchup": None, "note": resp.message or "No current matchup"}
+    # Protections are keyed by ESPN id, which an ESPN roster's player_id is
+    protected = (await roster_protection.ids_soft(args.team_id)
+                 if league_info.provider == FantasyProvider.ESPN else frozenset())
+    mine = [_roster_row(p, protected) for p in md.your_team.roster]
     return {
         "team_id": args.team_id,
         "matchup_period": md.matchup_period,
@@ -455,8 +464,9 @@ async def _get_matchup(args: MatchupInput, ctx: ToolContext | None) -> dict[str,
                      "projected": md.opponent_team.projected_score},
         "projected_margin": md.projected_margin,
         "categories": _categories(md),
-        "your_roster": [_roster_row(p) for p in md.your_team.roster],
+        "your_roster": mine,
         "opponent_roster": [_roster_row(p) for p in md.opponent_team.roster],
+        **({"notes": [roster_protection.DIME_NOTE]} if any(r.get("protected") for r in mine) else {}),
     }
 
 

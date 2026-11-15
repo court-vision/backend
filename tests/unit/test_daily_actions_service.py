@@ -434,6 +434,17 @@ def test_two_games_are_too_few_to_call_a_player_the_weakest(harness):
     assert rows(read()) == [("add_drop", 99, 11)]
 
 
+@pytest.mark.unit
+def test_the_days_swap_never_suggests_dropping_a_protected_player(harness, protect):
+    harness.board = state(full_board({11: player(11, "P11", BE, game=False, value=8.0),
+                                      12: player(12, "P12", BE, game=False, value=18.0)}))
+    harness.pool = pool(pick(99, "Kawhi", value=30.0))
+    assert rows(read()) == [("add_drop", 99, 11)]
+    protect({21: [11]})
+    assert rows(read()) == [("add_drop", 99, 12)]
+    assert 11 not in harness.evidence_calls[-1]            # nor weighed as one
+
+
 # ---- suggest_transaction (pure) ---------------------------------------------------------------------------
 
 
@@ -508,6 +519,14 @@ def test_locked_ir_and_ir_eligible_players_are_never_the_drop():
     assert suggest(players, [pick(99, value=50.0)]) is None
     players[3] = player(8, "P8", UT, game=False, value=3.0)
     assert suggest(players, [pick(99, value=50.0)]).drop.player_id == 8
+
+
+@pytest.mark.unit
+def test_a_protected_player_is_never_the_drop():
+    """The roster lock: the swap takes the next weakest, or none when he was the only one."""
+    players = full_board({11: player(11, "P11", BE, game=False, value=25.0), 12: player(12, "P12", BE, game=False, value=9.0)})
+    assert suggest(players, [pick(99, value=40.0)], protected={12}).drop.player_id == 11
+    assert suggest(players, [pick(99, value=40.0)], protected={11, 12}) is None
 
 
 @pytest.mark.unit

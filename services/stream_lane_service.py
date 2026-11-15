@@ -103,6 +103,7 @@ from schemas.stream_lane import (
     StreamLaneStartReq,
     StreamLaneUpdateReq,
 )
+from services import roster_protection
 from services.acquisitions import adds_for_day, in_current_matchup, matchup_room, season_room
 from services.lineup_editor_service import (
     RosterWriteBlocked,
@@ -861,6 +862,10 @@ class StreamLaneService:
             raise _invalid("not_on_roster", "That player is not on your roster")
         if holder.lineup_slot_id == IR_SLOT_ID:
             raise _invalid("on_ir", f"{holder.name} is on IR — a lane streams an active spot")
+        if holder.player_id in await roster_protection.ids(team.team_id):
+            # A lane drops its spot's player at its first switch (Dime's lane chips come through here too)
+            raise _invalid("holder_protected", f"{holder.name} is protected, and a lane would drop him: "
+                                               "unprotect him in the Week desk to stream his spot")
         period, _ = StreamLaneService._board_today(board)
         end_period, end_date = StreamLaneService._end_period(board)
         today = (await run_db("lane.days", _days, period, period, period, date.fromisoformat(board.nba_date)))[0]
@@ -1035,14 +1040,17 @@ class StreamLaneService:
         return dict(status=ACTIVE, next_period=nxt, next_decision_at=window.not_before_at, reason=None, detail=None)
 
     @staticmethod
-    async def stop(team, lane_id: int, proposal_id: Optional[int] = None, *, by: str = "user") -> StreamLaneResp:
+    async def stop(team, lane_id: int, proposal_id: Optional[int] = None, *, by: str = "user",
+                   why: Optional[dict[str, Any]] = None) -> StreamLaneResp:
+        """`why`: the reason the lane's end carries when it isn't the user's own stop or a chip's
+        (protecting the spot's player stops it with `stopped_for_protected`)."""
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         if lane is None:
             raise NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found")
         if lane.status == ENDED:
             raise StreamLaneEnded()
         chip = await _dime_chip(team, proposal_id, "stop", lane_id=lane.id)
-        why = _by_dime(chip, "stop", by) or dict(reason="stopped", detail=None)
+        why = _by_dime(chip, "stop", by) or why or dict(reason="stopped", detail=None)
         now = datetime.now(timezone.utc)
         # A pickup the lane scheduled goes with it — unless it is being made right now.
         await StreamLaneService._cancel_pickups(team, lane, now)
@@ -1123,11 +1131,22 @@ class StreamLaneService:
             for lane in lanes:
                 tell(await StreamLaneService._pause(lane, now, "provider_not_supported", team_name=team_name))
             return notices
+        try:
+            protected = await roster_protection.ids(team_id)
+        except Exception as exc:
+            # A switch drops the spot's player: no decision without knowing whether he is protected
+            for lane in lanes:
+                await StreamLaneService._wait(lane, now, "protections_unread", detail=str(exc)[:300])
+            return notices
         live = []
         for lane in lanes:
             if await run_db("lane.has_pending", _lane_has_pending, lane.id):
                 # Its last pickup hasn't settled: who holds the spot is not known yet.
                 await StreamLaneService._wait(lane, now, "pickup_pending", after=PICKUP_WAIT)
+            elif lane.holder_player_id in protected:
+                # Protecting him stops the lane (services/roster_protection.py); this ends one whose
+                # pickup was being made at that moment, once the check before ESPN has refused it.
+                tell(await StreamLaneService._end(lane, now, roster_protection.LANE_STOPPED))
             elif lane.next_period > lane.end_period:
                 tell(await StreamLaneService._end(lane, now, "matchup_over"))
             else:

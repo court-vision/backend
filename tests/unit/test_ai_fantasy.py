@@ -165,6 +165,24 @@ def test_an_add_without_a_drop_on_a_full_roster_gets_the_rules_drop(what_if):
 
 
 @pytest.mark.unit
+def test_the_rules_drop_passes_over_a_protected_player_and_says_so(what_if, protect):
+    """The roster lock: B would be the rule's drop; protected, A goes, and the answer says why."""
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
+    protect({7: [102]})
+    out = project([{"add": 2001, "day": 1}], team_=team(slots=3))
+    assert out["moves"][0]["drop"] == "A"
+    assert "The rule's drop passed over B: protected by the user, never a drop." in out["assumes"]
+
+
+@pytest.mark.unit
+def test_a_what_if_naming_a_protected_drop_is_refused_in_words_that_say_what_to_do(what_if, protect):
+    protect({7: [102]})
+    with pytest.raises(AppError) as exc:
+        project([{"add": 2001, "drop": 1002, "day": 3}])
+    assert exc.value.message.startswith("B is protected by the user, so he is never a drop: choose another player")
+
+
+@pytest.mark.unit
 def test_an_ir_player_is_never_the_rules_drop_and_dropping_him_frees_no_spot(what_if):
     cheap_ir = (103, 1003, "Hurt", "BOS", 1.0, "IR")
     what_if.resp = matchup([roster_player(*A), roster_player(*B), roster_player(*cheap_ir, injured=True)])
@@ -446,6 +464,19 @@ def test_the_default_holder_is_the_rules_drop_and_the_plan_names_nba_ids(lanes):
     assert (out["projected_value"], out["hold_value"], out["gain"], out["adds"], out["optimal"]) == (70.0, 0.0, 70.0, 1, True)
     assert out["candidates_considered"] == 2 and out["weights"] is None and out["notes"] == []
     assert "espn" not in str(out) and 11 not in {r["player_id"] for r in out["plan"]}
+
+
+@pytest.mark.unit
+def test_a_protected_player_never_holds_a_planned_spot(lanes, protect):
+    """A lane drops its spot's player: the rule passes over him with a note, and naming him is refused."""
+    protect({7: [BIG]})
+    out = plan()
+    assert [h["name"] for h in out["holders"]] != ["Big"]
+    assert "The drop rule passes over Big: protected by the user, never a drop." in out["notes"]
+    with pytest.raises(AppError) as exc:
+        plan(holders=[1003])
+    assert exc.value.error_code == "AI_PLAYER_PROTECTED"
+    assert exc.value.message.startswith("Big is protected by the user, so he is never a drop and a stream lane")
 
 
 @pytest.mark.unit

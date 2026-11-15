@@ -58,7 +58,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -69,7 +69,7 @@ from db.models.ai_conversations import AiProposal
 from db.models.nba.games import Game
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import LineupState
-from services import schedule_service, steering
+from services import roster_protection, schedule_service, steering
 from services.acquisitions import budget_block
 from services.ai.fantasy import MoveInput, ProjectMatchupInput, _first_open_day, _identities, project_matchup
 from services.daily_actions_service import has_open_seat
@@ -596,6 +596,10 @@ async def _problems(team: Any, league_info: LeagueInfo, state: LineupState, kind
         # chip's; a move for today is a transaction, another chip. The expiry normally gets here first.
         problems.append(f"{_day_label(nba_date)} has begun on ESPN, so a pickup can no longer be scheduled for it; "
                         "ask for the move again.")
+    if drop is not None and drop.espn_id in await roster_protection.ids(team.team_id):
+        # The roster lock, in the words that tell Dime what to do instead (the prompt and its reads
+        # already say who is protected; this is the backstop)
+        problems.append(roster_protection.dime_words(drop.name) + ".")
     try:
         await RosterTransactionService._validate(league_info, state, add.espn_id if add else None,
                                                  drop.espn_id if drop else None, for_future_day=kind == SCHEDULED)
@@ -781,10 +785,12 @@ def _move_view(m: Move, names: dict[int, Any]) -> dict[str, Any]:
             "from_slot": _slot_name(m.from_slot_id), "to_slot": _slot_name(m.to_slot_id), "role": m.role, "note": m.note}
 
 
-def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] = ()) -> dict[str, Any]:
+def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] = (),
+                protected: Collection[int] = ()) -> dict[str, Any]:
     """The model's view of a day's board (NBA ids only): slots, every player's slot, eligibility,
     game, lock and value, and the server's own fill for the day, as auto-lineup would make it
-    with the team's holds (a pinned player marked `pinned`)."""
+    with the team's holds (a pinned player marked `pinned`). A player the user protected (ESPN ids
+    in `protected`, the roster lock) is marked `protected`: never a drop."""
     state = board.state
     planners = {pp.player_id: pp for pp in planner_players(state)}
     plan = steering.fill_with(list(planners.values()), slot_counts_of(state), holds, board.nba_date)
@@ -802,6 +808,7 @@ def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] =
             "locked": p.locked, "injury": p.injury_status if (p.injured or p.injury_status) else None,
             "avg_value": p.avg_points, "value_kind": p.value_kind,
             **({"pinned": True} if p.player_id in pinned else {}),
+            **({"protected": True} if p.player_id in protected else {}),
         })
     slots = [{"slot": sd.slot, "count": sd.count} for sd in state.slots] or \
         [{"slot": _slot_name(sid), "count": n} for sid, n in sorted(slot_counts_of(state).items())]
@@ -814,14 +821,16 @@ def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] =
                  "unfilled": [{"player_id": by_id[u.player_id].nba_player_id if u.player_id in by_id else None,
                                "name": u.name, "reason": u.reason} for u in plan.unfilled],
                  "summary": plan.summary},
-        "notes": ["Players without a player_id have no NBA id in Court Vision and can't be moved from here."]
-        if any(p["player_id"] is None for p in players) else [],
+        "notes": [*(["Players without a player_id have no NBA id in Court Vision and can't be moved from here."]
+                    if any(p["player_id"] is None for p in players) else []),
+                  *([roster_protection.DIME_NOTE] if any(p.get("protected") for p in players) else [])],
     }
 
 
 async def get_lineup(team: Any, league_info: LeagueInfo, args: GetLineupInput) -> dict[str, Any]:
     board = await _day_board(team, league_info, args.day)
-    return lineup_view(board, team.team_id, await steering.holds_for(team.team_id))
+    return lineup_view(board, team.team_id, await steering.holds_for(team.team_id),
+                       await roster_protection.ids_soft(team.team_id))
 
 
 def _resolve_moves(state: LineupState, wanted: Sequence[LineupMoveInput]) -> list[Move]:

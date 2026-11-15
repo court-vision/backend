@@ -466,6 +466,16 @@ class TestPolicy:
         v = commit()
         assert v.rule == "protected" and v.message.startswith("Anthony Edwards is one of the roster's top 2")
 
+    def test_a_player_the_user_protected_is_never_dropped_and_it_never_counts_against_dime(self, h, protect):
+        """A chip proposed before the user protected him: stopped, as a switch is, so never an auto-pause."""
+        protect({21: [EDWARDS]})
+        for pid in (31, 32, 33):
+            h.rows[pid] = prop(id=pid, state="shadow")
+            v = commit(pid, decision_id=60 + pid)
+            assert (v.outcome, v.rule, v.paused) == ("blocked", "user_protected", None)
+            assert v.message.startswith("Anthony Edwards is protected, so Dime never drops him")
+        assert h.paused == [] and h.sends == []
+
     def test_a_player_added_recently_is_not_dropped_unless_he_is_out(self, h):
         h.recent = {EDWARDS}
         v = commit()

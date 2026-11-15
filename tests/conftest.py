@@ -75,6 +75,63 @@ def no_team_holds(request, monkeypatch):
     yield
 
 
+# ---- The roster lock ----
+
+@pytest.fixture(autouse=True)
+def no_roster_protections(request, monkeypatch):
+    """Every add/drop, lane decision and drop suggestion reads the team's protected players
+    (services/roster_protection.py). Outside the database-backed suite a test sees none unless
+    it stubs its own (`protect` below), so no unit test reaches for a database through them."""
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
+    from services import roster_protection
+
+    async def none(team_id):
+        return frozenset()
+
+    async def no_rows(team_id):
+        return []
+
+    async def no_teams(team_ids):
+        return {}
+
+    monkeypatch.setattr(roster_protection, "ids", none)
+    monkeypatch.setattr(roster_protection, "for_team", no_rows)
+    monkeypatch.setattr(roster_protection, "for_teams", no_teams)
+    yield
+
+
+@pytest.fixture
+def protect(monkeypatch):
+    """`protect({team_id: [espn ids]})` makes those players protected for the reads above (names
+    for `for_team`/`for_teams` come from `names`, an ESPN id to name map, when given)."""
+    from services import roster_protection
+
+    def apply(by_team, names=None, nba_ids=None):
+        names, nba_ids = names or {}, nba_ids or {}
+
+        async def ids(team_id):
+            return frozenset(by_team.get(team_id, ()))
+
+        def rows(team_id):
+            return [roster_protection.Protected(player_id=pid, nba_player_id=nba_ids.get(pid),
+                                                name=names.get(pid, f"player {pid}"), team=None)
+                    for pid in by_team.get(team_id, ())]
+
+        async def for_team(team_id):
+            return rows(team_id)
+
+        async def for_teams(team_ids):
+            return {tid: rows(tid) for tid in team_ids if by_team.get(tid)}
+
+        monkeypatch.setattr(roster_protection, "ids", ids)
+        monkeypatch.setattr(roster_protection, "for_team", for_team)
+        monkeypatch.setattr(roster_protection, "for_teams", for_teams)
+
+    return apply
+
+
 # ---- Reading a write back ----
 
 @pytest.fixture(autouse=True)
