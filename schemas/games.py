@@ -30,6 +30,13 @@ class GamesOnDateData(ApiModel):
     date: str = Field(..., description="Date queried (YYYY-MM-DD)")
     games: list[GameInfo] = Field(default_factory=list, description="List of games on this date")
     count: int = Field(..., description="Number of games on this date")
+    live_age_ms: Optional[int] = Field(
+        None,
+        description=(
+            "Today only: how old the live pipeline's newest score snapshot of these games was when this "
+            "was answered, in milliseconds. Null on any other date and before the first snapshot."
+        ),
+    )
 
 
 class GamesOnDateResp(BaseResponse):

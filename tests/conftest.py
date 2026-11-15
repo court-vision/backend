@@ -75,6 +75,24 @@ def no_team_holds(request, monkeypatch):
     yield
 
 
+# ---- The live matchup's kept provider reads ----
+
+@pytest.fixture(autouse=True)
+def no_kept_matchups():
+    """The live matchup keeps its provider read per process for a few seconds
+    (services/matchup_hold.py); one test's must never answer for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.matchup_hold")
+        if module is not None:
+            module.clear()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- The roster lock ----
 
 @pytest.fixture(autouse=True)

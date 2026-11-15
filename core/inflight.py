@@ -34,7 +34,7 @@ Rules:
   second replica (the audit's S7, `numReplicas=2`) the server's own verify
   re-read stays fenced, because it runs in the process that wrote; but the
   client's refetch after a lineup move can land on the other replica and join
-  an identical read there (same cookies: another tab, the 30 s live poll) that
+  an identical read there (same cookies: another tab, the live poll) that
   began before the write, and show the board from before the move for that one
   read (the window is one ESPN read, a few hundred milliseconds). Before adding
   replicas, set PROVIDER_READ_COALESCING=false for the rollout or accept that

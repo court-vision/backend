@@ -1,8 +1,10 @@
 from datetime import date as date_type, datetime
 from types import SimpleNamespace
 
+from core.live_age import live_age_ms
 from core.logging import get_logger
 from core.settings import settings
+from services import matchup_hold
 from services.matchup_days import comparison_to_schema, nba_today as _nba_today, score_stat_row
 from services.scoring.models import CategoryTeamScoreData, StatLine
 from services.scoring.resolver import resolve_scoring_for_league_info, resolve_scoring_for_team
@@ -213,19 +215,30 @@ class MatchupService(MatchupHistoryService):
     async def get_live_matchup_by_team_id(
         user_id: int,
         team_id: int,
+        reuse_from: int | None = None,
     ) -> LiveMatchupResp:
         """
         Get the current matchup augmented with live in-game stats per player.
 
         Fetches the current matchup (ESPN/Yahoo scores + roster) then overlays
         live stats from live_player_stats for each roster player matched by name.
+
+        `reuse_from` is the `provider_read_ms` of the answer the caller already
+        holds: given, the provider read behind this answer may be one made in
+        the last few seconds (services/matchup_hold.py). The box scores on top
+        are read now either way.
         """
         # Step 1: Fetch the provider — always the default (current) scoring
         # period. We trust whatever it returns as the current roster and lineup.
-        matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
+        kept = matchup_hold.reusable(user_id, team_id, reuse_from)
+        if kept is None:
+            epoch = matchup_hold.reading()
+            matchup = await MatchupService.get_matchup_by_team_id(user_id, team_id, avg_window="season")
 
-        if matchup.status != ApiStatus.SUCCESS or not matchup.data:
-            return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
+            if matchup.status != ApiStatus.SUCCESS or not matchup.data:
+                return LiveMatchupResp(status=matchup.status, message=matchup.message, data=None)
+            kept = matchup_hold.keep(user_id, team_id, matchup, epoch)
+        matchup = kept.matchup
 
         espn_matchup_period = matchup.data.matchup_period
 
@@ -422,5 +435,7 @@ class MatchupService(MatchupHistoryService):
                 scoring_format=scoring.format,
                 settings_synced=scoring.settings_synced,
                 category_comparison=category_comparison,
+                live_age_ms=live_age_ms(row.last_updated for row in live_rows.values()),
+                provider_read_ms=kept.read_ms,
             ),
         )

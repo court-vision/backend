@@ -188,6 +188,13 @@ class LiveMatchupData(ApiModel):
     scoring_format: ScoringFormat = "points"
     settings_synced: bool = False
     category_comparison: Optional[CategoryComparison] = None
+    # How old the newest box score line on these rosters was when this was
+    # answered (core/live_age.py); None when no rostered player has a line.
+    live_age_ms: Optional[int] = None
+    # When the provider read under this answer was made (epoch ms). A caller
+    # hands it back as `reuse_from` to let its next answer stand on a read no
+    # older than this one (services/matchup_hold.py).
+    provider_read_ms: Optional[int] = None
 
 
 class LiveMatchupResp(BaseResponse):

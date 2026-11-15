@@ -2,7 +2,7 @@
 Live Game Score Snapshots Table (backend read-only mirror)
 
 Periodic snapshots of NBA game scores written by the data-platform
-LiveGameStatsPipeline every 30 seconds, each one the game as its live box
+LiveGameStatsPipeline every 15 seconds, each one the game as its live box
 score had it on that poll. The backend reads this table to serve the
 score-over-time chart, as today's slate's score, clock and status
 (services/games_service.py), and as a fallback when the live box score API is
