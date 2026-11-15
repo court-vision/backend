@@ -1351,8 +1351,8 @@ async def _get_draft_board(args: league.DraftBoardInput, ctx: ToolContext | None
 # and what the check-ins decided. log_decision is a check-in's own (CHECKIN_ONLY_TOOLS).
 
 async def _get_automations(args: automations.GetAutomationsInput, ctx: ToolContext | None) -> dict[str, Any]:
-    team, _ = await _owned(ctx, args.team_id)
-    return await automations.get_automations(team, ctx.user_id)
+    team, league_info = await _owned(ctx, args.team_id)
+    return await automations.get_automations(team, ctx.user_id, league_info=league_info)
 
 
 async def _get_decisions(args: decisions.GetDecisionsInput, ctx: ToolContext | None) -> dict[str, Any]:

@@ -277,13 +277,14 @@ def h(monkeypatch):
     the send faked."""
     for k, v in dict(ai_enabled=True, autopilot_enabled=True, roster_writes_enabled=True,
                      ai_agent_user_ids=[11],
-                     autopilot_adds_per_day=2, autopilot_adds_per_matchup=5, autopilot_adds_reserve=1,
-                     autopilot_protected_top=1, autopilot_churn_hours=48, autopilot_pause_refused=2,
+                     autopilot_adds_per_day=2, autopilot_adds_reserve=1,
+                     autopilot_protected_top=1, autopilot_pause_refused=2,
                      autopilot_pause_same_block=2, frontend_url="https://courtvision.dev/").items():
         monkeypatch.setattr(settings, k, v)
     h = SimpleNamespace(rows={31: prop(state="shadow", summary="... Logged in shadow, not sent.")},
                         autopilot=pilot(ai_rows=["daily_actions"]), actions={}, recorded=[], promoted=[], paused=[], emails=[],
-                        recent=set(), board=roster(), sends=[], raises=None, earlier=[])
+                        pending=[], board=roster(), sends=[], raises=None, reads=[],
+                        earlier=[])
 
     async def proposal(pid):
         return h.rows.get(pid)
@@ -317,8 +318,9 @@ def h(monkeypatch):
     async def count_since(team_id, since, outcome, rule=None):
         return sum(1 for f in h.recorded if f["outcome"] == outcome and (rule is None or f["rule"] == rule))
 
-    async def recent_adds(team_id, player_id, since, since_day):
-        return player_id in h.recent
+    async def pending_days(team_id):
+        h.reads.append("pending")
+        return list(h.pending)
 
     async def team(team_id, user_id):
         return (TEAM, LEAGUE) if (team_id, user_id) == (21, 11) else (None, None)
@@ -334,6 +336,7 @@ def h(monkeypatch):
         return "owner@example.com"
 
     async def board(team, league_info, scoring_period_id=None):
+        h.reads.append("board")
         return h.board
 
     async def send(team, league_info, r):
@@ -353,7 +356,7 @@ def h(monkeypatch):
     monkeypatch.setattr(acting, "_record", record)
     monkeypatch.setattr(acting, "_adds_sent", adds_sent)
     monkeypatch.setattr(acting, "_count_since", count_since)
-    monkeypatch.setattr(acting, "_recent_adds", recent_adds)
+    monkeypatch.setattr(acting, "_pending_days", pending_days)
     monkeypatch.setattr(acting, "_team", team)
     monkeypatch.setattr(acting, "_pause", pause)
     monkeypatch.setattr(acting, "_recipient", recipient)
@@ -368,6 +371,12 @@ def h(monkeypatch):
 
 def commit(pid=31, decision_id=60):
     return run(acting.commit(11, CHECKIN, decision_id, pid, now=NOW))
+
+
+def pool(*, used=0, game_days=7):
+    """James's kind of league: one add for each of the matchup's days with games."""
+    return AcquisitionState(per="game_day", per_game_day=1, game_days=game_days, limit=game_days,
+                            matchup_start=WEEK["start_date"], matchup_end=WEEK["end_date"], matchup_used=used)
 
 
 def sent(nba_date, adds=1):
@@ -447,9 +456,52 @@ class TestPolicy:
         assert v.message == "Dime has made its 2 add(s) for Wed Oct 21; left as a chip for the user"
         assert h.sends == [] and h.recorded[0]["outcome"] == "blocked" and h.rows[31].state == "proposed"
 
-    def test_the_matchup_s_cap_counts_the_whole_matchup(self, h):
-        h.earlier = [sent(date(2026, 10, 19), 2), sent(date(2026, 10, 20), 2), sent(TOMORROW)]
-        assert commit().rule == "cap_matchup"
+    def test_dime_has_no_matchup_cap_of_its_own(self, h):
+        h.earlier = [sent(date(2026, 10, 19), 2), sent(date(2026, 10, 20), 2), sent(TOMORROW, 2)]
+        assert commit().outcome == "sent"
+
+    def test_a_per_matchup_league_s_limit_is_the_matchup_s_cap(self, h):
+        h.board = roster().model_copy(update={"acquisitions": AcquisitionState(
+            per="matchup", limit=7, matchup_start=WEEK["start_date"], matchup_end=WEEK["end_date"], matchup_used=7)})
+        v = commit()
+        assert (v.outcome, v.rule) == ("blocked", "league_limit")
+        assert v.message == ("The league's add limit: Every add this matchup allows is used (7 of 7); "
+                             "left as a chip for the user")
+
+    def test_a_per_game_day_league_s_adds_are_the_matchup_s_to_use_on_any_day(self, h):
+        """James's leagues: one add for each day with games (x/7), several in a day if wanted."""
+        h.board = roster().model_copy(update={"acquisitions": pool(used=4)})
+        h.pending = [TODAY]                           # one the user scheduled for today too
+        assert commit().outcome == "sent"             # 4 made, 1 to come, this one: 1 still left for the user
+
+    def test_pickups_still_scheduled_this_matchup_take_its_adds(self, h):
+        h.board = roster().model_copy(update={"acquisitions": pool(used=5)})
+        h.pending = [TOMORROW, TOMORROW]
+        v = commit()
+        assert (v.outcome, v.rule) == ("blocked", "league_limit")
+        assert v.message == ("The league's add limit: Every add this matchup allows is used (5 of 7), with 2 more "
+                             "scheduled; left as a chip for the user")
+        h.pending = [WEEK["end_date"] + timedelta(days=1)]     # one for next matchup's first day counts there
+        h.rows[32] = prop(id=32, state="shadow")
+        assert commit(32).outcome == "sent"
+
+    def test_the_pending_pickups_are_read_before_the_board(self, h):
+        """A pickup made between the two reads is then counted twice (ESPN's counter and the
+        list), never missed."""
+        h.board = roster().model_copy(update={"acquisitions": pool(used=2)})
+        assert commit().outcome == "sent"
+        assert h.reads[:2] == ["pending", "board"]
+
+    def test_a_per_game_day_total_not_known_yet_leaves_the_limit_to_espn(self, h):
+        h.board = roster().model_copy(update={"acquisitions": AcquisitionState(per="game_day", per_game_day=1,
+                                                                              matchup_used=7)})
+        assert commit().outcome == "sent"
+
+    def test_the_last_of_a_per_game_day_league_s_adds_is_kept_for_the_user(self, h):
+        h.board = roster().model_copy(update={"acquisitions": pool(used=5)})
+        h.pending = [TOMORROW]
+        v = commit()
+        assert v.rule == "reserve" and v.message.startswith("1 of the league's adds left this matchup; Dime keeps 1")
 
     def test_the_last_of_espn_s_adds_this_matchup_is_kept_for_the_user(self, h):
         h.board = roster().model_copy(update={"acquisitions": AcquisitionState(
@@ -476,13 +528,10 @@ class TestPolicy:
             assert v.message.startswith("Anthony Edwards is protected, so Dime never drops him")
         assert h.paused == [] and h.sends == []
 
-    def test_a_player_added_recently_is_not_dropped_unless_he_is_out(self, h):
-        h.recent = {EDWARDS}
-        v = commit()
-        assert v.rule == "churn" and "in the last 48 hours" in v.message
-        h.board = roster(edwards_status="OUT")
-        h.rows[32] = prop(id=32, state="shadow")
-        assert commit(32).outcome == "sent"
+    def test_a_player_dime_added_yesterday_may_be_dropped_today(self, h):
+        # Streaming a spot: yesterday's stream goes for today's
+        h.earlier = [{**sent(date(2026, 10, 20)), "add_player_id": EDWARDS}]
+        assert commit().outcome == "sent"
 
     def test_a_switch_that_is_off_blocks_and_never_pauses_the_team(self, h, monkeypatch):
         monkeypatch.setattr(settings, "roster_writes_enabled", False)
@@ -509,6 +558,81 @@ class TestPolicy:
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         h.rows[32] = prop(id=32, state="shadow")
         assert commit(32).rule == "autopilot_off"
+
+
+class TestLeagueLimits:
+    """What get_automations' autopilot section says the league's own limits are."""
+
+    def test_a_per_game_day_limit_comes_to_one_add_for_each_day_with_games(self):
+        out = acting.league_limits(pool(used=2, game_days=6))
+        assert {k: v for k, v in out.items() if k != "note"} == {
+            "read": True, "per": "game_day", "adds_per_game_day": 1, "days_with_games_this_matchup": 6,
+            "this_matchup": 6, "team_adds_this_matchup": 2, "left_this_matchup": 4}
+        assert "any day" in out["note"] and "the lanes'" in out["note"] and "scheduled" in out["note"]
+
+    def test_a_per_game_day_limit_whose_days_are_unknown_says_so(self):
+        out = acting.league_limits(AcquisitionState(per="game_day", per_game_day=1, matchup_used=3))
+        assert (out["per"], out["adds_per_game_day"], out["this_matchup"], out["left_this_matchup"]) == \
+            ("game_day", 1, None, None)
+
+    def test_a_per_matchup_limit_is_the_league_s_number_and_its_season_cap_shows_too(self):
+        acq = AcquisitionState(per="matchup", limit=7, matchup_used=3, season_limit=60, season_used=58)
+        out = acting.league_limits(acq)
+        assert (out["per"], out["this_matchup"], out["team_adds_this_matchup"], out["left_this_matchup"],
+                out["season_left"]) == ("matchup", 7, 3, 4, 2)
+
+    def test_no_limit(self):
+        assert acting.league_limits(AcquisitionState(per="matchup", limit=None)) == {"read": True, "limit": None}
+        assert acting.league_limits(None) == {"read": True, "limit": None}
+
+    def test_the_policy_keeps_an_add_back_wherever_the_matchup_has_a_known_total(self, monkeypatch):
+        async def none(*a, **k):
+            return 0 if a and isinstance(a[-1], date) else []
+        monkeypatch.setattr(acting, "_adds_sent", lambda *a: none(TODAY))
+        monkeypatch.setattr(acting, "_recent", lambda *a: none())
+        monkeypatch.setattr(acting.schedule_service, "get_nba_today", lambda: TODAY)
+        monkeypatch.setattr(acting.schedule_service, "get_current_matchup", lambda today: dict(WEEK))
+        monkeypatch.setattr(settings, "autopilot_adds_reserve", 1)
+        team = pilot(ai_rows=["daily_actions"])
+        per_matchup = run(acting.policy_view(21, team, {"read": True, "per": "matchup", "this_matchup": 7}))["policy"]
+        assert per_matchup["adds_kept_for_the_user"] == 1 and per_matchup["league_add_limits"]["this_matchup"] == 7
+        per_game_day = run(acting.policy_view(21, team, {"read": True, "per": "game_day", "this_matchup": 6}))["policy"]
+        assert per_game_day["adds_kept_for_the_user"] == 1
+        unknown = run(acting.policy_view(21, team, {"read": True, "per": "game_day", "this_matchup": None}))["policy"]
+        assert "adds_kept_for_the_user" not in unknown
+        unread = run(acting.policy_view(21, team))["policy"]
+        assert unread["league_add_limits"] == acting.LIMITS_UNREAD and "adds_kept_for_the_user" not in unread
+        assert set(unread) == {"adds_per_day", "league_add_limits", "never_drops_top"}
+
+
+    def test_get_automations_reads_the_limits_off_the_board_and_goes_without_them_when_it_can_t(self, monkeypatch):
+        from services.ai import automations
+        reads, seen = [], []
+
+        async def autopilot_row(team_id):
+            return pilot(ai_rows=["daily_actions"])
+
+        async def board(team, league_info, scoring_period_id=None):
+            reads.append(team.team_id)
+            if isinstance(h_board[0], Exception):
+                raise h_board[0]
+            return h_board[0]
+
+        async def view(team_id, row, league=None):
+            seen.append(league)
+            return {"policy": "..."}
+
+        h_board = [roster().model_copy(update={"acquisitions": AcquisitionState(per="matchup", limit=7, matchup_used=2)})]
+        monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
+        monkeypatch.setattr(acting, "policy_view", view)
+        monkeypatch.setattr(proposals, "_board", board)
+        assert run(automations._autopilot(TEAM, LEAGUE)) == {"autopilot": {"policy": "..."}}
+        assert seen[-1]["this_matchup"] == 7 and seen[-1]["left_this_matchup"] == 5
+        h_board[0] = AppError("ESPN_UNAVAILABLE", "ESPN timed out")
+        assert run(automations._autopilot(TEAM, LEAGUE)) == {"autopilot": {"policy": "..."}}
+        assert seen[-1] is None                        # policy_view says unread
+        run(automations._autopilot(TEAM, None))
+        assert reads == [21, 21] and seen[-1] is None  # no league to read
 
 
 class TestAutoPause:

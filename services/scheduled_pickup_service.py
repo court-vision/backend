@@ -37,11 +37,10 @@ on it settles the row executed (and seats him), his absence settles it failed
 free slot, no connection) clears the mark, so that retry may send.
 
 Acquisition limits. Scheduling refuses, and an attempt skips, an add the league's limit
-certainly leaves no room for (`services.acquisitions.budget_block`): the season used up, a
-per-matchup limit used up for a day in the current matchup, or a per-day limit used up on
-the day itself. ESPN refusing an add as over the limit waits for the rollover into the day
-when that brings a fresh allowance (a per-day limit, or a day that opens a new matchup),
-and is skipped otherwise (`on_limit_refusal`).
+certainly leaves no room for (`services.acquisitions.budget_block`): the season used up, or
+the matchup's adds used up for a day in the current matchup (a per-game-day limit is a
+matchup total too). ESPN refusing an add as over the limit waits for the rollover into the
+day when that day opens a new matchup, and is skipped otherwise (`on_limit_refusal`).
 
 Stream lanes. Each run first makes the lane decisions that are due
 (`StreamLaneService.decide_due`); a decision that switches inserts a pickup with the lane's
@@ -91,7 +90,7 @@ from schemas.scheduled_pickup import (
     ScheduledPickupResp,
 )
 from services import roster_protection
-from services.acquisitions import adds_for_day, budget_block, in_current_matchup, is_limit_refusal
+from services.acquisitions import budget_block, in_current_matchup, is_limit_refusal
 from services.daily_actions_service import has_open_seat
 from services.fantasy_writer_client import FantasyWriterUnavailable
 from services.lineup_editor_service import (
@@ -278,9 +277,10 @@ def on_refusal(reason: str, *, period: int, day: int, nba_date: date, seat_free:
 def on_limit_refusal(acq: Optional[AcquisitionState], *, period: int, day: int, nba_date: date) -> Decision:
     """ESPN refused the add for day `day` (on `nba_date`), attempted on ESPN day `period`, as over
     its acquisition limit. Before the day itself, the rollover into it brings a fresh allowance
-    when the limit is per day, or when the day opens a new matchup: wait for it. Otherwise
-    nothing frees up before the day's games: skipped."""
-    fresh = acq is not None and (acq.per == "day" or (acq.limit is not None and not in_current_matchup(acq, nba_date)))
+    when the day opens a new matchup: wait for it. Otherwise nothing frees up before the day's
+    games: skipped."""
+    has_matchup_limit = acq is not None and (acq.limit is not None or acq.per_game_day is not None)
+    fresh = has_matchup_limit and not in_current_matchup(acq, nba_date)
     if period < day and fresh:
         return Decision("defer", at=rollover_at(nba_date))
     return Decision("settle", SKIPPED, "acquisition_limit")
@@ -735,16 +735,10 @@ class ScheduledPickupService:
         # dropped plays out today whatever his lock says, so locks are only checked on D itself.
         check_locks = period == day
 
-        # The league's add limit: skip what it certainly leaves no room for. A per-day limit needs
-        # the day's own adds; when they can't be read, ESPN refuses an over-limit add itself.
-        acq, day_adds = state.acquisitions, None
-        if acq is not None and acq.per == "day" and acq.limit is not None and state.espn_team_id is not None:
-            try:
-                day_adds = await adds_for_day(league_info, state.espn_team_id, day)
-            except Exception as exc:
-                log.warning("scheduled_pickup_day_adds_unavailable", pickup_id=row.id, team_id=row.team_id,
-                            error=str(exc))
-        blocked = budget_block(acq, nba_date, day_adds=day_adds)
+        # The league's add limit: skip what it certainly leaves no room for (ESPN's counter, read
+        # with this board, already has every add made before this one).
+        acq = state.acquisitions
+        blocked = budget_block(acq, nba_date)
         if blocked:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
         if by_dime and add is not None:

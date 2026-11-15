@@ -196,7 +196,8 @@ def _first_tip(d: date):
     return Game.get_earliest_game_time_on_date(d)
 
 
-async def get_automations(team: Any, user_id: int, now: Optional[datetime] = None) -> dict[str, Any]:
+async def get_automations(team: Any, user_id: int, now: Optional[datetime] = None,
+                          league_info: Any = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     today = schedule_service.get_nba_today()
     prefs, team_pref = await run_db("ai.automations_prefs", _prefs, user_id, team.team_id)
@@ -254,20 +255,29 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
         # The roster lock: players the user protected, which nothing drops (lanes, pickups, Dime)
         "protected": [{"player_id": p.nba_player_id, "name": p.name}
                       for p in await roster_protection.for_team(team.team_id)],
-        **await _autopilot(team.team_id),
+        **await _autopilot(team, league_info),
         "notes": notes,
     }
 
 
-async def _autopilot(team_id: int) -> dict[str, Any]:
-    """What Dime acts on here and what it has used of the policy (step 5), under `autopilot`; nothing
-    on a team where Dime acts on no automation, so the result is step 3's there."""
-    from services.ai import acting, autonomy
+async def _autopilot(team: Any, league_info: Any) -> dict[str, Any]:
+    """What Dime acts on here and what it has used of the policy (step 5), under `autopilot`, with the
+    league's own add limits off the board; nothing on a team where Dime acts on no automation, so the
+    result is step 3's there."""
+    from services.ai import acting, autonomy, proposals
+    team_id = team.team_id
     try:
         row = await acting._autopilot_row(team_id)
         if not autonomy.acting_rows(row):
             return {}
-        return {"autopilot": await acting.policy_view(team_id, row)}
+        league = None
+        if league_info is not None:
+            try:
+                board = await proposals._board(team, league_info)
+                league = acting.league_limits(board.acquisitions)
+            except Exception as exc:       # the policy still goes out, saying the limits are unread
+                log.warning("autopilot_league_limits_unread", team_id=team_id, error=str(exc))
+        return {"autopilot": await acting.policy_view(team_id, row, league)}
     except Exception:
         # The brief goes out without the policy rather than not at all; the failure is still seen
         log.exception("autopilot_view_failed", team_id=team_id)

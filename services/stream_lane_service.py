@@ -24,7 +24,7 @@ Otherwise it records a keep. A projected player who is gone
 is not a failure: the plan picks again.
 
 Together. A team's lanes deciding the same day are planned as one: they share the
-adds (the budget, a per-day limit) and the lineup's seats, and a free agent goes to
+adds (the budget) and the lineup's seats, and a free agent goes to
 one of them. Their decisions fall due together (the same day's window), and a run
 claims all of a team's due lanes at once (none while another run is still deciding
 the team's). A lane that has already decided the day (started after the others
@@ -38,10 +38,9 @@ the roster any other way the lane pauses and says so. Scheduled pickups and the
 desk's transactions refuse to drop an active lane's holder
 (`db.models.stream_lanes.active_lane_holder`).
 
-Budget. The planner gets the adds the league leaves (a per-matchup limit's room,
-a season cap's) less the pickups already scheduled, and how many switches may
-take effect each day (a per-day limit's room once its adds are used or
-scheduled). Nothing else: whether to replace a player who plays or wait for
+Budget. The planner gets the adds the league leaves (the matchup's room, a season
+cap's) less the pickups already scheduled; a per-game-day limit is a matchup total
+like any other, so any day may take several switches. Nothing else: whether to replace a player who plays or wait for
 their day off is the planner's to work out.
 
 Values. A player's value on a day is the board's `avg_points` (free agents: the
@@ -104,7 +103,7 @@ from schemas.stream_lane import (
     StreamLaneUpdateReq,
 )
 from services import roster_protection
-from services.acquisitions import adds_for_day, in_current_matchup, matchup_room, season_room
+from services.acquisitions import in_current_matchup, matchup_room, season_room
 from services.lineup_editor_service import (
     RosterWriteBlocked,
     RosterWriteDisabled,
@@ -237,11 +236,9 @@ def rehold_after_for(acq: Optional[AcquisitionState]) -> int:
     return 1 if hours <= 0 else 1 + math.ceil(hours / 24)
 
 
-def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pending: Sequence[PendingPickup], *,
-                first_day_adds: Optional[int] = None) -> Budget:
-    """The adds the lanes may plan with, and how many switches may take effect each day. Pending
-    pickups draw on the same allowances; `first_day_adds` is what a per-day limit has already
-    counted for the first day (None when unread: ESPN refuses an over-limit add itself)."""
+def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pending: Sequence[PendingPickup]) -> Budget:
+    """The adds the lanes may plan with; pending pickups draw on the same allowances. ESPN sets
+    no daily limit (a per-game-day one is a matchup total), so no day caps its switches."""
     n = len(days)
     if acq is None:
         return Budget(None, (None,) * n)
@@ -253,14 +250,7 @@ def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pendin
     if room is not None:
         rooms.append(room - len(pending))
     adds = max(0, min(rooms)) if rooms else None
-    day_limits: list[Optional[int]] = [None] * n
-    if acq.per == "day" and acq.limit is not None:
-        for i, day in enumerate(days):
-            used = sum(1 for p in pending if p.period == day.period)
-            if i == 0 and first_day_adds:
-                used += first_day_adds
-            day_limits[i] = max(0, acq.limit - used)
-    return Budget(adds, tuple(day_limits))
+    return Budget(adds, (None,) * n)
 
 
 # ESPN's combo slots, from the base positions the pool keeps.
@@ -804,14 +794,7 @@ class StreamLaneService:
         reserved = {lane.holder_player_id for lane in await run_db("lane.open", _open_lanes, team_id)}
         reserved -= {p.add_player_id for p in pending}
         pool = [f for f in await StreamLaneService._pool(league_info, adapter, team_id) if f.player_id not in reserved]
-        acq = board.acquisitions
-        first_day_adds = None
-        if acq is not None and acq.per == "day" and acq.limit is not None and board.espn_team_id is not None:
-            try:
-                first_day_adds = await adds_for_day(league_info, board.espn_team_id, start_period)
-            except Exception as exc:  # ESPN refuses an over-limit add itself
-                log.warning("stream_lane_day_adds_unavailable", team_id=team_id, error=str(exc))
-        budget = lane_budget(acq, days, pending, first_day_adds=first_day_adds)
+        budget = lane_budget(board.acquisitions, days, pending)
         # Dime's holds on the team (keeps, blocks, overrides) enter the plan as inputs
         steer = lane_steer(await holds_for(team_id, base_date), [d.nba_date for d in days])
         plan = await run_cpu("lane.plan", plan_lanes, board, [h.player_id for h in holders], pool, days, pending,

@@ -24,15 +24,21 @@ plan's Guardrails table:
 
     switches       AI_ENABLED, AUTOPILOT_ENABLED, the team's Pause and allowlist,
                    ROSTER_WRITES_ENABLED for an ESPN write
-    caps           Dime's own adds: AUTOPILOT_ADDS_PER_DAY on the move's day and
-                   AUTOPILOT_ADDS_PER_MATCHUP over the matchup (lanes keep their own
-                   budget, and ESPN's limits still apply at the write)
-    reserve        AUTOPILOT_ADDS_RESERVE of ESPN's adds this matchup are left for the
-                   user (injuries)
+    caps           Dime's own adds: AUTOPILOT_ADDS_PER_DAY on the move's day (lanes keep
+                   their own budget)
+    league         the league's own add limits, which every add counts toward (the user's,
+                   the lanes', Dime's): the matchup's total and the season's, less the
+                   pickups already scheduled. They are ESPN's settings, read off the board, so
+                   the matchup's cap is the league's; a per-game-day limit is a matchup total
+                   too, usable on any day (`services.acquisitions`; ESPN still applies them at
+                   the write)
+    reserve        AUTOPILOT_ADDS_RESERVE of the matchup's adds are left for the user
+                   (injuries)
     protected      never drops one of the roster's top AUTOPILOT_PROTECTED_TOP by the
                    board's value (Dime's own keep holds already refuse at the proposal)
-    churn          never drops a player added in the last AUTOPILOT_CHURN_HOURS unless
-                   he is out
+
+A player Dime added may be dropped again the next day: streaming a spot day by day is
+the point of a stream move.
 
 Every committed change on rows at AI is a row in usr.autopilot_actions:
 sent, blocked (with the rule), refused (the route or ESPN said no) or failed. One
@@ -54,8 +60,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import date, datetime, timezone
+from typing import Any, Iterable, Optional
 
 from peewee import JOIN, IntegrityError, fn
 
@@ -66,6 +72,7 @@ from db.base import db_operation, run_db
 from db.models.ai_conversations import AiProposal
 from db.models.autopilot import AiCheckin, Autopilot, AutopilotAction
 from services import roster_protection, schedule_service, steering
+from services.acquisitions import budget_block, matchup_room, season_room
 from services.ai import autonomy, proposals
 from services.scheduled_pickup_service import rollover_at
 
@@ -78,7 +85,7 @@ AUTOPILOT = "autopilot"          # usr.roster_moves.source of every ESPN write D
 # The policy's rules, as `rule` names them
 R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED = "ai_off", "autopilot_off", "paused", "not_allowed"
 R_WRITES_OFF, R_EXPIRED = "writes_off", "expired"
-R_CAP_DAY, R_CAP_MATCHUP, R_RESERVE, R_PROTECTED, R_CHURN = "cap_day", "cap_matchup", "reserve", "protected", "churn"
+R_CAP_DAY, R_LEAGUE, R_RESERVE, R_PROTECTED = "cap_day", "league_limit", "reserve", "protected"
 R_CREDENTIALS = "credentials"
 # The user protected the drop (the roster lock, services/roster_protection.py). Dime can't propose
 # that drop, so one stopped here was proposed before the protection: not Dime's mistake either.
@@ -178,6 +185,15 @@ def _adds_sent(team_id: int, start: date, end: date) -> int:
     return int(total or 0)
 
 
+@db_operation("acting.pending_days")
+def _pending_days(team_id: int) -> list[date]:
+    """The days of the team's pickups still to be made, whoever scheduled them: each will take
+    one of the league's adds that ESPN's counter doesn't show yet."""
+    from db.models.scheduled_pickups import ScheduledPickup
+    return [r.nba_date for r in (ScheduledPickup.select(ScheduledPickup.nba_date)
+                                 .where((ScheduledPickup.team == team_id) & (ScheduledPickup.status == "pending")))]
+
+
 @db_operation("acting.count_since")
 def _count_since(team_id: int, since: datetime, outcome: str, rule: Optional[str] = None) -> int:
     where = ((AutopilotAction.team_id == team_id) & (AutopilotAction.outcome == outcome)
@@ -185,25 +201,6 @@ def _count_since(team_id: int, since: datetime, outcome: str, rule: Optional[str
     if rule is not None:
         where &= AutopilotAction.rule == rule
     return AutopilotAction.select().where(where).count()
-
-
-@db_operation("acting.recent_adds")
-def _recent_adds(team_id: int, player_id: int, since: datetime, since_day: date) -> bool:
-    """The player joined the team recently: a Court Vision add that went through since `since`
-    (any source: the desk, a pickup, a lane, Dime), or a move the ledger read off the rosters
-    (made in ESPN itself) counting from `since_day` on."""
-    from db.models.move_outcomes import MoveOutcome
-    from db.models.roster_moves import RosterMove
-    rows = (RosterMove.select(RosterMove.moves)
-            .where((RosterMove.team == team_id) & (RosterMove.kind == "transaction")
-                   & RosterMove.status.in_(["applied", "applied_unverified"]) & (RosterMove.created_at >= since)))
-    for r in rows:
-        if any(m.get("action") == "add" and m.get("player_id") == player_id for m in (r.moves or [])):
-            return True
-    return (MoveOutcome.select()
-            .where((MoveOutcome.team_id == team_id) & (MoveOutcome.add_player_id == player_id)
-                   & (MoveOutcome.nba_date >= since_day))
-            .exists())
 
 
 async def _team(team_id: int, user_id: int) -> tuple[Any, Any]:
@@ -350,18 +347,20 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     if row.kind not in (proposals.TRANSACTION, proposals.SCHEDULED):
         return None
 
-    board = await proposals._board(team, league_info)
+    pending: list[date] = []
     if row.add_player_id is not None:
         day_used = await _adds_sent(team_id, row.nba_date, row.nba_date)
         if day_used >= settings.autopilot_adds_per_day:
             return R_CAP_DAY, (f"Dime has made its {settings.autopilot_adds_per_day} add(s) for "
                                f"{row.nba_date:%a %b} {row.nba_date.day}")
-        week = schedule_service.get_current_matchup(schedule_service.get_nba_today())
-        if week is not None and week["start_date"] <= row.nba_date <= week["end_date"]:
-            used = await _adds_sent(team_id, week["start_date"], week["end_date"])
-            if used >= settings.autopilot_adds_per_matchup:
-                return R_CAP_MATCHUP, f"Dime has made its {settings.autopilot_adds_per_matchup} add(s) this matchup"
-        reserve = reserve_block(board.acquisitions, row.nba_date)
+        # Before the board: a pickup made between the two reads is then counted twice, never missed
+        pending = await _pending_days(team_id)
+    board = await proposals._board(team, league_info)
+    if row.add_player_id is not None:
+        league = budget_block(board.acquisitions, row.nba_date, pending=pending)
+        if league is not None:
+            return R_LEAGUE, f"The league's add limit: {league}"
+        reserve = reserve_block(board.acquisitions, row.nba_date, pending=pending)
         if reserve is not None:
             return R_RESERVE, reserve
     if row.drop_player_id is not None:
@@ -371,23 +370,20 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
             return R_USER_PROTECTED, f"{name} is protected, so Dime never drops him"
         if row.drop_player_id in _top(board, settings.autopilot_protected_top):
             return R_PROTECTED, f"{name} is one of the roster's top {settings.autopilot_protected_top}, which Dime never drops"
-        out = held is not None and (held.injury_status or "").upper() == "OUT"
-        since = now - timedelta(hours=settings.autopilot_churn_hours)
-        since_day = schedule_service.get_nba_today() - timedelta(days=max(1, settings.autopilot_churn_hours // 24))
-        if not out and await _recent_adds(team_id, row.drop_player_id, since, since_day):
-            return R_CHURN, (f"{name} joined the team in the last {settings.autopilot_churn_hours} hours, and isn't "
-                             "out, so Dime won't drop him yet")
     return None
 
 
-def reserve_block(acq: Any, day: date) -> Optional[str]:
+def reserve_block(acq: Any, day: date, *, pending: Iterable[date] = ()) -> Optional[str]:
     """Why an add for `day` would take one of the league's adds Dime keeps for the user, as the
-    sentence the user reads; None when there is room (or no per-matchup limit, or `day` is in a
-    later matchup)."""
+    sentence the user reads; None when there is room (or no matchup limit known, or `day` is in
+    a later matchup). `pending` are the days of pickups still to be made, which take adds too."""
     from services.acquisitions import in_current_matchup, matchup_room
     room = matchup_room(acq) if acq is not None else None
-    if room is not None and in_current_matchup(acq, day) and room <= settings.autopilot_adds_reserve:
-        return f"{room} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
+    if room is None or not in_current_matchup(acq, day):
+        return None
+    room -= sum(1 for d in pending if in_current_matchup(acq, d))
+    if room <= settings.autopilot_adds_reserve:
+        return f"{max(0, room)} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
     return None
 
 
@@ -653,23 +649,51 @@ async def _commit(user_id: int, checkin: AiCheckin, decision_id: int, proposal_i
 # ------------------------------- what Dime reads ------------------------------- #
 
 
-async def policy_view(team_id: int, autopilot: Any) -> dict[str, Any]:
-    """The rows Dime acts on, the policy and what Dime has used of it, for get_automations (DB reads only)."""
+LIMITS_UNREAD = {"read": False, "note": "The league's add limits couldn't be read just now; ESPN still applies "
+                                          "them to every move when it is sent"}
+
+
+def league_limits(acq: Any) -> dict[str, Any]:
+    """The league's own add limits as Dime reads them (get_automations): ESPN's settings off the board,
+    which every add the team makes counts toward, the user's and the lanes' as well as Dime's. Either
+    kind is a matchup total the team may use on any day; a per-game-day one is the limit for each of
+    the matchup's days with games."""
+    if acq is None or (acq.limit is None and acq.per_game_day is None):
+        out: dict[str, Any] = {"read": True, "limit": None}
+    else:
+        out = {"read": True, "per": acq.per}
+        if acq.per == "game_day":
+            out["adds_per_game_day"] = acq.per_game_day
+            out["days_with_games_this_matchup"] = acq.game_days
+        out.update({"this_matchup": acq.limit, "team_adds_this_matchup": acq.matchup_used,
+                    "left_this_matchup": matchup_room(acq),
+                    "note": "Usable on any day of the matchup. Every add the team makes counts: the user's, "
+                            "the lanes' and yours, and a pickup still scheduled takes one when it's made"})
+    if acq is not None and acq.season_limit is not None:
+        out["season_left"] = season_room(acq)
+    return out
+
+
+async def policy_view(team_id: int, autopilot: Any, league: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The rows Dime acts on, the policy and what Dime has used of it, for get_automations (DB reads
+    only; `league` is the league's own limits, `league_limits`, which the caller read off the board)."""
     today = schedule_service.get_nba_today()
     week = schedule_service.get_current_matchup(today)
     used_today = await _adds_sent(team_id, today, today)
     used_week = await _adds_sent(team_id, week["start_date"], week["end_date"]) if week else 0
     recent = await _recent(team_id, 8)
+    league = league or LIMITS_UNREAD
+    policy: dict[str, Any] = {
+        "adds_per_day": settings.autopilot_adds_per_day,
+        "league_add_limits": league,
+        "never_drops_top": settings.autopilot_protected_top,
+    }
+    if league.get("this_matchup") is not None:
+        policy["adds_kept_for_the_user"] = settings.autopilot_adds_reserve
     return {
         "acting_on": autonomy.acting_rows(autopilot),
         "autopilot": autonomy.switch_on(autopilot),
-        "policy": {
-            "adds_per_day": settings.autopilot_adds_per_day,
-            "adds_per_matchup": settings.autopilot_adds_per_matchup,
-            "adds_kept_for_the_user": settings.autopilot_adds_reserve,
-            "never_drops_top": settings.autopilot_protected_top,
-            "never_drops_added_within_hours": settings.autopilot_churn_hours,
-        },
+        "policy": policy,
         "your_adds_today": used_today,
         "your_adds_this_matchup": used_week,
         "recent_actions": [{"date": a.nba_date.isoformat(), "kind": a.kind, "outcome": a.outcome, "rule": a.rule,

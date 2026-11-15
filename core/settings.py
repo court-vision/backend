@@ -212,15 +212,14 @@ class Settings(BaseSettings):
     # check-ins (services/ai/events.py) happen only on a team of an account with CV AI
     # access, and only for an automation its owner put at AI. AUTOPILOT_ENABLED, ROSTER_WRITES_ENABLED
     # and the team's Pause stop them.
-    # The policy every move Dime sends itself is held to. The caps count Dime's own adds
-    # (lanes keep their own budget, and ESPN's limits still apply); the reserve keeps that many
-    # of ESPN's adds this matchup for the user (injuries). Top N by the board's value and a
-    # player added within the churn window (unless he is out) are never dropped.
+    # The policy every move Dime sends itself is held to. The day's cap counts Dime's own adds
+    # (lanes keep their own budget); over the matchup and the season Dime keeps to the league's
+    # own add limits, ESPN's settings, which every add counts toward. The reserve keeps that many
+    # of the matchup's adds for the user (injuries). Top N by the board's value are never
+    # dropped. A player Dime added may be dropped the next day (streaming a spot).
     autopilot_adds_per_day: int = 2
-    autopilot_adds_per_matchup: int = 5
     autopilot_adds_reserve: int = 1
     autopilot_protected_top: int = 6
-    autopilot_churn_hours: int = 48
     # Auto-pause: the team pauses (and the user gets an email) after this many refused writes
     # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
     autopilot_pause_refused: int = 2
