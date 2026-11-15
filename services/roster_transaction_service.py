@@ -27,6 +27,7 @@ behave the same (James, 2026-10-23).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -66,6 +67,7 @@ from services.lineup_editor_service import (
 from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
 from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
 from services.providers.writers import espn_transaction_payload
+from services.write_readback import read_until_shown
 
 log = get_logger("roster_transaction")
 
@@ -360,11 +362,25 @@ class RosterTransactionService:
                          provider_status=exc.espn_status, error=exc.message)
             raise RosterWriteUnavailable() from exc
 
-        try:
-            fresh = await get_provider_adapter(league_info.provider).read_lineup(
+        def read() -> Awaitable[LineupState]:
+            return get_provider_adapter(league_info.provider).read_lineup(
                 team_id, league_info, fallback_slot_counts=fallback_slot_counts,
                 scoring_period_id=verify_scoring_period_id,
             )
+
+        def shows(board: LineupState) -> bool:
+            ids = {p.player_id for p in board.players}
+            return (add is None or add in ids) and (drop is None or drop not in ids)
+
+        try:
+            # ESPN's reads can trail the write: read again a little later while it doesn't show yet.
+            fresh, verified, reads = await read_until_shown(read, shows)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the transaction to show: ESPN took it, so settle the row
+            # the same way before the cancellation goes on (same as the lineup chain).
+            await run_db("roster_txn.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error="verify_read_cancelled")
+            raise
         except Exception as exc:
             # ESPN took the transaction and only the read-back failed: settle the row as applied,
             # just unverified, and hand back the pre-write board (same as the lineup chain).
@@ -374,10 +390,8 @@ class RosterTransactionService:
                         espn_status=result.espn_status, error=str(exc))
             return state, False, audit_id
 
-        ids = {p.player_id for p in fresh.players}
-        verified = (add is None or add in ids) and (drop is None or drop not in ids)
         await run_db("roster_txn.audit_update", _audit_update, audit_id,
                      "applied" if verified else "applied_unverified", provider_status=result.espn_status)
         log.info("roster_transaction_applied", team_id=team_id, add=add, drop=drop, verified=verified,
-                 espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
+                 reads=reads, espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
         return fresh, verified, audit_id
