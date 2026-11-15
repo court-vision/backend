@@ -26,7 +26,7 @@ class CheckinStarted(ApiModel):
 
 class CheckinRunData(ApiModel):
     off: bool                                    # AI_ENABLED or AUTOPILOT_ENABLED is off: nothing ran
-    teams: int                                   # switched-on teams on AUTOPILOT_TEAM_IDS
+    teams: int                                   # switched-on teams of accounts with CV AI
     started: list[CheckinStarted]
     missed: int                                  # windows that closed before their check-in could run
     skipped: int                                 # refused: the monthly budget, the day's cap
@@ -54,7 +54,7 @@ class CheckinEventsReq(ApiModel):
 
 class CheckinEventsData(ApiModel):
     off: bool                                    # AI_ENABLED or AUTOPILOT_ENABLED is off: nothing recorded
-    teams: int                                   # switched-on teams on AUTOPILOT_TEAM_IDS
+    teams: int                                   # switched-on teams of accounts with CV AI
     facts: int                                   # the posted keys that are events at all
     recorded: int                                # new events on a team that rosters the player
     started: list[CheckinStarted]

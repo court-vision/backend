@@ -188,13 +188,18 @@ class TestSwitch:
         Team.update(user_id=other.user_id).where(Team.team_id == team.team_id).execute()
         assert run(checkins._live()) == []
 
-    def test_the_teams_view_lists_only_the_allowlisted_teams_the_user_owns(self, integration_db, monkeypatch):
+    def test_the_teams_view_lists_every_team_the_user_owns_and_only_those(self, integration_db, monkeypatch):
         me, other = _user(1), _user(2)
-        mine, theirs = _team(me), _team(other)
-        monkeypatch.setattr(settings, "ai_agent_user_ids", [me.user_id])
-        monkeypatch.setattr(settings, "autopilot_team_ids", [mine.team_id, theirs.team_id])
-        pairs = run(checkins._autopilot_teams(me.user_id, settings.autopilot_team_ids))
-        assert pairs == [(mine.team_id, None)]
+        mine, second, theirs = _team(me), _team(me), _team(other)
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [me.user_id, other.user_id])
+        run(checkins._set_autopilot(second.team_id, me.user_id, True, _now()))
+        pairs = run(checkins._autopilot_teams(me.user_id))
+        assert [(t, r is not None) for t, r in pairs] == [(mine.team_id, False), (second.team_id, True)]
+        assert run(checkins._autopilot_teams(me.user_id, [theirs.team_id])) == []
+        # Every team of the account is in the AI and automation view; an account without CV AI has none
+        assert [t["team_id"] for t in run(checkins.teams_of(me.user_id))] == [mine.team_id, second.team_id]
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [other.user_id])
+        assert run(checkins.teams_of(me.user_id)) == []
 
 
 class TestDecisions:

@@ -197,8 +197,10 @@ async def calendar(now: datetime) -> Calendar:
 
 
 def allowed(team_id: int, user_id: int) -> bool:
-    """A team Dime may run check-ins on: on AUTOPILOT_TEAM_IDS, its owner on the AI allowlist."""
-    return team_id in settings.autopilot_team_ids and user_id in settings.ai_agent_user_ids
+    """A team Dime may run on: any team of an account with CV AI access (its owner on
+    AI_AGENT_USER_IDS), since 2026-11-15; the team's own switch and rows say what Dime does there.
+    Callers pass the team's owner (ownership is checked where the team is looked up)."""
+    return user_id in settings.ai_agent_user_ids
 
 
 @db_operation("ai.autopilot_live")
@@ -331,13 +333,15 @@ def _tally(checkin_id: int) -> dict[str, Any]:
 
 
 @db_operation("ai.autopilot_teams")
-def _autopilot_teams(user_id: int, team_ids: list[int]) -> list[tuple[int, Optional[Autopilot]]]:
-    """The user's teams among `team_ids`, each with its autopilot row (None when never switched on)."""
-    if not team_ids:
+def _autopilot_teams(user_id: int, team_ids: Optional[list[int]] = None) -> list[tuple[int, Optional[Autopilot]]]:
+    """The user's teams (among `team_ids`, when given), each with its autopilot row (None when never
+    switched on)."""
+    if team_ids is not None and not team_ids:
         return []
-    owned = [t for (t,) in Team.select(Team.team_id)
-             .where(Team.user_id == user_id, Team.team_id.in_(team_ids))
-             .order_by(Team.team_id).tuples()]
+    query = Team.select(Team.team_id).where(Team.user_id == user_id)
+    if team_ids is not None:
+        query = query.where(Team.team_id.in_(team_ids))
+    owned = [t for (t,) in query.order_by(Team.team_id).tuples()]
     rows = {r.team_id_id: r for r in Autopilot.select().where(Autopilot.team_id.in_(owned))} if owned else {}
     return [(t, rows.get(t)) for t in owned]
 
@@ -707,7 +711,7 @@ def _ensure_allowed(team_id: int, user_id: int) -> None:
     if not settings.autopilot_enabled:
         raise ServiceUnavailableError("AI_AUTOPILOT_DISABLED", "Dime's check-ins are turned off", log_level="info")
     if not allowed(team_id, user_id):
-        raise AuthorizationError("AI_AUTOPILOT_NOT_ALLOWED", "Dime's check-ins aren't open for this team yet")
+        raise AuthorizationError("AI_AUTOPILOT_NOT_ALLOWED", "Dime runs only on the teams of an account with CV AI")
 
 
 async def _ensure_owned(team_id: int, user_id: int) -> None:
@@ -765,10 +769,12 @@ def next_slot(cal: Calendar, row: Optional[Autopilot], taken: set[tuple[str, dat
 
 
 async def teams_of(user_id: int, now: Optional[datetime] = None) -> list[dict[str, Any]]:
-    """The user's teams Dime may run check-ins on, with each one's switch and next check-in."""
+    """The user's teams Dime may run on (every one, for an account with CV AI access), with each one's
+    switch, next check-in and automations table."""
     now = now or _now()
-    pairs = await _autopilot_teams(user_id, [t for t in settings.autopilot_team_ids
-                                             if user_id in settings.ai_agent_user_ids])
+    if user_id not in settings.ai_agent_user_ids:
+        return []
+    pairs = await _autopilot_teams(user_id)
     if not pairs:
         return []
     cal = await calendar(now)

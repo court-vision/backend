@@ -276,7 +276,7 @@ def h(monkeypatch):
     """Every switch on, team 21's daily actions at AI, one shadow add/drop for today; the DB, the board and
     the send faked."""
     for k, v in dict(ai_enabled=True, autopilot_enabled=True, roster_writes_enabled=True,
-                     autopilot_team_ids=[21], ai_agent_user_ids=[11],
+                     ai_agent_user_ids=[11],
                      autopilot_adds_per_day=2, autopilot_adds_per_matchup=5, autopilot_adds_reserve=1,
                      autopilot_protected_top=1, autopilot_churn_hours=48, autopilot_pause_refused=2,
                      autopilot_pause_same_block=2, frontend_url="https://courtvision.dev/").items():
@@ -503,9 +503,9 @@ class TestPolicy:
         assert v.outcome == "sent" and h.recorded[-1]["capability"] == "lanes" and h.recorded[-1]["adds"] == 0
 
     def test_a_paused_or_closed_team_and_a_server_switch_stop_it(self, h, monkeypatch):
-        monkeypatch.setattr(settings, "autopilot_team_ids", [23])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [12])          # the owner lost CV AI
         assert commit().rule == "not_allowed"
-        monkeypatch.setattr(settings, "autopilot_team_ids", [21])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [11])
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         h.rows[32] = prop(id=32, state="shadow")
         assert commit(32).rule == "autopilot_off"

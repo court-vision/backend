@@ -341,7 +341,7 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     if autopilot is None or autopilot.paused_at is not None:
         return R_PAUSED, "Autopilot is paused on this team"
     if not checkins.allowed(team_id, team.user_id):
-        return R_NOT_ALLOWED, "This team isn't open to autopilot"
+        return R_NOT_ALLOWED, "This team's account no longer has CV AI"
     if _aware(row.expires_at) <= now:
         return R_EXPIRED, "The move's day has started, so it can't be sent as proposed"
     if row.kind in _WRITES or (row.kind == proposals.LANE and (row.action or {}).get("op") == "start"):
@@ -411,7 +411,7 @@ async def pickup_block(team_id: int, user_id: int, pickup_id: Optional[int] = No
     if autopilot is None or autopilot.paused_at is not None:
         return P_PAUSED, "Dime is paused on this team"
     if not checkins.allowed(team_id, user_id):
-        return P_NOT_ALLOWED, "This team isn't open to autopilot"
+        return P_NOT_ALLOWED, "This team's account no longer has CV AI"
     row = await _pickup_committed_under(pickup_id) if pickup_id is not None else None
     if row != autonomy.LATE_SCRATCH:
         row = autonomy.DAILY_ACTIONS

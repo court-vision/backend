@@ -124,7 +124,6 @@ def tick(monkeypatch):
     monkeypatch.setattr(settings, "ai_enabled", True)
     monkeypatch.setattr(settings, "autopilot_enabled", True)
     monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
-    monkeypatch.setattr(settings, "autopilot_team_ids", [23])
     monkeypatch.setattr(settings, "autopilot_checkins_per_day", 6)
     # Switched on Monday night, after Monday's own check-ins had closed
     state = SimpleNamespace(rows=[SimpleNamespace(team_id_id=23, user_id_id=42, active_since=et(MON, 23),
@@ -203,10 +202,10 @@ class TestTick:
         assert tick.started == [] and out["skipped"] >= 1
         assert ("night", MON, "skipped", "daily_cap") in tick.claims
 
-    def test_a_team_off_the_allowlist_or_a_kill_switch_runs_nothing(self, tick, monkeypatch):
-        monkeypatch.setattr(settings, "autopilot_team_ids", [])
+    def test_an_account_without_cv_ai_or_a_kill_switch_runs_nothing(self, tick, monkeypatch):
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [])
         assert run(checkins.run_due(et(TUE, 9, 30)))["teams"] == 0 and tick.started == []
-        monkeypatch.setattr(settings, "autopilot_team_ids", [23])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         assert run(checkins.run_due(et(TUE, 9, 30)))["off"] is True and tick.started == []
 
@@ -216,7 +215,6 @@ class TestTick:
         assert tick.ran_scheduled_only == [True]
 
     def test_one_team_s_failure_doesn_t_hold_back_the_next(self, tick, monkeypatch):
-        monkeypatch.setattr(settings, "autopilot_team_ids", [23, 24])
         tick.rows.append(SimpleNamespace(team_id_id=24, user_id_id=42, active_since=et(MON, 23), paused_at=None))
         tick.broken = {23}
         out = run(checkins.run_due(et(TUE, 9, 30)))
@@ -420,7 +418,7 @@ class TestRunNow:
         with pytest.raises(AppError) as err:
             run(checkins.run_now(42, 23, now=et(TUE, 10)))
         assert err.value.error_code == "AI_CHECKIN_DAILY_LIMIT"
-        monkeypatch.setattr(settings, "autopilot_team_ids", [])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [])
         with pytest.raises(AuthorizationError):
             run(checkins.run_now(42, 23, now=et(TUE, 10)))
 
