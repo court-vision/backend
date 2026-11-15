@@ -51,17 +51,27 @@ async def get_matchup_by_team(
 
 @router.get('/live/{team_id}', response_model=LiveMatchupResp)
 async def get_live_matchup(
+    reuse_from: int | None = Query(
+        default=None,
+        ge=0,
+        description=(
+            "The provider_read_ms of the answer the caller holds. Given, the ESPN/Yahoo read behind this "
+            "answer may be one made in the last 25 seconds, never one older than the caller's; the box "
+            "scores are read now either way. Left out, the provider is read."
+        ),
+    ),
     team: OwnedTeamContext = Depends(get_owned_team)
 ) -> LiveMatchupResp:
     """
     Get the current matchup with live in-game stats per player.
 
     Combines ESPN/Yahoo live scores (correct for custom league scoring) with
-    per-player box score stats from the live polling pipeline (~60s cadence).
+    per-player box score stats from the live pipeline (written every 15 s
+    while games are on; `live_age_ms` says how old the newest is).
     Players with no game today have live=null. Includes all roster slots
     (active and bench) so the frontend can render the full matchup layout.
     """
-    return respond(await MatchupService.get_live_matchup_by_team_id(team.user_id, team.team_id))
+    return respond(await MatchupService.get_live_matchup_by_team_id(team.user_id, team.team_id, reuse_from))
 
 
 @router.get('/history/{team_id}', response_model=MatchupScoreHistoryResp)

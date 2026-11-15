@@ -4,7 +4,7 @@ Service for game-related operations.
 Today's slate carries each game's live score, status, period and clock. They
 come from the live pipeline's newest score snapshot of the game
 (nba.live_game_score_snapshots), which is the game as its live box score had it
-within the last 30 seconds. They used to be read from the NBA's scoreboard file
+within the last 15 seconds. They used to be read from the NBA's scoreboard file
 on every request, and that file moves about once in ten minutes (the median
 gap between changes was 600 s in every game of 2026-11-09), so the slate still
 showed a tip time for minutes after the tip and held each score for ten.
@@ -14,6 +14,9 @@ pipeline's window opens there are none, and one that has stopped moving for a
 game not yet final means the pipeline is not running. Then each game takes
 whichever of the two is further along. Neither is taken over a stored row that
 is further along than both: a final the game log has written since stands.
+
+Today's slate also says how old the newest of those snapshots is (`live_age_ms`,
+core/live_age.py), so a screen can time its next read to the next write.
 """
 
 import re
@@ -23,6 +26,7 @@ from datetime import date, datetime, timedelta
 import pytz
 
 from services.schedule_service import get_upcoming_games_on_date
+from core.live_age import live_age_ms
 from core.logging import get_logger
 from db.models.nba.games import Game, STATUS_ORDER
 from db.models.nba.live_game_score_snapshots import LatestSnapshot, LiveGameScoreSnapshot
@@ -38,8 +42,8 @@ from core.nba_calendar import nba_date_et as _get_nba_today  # noqa: E402
 
 _GAME_STATUS_MAP = {1: "scheduled", 2: "in_progress", 3: "final"}
 
-# The live pipeline snapshots every game it reads each 30 s. A game not yet
-# final whose newest snapshot is older than this has gone six polls without
+# The live pipeline snapshots every game it reads each 15 s. A game not yet
+# final whose newest snapshot is older than this has gone twelve polls without
 # one: the pipeline is down or cannot read it, and the scoreboard is asked.
 SNAPSHOT_FRESH_SECONDS = 180
 
@@ -230,6 +234,7 @@ class GamesService:
                     date=game_date.isoformat(),
                     games=game_list,
                     count=len(game_list),
+                    live_age_ms=live_age_ms(snapshot.captured_at for snapshot in snapshots.values()),
                 ),
             )
 

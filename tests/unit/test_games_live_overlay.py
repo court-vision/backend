@@ -174,6 +174,7 @@ class Slate:
         self.scoreboard: list[dict] | Exception = []
         self.scoreboard_reads = 0
         self.db_reads: list[str] = []
+        self.live_age_ms: int | None = None
 
         async def run_db(name, fn, *args):
             self.db_reads.append(fn.__name__)
@@ -196,6 +197,7 @@ class Slate:
         with freeze_time(NOW):
             resp = asyncio.run(GamesService.get_games_on_date(day))
         assert resp.status == ApiStatus.SUCCESS
+        self.live_age_ms = resp.data.live_age_ms
         return {game.game_id: game for game in resp.data.games}
 
 
@@ -287,3 +289,30 @@ def test_another_date_is_the_stored_games_with_no_overlay_and_no_snapshot_read(s
 
     assert slate.db_reads == ["_stored_games"] and slate.scoreboard_reads == 0
     assert (games[KNICKS].status, games[KNICKS].home_score, games[KNICKS].period) == ("final", 110, None)
+
+
+def test_todays_slate_says_how_old_its_newest_snapshot_is(slate) -> None:
+    """What a screen times its next read by (core/live_age.py): a night's games are
+    snapshotted on the same run, and a final no longer read does not hold the age back."""
+    slate.games = [stored(KNICKS), stored(LAKERS, "LAL", "PHX"), stored(SUNS, "DEN", "UTA")]
+    slate.snapshots = {
+        KNICKS: snapshot(age=1.5),
+        LAKERS: snapshot(status=3, period=4, clock=None, home=110, away=106, age=3600),
+        SUNS: snapshot(status=1, period=None, clock=None, home=0, away=0, age=1.2),
+    }
+
+    slate.get()
+
+    assert slate.live_age_ms == 1200
+
+
+def test_a_slate_with_no_snapshot_has_no_age(slate) -> None:
+    slate.games = [stored(KNICKS)]
+    slate.scoreboard = [listed(KNICKS, status=1, period=0, clock="", home=0, away=0)]
+
+    slate.get()
+    assert slate.live_age_ms is None
+
+    slate.snapshots = {KNICKS: snapshot()}
+    slate.get(TODAY - timedelta(days=1))                              # another date reads no snapshot
+    assert slate.live_age_ms is None
