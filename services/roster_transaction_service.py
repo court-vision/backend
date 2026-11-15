@@ -341,20 +341,25 @@ class RosterTransactionService:
         None): the executor's swap the day before is next-day business on ESPN, so today's board
         still shows the player dropped and only day D's shows the swap.
 
-        The roster lock is checked here, last, right before the writer: every add/drop Court Vision
-        sends comes through this chain, so a protected drop never reaches ESPN whatever asked for it
-        (`roster_protection.guard`, which also refuses when the protections can't be read)."""
+        The roster lock is checked here, right before the writer: every add/drop Court Vision sends
+        comes through this chain, so a protected drop never reaches ESPN whatever asked for it
+        (`roster_protection.guard`, which also refuses when the protections can't be read). With a
+        `before_send` it is checked again once that has run: protecting can't cancel a pickup an
+        attempt already holds, so one protected while the send was being claimed is refused there."""
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, add, drop)
         audit_id = await run_db("roster_txn.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
                                 moves, key, kind="transaction")
+        drop_name = next((m["name"] for m in moves if m.get("action") == "drop"), None)
         try:
-            await roster_protection.guard(team_id, drop, next((m["name"] for m in moves if m.get("action") == "drop"),
-                                                              None))
+            await roster_protection.guard(team_id, drop, drop_name)
             if before_send is not None:
                 await before_send(audit_id)
+                # Again once the send is claimed: a protection stored while it was being claimed found
+                # the pickup held (so it couldn't cancel it) and must still keep the drop from ESPN.
+                await roster_protection.guard(team_id, drop, drop_name)
         except Exception as exc:
             await run_db("roster_txn.audit_update", _audit_update, audit_id, "failed", error=f"not_sent: {exc}")
             raise

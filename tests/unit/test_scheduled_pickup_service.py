@@ -1345,6 +1345,27 @@ def test_a_drop_protected_under_the_attempt_is_refused_before_espn_and_never_mar
 
 
 @pytest.mark.unit
+def test_a_drop_protected_while_the_send_is_claimed_is_still_never_sent(h, monkeypatch):
+    """Protected after the write chain's first check, while the in-flight mark was being taken
+    (protecting finds the pickup held, so it can't cancel it): the check after the mark refuses
+    it, nothing reaches ESPN, and settling skipped clears the mark."""
+    from services import roster_protection
+    reads = []
+
+    async def protected_from_the_third_read(team_id):
+        reads.append(team_id)
+        return frozenset() if len(reads) <= 2 else frozenset({EDWARDS})
+    monkeypatch.setattr(roster_protection, "ids", protected_from_the_third_read)
+    arrange_day_before(h)
+    r = execute(h)
+    assert len(reads) == 3                       # the attempt's check, then one each side of the mark
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected")
+    assert h.txn_calls == [] and len(h.marked) == 1
+    assert h.settled[0][1]["status"] == "skipped" and h.settled[0][1]["audit_id"] is None
+    assert h.updates[0][1] == "failed" and h.updates[0][3].startswith("not_sent: Anthony Edwards is protected")
+
+
+@pytest.mark.unit
 def test_schedule_refuses_to_drop_a_protected_player(scheduling, protect):
     protect({21: [EDWARDS]})
     with pytest.raises(svc.ScheduledPickupInvalid) as exc:

@@ -815,7 +815,8 @@ class ScheduledPickupService:
             return None
         except RosterTransactionInvalid as exc:
             # The check before ESPN (the roster lock): protected since this attempt's own check.
-            # Nothing was sent, and the row never took the in-flight mark.
+            # Nothing was sent, so the in-flight mark the last check may have set comes off with it.
+            row.audit_id = None
             return await settle(row, now, SKIPPED, exc.data.get("reason") or "refused", detail=exc.message,
                                 team_name=team_name)
         except RosterWriteRejected as exc:
