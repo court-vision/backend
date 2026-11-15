@@ -72,9 +72,10 @@ from schemas.lineup_editor import LineupState
 from services import roster_protection, schedule_service, steering
 from services.acquisitions import budget_block
 from services.ai.fantasy import MoveInput, ProjectMatchupInput, _first_open_day, _identities, project_matchup
+from services.availability_service import AvailabilityService, planner_verdicts
 from services.daily_actions_service import has_open_seat
 from services.lineup_editor_service import _roster_slots, _slot_name, planner_players, slot_counts_of
-from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, plan_ir, validate_moves
+from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, plan_ir, plays_today, validate_moves
 from services.providers import get_provider_adapter
 from services.roster_transaction_service import (
     RosterTransactionInvalid,
@@ -794,18 +795,19 @@ TO_IR_NOTE = (
 
 
 def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] = (),
-                protected: Collection[int] = ()) -> dict[str, Any]:
+                protected: Collection[int] = (), playing: Optional[Collection[int]] = None) -> dict[str, Any]:
     """The model's view of a day's board (NBA ids only): slots, every player's slot, eligibility,
     game, lock and value, and the server's own fill for the day, as auto-lineup would make it
     with the team's holds (a pinned player marked `pinned`). A player the user protected (ESPN ids
     in `protected`, the roster lock) is marked `protected`: never a drop. `to_ir` is the Week
-    desk's IR moves for the day (`plan_ir`): injured players who sit, into IR's open seats. IR wins
-    over a start, which the note says, since auto-lineup's fill never moves anyone to IR and may
-    start one of them."""
+    desk's IR moves for the day (`plan_ir`): injured players who sit, into IR's open seats, where
+    `playing` (who plays that day by our availability verdicts, `playing_on`) keeps a player we
+    cleared before ESPN off IR, as the Week desk does. IR wins over a start, which the note says,
+    since auto-lineup's fill never moves anyone to IR and may start one of them."""
     state = board.state
     planners = {pp.player_id: pp for pp in planner_players(state)}
     plan = steering.fill_with(list(planners.values()), slot_counts_of(state), holds, board.nba_date)
-    to_ir = [a.move for a in plan_ir(list(planners.values()), slot_counts_of(state))
+    to_ir = [a.move for a in plan_ir(list(planners.values()), slot_counts_of(state), playing=playing)
              if a.kind == "ir_in" and a.move is not None]
     pinned = {h.player_id for h in steering.on_day(holds, board.nba_date, steering.PIN)}
     by_id = {p.player_id: p for p in state.players}
@@ -842,10 +844,28 @@ def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] =
     }
 
 
+async def playing_on(board: _DayBoard) -> Optional[frozenset[int]]:
+    """Who plays on the board's day with our availability verdicts in place of ESPN's statuses
+    (`plays_today`), as the Week desk's daily actions read them; None (ESPN's statuses stand)
+    when there are none or they can't be read."""
+    state = board.state
+    ids = [p.nba_player_id for p in state.players if p.nba_player_id is not None]
+    if not ids:
+        return None
+    try:
+        found = await AvailabilityService.today(ids, board.nba_date)
+    except Exception as exc:  # the verdicts sharpen to_ir; without them it is on ESPN's statuses
+        log.warning("ai_lineup_verdicts_failed", error=f"{type(exc).__name__}: {exc}")
+        return None
+    if not found:
+        return None
+    return plays_today(planner_players(state, planner_verdicts(found, board.nba_date)))
+
+
 async def get_lineup(team: Any, league_info: LeagueInfo, args: GetLineupInput) -> dict[str, Any]:
     board = await _day_board(team, league_info, args.day)
     return lineup_view(board, team.team_id, await steering.holds_for(team.team_id),
-                       await roster_protection.ids_soft(team.team_id))
+                       await roster_protection.ids_soft(team.team_id), await playing_on(board))
 
 
 def _resolve_moves(state: LineupState, wanted: Sequence[LineupMoveInput]) -> list[Move]:
