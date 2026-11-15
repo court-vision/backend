@@ -145,7 +145,10 @@ GET_DRAFT_BOARD: dict[str, Any] = {
         "on the board in its own order (optionally one position), the user's drafted roster, the "
         "room's punts and, in a category league, how far the roster trails an average team in each "
         "category. rank_source espn orders the recommendations by ESPN's board instead, with the same "
-        "numbers on each. Cite these numbers when advising a pick."
+        "numbers on each. In a draft held during the season (in_season), values blend this season's "
+        "games (season_gp, season_fpts_avg: this season's fantasy points per game) with the projection, "
+        "count only the games from games_from on, and injury flags are today's; ADP stays the preseason "
+        "crowd's (adp_as_of). Cite these numbers when advising a pick."
     ),
     "input_schema": {
         "type": "object",
@@ -223,6 +226,13 @@ def _eligible(row: Any, position: Optional[str]) -> bool:
     return position in slots or (not slots and row.primary_position == position)
 
 
+def _season_of(row: Any) -> dict[str, Any]:
+    """This season's games and points per game, on a board for a draft held in season."""
+    if row is None or row.season_gp is None:
+        return {}
+    return {"season_gp": row.season_gp, "season_fpts_avg": row.season_fpts_avg}
+
+
 async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput) -> dict[str, Any]:
     from services.draft_board_service import BoardSession, DraftBoardService
     from services.draft_service import DraftService
@@ -256,6 +266,7 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             "adp": row.adp if row else None,
             "availability": row.availability if row else None,
             "injury": row.injury_status if row else None,
+            **_season_of(row),
             "components": [_component(c) for c in rec.components],
             "reason": rec.reason,
         })
@@ -283,6 +294,7 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             "availability": row.availability,
             "injury": row.injury_status,
             "cap_blocked": row.cap_blocked,
+            **_season_of(row),
         }
         if row.fit_rank is not None:
             entry["fit_rank"] = row.fit_rank
@@ -308,6 +320,12 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             for r in board.roster
         ],
     }
+    if meta.in_season is not None:
+        out["in_season"] = {
+            "games_from": meta.in_season.games_from.isoformat(),
+            "prior_games": meta.in_season.prior_games,
+            "adp_as_of": meta.market_as_of.isoformat() if meta.market_as_of else None,
+        }
     if meta.category_need:
         out["category_need"] = [
             {"category": n.key, "label": n.label, "need": round(n.need, 2), "punted": n.punted,

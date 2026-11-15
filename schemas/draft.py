@@ -458,11 +458,14 @@ class DraftBoardRow(ApiModel):
             "neither a projection nor last season's baseline can value (a rookie, before projections)."
         ),
     )
-    value_source: Literal["projection", "baseline", "market"] = Field(
+    value_source: Literal["projection", "baseline", "season", "market"] = Field(
         description=(
             "projection: a per-game projection for the coming season (`meta.projection_source` "
-            "says whose). baseline: last season's per-game averages. market: no stat line at all "
-            "— the row exists because ESPN drafts him."
+            "says whose). baseline: last season's per-game averages. In a draft held after "
+            "opening night (`meta.in_season`) both are blended with this season's games "
+            "(`season_gp`). season: nothing projects him and he had no qualifying last season, "
+            "so this season's games alone value him (in season only, and only with enough of "
+            "them). market: no stat line at all — the row exists because ESPN drafts him."
         ),
     )
     board_rank: Optional[int] = Field(
@@ -534,6 +537,21 @@ class DraftBoardRow(ApiModel):
     fpts_avg: Optional[float] = Field(
         default=None,
         description="Per-game fantasy points under the platform default formula (familiar scale, tiebreak); None for market-only rows",
+    )
+    season_gp: Optional[int] = Field(
+        default=None,
+        description=(
+            "In a draft held after opening night (`meta.in_season`): games he has played this "
+            "season, which is how much this season counts in his value. None before opening "
+            "night, and for a player who hasn't played."
+        ),
+    )
+    season_fpts_avg: Optional[float] = Field(
+        default=None,
+        description=(
+            "In a draft held after opening night: this season's fantasy points per game under "
+            "the platform default formula, unblended (compare `fpts_avg`, the blended line's)."
+        ),
     )
     market_rank: Optional[int] = Field(
         default=None,
@@ -623,7 +641,7 @@ class DraftRosterEntry(ApiModel):
     primary_position: Optional[str] = None
     positions: Optional[List[str]] = None
     value: Optional[float] = None
-    value_source: Literal["projection", "baseline", "market"] = "baseline"
+    value_source: Literal["projection", "baseline", "season", "market"] = "baseline"
     injury_status: Optional[str] = None
 
 
@@ -722,6 +740,34 @@ class DraftPlayoffsResp(ApiModel):
     games_min: int = Field(description="Fewest playoff-week games any NBA team plays")
     games_max: int = Field(description="Most playoff-week games any NBA team plays")
     games_mean: float = Field(description="Average playoff-week games across the 30 teams")
+
+
+class DraftInSeasonResp(ApiModel):
+    """A draft held after opening night, and what the board valued differently for it."""
+
+    games_from: date = Field(
+        description="The first day counted: values and lineup congestion cover the games from here on"
+    )
+    season_as_of: Optional[date] = Field(
+        default=None, description="The newest of this season's stat rows the values were blended with"
+    )
+    prior_games: int = Field(
+        description=(
+            "How many of this season's games the projection (or last season's line) counts as: "
+            "a player with this many games played is valued half on this season"
+        ),
+    )
+    blended: int = Field(description="Players whose value took this season's games")
+    season_only: int = Field(description="Players valued off this season alone (`value_source` season)")
+    injured: int = Field(
+        description="Players with an injury flag on today's report, which replaces the market snapshot's flags"
+    )
+    injured_since_projection: int = Field(
+        description=(
+            "Of them, those the market snapshot listed healthy: their injury term applies even "
+            "where their games are projected, since the projection couldn't know"
+        ),
+    )
 
 
 class DraftBoardMeta(ApiModel):
@@ -846,6 +892,15 @@ class DraftBoardMeta(ApiModel):
         description=(
             "The fantasy-playoff weeks behind every row's `playoff_games`, and the weight the CV "
             "value gives them. None in roto leagues and when the season calendar is unavailable."
+        ),
+    )
+    in_season: Optional[DraftInSeasonResp] = Field(
+        default=None,
+        description=(
+            "Set for a draft held after opening night: values blend this season's games with the "
+            "projection, count only the games left, and injury flags are today's. ADP and ESPN's "
+            "ranks stay the last preseason snapshot (`market_as_of`). None for a draft before "
+            "opening night, an imported draft, and a room whose draft started before it."
         ),
     )
 
