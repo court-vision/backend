@@ -12,9 +12,10 @@ A per-scoring-period limit is still a matchup total, not a daily one: ESPN gives
 for each day of the matchup with at least one NBA game and lets the team use them on any day (a
 week with a day without games has 6, the merged All-Star matchup more; read off James's league
 2026-11-15, where one team logged three adds on one day). ESPN sends no total: it is the limit
-times the matchup's game days, counted on ESPN's own pro schedule (`proTeamSchedules_wl`), with
-our calendar standing in when that can't be read. Until the matchup's days are known the total
-is None, which refuses nothing.
+times the matchup's game days, counted on ESPN's own pro schedule (`proTeamSchedules_wl`), which
+is what ESPN counts. Our calendar doesn't stand in: it lacks games the NBA has published since it
+was built (the Cup's December week), and a short count would refuse adds ESPN allows. Until the
+matchup's days are known on ESPN's schedule the total is None, which refuses nothing.
 
 The counts are in mTeam `teams[].transactionCounter`: `acquisitions` (the season) and
 `matchupAcquisitionTotals` ({matchupPeriodId: adds}). Pre-season adds do not count (seen
@@ -123,17 +124,17 @@ async def espn_game_days(year: int) -> Optional[frozenset[int]]:
     return days
 
 
-async def matchup_game_days(year: int, start: date, end: date) -> int:
-    """How many days from `start` through `end` have at least one NBA game: ESPN's own count when
-    its schedule can be read, else our calendar's (the two agreed day for day on 2026-11-15)."""
+async def matchup_game_days(year: int, start: date, end: date) -> Optional[int]:
+    """How many days from `start` through `end` have at least one NBA game on ESPN's own schedule;
+    None when it can't be read (no total then, so nothing is refused over one)."""
     from services import schedule_service
 
     espn = await espn_game_days(year)
-    if espn is not None:
-        opening = schedule_service.get_season_bounds().opening_night
-        first, last = (start - opening).days + 1, (end - opening).days + 1
-        return sum(1 for period in range(first, last + 1) if period in espn)
-    return schedule_service.days_with_games(start, end)
+    if espn is None:
+        return None
+    opening = schedule_service.get_season_bounds().opening_night
+    first, last = (start - opening).days + 1, (end - opening).days + 1
+    return sum(1 for period in range(first, last + 1) if period in espn)
 
 
 def matchup_room(acq: AcquisitionState) -> Optional[int]:

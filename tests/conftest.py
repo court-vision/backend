@@ -98,8 +98,8 @@ def no_kept_matchups():
 @pytest.fixture(autouse=True)
 def no_espn_pro_schedule(monkeypatch):
     """A per-game-day add limit counts the matchup's game days on ESPN's public pro schedule
-    (services/acquisitions.py). No test reads ESPN: the read answers None, so our calendar
-    stands in, unless a test stubs `espn_game_days` itself."""
+    (services/acquisitions.py). No test reads ESPN: the read answers None (no total, as when
+    ESPN can't be read), unless a test stubs `espn_game_days` itself."""
     from services import acquisitions
 
     async def unread(year):

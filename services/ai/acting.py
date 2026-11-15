@@ -347,13 +347,16 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     if row.kind not in (proposals.TRANSACTION, proposals.SCHEDULED):
         return None
 
-    board = await proposals._board(team, league_info)
+    pending: list[date] = []
     if row.add_player_id is not None:
         day_used = await _adds_sent(team_id, row.nba_date, row.nba_date)
         if day_used >= settings.autopilot_adds_per_day:
             return R_CAP_DAY, (f"Dime has made its {settings.autopilot_adds_per_day} add(s) for "
                                f"{row.nba_date:%a %b} {row.nba_date.day}")
+        # Before the board: a pickup made between the two reads is then counted twice, never missed
         pending = await _pending_days(team_id)
+    board = await proposals._board(team, league_info)
+    if row.add_player_id is not None:
         league = budget_block(board.acquisitions, row.nba_date, pending=pending)
         if league is not None:
             return R_LEAGUE, f"The league's add limit: {league}"

@@ -149,6 +149,16 @@ def test_a_per_game_day_limit_is_the_matchup_s_so_the_day_before_brings_none_bac
 
 
 @pytest.mark.unit
+def test_a_per_game_day_limit_whose_total_is_unknown_still_waits_for_the_next_matchup():
+    """The rollover's allowance hangs on the matchup boundary, not on knowing the total."""
+    unknown = limited(per="game_day", per_game_day=1, limit=None)
+    assert over_limit(unknown, nba_date=date(2026, 10, 27)).action == "defer"
+    assert over_limit(unknown) == svc.Decision("settle", "skipped", "acquisition_limit")
+    no_limit = limited(limit=None)                       # nothing per matchup: a season cap refused it
+    assert over_limit(no_limit, nba_date=date(2026, 10, 27)) == svc.Decision("settle", "skipped", "acquisition_limit")
+
+
+@pytest.mark.unit
 def test_on_the_day_itself_nothing_frees_up():
     assert over_limit(limited(), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
 

@@ -279,7 +279,8 @@ def on_limit_refusal(acq: Optional[AcquisitionState], *, period: int, day: int, 
     its acquisition limit. Before the day itself, the rollover into it brings a fresh allowance
     when the day opens a new matchup: wait for it. Otherwise nothing frees up before the day's
     games: skipped."""
-    fresh = acq is not None and acq.limit is not None and not in_current_matchup(acq, nba_date)
+    has_matchup_limit = acq is not None and (acq.limit is not None or acq.per_game_day is not None)
+    fresh = has_matchup_limit and not in_current_matchup(acq, nba_date)
     if period < day and fresh:
         return Decision("defer", at=rollover_at(nba_date))
     return Decision("settle", SKIPPED, "acquisition_limit")

@@ -414,12 +414,3 @@ def get_teams_with_b2b(current_date: Optional[date] = None) -> list[str]:
 def get_upcoming_games_on_date(date: date) -> list[dict]:
     """Games on a date from the per-day file ([{homeTeam, awayTeam}]; [] if none)."""
     return _load_schedule_v2().get(date.strftime("%m/%d/%Y"), [])
-
-
-def days_with_games(start: date, end: date) -> int:
-    """How many days from `start` through `end` the per-day file has at least one game on. A day
-    the file shows empty counts as none, so a stretch whose games aren't published yet (the NBA
-    Cup's December dates until the calendar is refreshed) counts short."""
-    per_day = _load_schedule_v2()
-    return sum(1 for i in range((end - start).days + 1)
-               if per_day.get((start + timedelta(days=i)).strftime("%m/%d/%Y")))

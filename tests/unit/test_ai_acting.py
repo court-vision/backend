@@ -283,7 +283,7 @@ def h(monkeypatch):
         monkeypatch.setattr(settings, k, v)
     h = SimpleNamespace(rows={31: prop(state="shadow", summary="... Logged in shadow, not sent.")},
                         autopilot=pilot(ai_rows=["daily_actions"]), actions={}, recorded=[], promoted=[], paused=[], emails=[],
-                        pending=[], board=roster(), sends=[], raises=None,
+                        pending=[], board=roster(), sends=[], raises=None, reads=[],
                         earlier=[])
 
     async def proposal(pid):
@@ -319,6 +319,7 @@ def h(monkeypatch):
         return sum(1 for f in h.recorded if f["outcome"] == outcome and (rule is None or f["rule"] == rule))
 
     async def pending_days(team_id):
+        h.reads.append("pending")
         return list(h.pending)
 
     async def team(team_id, user_id):
@@ -335,6 +336,7 @@ def h(monkeypatch):
         return "owner@example.com"
 
     async def board(team, league_info, scoring_period_id=None):
+        h.reads.append("board")
         return h.board
 
     async def send(team, league_info, r):
@@ -482,6 +484,13 @@ class TestPolicy:
         h.pending = [WEEK["end_date"] + timedelta(days=1)]     # one for next matchup's first day counts there
         h.rows[32] = prop(id=32, state="shadow")
         assert commit(32).outcome == "sent"
+
+    def test_the_pending_pickups_are_read_before_the_board(self, h):
+        """A pickup made between the two reads is then counted twice (ESPN's counter and the
+        list), never missed."""
+        h.board = roster().model_copy(update={"acquisitions": pool(used=2)})
+        assert commit().outcome == "sent"
+        assert h.reads[:2] == ["pending", "board"]
 
     def test_a_per_game_day_total_not_known_yet_leaves_the_limit_to_espn(self, h):
         h.board = roster().model_copy(update={"acquisitions": AcquisitionState(per="game_day", per_game_day=1,

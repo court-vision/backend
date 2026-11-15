@@ -135,9 +135,11 @@ def test_a_matchup_s_game_days_are_espn_s_count_when_its_schedule_reads(monkeypa
 
 
 @pytest.mark.unit
-def test_our_calendar_counts_the_game_days_when_espn_s_schedule_can_t_be_read(this_season):
+def test_no_game_day_count_when_espn_s_schedule_can_t_be_read(this_season):
+    """Our calendar doesn't stand in: it lacks games published since it was built (the Cup's
+    December week), and a short count would refuse adds ESPN allows."""
     # The autouse stub answers None, as a failed read does
-    assert asyncio.run(matchup_game_days(2027, date(2026, 11, 2), date(2026, 11, 8))) == 6
+    assert asyncio.run(matchup_game_days(2027, date(2026, 11, 2), date(2026, 11, 8))) is None
 
 
 @pytest.mark.unit
