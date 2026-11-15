@@ -373,21 +373,19 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
 async def _day_adds(team_id: int, league_info: Any, board: Any, row: Any) -> Optional[int]:
     """What a per-day limit has already counted for the move's day: the pickups still to be made for
     it (the user's, a lane's, Dime's), and for today's move ESPN's own record of the day's adds.
-    None under any other limit, or when ESPN's record can't be read (it refuses an over-limit
-    add itself)."""
+    None under any other limit. When ESPN's record can't be read the pending pickups alone are
+    returned: they still show a day already full, and ESPN refuses any other over-limit add itself."""
     acq = board.acquisitions
     if acq is None or acq.per != "day" or acq.limit is None:
         return None
     pending = await _pending_on(team_id, row.nba_date)
-    if row.kind != proposals.TRANSACTION:
+    if row.kind != proposals.TRANSACTION or board.espn_team_id is None:
         return pending
-    if board.espn_team_id is None:
-        return None
     try:
         return pending + await adds_for_day(league_info, board.espn_team_id, row.scoring_period_id)
     except Exception as exc:
         log.warning("acting_day_adds_unavailable", team_id=team_id, proposal_id=row.id, error=str(exc))
-        return None
+        return pending
 
 
 def reserve_block(acq: Any, day: date) -> Optional[str]:

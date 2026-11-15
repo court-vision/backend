@@ -496,6 +496,15 @@ class TestPolicy:
         h.espn_day_adds = RuntimeError("ESPN timed out")
         assert commit().outcome == "sent"
 
+    def test_a_day_s_pending_pickups_still_count_when_espn_can_t_be_read(self, h):
+        h.board = roster().model_copy(update={"acquisitions": AcquisitionState(per="day", limit=1)})
+        h.espn_day_adds, h.pending = RuntimeError("ESPN timed out"), {TODAY: 1}
+        assert commit().rule == "league_limit"
+        h.board = h.board.model_copy(update={"espn_team_id": None})     # nothing to ask ESPN with
+        h.espn_reads.clear()
+        h.rows[32] = prop(id=32, state="shadow")
+        assert commit(32).rule == "league_limit" and h.espn_reads == []
+
     def test_a_per_day_league_keeps_no_add_back_for_the_user(self, h):
         h.board = roster().model_copy(update={"acquisitions": AcquisitionState(
             per="day", limit=1, matchup_start=WEEK["start_date"], matchup_end=WEEK["end_date"], matchup_used=6)})
