@@ -90,6 +90,7 @@ from schemas.scheduled_pickup import (
     ScheduledPickupPlayer,
     ScheduledPickupResp,
 )
+from services import roster_protection
 from services.acquisitions import adds_for_day, budget_block, in_current_matchup, is_limit_refusal
 from services.daily_actions_service import has_open_seat
 from services.fantasy_writer_client import FantasyWriterUnavailable
@@ -266,6 +267,11 @@ def on_refusal(reason: str, *, period: int, day: int, nba_date: date, seat_free:
         return Decision("settle", SKIPPED, "already_on_roster")
     if reason == "drop_not_on_roster":
         return Decision("add_only", reason="drop_missing") if seat_free else Decision("settle", SKIPPED, "drop_missing")
+    if reason == roster_protection.DROP_PROTECTED:
+        # The user protected him after scheduling (protecting cancels the pickup; this catches one
+        # claimed at that moment): never dropped, so an add only into an open seat, else nothing.
+        return (Decision("add_only", reason=roster_protection.DROP_PROTECTED) if seat_free
+                else Decision("settle", SKIPPED, roster_protection.DROP_PROTECTED))
     return Decision("settle", FAILED, reason)                       # nothing_to_do / same_player: not storable
 
 
@@ -512,8 +518,9 @@ class ScheduledPickupService:
 
         add, drop = req.add_player_id, req.drop_player_id
         try:
-            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                          for_future_day=True)
+            holder, pool_entry = await RosterTransactionService._validate(
+                league_info, state, add, drop, for_future_day=True,
+                protected=await roster_protection.ids(team.team_id) if drop is not None else frozenset())
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
@@ -747,9 +754,22 @@ class ScheduledPickupService:
             if reserve is not None:
                 return await settle(row, now, SKIPPED, acting.P_RESERVE, detail=reserve, team_name=team_name)
 
+        protected: frozenset[int] = frozenset()
+        if drop is not None:
+            try:
+                protected = await roster_protection.ids(row.team_id)
+            except Exception as exc:
+                # The drop may be protected: nothing is sent until that can be read
+                return await defer(row, now, "protections_unread", detail=str(exc)[:300], team_name=team_name)
+            if drop in protected and lane_id is not None:
+                # A lane's switch: protecting him stops the lane, and its add alone would leave the
+                # lane's spot to no one. Nothing is sent; the lane ends at its next decision.
+                return await settle(row, now, SKIPPED, roster_protection.DROP_PROTECTED,
+                                    detail=roster_protection.refusal_words(holder.name if holder else "That player"),
+                                    team_name=team_name)
         try:
             holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                          check_locks=check_locks)
+                                                                          check_locks=check_locks, protected=protected)
         except RosterTransactionInvalid as exc:
             decision = on_refusal(exc.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=seat_free)
             if decision.action == "defer":
@@ -793,6 +813,12 @@ class ScheduledPickupService:
         except ClaimLost:
             log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
             return None
+        except RosterTransactionInvalid as exc:
+            # The check before ESPN (the roster lock): protected since this attempt's own check.
+            # Nothing was sent, so the in-flight mark the last check may have set comes off with it.
+            row.audit_id = None
+            return await settle(row, now, SKIPPED, exc.data.get("reason") or "refused", detail=exc.message,
+                                team_name=team_name)
         except RosterWriteRejected as exc:
             code = (exc.data or {}).get("espn_error_code")
             if code == ROSTER_FULL_CODE:

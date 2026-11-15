@@ -40,7 +40,7 @@ from db.models.nba.players import Player
 from db.models.notifications import NotificationPreference, NotificationTeamPreference
 from db.models.roster_moves import RosterMove
 from db.models.scheduled_pickups import ScheduledPickup
-from services import schedule_service, steering
+from services import roster_protection, schedule_service, steering
 from services.ai import steering as ai_steering
 from services.lineup_editor_service import _slot_name
 from services.scheduled_pickup_service import et_at
@@ -251,6 +251,9 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
             **({"scheduled_by_you": True} if getattr(p, "made_by_autopilot", False) else {}),
         } for p in pickups],
         "holds": await _holds(team.team_id, today),
+        # The roster lock: players the user protected, which nothing drops (lanes, pickups, Dime)
+        "protected": [{"player_id": p.nba_player_id, "name": p.name}
+                      for p in await roster_protection.for_team(team.team_id)],
         **await _autopilot(team.team_id),
         "notes": notes,
     }

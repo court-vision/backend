@@ -45,7 +45,7 @@ from core.logging import get_logger
 from core.settings import settings
 from db.base import db, db_operation, run_db
 from schemas.common import LeagueInfo
-from services import schedule_service, steering
+from services import roster_protection, schedule_service, steering
 from services.ai import proposals
 from services.ai.fantasy import _identities
 from services.ai.proposals import CANCEL_PICKUP, CHIP_KEY, LANE, PROPOSED, SENT, SHADOW, STEER, SHADOW_WORDS
@@ -453,6 +453,10 @@ async def set_lane(user_id: int, conversation_id: int, team: Any, league_info: L
             raise AppError("PLAYER_NOT_FOUND", f"No NBA player with id {args.player_id}")
         if who.espn_id is None:
             raise AppError("AI_PROPOSAL_INVALID", f"Court Vision has no ESPN id for {who.name}")
+        if who.espn_id in await roster_protection.ids(team.team_id):
+            # A lane drops its spot's player; said to Dime as what to do instead (the desk's own
+            # refusal, below, is worded for the user)
+            raise AppError("AI_PLAYER_PROTECTED", roster_protection.dime_lane_words(who.name))
         # The Week desk's own dry run: it refuses a spot that can't be streamed, and plans with the holds
         plan = (await StreamLaneService.plan(team, league_info, StreamLanePlanReq(player_id=who.espn_id))).data
         p = plan.projection

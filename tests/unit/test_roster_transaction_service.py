@@ -686,3 +686,72 @@ def test_check_locks_false_skips_the_locks_but_not_waivers(harness):
         asyncio.run(svc.RosterTransactionService._validate(LEAGUE, board_state, KAWHI, EDWARDS))
     assert exc.value.data["reason"] == "drop_locked"
 
+
+
+# ---- the roster lock -------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_protected_player_is_never_dropped(harness, protect):
+    """Drop-only and add+drop alike, refused on the board before the pool or the writer."""
+    protect({21: [EDWARDS]})
+    harness.pool = {KAWHI: pool()}
+    exc = _invalid(harness, req(drop=EDWARDS), "drop_protected", EDWARDS)
+    assert exc.message == "Anthony Edwards is protected: unprotect him in the Week desk to drop him"
+    _invalid(harness, req(add=KAWHI, drop=EDWARDS), "drop_protected", EDWARDS)
+    assert harness.pool_calls == []
+    # Another team's protection says nothing about this one
+    protect({22: [EDWARDS]})
+    after = [player(JOKIC, "Nikola Jokic"), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(after, version="v2")]
+    assert apply(req(add=KAWHI, drop=EDWARDS)).data.verified is True
+
+
+@pytest.mark.unit
+def test_an_add_alone_never_reads_the_protections(harness, monkeypatch):
+    from services import roster_protection
+
+    async def unreadable(team_id):
+        raise AssertionError("an add drops nobody")
+    monkeypatch.setattr(roster_protection, "ids", unreadable)
+    harness.pool = {KAWHI: pool()}
+    after = [*board(), player(KAWHI, "Kawhi Leonard", BE, team="LAC")]
+    harness.reads = [state(board()), state(after, version="v2")]
+    assert apply(req(add=KAWHI)).data.added.player_id == KAWHI
+
+
+@pytest.mark.unit
+def test_the_check_before_espn_refuses_a_drop_protected_since_the_validation(harness, monkeypatch):
+    """Protecting him while the move is under way: the write chain's own check, last before the
+    writer, refuses it, and the audit row says it was never sent."""
+    from services import roster_protection
+    reads = []
+
+    async def protected_on_the_second_read(team_id):
+        reads.append(team_id)
+        return frozenset() if len(reads) == 1 else frozenset({EDWARDS})
+    monkeypatch.setattr(roster_protection, "ids", protected_on_the_second_read)
+    harness.pool = {KAWHI: pool()}
+    harness.reads = [state(board())]
+    with pytest.raises(svc.RosterTransactionInvalid) as exc:
+        apply(req(add=KAWHI, drop=EDWARDS))
+    assert exc.value.data == {"reason": "drop_protected", "player_id": EDWARDS}
+    assert "Anthony Edwards is protected" in exc.value.message
+    assert harness.writer_calls == [] and len(harness.audits) == 1
+    (update,) = harness.updates
+    assert update[1] == "failed" and update[3].startswith("not_sent: Anthony Edwards is protected")
+
+
+@pytest.mark.unit
+def test_a_drop_whose_protection_cant_be_read_is_refused(harness, monkeypatch):
+    """Fails closed: nothing reaches ESPN when the lock can't be checked."""
+    from core.errors import DatabaseUnavailableError
+    from services import roster_protection
+
+    async def down(team_id):
+        raise DatabaseUnavailableError()
+    monkeypatch.setattr(roster_protection, "ids", down)
+    harness.reads = [state(board())]
+    with pytest.raises(DatabaseUnavailableError):
+        apply(req(drop=EDWARDS))
+    assert harness.writer_calls == [] and harness.audits == []
