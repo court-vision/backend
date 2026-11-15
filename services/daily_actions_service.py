@@ -16,6 +16,12 @@ so is benched for a bench player with a game: that row is a `scratch` ("ruled ou
 swap available"), first in the list. IR stays on ESPN's injury flag, which is what
 ESPN lets onto IR.
 
+IR wins over a start (`lineup_planner.ir_first`): an injured player who sits today goes to IR
+while it has an open seat, and the fill doesn't also start him, since the roster spot that frees
+for a pickup is worth more than the slim chance he plays. With IR full there is no IR row, and the
+fill starts him over a player without a game (free, in case he is cleared late). A player the fill
+counts on today (a game, and healthy or questionable by our verdict or ESPN's) gets no IR row.
+
 The pickup row is a streaming move, not an upgrade engine: the player to drop is
 the lowest-value roster player with no game today, the pickup is the day's best
 free agent, and the value comparison only checks that the two are comparable.
@@ -61,7 +67,7 @@ from services.lineup_editor_service import (
     slot_counts_of,
     unfilled_results,
 )
-from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_ir
+from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, ir_first, plan_ir, plays_today
 from services.lineup_read_service import LineupReadService, _games_on  # noqa: F401  (tests stand in for its read here)
 from services.matchup_days import index_games
 from services.player_value_service import PlayerValueService
@@ -425,11 +431,12 @@ class DailyActionsService:
         today = date.fromisoformat(state.nba_date) if state.nba_date else None
         verdicts = await _verdicts_for(team.team_id, state, today)
         # The fill as auto-lineup will make it, with Dime's holds (services/steering.py), over our
-        # verdicts; IR on ESPN's own statuses
+        # verdicts; IR on ESPN's own statuses, for the players who sit today. IR wins: the fill
+        # doesn't start a bench player headed there
         holds = await steering.holds_for(team.team_id, today) if today else []
         fill_players = planner_players(state, planner_verdicts(list(verdicts.values()), today)) if verdicts else players
-        fill = steering.fill_with(fill_players, counts, holds, today)
-        ir = plan_ir(players, counts)
+        ir = plan_ir(players, counts, playing=plays_today(fill_players))
+        fill = steering.fill_with(ir_first(fill_players, ir), counts, holds, today)
         value_kind = state.players[0].value_kind if state.players else "fpts"
 
         suggestion: Optional[TransactionSuggestion] = None

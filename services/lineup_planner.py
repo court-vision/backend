@@ -33,14 +33,20 @@ Every consumer of a plan (manual "Optimize today", the alert email, the auto
 write) reads the same `Plan`, so "an issue exists" means exactly "a move exists".
 
 `plan_ir` is the IR counterpart for the daily-actions view: it never runs inside
-`plan_fill`, so nothing auto-applied ever touches slot 13.
+`plan_fill`, so nothing auto-applied ever touches slot 13. Where both are offered
+(the Week desk's daily actions, Dime's get_lineup), IR wins over a start: an injured
+player who sits today goes to IR while it has an open seat, because the roster spot
+that frees for a pickup is worth more than the slim chance he plays, and the fill
+plans on `ir_first`'s board so it doesn't also start him. With IR full he gets no IR
+move, and the fill starts him over a player without a game, which costs nothing (he
+may be cleared late). A player expected to play (`plays_today`) never goes to IR.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Collection, Iterable, Mapping, Optional, Sequence
 
 ACTIVE_SLOT_IDS: frozenset[int] = frozenset(range(0, 12))
 BENCH_SLOT_ID = 12
@@ -380,14 +386,24 @@ class IrAction:
     blocked_reason: Optional[str] = None   # roster_full
 
 
-def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> tuple[IrAction, ...]:
+def plays_today(players: Iterable[PlannerPlayer]) -> frozenset[int]:
+    """Who the fill counts on today: a game and tier A (healthy, questionable or day-to-day, an
+    upgraded doubtful). Pass the board the fill reads (our verdicts in it) so a player we have
+    cleared before ESPN does counts."""
+    return frozenset(p.player_id for p in players if p.has_game and p.tier == TIER_A)
+
+
+def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int], *,
+            playing: Optional[Collection[int]] = None) -> tuple[IrAction, ...]:
     """IR housekeeping, every action judged against the CURRENT board so each one can be
     staged on its own: healthy players leave IR while the roster has a spot for them —
     into an eligible open active slot when there is one, else the (unbounded) bench —
-    otherwise they are reported as blocked; injured players on slots 0-12 take the open
-    IR seats, active-slot holders first, then the lowest value. Locked players never
-    move, and an ir_out here does not free a seat for an ir_in in the same pass — the
-    next read does."""
+    otherwise they are reported as blocked; injured players on slots 0-12 who sit today
+    take the open IR seats, active-slot holders first, then the lowest value. One expected
+    to play today (`playing`, by default `plays_today` of this board) stays off IR: the
+    fill starts him. Locked players never move, and an ir_out here does not free a seat
+    for an ir_in in the same pass — the next read does."""
+    plays = plays_today(players) if playing is None else frozenset(playing)
     occupants = _occupants(players)
     capacity = _active_capacity(slot_counts)
     room = roster_spots(slot_counts) - _off_ir(players)
@@ -409,13 +425,24 @@ def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) ->
 
     injured = sorted(
         (p for p in players
-         if (p.slot_id in ACTIVE_SLOT_IDS or p.slot_id == BENCH_SLOT_ID) and not p.locked and p.ir_eligible),
+         if (p.slot_id in ACTIVE_SLOT_IDS or p.slot_id == BENCH_SLOT_ID) and not p.locked and p.ir_eligible
+         and p.player_id not in plays),
         key=lambda p: (0 if p.slot_id in ACTIVE_SLOT_IDS else 1, p.value, p.name),
     )
     for p in injured[:max(ir_open, 0)]:
         out.append(IrAction("ir_in", p.player_id,
                             Move(p.player_id, p.slot_id, IR_SLOT_ID, role="shift", note=(p.injury_status or "OUT").upper())))
     return tuple(out)
+
+
+def ir_first(players: Sequence[PlannerPlayer], ir: Sequence[IrAction]) -> list[PlannerPlayer]:
+    """The board the fill plans on beside `plan_ir`'s actions: a bench player headed to IR is on
+    IR already, so the fill never starts him (IR wins while it has an open seat). A starter headed
+    there stays in his slot: a start that benches him and his IR move both take him out of it, and
+    each row still stages on its own against the current board."""
+    bound = {a.player_id for a in ir if a.kind == "ir_in" and a.move is not None}
+    return [replace(p, slot_id=IR_SLOT_ID) if p.player_id in bound and p.slot_id == BENCH_SLOT_ID else p
+            for p in players]
 
 
 def _slot_label(slot_id: int) -> str:

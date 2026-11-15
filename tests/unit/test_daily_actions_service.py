@@ -285,6 +285,37 @@ def test_a_healthy_ir_player_gets_an_ir_out_row_or_a_blocked_one(harness):
     assert row.detail == svc.ROSTER_FULL_DETAIL
 
 
+def out_bench_player(*, ir_full):
+    """P11 is OUT with a game tonight, on the bench, and fits SG, where P2 has no game today: the
+    fill alone would start him, and IR is open unless `ir_full`."""
+    board = full_board({2: player(2, "P2", SG, game=False), 11: player(11, "P11", BE, status="OUT"),
+                        12: player(12, "P12", BE, game=False)})
+    return state(board if ir_full else [p for p in board if p.player_id != 14])
+
+
+@pytest.mark.unit
+def test_an_out_bench_player_goes_to_ir_and_is_not_also_started_while_ir_has_a_seat(harness):
+    harness.board = out_bench_player(ir_full=False)
+    resp = read()
+    assert rows(resp) == [("ir_in", 11, None)]
+    assert resp.data.actions[0].detail == "OUT · frees BE" and resp.data.unfilled == []
+
+
+@pytest.mark.unit
+def test_with_ir_full_the_out_bench_player_starts_over_one_without_a_game(harness):
+    harness.board = out_bench_player(ir_full=True)
+    resp = read()
+    assert rows(resp) == [("start", 11, 2)]
+    assert resp.data.actions[0].detail == "vs LAL · 7:30 PM · SG over P2 (no game today)"
+
+
+@pytest.mark.unit
+def test_a_player_our_verdict_clears_starts_instead_of_going_to_ir(harness):
+    harness.board = out_bench_player(ir_full=False)            # ESPN still says OUT
+    harness.verdicts = [ruled(11, "available", reason=None, by="nba_report")]
+    assert rows(read()) == [("start", 11, 2)]
+
+
 # ---- the daily swap ---------------------------------------------------------------------------
 
 

@@ -22,9 +22,11 @@ from services.lineup_planner import (
     Move,
     PlannerPlayer,
     apply_moves,
+    ir_first,
     plan_fill,
     plan_ir,
     plan_reaction,
+    plays_today,
     validate_moves,
 )
 
@@ -575,7 +577,8 @@ def test_locked_players_never_move_on_or_off_ir():
 @pytest.mark.unit
 def test_ir_eligibility_is_espns_injury_rule_not_the_status_alone():
     assert plan_ir(full_lineup({5: player(5, C, IR_BIG, status="SUSPENSION")}), SLOT_COUNTS) == ()
-    flagged = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    # Flagged injured with no game today: ESPN lets him on IR whatever the status word says
+    flagged = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, False, "DAY_TO_DAY", False, 10.0, injured=True)})
     assert ir_of(plan_ir(flagged, SLOT_COUNTS)) == [("ir_in", 5, (C, IR), None)]
     assert plan_ir(full_lineup({5: player(5, C, BIG, status="OUT")}), SLOT_COUNTS) == ()   # 13 not listed
 
@@ -584,3 +587,65 @@ def test_ir_eligibility_is_espns_injury_rule_not_the_status_alone():
 def test_an_ir_out_does_not_free_the_seat_for_an_ir_in_in_the_same_pass():
     roster = without(full_lineup({5: player(5, C, IR_BIG, status="OUT")}), 13) + [player(14, IR, IR_GUARD)]
     assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, BE), None)]
+
+
+# ---- IR wins over a start ------------------------------------------------------------
+# An OUT bench player with a game is tier B, so the fill would start him over a starter with no
+# game; when IR has an open seat he goes there instead, and only with IR full does the fill start him.
+
+
+def out_on_bench():
+    """P11 is OUT with a game tonight, on the bench; P8 (UT) and the rest of the bench have no game; IR is open."""
+    return full_lineup({11: player(11, BE, IR_GUARD, status="OUT", value=30.0), 8: player(8, UT, game=False),
+                        12: player(12, BE, WING, game=False), 13: player(13, BE, BIG, game=False)})
+
+
+@pytest.mark.unit
+def test_an_out_bench_player_with_an_open_ir_seat_goes_to_ir_and_the_fill_does_not_start_him():
+    roster = out_on_bench()
+    assert moves_of(plan_fill(roster, SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]   # alone, it would
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 11, (BE, IR), None)]
+    board = ir_first(roster, ir)
+    assert {p.player_id: p.slot_id for p in board}[11] == IR
+    assert plan_fill(board, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_with_ir_full_the_out_bench_player_starts_over_one_without_a_game():
+    roster = out_on_bench() + [player(14, IR, IR_GUARD, status="OUT")]
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir == ()
+    assert moves_of(plan_fill(ir_first(roster, ir), SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_one_open_seat_and_two_out_bench_players_the_other_one_starts():
+    roster = full_lineup({11: player(11, BE, IR_GUARD, status="OUT", value=30.0),
+                          12: player(12, BE, IR_GUARD | WING, status="OUT", value=5.0),
+                          13: player(13, BE, BIG, game=False), 8: player(8, UT, game=False)})
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 12, (BE, IR), None)]      # the lower value takes the seat
+    assert moves_of(plan_fill(ir_first(roster, ir), SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_an_out_starter_headed_to_ir_stays_on_the_fill_s_board_so_his_replacement_still_starts():
+    roster = full_lineup({8: player(8, UT, IR_GUARD, status="OUT")})
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 8, (UT, IR), None)]
+    assert ir_first(roster, ir) == roster
+    assert moves_of(plan_fill(roster, SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_a_player_expected_to_play_today_stays_off_ir():
+    # Day-to-day with a game tonight: the fill counts on him, so no IR move
+    dtd = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    assert 5 in plays_today(dtd) and plan_ir(dtd, SLOT_COUNTS) == ()
+    # ESPN still says OUT, but the fill's board (our verdict) has him playing: he starts, no IR move
+    roster = out_on_bench()
+    cleared = [p if p.player_id != 11 else player(11, BE, IR_GUARD, status="ACTIVE", value=30.0) for p in roster]
+    assert plan_ir(roster, SLOT_COUNTS, playing=plays_today(cleared)) == ()
+    # Doubtful, or no game today, is someone who sits
+    assert plays_today([player(1, PG, status="DOUBTFUL"), player(2, SG, game=False)]) == frozenset()
