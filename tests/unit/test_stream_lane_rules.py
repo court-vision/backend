@@ -86,13 +86,14 @@ def test_a_season_cap_can_be_the_tighter_one():
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_leaves_each_day_its_room():
+def test_a_per_game_day_limit_is_the_matchup_s_total_and_caps_no_day():
+    """One add for each day with games is a matchup total: two lanes may both switch on one day."""
     days = [day(i, "DEN") for i in range(3)]
-    daily = acq(per="day", limit=1, matchup_used=0)
-    budget = lane_budget(daily, days, [pending(29)], first_day_adds=1)
-    assert budget.adds is None and budget.day_limits == (0, 0, 1)
-    assert lane_budget(daily, days, []).day_limits == (1, 1, 1)                 # unread: ESPN decides
-    assert lane_budget(acq(per="day", limit=2), days, [pending(29)]).day_limits == (2, 1, 2)
+    week = acq(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=4)
+    budget = lane_budget(week, days, [pending(29)])
+    assert budget.adds == 2 and budget.day_limits == (None, None, None)
+    unknown = acq(per="game_day", per_game_day=1, limit=None, matchup_used=4)    # no total yet: ESPN decides
+    assert lane_budget(unknown, days, []) == lane_budget(None, days, [])
 
 
 @pytest.mark.unit

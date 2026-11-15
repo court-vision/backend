@@ -34,7 +34,7 @@ from core.settings import settings
 from db.base import run_db
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import AcquisitionState, LineupPlayer, LineupSlotDef, LineupState, WriteBlockedReason
-from services.acquisitions import parse_acquisitions
+from services.acquisitions import matchup_game_days, parse_acquisitions, with_game_days
 from services.credential_service import normalize_swid
 from services.espn_team_match import find_espn_team, persist_espn_identity
 from services.espn_service import EspnService
@@ -173,9 +173,10 @@ def parse_espn_lineup(
     )
 
 
-def _with_matchup_dates(acq: Optional[AcquisitionState], payload: dict) -> Optional[AcquisitionState]:
+async def _with_matchup_dates(acq: Optional[AcquisitionState], payload: dict, year: int) -> Optional[AcquisitionState]:
     """The current matchup's first and last days, from the league's matchup periods and our
-    calendar; the counts stand without them when the calendar can't say."""
+    calendar, and for a per-game-day limit the matchup's total (the limit for each of its days
+    with games). The counts stand without them when the calendar can't say."""
     if acq is None or acq.matchup_period_id is None:
         return acq
     try:
@@ -187,7 +188,14 @@ def _with_matchup_dates(acq: Optional[AcquisitionState], payload: dict) -> Optio
         return acq
     if not dates:
         return acq
-    return acq.model_copy(update={"matchup_start": dates[0], "matchup_end": dates[1]})
+    acq = acq.model_copy(update={"matchup_start": dates[0], "matchup_end": dates[1]})
+    if acq.per != "game_day":
+        return acq
+    try:
+        return with_game_days(acq, await matchup_game_days(year, dates[0], dates[1]))
+    except Exception as exc:  # no total: nothing is refused over it, ESPN still applies the limit
+        log.warning("lineup_matchup_game_days_unavailable", matchup_period=acq.matchup_period_id, error=str(exc))
+        return acq
 
 
 def roster_version(scoring_period_id: Optional[int], players: list[LineupPlayer]) -> str:
@@ -335,7 +343,7 @@ class LineupReadService:
             write_blocked_reason=reason,
             roster_version=roster_version(period, players),
             fetched_at=now_et.isoformat(timespec="seconds"),
-            acquisitions=_with_matchup_dates(parsed.acquisitions, payload),
+            acquisitions=await _with_matchup_dates(parsed.acquisitions, payload, league_info.year),
         )
 
         renamed = (league_info.team_name or "").strip() != (parsed.team_name or "").strip()

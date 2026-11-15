@@ -255,12 +255,12 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
         # The roster lock: players the user protected, which nothing drops (lanes, pickups, Dime)
         "protected": [{"player_id": p.nba_player_id, "name": p.name}
                       for p in await roster_protection.for_team(team.team_id)],
-        **await _autopilot(team, league_info, today),
+        **await _autopilot(team, league_info),
         "notes": notes,
     }
 
 
-async def _autopilot(team: Any, league_info: Any, today: date) -> dict[str, Any]:
+async def _autopilot(team: Any, league_info: Any) -> dict[str, Any]:
     """What Dime acts on here and what it has used of the policy (step 5), under `autopilot`, with the
     league's own add limits off the board; nothing on a team where Dime acts on no automation, so the
     result is step 3's there."""
@@ -274,7 +274,7 @@ async def _autopilot(team: Any, league_info: Any, today: date) -> dict[str, Any]
         if league_info is not None:
             try:
                 board = await proposals._board(team, league_info)
-                league = acting.league_limits(board.acquisitions, today)
+                league = acting.league_limits(board.acquisitions)
             except Exception as exc:       # the policy still goes out, saying the limits are unread
                 log.warning("autopilot_league_limits_unread", team_id=team_id, error=str(exc))
         return {"autopilot": await acting.policy_view(team_id, row, league)}

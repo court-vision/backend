@@ -673,53 +673,29 @@ def test_a_write_dime_already_sent_is_confirmed_from_the_board_even_after_a_paus
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_reads_the_days_adds(h, monkeypatch):
-    calls = []
-
-    async def adds(league_info, espn_team_id, period):
-        calls.append((espn_team_id, period))
-        return used
-
-    monkeypatch.setattr(svc, "adds_for_day", adds)
-    used = 1
+def test_a_per_game_day_limit_lets_several_adds_go_on_one_day_until_the_matchup_s_are_used(h):
+    """One add for each day with games is a matchup total (James's league, 2026-11-15): three adds
+    made on one day leave this one room, and it is skipped only once the week's seven are used."""
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    r = execute(h)
-    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit") and calls == [(1, 3)]
-    assert h.txn_calls == []
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=3))
+    assert execute(h).outcome == "executed"
 
-    used = 0
     h.settled.clear()
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    assert execute(h).outcome == "executed"
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=7))
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit")
 
 
 @pytest.mark.unit
-def test_an_unreadable_day_count_leaves_the_limit_to_espn(h, monkeypatch):
-    async def broken(league_info, espn_team_id, period):
-        raise RuntimeError("ESPN is down")
-
-    monkeypatch.setattr(svc, "adds_for_day", broken)
+def test_espn_refusing_a_per_game_day_limit_inside_the_matchup_is_skipped(h):
+    """Its adds are the matchup's: the rollover into the pickup's day brings none back."""
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    assert execute(h).outcome == "executed"
-
-
-@pytest.mark.unit
-def test_espn_refusing_a_per_day_limit_the_day_before_waits_for_the_rollover_and_may_send_again(h, monkeypatch):
-    async def none_yet(league_info, espn_team_id, period):
-        return 0
-
-    monkeypatch.setattr(svc, "adds_for_day", none_yet)
-    arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    h.txn = [FantasyWriterRejected("You have reached the acquisition limit for this scoring period.", espn_status=400,
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=6))
+    h.txn = [FantasyWriterRejected("You have reached the acquisition limit for this matchup.", espn_status=400,
                                    espn_error_code="TRAN_SOMETHING_NEW")]
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "acquisition_limit", ROLLOVER)
-    # ESPN refused it, so nothing landed: the in-flight mark is cleared and the retry may send.
-    assert h.deferred_audit_ids == [None]
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit")
 
 
 @pytest.mark.unit

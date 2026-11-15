@@ -265,17 +265,16 @@ class TestTheWrites:
         row = Autopilot.get(Autopilot.team_id == team.team_id)
         assert (row.paused_by, row.paused_reason) == ("system", "2 of its moves were refused today")
 
-    def test_a_day_s_pending_pickups_are_counted_whoever_made_them(self, team):
+    def test_the_team_s_pending_pickups_are_listed_by_day_whoever_made_them(self, team):
         tomorrow = DAY + timedelta(days=1)
         fields = dict(user=team.user_id_id, team=team.team_id, scoring_period_id=21, nba_date=tomorrow,
                       add_player_id=6450, add_name="Kawhi Leonard", not_before_at=_now() + timedelta(hours=10))
-        assert run(acting._pending_on(team.team_id, tomorrow)) == 0
+        assert run(acting._pending_days(team.team_id)) == []
         ScheduledPickup.create(**fields)
         ScheduledPickup.create(**{**fields, "add_player_id": 99, "made_by_autopilot": True})
         ScheduledPickup.create(**{**fields, "add_player_id": 98, "status": "executed"})       # already made
         ScheduledPickup.create(**{**fields, "add_player_id": 97, "nba_date": DAY, "scoring_period_id": 20})
-        assert run(acting._pending_on(team.team_id, tomorrow)) == 2
-        assert run(acting._pending_on(team.team_id, DAY)) == 1
+        assert sorted(run(acting._pending_days(team.team_id))) == [DAY, tomorrow, tomorrow]
 
     def test_dime_s_writes_are_their_own_source_outside_auto_lineup_s_once_a_day(self, team):
         for _ in range(2):

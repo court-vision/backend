@@ -40,7 +40,6 @@ from db.models.nba.players import Player
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.espn import PlayerResp
 from services import roster_protection, schedule_service
-from services.acquisitions import adds_for_day
 from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
 from services.espn_service import EspnService, PoolEntry
 from services.lineup_editor_service import _roster_slots
@@ -727,14 +726,7 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     days = await run_db("ai.lane_days", _days, start, end_period, period, base_date)
     pending = await run_db("ai.lane_pending", _pending_pickups, team.team_id)
     pool = await StreamLaneService._pool(league_info, adapter, team.team_id)
-    acq = board.acquisitions
-    first_day_adds = None
-    if acq is not None and acq.per == "day" and acq.limit is not None and board.espn_team_id is not None:
-        try:
-            first_day_adds = await adds_for_day(league_info, board.espn_team_id, start)
-        except Exception as exc:  # ESPN refuses an over-limit add itself
-            log.warning("ai_day_adds_unavailable", team_id=team.team_id, error=str(exc))
-    budget = lane_budget(acq, days, pending, first_day_adds=first_day_adds)
+    budget = lane_budget(board.acquisitions, days, pending)
     scoring = await run_db("ai.scoring", PlayerValueService.scoring_for, league_info, team.team_id)
 
     on_board = {p.player_id: p for p in board.players}

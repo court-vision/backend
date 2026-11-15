@@ -27,12 +27,13 @@ plan's Guardrails table:
     caps           Dime's own adds: AUTOPILOT_ADDS_PER_DAY on the move's day (lanes keep
                    their own budget)
     league         the league's own add limits, which every add counts toward (the user's,
-                   the lanes', Dime's): a per-matchup limit, a per-day limit on the move's
-                   day (with the pickups already scheduled for it), the season's. They are
-                   ESPN's settings, read off the board, so the matchup's cap is the league's
-                   (`services.acquisitions.budget_block`; ESPN still applies them at the write)
-    reserve        AUTOPILOT_ADDS_RESERVE of a per-matchup limit's adds are left for the
-                   user (injuries); a per-day limit has no matchup total to keep one from
+                   the lanes', Dime's): the matchup's total and the season's, less the
+                   pickups already scheduled. They are ESPN's settings, read off the board, so
+                   the matchup's cap is the league's; a per-game-day limit is a matchup total
+                   too, usable on any day (`services.acquisitions`; ESPN still applies them at
+                   the write)
+    reserve        AUTOPILOT_ADDS_RESERVE of the matchup's adds are left for the user
+                   (injuries)
     protected      never drops one of the roster's top AUTOPILOT_PROTECTED_TOP by the
                    board's value (Dime's own keep holds already refuse at the proposal)
 
@@ -60,7 +61,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from peewee import JOIN, IntegrityError, fn
 
@@ -71,7 +72,7 @@ from db.base import db_operation, run_db
 from db.models.ai_conversations import AiProposal
 from db.models.autopilot import AiCheckin, Autopilot, AutopilotAction
 from services import roster_protection, schedule_service, steering
-from services.acquisitions import adds_for_day, budget_block, matchup_allowance, season_room
+from services.acquisitions import budget_block, matchup_room, season_room
 from services.ai import autonomy, proposals
 from services.scheduled_pickup_service import rollover_at
 
@@ -184,14 +185,13 @@ def _adds_sent(team_id: int, start: date, end: date) -> int:
     return int(total or 0)
 
 
-@db_operation("acting.pending_on")
-def _pending_on(team_id: int, day: date) -> int:
-    """The team's pickups still to be made for `day`, whoever scheduled them."""
+@db_operation("acting.pending_days")
+def _pending_days(team_id: int) -> list[date]:
+    """The days of the team's pickups still to be made, whoever scheduled them: each will take
+    one of the league's adds that ESPN's counter doesn't show yet."""
     from db.models.scheduled_pickups import ScheduledPickup
-    return (ScheduledPickup.select()
-            .where((ScheduledPickup.team == team_id) & (ScheduledPickup.status == "pending")
-                   & (ScheduledPickup.nba_date == day))
-            .count())
+    return [r.nba_date for r in (ScheduledPickup.select(ScheduledPickup.nba_date)
+                                 .where((ScheduledPickup.team == team_id) & (ScheduledPickup.status == "pending")))]
 
 
 @db_operation("acting.count_since")
@@ -353,11 +353,11 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
         if day_used >= settings.autopilot_adds_per_day:
             return R_CAP_DAY, (f"Dime has made its {settings.autopilot_adds_per_day} add(s) for "
                                f"{row.nba_date:%a %b} {row.nba_date.day}")
-        league = budget_block(board.acquisitions, row.nba_date,
-                              day_adds=await _day_adds(team_id, league_info, board, row))
+        pending = await _pending_days(team_id)
+        league = budget_block(board.acquisitions, row.nba_date, pending=pending)
         if league is not None:
             return R_LEAGUE, f"The league's add limit: {league}"
-        reserve = reserve_block(board.acquisitions, row.nba_date)
+        reserve = reserve_block(board.acquisitions, row.nba_date, pending=pending)
         if reserve is not None:
             return R_RESERVE, reserve
     if row.drop_player_id is not None:
@@ -370,32 +370,17 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     return None
 
 
-async def _day_adds(team_id: int, league_info: Any, board: Any, row: Any) -> Optional[int]:
-    """What a per-day limit has already counted for the move's day: the pickups still to be made for
-    it (the user's, a lane's, Dime's), and for today's move ESPN's own record of the day's adds.
-    None under any other limit. When ESPN's record can't be read the pending pickups alone are
-    returned: they still show a day already full, and ESPN refuses any other over-limit add itself."""
-    acq = board.acquisitions
-    if acq is None or acq.per != "day" or acq.limit is None:
-        return None
-    pending = await _pending_on(team_id, row.nba_date)
-    if row.kind != proposals.TRANSACTION or board.espn_team_id is None:
-        return pending
-    try:
-        return pending + await adds_for_day(league_info, board.espn_team_id, row.scoring_period_id)
-    except Exception as exc:
-        log.warning("acting_day_adds_unavailable", team_id=team_id, proposal_id=row.id, error=str(exc))
-        return pending
-
-
-def reserve_block(acq: Any, day: date) -> Optional[str]:
+def reserve_block(acq: Any, day: date, *, pending: Iterable[date] = ()) -> Optional[str]:
     """Why an add for `day` would take one of the league's adds Dime keeps for the user, as the
-    sentence the user reads; None when there is room (or no per-matchup limit, or `day` is in a
-    later matchup)."""
+    sentence the user reads; None when there is room (or no matchup limit known, or `day` is in
+    a later matchup). `pending` are the days of pickups still to be made, which take adds too."""
     from services.acquisitions import in_current_matchup, matchup_room
     room = matchup_room(acq) if acq is not None else None
-    if room is not None and in_current_matchup(acq, day) and room <= settings.autopilot_adds_reserve:
-        return f"{room} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
+    if room is None or not in_current_matchup(acq, day):
+        return None
+    room -= sum(1 for d in pending if in_current_matchup(acq, d))
+    if room <= settings.autopilot_adds_reserve:
+        return f"{max(0, room)} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
     return None
 
 
@@ -665,30 +650,22 @@ LIMITS_UNREAD = {"read": False, "note": "The league's add limits couldn't be rea
                                           "them to every move when it is sent"}
 
 
-def league_limits(acq: Any, today: date) -> dict[str, Any]:
+def league_limits(acq: Any) -> dict[str, Any]:
     """The league's own add limits as Dime reads them (get_automations): ESPN's settings off the board,
-    which every add the team makes counts toward, the user's and the lanes' as well as Dime's. A
-    per-day limit is its own each day (an unused one doesn't carry over), so its matchup total is the
-    limit once for each day with games."""
-    if acq is None or acq.limit is None:
+    which every add the team makes counts toward, the user's and the lanes' as well as Dime's. Either
+    kind is a matchup total the team may use on any day; a per-game-day one is the limit for each of
+    the matchup's days with games."""
+    if acq is None or (acq.limit is None and acq.per_game_day is None):
         out: dict[str, Any] = {"read": True, "limit": None}
-    elif acq.per == "day":
-        start, end = acq.matchup_start, acq.matchup_end
-        if start is None or end is None:
-            week = schedule_service.get_current_matchup(today)
-            start, end = (week["start_date"], week["end_date"]) if week else (None, None)
-        game_days = schedule_service.days_with_games(start, end) if start and end else None
-        out = {"read": True, "per": "day", "adds_per_day": acq.limit,
-               "days_with_games_this_matchup": game_days, "this_matchup": matchup_allowance(acq, game_days),
-               "days_with_games_left": (schedule_service.days_with_games(max(start, today), end)
-                                        if start and end and today <= end else None),
-               "team_adds_this_matchup": acq.matchup_used,
-               "note": "Each day's adds are its own; one left unused doesn't carry over. Every add the team "
-                       "makes counts: the user's, the lanes' and yours"}
     else:
-        out = {"read": True, "per": "matchup", "this_matchup": acq.limit,
-               "team_adds_this_matchup": acq.matchup_used, "left_this_matchup": max(0, acq.limit - acq.matchup_used),
-               "note": "Every add the team makes counts: the user's, the lanes' and yours"}
+        out = {"read": True, "per": acq.per}
+        if acq.per == "game_day":
+            out["adds_per_game_day"] = acq.per_game_day
+            out["days_with_games_this_matchup"] = acq.game_days
+        out.update({"this_matchup": acq.limit, "team_adds_this_matchup": acq.matchup_used,
+                    "left_this_matchup": matchup_room(acq),
+                    "note": "Usable on any day of the matchup. Every add the team makes counts: the user's, "
+                            "the lanes' and yours, and a pickup still scheduled takes one when it's made"})
     if acq is not None and acq.season_limit is not None:
         out["season_left"] = season_room(acq)
     return out
@@ -708,8 +685,7 @@ async def policy_view(team_id: int, autopilot: Any, league: Optional[dict[str, A
         "league_add_limits": league,
         "never_drops_top": settings.autopilot_protected_top,
     }
-    if league.get("per") == "matchup":
-        # Only a matchup total has an add to keep back; a per-day limit's is the day's own
+    if league.get("this_matchup") is not None:
         policy["adds_kept_for_the_user"] = settings.autopilot_adds_reserve
     return {
         "acting_on": autonomy.acting_rows(autopilot),

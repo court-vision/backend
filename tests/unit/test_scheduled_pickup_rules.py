@@ -142,14 +142,15 @@ def over_limit(acq, *, period=2, day=3, nba_date=DAY_D):
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_the_day_before_waits_for_the_days_own_allowance():
-    d = over_limit(limited(per="day", limit=1, matchup_used=1))
-    assert d.action == "defer" and d.at == svc.rollover_at(DAY_D)
+def test_a_per_game_day_limit_is_the_matchup_s_so_the_day_before_brings_none_back():
+    pool = limited(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=7)
+    assert over_limit(pool) == svc.Decision("settle", "skipped", "acquisition_limit")
+    assert over_limit(pool, nba_date=date(2026, 10, 27)).action == "defer"     # next matchup's first day
 
 
 @pytest.mark.unit
 def test_on_the_day_itself_nothing_frees_up():
-    assert over_limit(limited(per="day", limit=1), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
+    assert over_limit(limited(), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
 
 
 @pytest.mark.unit

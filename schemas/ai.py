@@ -563,7 +563,7 @@ class AiActingPolicy(ApiModel):
 
     adds_per_day: int = Field(..., description="Dime's own adds a day; over the matchup it keeps to the league's "
                                                "own add limits, which every add counts toward")
-    adds_reserve: int = Field(..., description="Adds of a per-matchup limit Dime leaves for the user (injuries)")
+    adds_reserve: int = Field(..., description="Adds of the matchup's limit Dime leaves for the user (injuries)")
     protected_top: int = Field(..., description="Dime never drops one of the roster's top this many by value")
     pause_refused: int = Field(..., description="It pauses itself after this many refused writes in a day")
     pause_same_block: int = Field(..., description="...or this many blocks by the same rule in a day")

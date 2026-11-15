@@ -91,7 +91,7 @@ def h(monkeypatch):
     h = SimpleNamespace(board=board(), pool=[free_agent(FA, "Free Agent", "LAL")], reads=0, schedule=schedule,
                         pending=[], open_lanes=[], inserted=[], recorded=[], steps=[], held=True,
                         lane_pending=False, adopted=None, team=(LEAGUE, {}), cancelled=[], cancel_prior="pending",
-                        lane_pickups=[], day_adds=0, projections=[], lane_pending_ids=set())
+                        lane_pickups=[], projections=[], lane_pending_ids=set())
 
     class Adapter:
         def capabilities(self, league_info):
@@ -137,9 +137,6 @@ def h(monkeypatch):
     async def direct_run_cpu(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    async def day_adds(league_info, espn_team_id, period):
-        return h.day_adds
-
     def cancel(team_id, pickup_id, now):
         h.cancelled.append(pickup_id)
         return h.cancel_prior, SimpleNamespace(id=pickup_id, status="cancelled")
@@ -163,7 +160,6 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_lane_pickups", lambda lane_id: list(h.lane_pickups))
     monkeypatch.setattr(svc, "_cancel_pickup", cancel)
     monkeypatch.setattr(svc, "nba_ids_by_espn_id", lambda ids: {})
-    monkeypatch.setattr(svc, "adds_for_day", day_adds)
     monkeypatch.setattr(svc.settings, "roster_writes_enabled", True)
     return h
 
@@ -211,7 +207,7 @@ def test_after_todays_tip_the_lane_starts_tomorrow(h, monkeypatch):
      svc.StreamLaneLimit, None),
     (lambda h: h.pending.append(svc.PendingPickup(1, 30, MON, 99, HOLDER)), svc.StreamLaneInvalid, "scheduled_out"),
     (lambda h: setattr(h, "board", board(acq=None)), svc.StreamLaneInvalid, "no_matchup_end"),
-    (lambda h: setattr(h, "board", board(acq=AcquisitionState(per="day", limit=1, matchup_end=MON, waiver_hours=24))),
+    (lambda h: setattr(h, "board", board(acq=AcquisitionState(per="game_day", per_game_day=1, matchup_end=MON, waiver_hours=24))),
      None, None),
 ])
 def test_start_refuses(h, monkeypatch, arrange, error, reason):

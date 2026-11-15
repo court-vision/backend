@@ -214,7 +214,7 @@ class Settings(BaseSettings):
     # The policy every move Dime sends itself is held to. The day's cap counts Dime's own adds
     # (lanes keep their own budget); over the matchup and the season Dime keeps to the league's
     # own add limits, ESPN's settings, which every add counts toward. The reserve keeps that many
-    # of a per-matchup limit's adds for the user (injuries). Top N by the board's value are never
+    # of the matchup's adds for the user (injuries). Top N by the board's value are never
     # dropped. A player Dime added may be dropped the next day (streaming a spot).
     autopilot_adds_per_day: int = 2
     autopilot_adds_reserve: int = 1

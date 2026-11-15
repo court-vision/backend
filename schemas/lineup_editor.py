@@ -71,11 +71,13 @@ class LineupPlayer(ApiModel):
 
 class AcquisitionState(ApiModel):
     """ESPN's limits on adds and what this team has used: `settings.acquisitionSettings`
-    (mSettings) and the team's `transactionCounter` (mTeam). A day's own adds (what a
-    per-day limit counts) are not in the counter: `services.acquisitions.adds_for_day`."""
+    (mSettings) and the team's `transactionCounter` (mTeam). Either kind of limit is a matchup
+    total the team may use on any day: `per` says how ESPN sets it (`services.acquisitions`)."""
 
-    per: Literal["matchup", "day"]               # what `limit` counts over
-    limit: Optional[int] = None                  # adds per matchup (or per day); None = no limit
+    per: Literal["matchup", "game_day"]          # a number per matchup, or per day of it with games
+    limit: Optional[int] = None                  # adds this matchup; None = no limit, or not known yet
+    per_game_day: Optional[int] = None           # "game_day": adds for each of the matchup's days with games
+    game_days: Optional[int] = None              # "game_day": the matchup's days with games, once known
     matchup_period_id: Optional[int] = None      # ESPN's current matchup
     matchup_start: Optional[date] = None         # its first and last days
     matchup_end: Optional[date] = None

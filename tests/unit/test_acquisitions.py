@@ -1,9 +1,11 @@
 """
-services.acquisitions: ESPN's add limits and a team's usage, from the mSettings / mTeam /
-mTransactions2 shapes seen live on 2026-10-08 (the settings fixtures carry the same
-`acquisitionSettings`), and the budget rule the scheduled pickups apply.
+services.acquisitions: ESPN's add limits and a team's usage, from the mSettings / mTeam shapes
+seen live on 2026-10-08 and 2026-11-15 (the settings fixtures carry the same
+`acquisitionSettings`), the matchup total a per-game-day limit comes to, and the budget rule the
+scheduled pickups apply.
 """
 
+import asyncio
 import json
 from datetime import date
 from pathlib import Path
@@ -11,15 +13,20 @@ from pathlib import Path
 import pytest
 
 from schemas.lineup_editor import AcquisitionState
+from core.settings import settings
+from services import acquisitions as mod
+from services import schedule_service
+from services.acquisitions import espn_game_days as REAL_ESPN_GAME_DAYS   # before the autouse stub
 from services.acquisitions import (
     budget_block,
-    count_adds,
     in_current_matchup,
     is_limit_refusal,
-    matchup_allowance,
+    matchup_game_days,
     matchup_room,
     parse_acquisitions,
+    parse_pro_schedule,
     season_room,
+    with_game_days,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -45,12 +52,14 @@ def acq(**kw):
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_from_the_settings_fixture():
-    """The fixture's league (like every live league checked) allows one add a day, no season cap."""
+def test_a_per_game_day_limit_from_the_settings_fixture():
+    """The fixture's league (like every live league checked) allows one add for each day of the
+    matchup with games, no season cap. Its total waits for the matchup's days."""
     a = parse_acquisitions({**SETTINGS, "status": {"currentMatchupPeriod": 21}},
                            team(season=59, totals={"20": 7, "21": 14}))
-    assert (a.per, a.limit, a.season_limit) == ("day", 1, None)
+    assert (a.per, a.per_game_day, a.limit, a.season_limit) == ("game_day", 1, None, None)
     assert (a.matchup_period_id, a.matchup_used, a.season_used) == (21, 14, 59)
+    assert matchup_room(a) is None                          # no total yet: nothing is refused over it
 
 
 @pytest.mark.unit
@@ -77,18 +86,90 @@ def test_no_adds_yet_this_matchup_counts_zero():
     assert (a.matchup_period_id, a.matchup_used, a.season_used) == (1, 0, 0)
 
 
-@pytest.mark.unit
-def test_a_per_day_limit_has_no_matchup_room():
-    assert matchup_room(acq(per="day", limit=1)) is None
+def per_game_day(n=1, **kw):
+    return acq(per="game_day", limit=None, per_game_day=n, **kw)
 
 
 @pytest.mark.unit
-def test_a_matchup_s_allowance_is_the_set_number_or_one_day_s_limit_per_day_with_games():
-    assert matchup_allowance(acq(per="matchup", limit=7), None) == 7
-    assert matchup_allowance(acq(per="day", limit=1), 6) == 6      # a week with a day without games
-    assert matchup_allowance(acq(per="day", limit=2), 7) == 14
-    assert matchup_allowance(acq(per="day", limit=1), None) is None
-    assert matchup_allowance(acq(per="matchup", limit=None), 7) is None and matchup_allowance(None, 7) is None
+def test_a_per_game_day_limit_is_a_matchup_total_of_one_day_s_limit_per_day_with_games():
+    """James's league, 2026-11-15: x/7 most weeks, x/6 in one with a day without games, all of it
+    usable on any day (his team made three adds on Oct 30)."""
+    week = with_game_days(per_game_day(1, matchup_used=4), 7)
+    assert (week.limit, week.game_days, matchup_room(week)) == (7, 7, 3)
+    assert with_game_days(per_game_day(1), 6).limit == 6
+    assert with_game_days(per_game_day(2), 7).limit == 14
+    assert with_game_days(per_game_day(1), None).limit is None
+    assert with_game_days(acq(limit=4), 7) == acq(limit=4)          # a per-matchup limit is as set
+
+
+@pytest.mark.unit
+def test_the_pro_schedule_lists_espn_s_days_with_a_game():
+    payload = {"settings": {"proTeams": [
+        {"id": 1, "proGamesByScoringPeriod": {"1": [{"id": 9}], "2": [], "4": [{"id": 8}]}},
+        {"id": 2, "proGamesByScoringPeriod": {"4": [{"id": 8}], "5": [{"id": 7}]}},
+        {"id": 0},
+    ]}}
+    assert parse_pro_schedule(payload) == frozenset({1, 4, 5})
+    assert parse_pro_schedule({}) == frozenset()
+
+
+@pytest.fixture
+def this_season(monkeypatch):
+    monkeypatch.setattr(settings, "nba_season", "2026-27")
+    schedule_service.reset_cache()
+    yield
+    schedule_service.reset_cache()
+
+
+@pytest.mark.unit
+def test_a_matchup_s_game_days_are_espn_s_count_when_its_schedule_reads(monkeypatch, this_season):
+    """Opening night 2026-10-20 is ESPN day 1, so Nov 2-8 is days 14-20; ESPN had no game on Nov 3
+    (day 15, Election Day)."""
+    async def espn(year):
+        assert year == 2027
+        return frozenset(set(range(1, 30)) - {15})
+
+    monkeypatch.setattr(mod, "espn_game_days", espn)
+    assert asyncio.run(matchup_game_days(2027, date(2026, 11, 2), date(2026, 11, 8))) == 6
+    assert asyncio.run(matchup_game_days(2027, date(2026, 11, 9), date(2026, 11, 15))) == 7
+
+
+@pytest.mark.unit
+def test_our_calendar_counts_the_game_days_when_espn_s_schedule_can_t_be_read(this_season):
+    # The autouse stub answers None, as a failed read does
+    assert asyncio.run(matchup_game_days(2027, date(2026, 11, 2), date(2026, 11, 8))) == 6
+
+
+@pytest.mark.unit
+def test_espn_s_schedule_is_read_once_and_kept(monkeypatch):
+    mod._pro_schedule.clear()
+    calls = []
+
+    async def provider_get(provider, url, **kw):
+        calls.append(url)
+        return {"settings": {"proTeams": [{"proGamesByScoringPeriod": {"3": [{"id": 1}]}}]}}
+
+    import services.providers.http as http
+    monkeypatch.setattr(http, "provider_get", provider_get)
+    assert asyncio.run(REAL_ESPN_GAME_DAYS(2027)) == frozenset({3})
+    assert asyncio.run(REAL_ESPN_GAME_DAYS(2027)) == frozenset({3})
+    assert calls == ["https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/2027"]
+    mod._pro_schedule.clear()
+
+
+@pytest.mark.unit
+def test_a_failed_read_of_espn_s_schedule_is_none_and_retried_later(monkeypatch):
+    mod._pro_schedule.clear()
+
+    async def down(provider, url, **kw):
+        raise RuntimeError("ESPN timed out")
+
+    import services.providers.http as http
+    monkeypatch.setattr(http, "provider_get", down)
+    assert asyncio.run(REAL_ESPN_GAME_DAYS(2027)) is None
+    expires, days = mod._pro_schedule[2027]
+    assert days is None and expires - mod.time.monotonic() <= mod.PRO_SCHEDULE_RETRY_S
+    mod._pro_schedule.clear()
 
 
 # ---- the budget ------------------------------------------------------------------------
@@ -117,13 +198,26 @@ def test_a_used_up_season_blocks_every_day():
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_blocks_only_when_that_days_adds_are_used():
-    daily = acq(per="day", limit=1)
-    assert budget_block(daily, date(2026, 11, 20)) is None                 # not counted: ESPN decides
-    assert budget_block(daily, date(2026, 11, 20), day_adds=0) is None
-    assert budget_block(daily, date(2026, 11, 20), day_adds=1) == "That day's add is already used (1 of 1)"
-    assert budget_block(acq(per="day", limit=2), date(2026, 11, 20), day_adds=2) == \
-        "That day's adds are already used (2 of 2)"
+def test_a_per_game_day_limit_allows_several_adds_in_a_day_until_the_matchup_s_are_used():
+    week = with_game_days(per_game_day(1, matchup_used=3), 7)
+    assert budget_block(week, date(2026, 11, 20)) is None                  # three made, all on one day
+    used = week.model_copy(update={"matchup_used": 7})
+    assert budget_block(used, date(2026, 11, 20)) == "Every add this matchup allows is used (7 of 7)"
+    assert budget_block(per_game_day(1, matchup_used=7), date(2026, 11, 20)) is None   # no total known
+
+
+@pytest.mark.unit
+def test_pickups_still_scheduled_this_matchup_take_its_adds_too():
+    left_two = acq(limit=4, matchup_used=2)
+    assert budget_block(left_two, date(2026, 11, 20), pending=[date(2026, 11, 18)]) is None
+    assert budget_block(left_two, date(2026, 11, 20), pending=[date(2026, 11, 18), date(2026, 11, 21)]) == \
+        "Every add this matchup allows is used (2 of 4), with 2 more scheduled"
+    # One for next matchup's day counts there, not here
+    assert budget_block(left_two, date(2026, 11, 20), pending=[date(2026, 11, 18), date(2026, 11, 24)]) is None
+    # The season's cap counts every one
+    capped = acq(limit=None, season_limit=10, season_used=9)
+    assert budget_block(capped, date(2026, 11, 20), pending=[date(2026, 12, 1)]) == \
+        "Every add the league allows this season is used (9 of 10), with 1 more scheduled"
 
 
 @pytest.mark.unit
@@ -131,36 +225,6 @@ def test_in_current_matchup_is_inclusive():
     a = acq()
     assert in_current_matchup(a, date(2026, 11, 16)) and in_current_matchup(a, date(2026, 11, 22))
     assert not in_current_matchup(a, date(2026, 11, 15)) and not in_current_matchup(a, date(2026, 11, 23))
-
-
-# ---- a day's adds -------------------------------------------------------------------------
-
-
-def txn(tid, *, team_id=4, period=30, kind="FREEAGENT", status="EXECUTED", items=None):
-    return {"id": tid, "teamId": team_id, "scoringPeriodId": period, "type": kind, "status": status,
-            "items": items if items is not None else [{"type": "ADD", "toTeamId": team_id, "fromTeamId": 0},
-                                                      {"type": "DROP", "toTeamId": 0, "fromTeamId": team_id}]}
-
-
-@pytest.mark.unit
-def test_count_adds_counts_executed_free_agent_and_waiver_adds_for_the_team_and_day():
-    rows = [
-        txn("a"), txn("b", kind="WAIVER"),
-        txn("a"),                                   # listed under two days' reads: counted once
-        txn("c", status="CANCELED"), txn("d", kind="ROSTER"), txn("e", kind="DRAFT"),
-        txn("f", team_id=9), txn("g", period=31),
-        txn("h", items=[{"type": "DROP", "toTeamId": 0, "fromTeamId": 4}]),     # a drop only
-    ]
-    assert count_adds(rows, 4, 30) == 2
-
-
-@pytest.mark.unit
-def test_count_adds_leaves_out_pre_season_adds():
-    """ESPN records pre-season adds under day 1 but doesn't count them toward the limit."""
-    pre = {**txn("p", period=1), "proposedDate": 1_759_700_000_000}         # 2025-10-05
-    season = {**txn("s", period=1), "proposedDate": 1_792_000_000_000}      # 2026-10-14
-    assert count_adds([pre, season], 4, 1) == 2
-    assert count_adds([pre, season], 4, 1, since_ms=1_790_000_000_000) == 1
 
 
 # ---- ESPN's refusal ----------------------------------------------------------------------
