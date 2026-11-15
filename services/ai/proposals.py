@@ -74,7 +74,7 @@ from services.acquisitions import budget_block
 from services.ai.fantasy import MoveInput, ProjectMatchupInput, _first_open_day, _identities, project_matchup
 from services.daily_actions_service import has_open_seat
 from services.lineup_editor_service import _roster_slots, _slot_name, planner_players, slot_counts_of
-from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, validate_moves
+from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, Move, plan_ir, validate_moves
 from services.providers import get_provider_adapter
 from services.roster_transaction_service import (
     RosterTransactionInvalid,
@@ -785,15 +785,28 @@ def _move_view(m: Move, names: dict[int, Any]) -> dict[str, Any]:
             "from_slot": _slot_name(m.from_slot_id), "to_slot": _slot_name(m.to_slot_id), "role": m.role, "note": m.note}
 
 
+TO_IR_NOTE = (
+    "to_ir lists injured players who sit this day and fit IR's open seats. IR wins over starting them: the "
+    "roster spot it frees for a pickup is worth more than the slim chance they play, so move them to IR even "
+    "where fill starts them (auto-lineup never moves anyone to IR). With IR full nobody is listed, and "
+    "starting an out player over one without a game costs nothing."
+)
+
+
 def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] = (),
                 protected: Collection[int] = ()) -> dict[str, Any]:
     """The model's view of a day's board (NBA ids only): slots, every player's slot, eligibility,
     game, lock and value, and the server's own fill for the day, as auto-lineup would make it
     with the team's holds (a pinned player marked `pinned`). A player the user protected (ESPN ids
-    in `protected`, the roster lock) is marked `protected`: never a drop."""
+    in `protected`, the roster lock) is marked `protected`: never a drop. `to_ir` is the Week
+    desk's IR moves for the day (`plan_ir`): injured players who sit, into IR's open seats. IR wins
+    over a start, which the note says, since auto-lineup's fill never moves anyone to IR and may
+    start one of them."""
     state = board.state
     planners = {pp.player_id: pp for pp in planner_players(state)}
     plan = steering.fill_with(list(planners.values()), slot_counts_of(state), holds, board.nba_date)
+    to_ir = [a.move for a in plan_ir(list(planners.values()), slot_counts_of(state))
+             if a.kind == "ir_in" and a.move is not None]
     pinned = {h.player_id for h in steering.on_day(holds, board.nba_date, steering.PIN)}
     by_id = {p.player_id: p for p in state.players}
     players = []
@@ -821,9 +834,11 @@ def lineup_view(board: _DayBoard, team_id: int, holds: Sequence[steering.Hold] =
                  "unfilled": [{"player_id": by_id[u.player_id].nba_player_id if u.player_id in by_id else None,
                                "name": u.name, "reason": u.reason} for u in plan.unfilled],
                  "summary": plan.summary},
+        "to_ir": [_move_view(m, by_id) for m in to_ir],
         "notes": [*(["Players without a player_id have no NBA id in Court Vision and can't be moved from here."]
                     if any(p["player_id"] is None for p in players) else []),
-                  *([roster_protection.DIME_NOTE] if any(p.get("protected") for p in players) else [])],
+                  *([roster_protection.DIME_NOTE] if any(p.get("protected") for p in players) else []),
+                  *([TO_IR_NOTE] if to_ir else [])],
     }
 
 

@@ -689,6 +689,27 @@ def test_get_lineup_lists_the_board_with_eligibility_game_lock_and_the_fill(boar
 
 
 @pytest.mark.unit
+def test_get_lineup_lists_the_week_desk_s_ir_moves_and_says_ir_wins_over_the_fill_s_start(boards):
+    """Kawhi is OUT with a game tonight on the bench and Jokic idle at UT: auto-lineup's fill starts
+    Kawhi (it never moves anyone to IR), and to_ir sends him to the open IR seat, which wins."""
+    kawhi = lplayer(KAWHI, "Kawhi Leonard", BE, nba_id=NBA_KAWHI, team="LAC", status="OUT", injured=True,
+                    eligible=(PG, UT, BE, 13), value=30.0)
+    jokic = lplayer(JOKIC, "Nikola Jokic", UT, nba_id=NBA_JOKIC, game=False, value=55.0)
+    boards.today = state([jokic, kawhi], counts={"11": 1, "12": 1, "13": 1})
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21)))
+    assert [(m["name"], m["to_slot"]) for m in out["fill"]["moves"]] == [("Kawhi Leonard", "UT"), ("Nikola Jokic", "BE")]
+    assert out["to_ir"] == [{"player_id": NBA_KAWHI, "name": "Kawhi Leonard", "from_slot": "BE", "to_slot": "IR",
+                             "role": "shift", "note": "OUT"}]
+    assert out["notes"] == [mod.TO_IR_NOTE]
+
+    # IR full: nothing to IR, and starting him over a player without a game is free
+    held = lplayer(99, "Held On IR", 13, nba_id=990, status="OUT", injured=True, eligible=(PG, UT, BE, 13))
+    boards.today = state([jokic, kawhi, held], counts={"11": 1, "12": 1, "13": 1})
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21)))
+    assert out["to_ir"] == [] and out["notes"] == [] and len(out["fill"]["moves"]) == 2
+
+
+@pytest.mark.unit
 def test_get_lineup_marks_the_players_the_user_protected(boards, protect):
     boards.today = state(lineup_board())
     protect({21: [EDWARDS]})
