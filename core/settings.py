@@ -189,15 +189,16 @@ class Settings(BaseSettings):
     ai_agent_max_context_tokens: int = 150_000
 
     # Dime's check-ins (the Dime autopilot plan, step 3; services/ai/checkins.py):
-    # turns Dime starts itself on a schedule, in shadow (nothing is sent). They run
-    # only on a team listed here (internal usr.teams ids, JSON: [23]) that also has
-    # a usr.autopilot row (switched on in the AI desk), and only while
-    # AUTOPILOT_ENABLED and AI_ENABLED are on. They are priced like any turn
+    # turns Dime starts itself on a schedule. They run on a team of an account with CV
+    # AI access (AI_AGENT_USER_IDS) that has a usr.autopilot row with check-ins on (set
+    # in the Account desk's AI and automation), and only while AUTOPILOT_ENABLED and
+    # AI_ENABLED are on. (AUTOPILOT_TEAM_IDS, the team allowlist, went on 2026-11-15:
+    # every team of such an account can be set to AI or autopilot; a leftover value is
+    # ignored.) They are priced like any turn
     # (AI_AGENT_TURN_MAX_USD is the ceiling of each) but on their own monthly line,
     # shared by every autopilot team, so they can't eat the AI desk's budget. A
     # check-in reads more than a chat answer, so it gets more steps and more time.
     autopilot_enabled: bool = True
-    autopilot_team_ids: list[int] = []
     autopilot_monthly_budget_usd: float = 60.0
     autopilot_checkins_per_day: int = 6
     autopilot_checkin_max_model_calls: int = 12
@@ -208,8 +209,8 @@ class Settings(BaseSettings):
     # cancel_pickup tools, their chips, and the pins a sent lineup chip leaves) and Dime in
     # the Draft desk (services/ai/draft.py) come with the AI desk: AI_ENABLED and the
     # account's place on AI_AGENT_USER_IDS. Acting (services/ai/acting.py) and event
-    # check-ins (services/ai/events.py) happen only on a team on AUTOPILOT_TEAM_IDS, and
-    # only for an automation its owner put at AI. AUTOPILOT_ENABLED, ROSTER_WRITES_ENABLED
+    # check-ins (services/ai/events.py) happen only on a team of an account with CV AI
+    # access, and only for an automation its owner put at AI. AUTOPILOT_ENABLED, ROSTER_WRITES_ENABLED
     # and the team's Pause stop them.
     # The policy every move Dime sends itself is held to. The day's cap counts Dime's own adds
     # (lanes keep their own budget); over the matchup and the season Dime keeps to the league's

@@ -388,8 +388,8 @@ async def delete_note(note_id: int = Path(..., gt=0), user: UserContext = Depend
 
 _CHECKIN_ERRORS = {
     **_AGENT_ERRORS,
-    403: {"description": "Not on the invite list (AI_INVITE_ONLY), or check-ins aren't open for this team "
-                         "(AI_AUTOPILOT_NOT_ALLOWED)"},
+    403: {"description": "Not on the invite list (AI_INVITE_ONLY, which also covers every team of the account: "
+                         "AI_AUTOPILOT_NOT_ALLOWED)"},
     404: {"description": "team_id is not one of the caller's teams (TEAM_NOT_FOUND)"},
     503: {"description": "Turned off (AI_DISABLED, AI_AUTOPILOT_DISABLED)"},
 }

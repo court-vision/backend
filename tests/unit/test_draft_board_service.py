@@ -950,6 +950,10 @@ def fake_tables(monkeypatch):
                         classmethod(lambda cls, *fields: _Query(state["profiles"])))
     # The calendar is a real file; the fetch tests are about the tables.
     monkeypatch.setattr(DraftBoardService, "_calendar_weeks", staticmethod(lambda: ()))
+    # Preseason unless a test says otherwise: today's date must not decide a fetch test.
+    state["season_reads"] = None
+    monkeypatch.setattr(DraftBoardService, "_season_reads",
+                        staticmethod(lambda session_id, season: state["season_reads"]))
     return state
 
 
@@ -1878,3 +1882,92 @@ def test_market_delta_is_measured_against_the_league_s_own_board(monkeypatch):
     cats = _board(resolve_scoring(_cat_league()))
     row = next(r for r in cats.data if r.player_id == 2)
     assert row.market_delta == row.market_rank - row.cv_rank
+
+
+# ---- a draft held in season (services/draft_in_season.py) ----
+
+def _season_reads(**overrides):
+    from services import draft_in_season as ins
+    from services.draft_board_service import _SeasonReads
+
+    base = dict(
+        first_day=date(2026, 11, 15),
+        rows=[_row(1, fpts=60.0, gp=10, name="Star", espn_id=101, team="LAL", pts=40)],
+        as_of=date(2026, 11, 14),
+        injuries={2: "OUT", 1: "QUESTIONABLE"},
+        calendar=(
+            ins.DatedWeek(date(2026, 11, 9), SampleWeek(4, tuple(frozenset({"DEN", "LAL"}) for _ in range(7)))),
+            ins.DatedWeek(date(2026, 11, 16), SampleWeek(5, (frozenset({"DEN"}),) * 7)),
+        ),
+    )
+    base.update(overrides)
+    return _SeasonReads(**base)
+
+
+@pytest.mark.unit
+def test_fetch_in_season_blends_this_season_counts_the_games_left_and_reads_todays_injuries(fake_tables):
+    fake_tables["market"] = [_market_row(1, overall_rank=1, injury_status="QUESTIONABLE"),
+                             _market_row(2, overall_rank=9)]
+    fake_tables["season_reads"] = _season_reads()
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    by_id = {r.id: r for r in inputs.pool}
+    # Star: last season's 50 a game and this season's 60 on ten games, half and half
+    assert by_id[1].fpts_avg == 55.0 and by_id[1].team == "LAL"
+    assert inputs.source[1] == "baseline"
+    assert inputs.in_season.season_gp == {1: 10} and inputs.in_season.blended == 1
+    # The calendar from Nov 15 on: week 4 has one day left
+    assert [len(w.days) for w in inputs.calendar] == [1, 7]
+    assert inputs.schedule_weeks == inputs.calendar and inputs.season_weeks == 2
+    # Nothing projects either, so a typical season's share of what each team has
+    # left: Star's LAL plays 1 of its 7 games from here, Guard's DEN 8 of 14
+    assert inputs.games_left == {1: round(65 * 1 / 7, 2), 2: round(65 * 8 / 14, 2)}
+    # Today's flags replace the snapshot's; Guard's is new since it, Star's isn't
+    assert inputs.live_injury == {2: "OUT", 1: "QUESTIONABLE"}
+    assert inputs.new_injury == frozenset({2})
+
+
+@pytest.mark.unit
+def test_fetch_before_the_season_reads_nothing_new(fake_tables):
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+    assert inputs.in_season is None and inputs.games_left == {}
+    assert inputs.live_injury is None and inputs.new_injury == frozenset()
+
+
+@pytest.mark.unit
+def test_a_board_in_season_says_so_and_prices_an_injury_newer_than_the_projection(monkeypatch):
+    from services import draft_in_season as ins
+
+    found = ins.InSeason(games_from=date(2026, 11, 15), season_gp={1: 12, 3: 11},
+                         season_fpts={1: 61.5, 3: 44.0}, season_as_of=date(2026, 11, 14), blended=2)
+    # Player 3 (projected, 74 games) is out today and was healthy in the snapshot;
+    # player 2's snapshot OUT has cleared.
+    market = _espn_market(**{"2": {"injury_status": "OUT"}})
+    inputs = _inputs(market=market, in_season=found, games_left={1: 50.0, 2: 45.0, 3: 48.0, 4: 46.0, 5: 40.0, 6: 44.0},
+                     live_injury={3: "OUT"}, new_injury=frozenset({3}))
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()))
+
+    meta = resp.meta.in_season
+    assert meta is not None and meta.games_from == date(2026, 11, 15) and meta.prior_games == 10
+    assert (meta.blended, meta.injured, meta.injured_since_projection) == (2, 1, 1)
+    rows = {r.player_id: r for r in resp.data}
+    assert (rows[1].season_gp, rows[1].season_fpts_avg) == (12, 61.5)
+    assert rows[2].season_gp is None
+    assert {pid: rows[pid].injury_status for pid in (2, 3)} == {2: None, 3: "OUT"}
+    recs = {r.player_id: r for r in resp.recommendations}
+    hurt = next(c for c in recs[3].components if c.key == "injury")
+    assert hurt.value == -round(0.15 * recs[3].season_value, 1) and hurt.value < 0
+    assert hurt.detail == "listed OUT today, hurt since his projection was made"
+    # Values are built on the games left, not a full season: 30 a game over 50 games
+    season = next(c for c in recs[1].components if c.key == "season_value")
+    assert season.value == pytest.approx(30.0 * 50.0, rel=0.05)
+
+
+@pytest.mark.unit
+def test_a_preseason_board_has_no_in_season_meta(stub_inputs):
+    resp = _board(resolve_scoring(_league()))
+    assert resp.meta.in_season is None
+    assert all(r.season_gp is None for r in resp.data)

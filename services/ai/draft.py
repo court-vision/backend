@@ -461,7 +461,7 @@ def facts_of(board: dict[str, Any], *, following: Optional[int]) -> dict[str, An
 def _board_block(board: dict[str, Any]) -> str:
     """The board as the brief carries it: get_draft_board's result, trimmed to what a pick needs."""
     keep_rec = ("player_id", "name", "position", "team", "score", "vorp", "season_value", "availability", "injury",
-                "adp", "cv_rank", "market_rank", "reason")
+                "adp", "cv_rank", "market_rank", "season_gp", "season_fpts_avg", "reason")
     out = {
         "picks_made": board.get("picks_made"),
         "my_next_pick": board.get("my_next_pick"),
@@ -478,7 +478,22 @@ def _board_block(board: dict[str, Any]) -> str:
     }
     if board.get("category_need"):
         out["category_need"] = board["category_need"]
+    if board.get("in_season"):
+        out["in_season"] = board["in_season"]
     return json.dumps(out, default=str, ensure_ascii=False, separators=(",", ":"))
+
+
+def _season_words(board: Optional[dict[str, Any]]) -> str:
+    """For a draft held during the season, what the board's numbers already carry."""
+    found = (board or {}).get("in_season")
+    if not found:
+        return ""
+    return (
+        "This draft is held during the season: the board's values blend this season's games (season_gp, "
+        f"season_fpts_avg) with the projection, count only the games from {found.get('games_from')} on, and "
+        "its injury flags are today's. ADP is the preseason crowd's. Weigh a hot or cold start by your "
+        "playbook's draft rules.\n\n"
+    )
 
 
 def _room_words(room: OwnedDraftSessionContext, detail: Any) -> str:
@@ -529,7 +544,9 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
             "Set the plan this draft is played to:\n"
             + recall
             + "- get_draft_board for the room: who the board values, ESPN's market, and in a category league "
-            "where an average roster stands (category_need lists the category keys).\n"
+            "where an average roster stands (category_need lists the category keys). In a draft held during "
+            "the season (in_season on the board), note who is well ahead of or behind his projection where "
+            "it changes the plan.\n"
             "- Decide the plan. In a category league: which categories to concede (none, or up to three that "
             "go together, like FT% with big men), and why; in a points league there are none to punt. Then when "
             "to take centers and guards against the roster slots, and who to target with the first picks "
@@ -542,6 +559,7 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
             f"[You hold the user's seat in {where}. {at} is theirs, and you are on the clock. The user asked "
             "you to draft this mock for them; nothing here reaches ESPN.]\n\n"
             f"{_plan_line(plan)}\n\n"
+            + _season_words(board) +
             "The room's board, read just now (get_draft_board's result; cite these numbers):\n"
             f"{_board_block(board or {})}\n\n"
             "Make the pick:\n"
@@ -558,6 +576,7 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
             f"[Pick note for {where}. The user's {at} is {when}. They read this beside the board while they "
             "pick; you don't make the pick.]\n\n"
             f"{_plan_line(plan)}\n\n"
+            + _season_words(board) +
             "The room's board, read just now (get_draft_board's result; cite these numbers):\n"
             f"{_board_block(board or {})}\n\n"
             "Write the note: who you'd take and why in a sentence or two, the runner-up, and whether anyone "
