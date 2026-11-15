@@ -35,8 +35,8 @@ old (`stale`), or the row left AI before a check-in took it (`level`). What an
 event check-in commits counts under Late scratches (autonomy.rows_of), so it is
 sent only where that row acts.
 
-There is no switch for events alone: they follow the team (AUTOPILOT_TEAM_IDS and
-its Late scratches row). With AI_ENABLED or AUTOPILOT_ENABLED off nothing is
+There is no switch for events alone: they follow the team (its owner's CV AI access
+and its Late scratches row). With AI_ENABLED or AUTOPILOT_ENABLED off nothing is
 recorded and no check-in takes an event.
 """
 

@@ -29,8 +29,8 @@ it is on (off, the stored rows count again).
 Dime sends a move itself (`acts`) only when its row is at AI and check-ins are on.
 Otherwise a check-in's change is a review: logged as what Dime would have done and never
 sent (step 3's shadow). There is no server switch for acting alone: the send is held to
-the policy (services/ai/acting.py), which is where AUTOPILOT_TEAM_IDS and the kill
-switches (AI_ENABLED, AUTOPILOT_ENABLED) stop it. A move counts under the row of
+the policy (services/ai/acting.py), which is where CV AI access (the owner on
+AI_AGENT_USER_IDS) and the kill switches (AI_ENABLED, AUTOPILOT_ENABLED) stop it. A move counts under the row of
 its kind (`rows_of`): slot moves and pins under lineup, adds and drops under
 daily_actions, lanes and their holds under lanes, and whatever an event check-in
 commits under late_scratch. A chip that touches two rows acts only if both do.
@@ -81,7 +81,8 @@ EVENT_KINDS: frozenset[str] = frozenset({"event"})
 def acting_available() -> bool:
     """The server's kill switches are on (AI_ENABLED and AUTOPILOT_ENABLED): off, no check-in starts
     and nothing is sent, whatever a team's rows say. Acting and event check-ins have no switch of
-    their own: which teams is AUTOPILOT_TEAM_IDS, and which automations is each team's rows at AI."""
+    their own: which teams is any team of an account with CV AI access, and which automations is
+    each team's rows at AI."""
     return settings.ai_enabled and settings.autopilot_enabled
 
 

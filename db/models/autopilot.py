@@ -5,7 +5,7 @@ step 3; services/ai/checkins.py), what it does on its own (migration 0044, step 
 services/ai/acting.py) and the events that start a check-in (migration 0045, step 6;
 services/ai/events.py).
 
-A team Dime runs on has an `Autopilot` row (and an entry in AUTOPILOT_TEAM_IDS),
+A team Dime runs on has an `Autopilot` row (any team of an account with CV AI access),
 which also says which automations Dime does itself there (`ai_rows`, and the
 `autopilot` switch; services/ai/autonomy.py). Each check-in Dime starts itself is an `AiCheckin`,
 claimed by its insert and settled with its turn; each call the check-in makes,

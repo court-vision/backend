@@ -119,7 +119,7 @@ async def checkin_events(req: CheckinEventsReq):
 
     Called by data-platform's availability pipeline (its late-scratch events, every 2-minute tick that
     has one) and its news feed (every 5 minutes). Keys only: the verdicts and items are read here. Only
-    teams on AUTOPILOT_TEAM_IDS with Late scratches at AI hear them; the check-ins run on here after
+    teams of accounts with CV AI, with Late scratches at AI, hear them; the check-ins run on here after
     the response.
     """
     out = await events.receive([(v.player_id, v.game_date) for v in req.availability], req.news)

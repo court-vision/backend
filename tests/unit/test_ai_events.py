@@ -35,7 +35,6 @@ def on(monkeypatch):
     monkeypatch.setattr(settings, "ai_enabled", True)
     monkeypatch.setattr(settings, "autopilot_enabled", True)
     monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
-    monkeypatch.setattr(settings, "autopilot_team_ids", [23])
     monkeypatch.setattr(settings, "autopilot_checkins_per_day", 6)
     monkeypatch.setattr(settings, "autopilot_event_checkins_per_day", 3)
     monkeypatch.setattr(settings, "autopilot_event_fold_minutes", 20)
@@ -236,14 +235,14 @@ class TestKick:
         kicking.event_checkins = 3
         assert kick(et(TUE, 15)) is None
 
-    def test_off_paused_or_off_the_allowlist_starts_nothing(self, kicking, monkeypatch):
+    def test_off_paused_or_an_account_without_cv_ai_starts_nothing(self, kicking, monkeypatch):
         kicking.taken |= {("morning", TUE)}
         kicking.row.paused_at = et(TUE, 8)
         assert kick(et(TUE, 15)) is None
         kicking.row.paused_at = None
-        monkeypatch.setattr(settings, "autopilot_team_ids", [])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [])
         assert kick(et(TUE, 15)) is None
-        monkeypatch.setattr(settings, "autopilot_team_ids", [23])
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [42])
         monkeypatch.setattr(settings, "autopilot_enabled", False)
         assert kick(et(TUE, 15)) is None
         assert kicking.events_started == []
@@ -267,7 +266,6 @@ def receiving(on, monkeypatch):
                             ai_rows=["late_scratch"], autopilot=False),
             SimpleNamespace(team_id_id=24, user_id_id=42, paused_at=None, active_since=et(MON, 0),
                             ai_rows=[], autopilot=True)]
-    monkeypatch.setattr(settings, "autopilot_team_ids", [23, 24])
     found = [events.Fact(source=events.AVAILABILITY, player_id=1628973, summary="Brunson ruled out",
                          game_date=TUE, verdict="out", changed_at=et(TUE, 18)),
              events.Fact(source=events.NEWS, player_id=1628404, summary="Hart: news", news_item_id=9)]
