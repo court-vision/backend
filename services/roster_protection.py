@@ -312,3 +312,112 @@ class RosterProtectionService:
             raise NotFoundError("PROTECTION_NOT_FOUND", "That player isn't protected")
         log.info("roster_protection_cleared", team_id=team.team_id, player_id=player_id)
         return await RosterProtectionService._resp(team.team_id, f"{row.player_name} is no longer protected")
+
+
+# ------------------------------- the cutover seed ------------------------------- #
+#
+# Dime's own rule never to drop one of the roster's top six by value gave way to these
+# protections (James, 2026-11-15), so that the user decides who is never dropped. So that the
+# cutover drops nothing Dime used to keep, a team Dime acts on gets its first draft picks still
+# on the roster protected, once, when a check-in starts there (services/ai/checkins.py) and
+# usr.autopilot.protections_seeded_at (0050) is still empty. The first picks by pick number,
+# an auction's by price; a league with no draft on ESPN takes the roster's top by value, the
+# rule this replaces. A player a pending pickup drops or an open lane's spot holds is left
+# alone: the user is already moving him out.
+
+SEED_DRAFT, SEED_VALUE = "draft", "value"
+
+
+def draft_core(payload: dict, espn_team_id: Optional[int], n: int) -> list[int]:
+    """The team's first `n` draft picks (ESPN ids): by pick number, or by price in an auction.
+    Empty when ESPN holds no completed draft for the league (or the team isn't known)."""
+    if espn_team_id is None or n <= 0:
+        return []
+    picks = [p for p in ((payload.get("draftDetail") or {}).get("picks") or [])
+             if int(p.get("playerId") or -1) > 0 and int(p.get("teamId") or -1) == espn_team_id]
+    draft = ((payload.get("settings") or {}).get("draftSettings") or {})
+    if str(draft.get("type") or "").upper() == "AUCTION":
+        picks.sort(key=lambda p: (-(p.get("bidAmount") or 0), int(p.get("overallPickNumber") or 0)))
+    else:
+        picks.sort(key=lambda p: int(p.get("overallPickNumber") or 0))
+    return [int(p["playerId"]) for p in picks[:n]]
+
+
+def _moving_out(team_id: int) -> frozenset[int]:
+    """The players the team's pending pickups drop or its open lanes' spots hold (ESPN ids)."""
+    from db.models.scheduled_pickups import ScheduledPickup as Pickup
+    from db.models.stream_lanes import StreamLane as Lane
+    drops = {r.drop_player_id for r in Pickup.select(Pickup.drop_player_id).where(
+        (Pickup.team == team_id) & (Pickup.status == "pending") & Pickup.drop_player_id.is_null(False))}
+    holders = {r.holder_player_id for r in Lane.select(Lane.holder_player_id).where(
+        (Lane.team == team_id) & (Lane.status.in_(("active", "paused"))) & Lane.holder_player_id.is_null(False))}
+    return frozenset(drops | holders)
+
+
+def _store_seed(team_id: int, user_id: int, players: Sequence[Any], now: datetime) -> list[str]:
+    """Protect `players` and mark the team seeded, in one transaction; the names newly protected.
+    A team another check-in seeded first is left as that one left it."""
+    from db.base import db
+    from db.models.autopilot import Autopilot
+    with db.atomic():
+        marked = (Autopilot.update(protections_seeded_at=now)
+                  .where((Autopilot.team_id == team_id) & Autopilot.protections_seeded_at.is_null(True)).execute())
+        if not marked:
+            return []
+        Row, held, made = _model(), _ids(team_id), []
+        for p in players:
+            if p.player_id in held:
+                continue
+            try:
+                with db.atomic():       # a savepoint: a protect made at the same moment fails only this insert
+                    Row.create(team_id=team_id, user_id=user_id, player_id=p.player_id, nba_player_id=p.nba_player_id,
+                               player_name=p.name, player_team=p.team or None, created_at=now)
+                made.append(p.name)
+            except IntegrityError:
+                pass
+        return made
+
+
+async def seed(team, league_info: LeagueInfo, *, n: Optional[int] = None,
+               now: Optional[datetime] = None) -> list[str]:
+    """Protect the team's first `n` draft picks still on its roster (AUTOPILOT_SEED_PROTECTED),
+    once, and return the names newly protected. Raises when ESPN can't be read, so the next
+    check-in tries again; a team not on ESPN (Dime moves no one there) is marked with none."""
+    from core.settings import settings
+    from schemas.common import FantasyProvider
+    from services.lineup_editor_service import _roster_slots
+    from services.providers import get_provider_adapter
+    from services.providers.http import provider_get
+    from services.espn_service import EspnService
+    from utils.constants import ESPN_FANTASY_ENDPOINT
+
+    n = settings.autopilot_seed_protected if n is None else n
+    now = now or datetime.now(timezone.utc)
+    if league_info.provider != FantasyProvider.ESPN or n <= 0:
+        return await run_db("protections.seed", _store_seed, team.team_id, team.user_id, [], now)
+    board = await get_provider_adapter(league_info.provider).read_lineup(
+        team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+    payload = await provider_get(
+        "espn", ESPN_FANTASY_ENDPOINT.format(int(league_info.year), int(league_info.league_id)),
+        params={"view": ["mDraftDetail", "mSettings"]}, cookies=EspnService._cookies(league_info),
+        expect_key="settings")
+    rostered = {p.player_id: p for p in board.players}
+    picks = draft_core(payload, board.espn_team_id or league_info.espn_team_id, n)
+    source = SEED_DRAFT if picks else SEED_VALUE
+    if not picks:
+        picks = [p.player_id for p in sorted(board.players, key=lambda p: p.avg_points or 0.0, reverse=True)[:n]]
+    moving = await run_db("protections.moving_out", _moving_out, team.team_id)
+    chosen = [rostered[pid] for pid in picks if pid in rostered and pid not in moving]
+    made = await run_db("protections.seed", _store_seed, team.team_id, team.user_id, chosen, now)
+    log.info("roster_protection_seeded", team_id=team.team_id, source=source, protected=made,
+             skipped=[rostered[pid].name for pid in picks if pid in moving and pid in rostered])
+    return made
+
+
+async def seed_for(team_id: int, user_id: int) -> list[str]:
+    """`seed` for a team by id, with its owner's league credentials (a check-in's start)."""
+    from api.deps import ensure_team_owned, load_owned_league_info
+    team = await run_db("ai.owned_team", ensure_team_owned, team_id, user_id)
+    if team is None:
+        return []
+    return await seed(team, await load_owned_league_info(team))

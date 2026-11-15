@@ -741,12 +741,6 @@ class ScheduledPickupService:
         blocked = budget_block(acq, nba_date)
         if blocked:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
-        if by_dime and add is not None:
-            # The adds left now, not when Dime scheduled it: the user may have used some since
-            from services.ai import acting
-            reserve = acting.reserve_block(acq, nba_date)
-            if reserve is not None:
-                return await settle(row, now, SKIPPED, acting.P_RESERVE, detail=reserve, team_name=team_name)
 
         protected: frozenset[int] = frozenset()
         if drop is not None:

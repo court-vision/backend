@@ -159,3 +159,93 @@ def test_0048_rollback_and_forward(user, team):
     assert db.execute_sql("SELECT to_regclass('usr.roster_protections')").fetchone()[0] is None
     db.execute_sql(forward)
     assert svc._ids(team.team_id) == frozenset()
+
+
+# ---- 0050: the team's first draft picks protected once, for Dime (roster_protection.seed) ----
+
+
+def _player(pid, name, nba_id=None, value=0.0):
+    return LineupPlayer(player_id=pid, nba_player_id=nba_id, name=name, team="MIN", lineup_slot_id=12,
+                        lineup_slot="BE", eligible_slot_ids=[12], eligible_slots=["BE"], avg_points=value)
+
+
+def _autopilot(user, team):
+    from db.models.autopilot import Autopilot
+    return Autopilot.create(team_id=team.team_id, user_id=user.user_id, ai_rows=["daily_actions"])
+
+
+def test_0050_is_applied_and_a_team_starts_unseeded(user, team):
+    ids = {r[0] for r in db.execute_sql("SELECT migration_id FROM public._yoyo_migration").fetchall()}
+    assert "0050__protections_seeded" in ids
+    assert _autopilot(user, team).protections_seeded_at is None
+
+
+def test_what_the_user_is_already_moving_out_is_every_pending_drop_and_open_lane_spot(user, team):
+    lane = _lane(user, team, holder=JOKIC)
+    _lane(user, team, holder=KAWHI, status="ended")
+    _pickup(user, team, 101)                                   # drops Edwards, no lane
+    _pickup(user, team, 102, drop=JOKIC, lane_id=lane.id)      # the lane's own
+    _pickup(user, team, 103, drop=KAWHI, status="executed")
+    assert svc._moving_out(team.team_id) == frozenset({EDWARDS, JOKIC})
+
+
+def test_the_seed_is_stored_once_and_keeps_what_the_user_protected(user, team):
+    from db.models.autopilot import Autopilot
+    _autopilot(user, team)
+    svc._insert(team.team_id, user.user_id, JOKIC, 203999, "Nikola Jokic", "DEN")
+    players = [_player(JOKIC, "Nikola Jokic", 203999), _player(EDWARDS, "Anthony Edwards", 1630162)]
+    assert svc._store_seed(team.team_id, user.user_id, players, NOW) == ["Anthony Edwards"]
+    assert Autopilot.get_by_id(team.team_id).protections_seeded_at == NOW
+    assert svc._ids(team.team_id) == frozenset({JOKIC, EDWARDS})
+    # Unprotected later, he stays unprotected: the seed never runs twice
+    svc._delete(team.team_id, EDWARDS)
+    assert svc._store_seed(team.team_id, user.user_id, players, NOW + timedelta(days=1)) == []
+    assert svc._ids(team.team_id) == frozenset({JOKIC})
+
+
+def test_seeding_end_to_end_protects_the_first_picks_on_the_roster(user, team, monkeypatch):
+    """ESPN stubbed: the team's first picks, less one traded away and one a pending pickup drops."""
+    from db.models.autopilot import Autopilot
+    from services import providers
+    from services.providers import http
+
+    _autopilot(user, team)
+    _pickup(user, team, 101, drop=KAWHI)
+    board = LineupState(provider=FantasyProvider.ESPN, team_name="T", espn_team_id=1, nba_date="2026-11-16",
+                        scoring_period_id=28, roster_version="v", fetched_at="now", can_write=True,
+                        players=[_player(JOKIC, "Nikola Jokic", 203999), _player(EDWARDS, "Anthony Edwards", 1630162),
+                                 _player(KAWHI, "Kawhi Leonard", 202695), _player(9, "A Streamer")])
+
+    class Adapter:
+        async def read_lineup(self, team_id, league_info, **kw):
+            return board
+
+    async def espn(provider, url, **kw):
+        assert kw["params"] == {"view": ["mDraftDetail", "mSettings"]}
+        return {"settings": {"draftSettings": {"type": "SNAKE"}}, "draftDetail": {"picks": [
+            {"overallPickNumber": 3, "teamId": 1, "playerId": JOKIC},
+            {"overallPickNumber": 18, "teamId": 1, "playerId": 777},       # traded away since
+            {"overallPickNumber": 23, "teamId": 1, "playerId": KAWHI},     # a pending pickup drops him
+            {"overallPickNumber": 38, "teamId": 1, "playerId": EDWARDS},
+            {"overallPickNumber": 4, "teamId": 2, "playerId": 9},          # another team's
+        ]}}
+
+    monkeypatch.setattr(providers, "get_provider_adapter", lambda provider: Adapter())
+    monkeypatch.setattr(http, "provider_get", espn)
+    owned = SimpleNamespace(team_id=team.team_id, user_id=user.user_id, league_info_json=team.league_info,
+                            league_id=None, league=None)
+    league = LeagueInfo(provider=FantasyProvider.ESPN, league_id=552315826, team_name="T", year=2027)
+
+    assert asyncio.run(svc.seed(owned, league, n=6, now=NOW)) == ["Nikola Jokic", "Anthony Edwards"]
+    assert svc._ids(team.team_id) == frozenset({JOKIC, EDWARDS})
+    assert Autopilot.get_by_id(team.team_id).protections_seeded_at == NOW
+
+
+def test_0050_rollback_and_forward(user, team):
+    forward = (Path(MIGRATIONS_DIR) / "0050__protections_seeded.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0050__protections_seeded.rollback.sql").read_text()
+    db.execute_sql(rollback)
+    cols = "SELECT column_name FROM information_schema.columns WHERE table_schema='usr' AND table_name='autopilot'"
+    assert "protections_seeded_at" not in {r[0] for r in db.execute_sql(cols).fetchall()}
+    db.execute_sql(forward)
+    assert "protections_seeded_at" in {r[0] for r in db.execute_sql(cols).fetchall()}

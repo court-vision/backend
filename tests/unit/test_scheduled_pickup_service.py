@@ -577,7 +577,7 @@ def dime(h, monkeypatch):
     monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
     monkeypatch.setattr(acting, "_pickup_committed_under", committed_under)
     for name, value in (("ai_enabled", True), ("autopilot_enabled", True),
-                        ("ai_agent_user_ids", [11]), ("autopilot_adds_reserve", 1)):
+                        ("ai_agent_user_ids", [11])):
         monkeypatch.setattr(svc.settings, name, value)
     return d
 
@@ -641,13 +641,11 @@ def test_a_pickup_with_no_action_on_record_is_asked_about_daily_actions(h, dime)
 
 
 @pytest.mark.unit
-def test_a_pickup_dime_scheduled_is_skipped_when_the_adds_left_are_the_ones_it_keeps_for_the_user(h, dime):
+def test_a_pickup_dime_scheduled_may_take_the_matchup_s_last_add(h, dime):
+    """No add is kept back for the user (James, 2026-11-15)."""
     arrange_day_before(h)
-    with_limits(h, limits(matchup_used=3))         # the user used adds since: 1 left, and Dime keeps 1
-    r = execute(h, row(made_by_autopilot=True))
-    assert (r.outcome, r.reason) == ("skipped", "dime_reserve")
-    assert r.detail == "1 of the league's adds left this matchup; Dime keeps 1 for you"
-    assert h.txn_calls == [] and h.marked == []
+    with_limits(h, limits(matchup_used=3))         # the user used adds since: 1 left
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
 
 
 @pytest.mark.unit

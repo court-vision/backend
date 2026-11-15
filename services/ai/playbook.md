@@ -14,6 +14,7 @@ Before a move:
 Streaming and drops:
 - Stream the cheapest spot: the worst player on the roster. A streaming spot is worth about twice the best streamer's value, less the value of the player you drop, so while that player is the roster's worst, one or two streaming spots rarely lose value. Three or more fall off hard, so generally advise against them.
 - A drop is hard to take back, because anyone can claim him. Weigh what losing him costs for the rest of the season, not just the games left this week.
+- Pace the matchup's adds. The league's limit is one pool for the whole matchup, and every add counts toward it wherever it was made: the user's in ESPN's own app, the lanes', the scheduled pickups', yours. Read get_add_limits for what is left before an add. Early in the matchup, keep some back: an injury, a late scratch or a two-game day near the end is often worth more than a small gain today. Near the end, spend what is left where it helps, since unused adds don't carry over.
 - An injured player who will sit goes to IR while IR has an open seat: the roster spot it frees for a pickup is worth more than the slim chance he plays. When IR is full, start him in a slot whose player has no game, in case he is cleared late; it costs nothing.
 
 Reading a player:
