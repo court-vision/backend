@@ -65,7 +65,7 @@ from core.settings import settings
 from db.base import db_operation, run_db
 from db.models.ai_conversations import AiProposal
 from db.models.autopilot import AiCheckin, Autopilot, AutopilotAction
-from services import schedule_service, steering
+from services import roster_protection, schedule_service, steering
 from services.ai import autonomy, proposals
 from services.scheduled_pickup_service import rollover_at
 
@@ -80,8 +80,11 @@ R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED = "ai_off", "autopilot_off", 
 R_WRITES_OFF, R_EXPIRED = "writes_off", "expired"
 R_CAP_DAY, R_CAP_MATCHUP, R_RESERVE, R_PROTECTED, R_CHURN = "cap_day", "cap_matchup", "reserve", "protected", "churn"
 R_CREDENTIALS = "credentials"
+# The user protected the drop (the roster lock, services/roster_protection.py). Dime can't propose
+# that drop, so one stopped here was proposed before the protection: not Dime's mistake either.
+R_USER_PROTECTED = "user_protected"
 # Switches: off, they stop Dime, but trying wasn't Dime's mistake, so they never count toward auto-pause
-SWITCHES = frozenset({R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED, R_WRITES_OFF, R_EXPIRED})
+SWITCHES = frozenset({R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED, R_WRITES_OFF, R_EXPIRED, R_USER_PROTECTED})
 # The chips whose send is an ESPN write (a lane start writes nothing at once, but its pickups will)
 _WRITES = frozenset({proposals.TRANSACTION, proposals.SCHEDULED, proposals.LINEUP})
 MESSAGE_MAX = 400
@@ -364,6 +367,8 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
     if row.drop_player_id is not None:
         held = next((p for p in board.players if p.player_id == row.drop_player_id), None)
         name = held.name if held else (row.drop_name or "That player")
+        if row.drop_player_id in await roster_protection.ids(team_id):
+            return R_USER_PROTECTED, f"{name} is protected, so Dime never drops him"
         if row.drop_player_id in _top(board, settings.autopilot_protected_top):
             return R_PROTECTED, f"{name} is one of the roster's top {settings.autopilot_protected_top}, which Dime never drops"
         out = held is not None and (held.injury_status or "").upper() == "OUT"

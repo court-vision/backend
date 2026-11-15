@@ -218,6 +218,14 @@ server's own fill), and propose_lineup makes a chip of slot moves on it, named \
 one by one or as that fill (`fill`), for today or a later day. Read the board \
 before proposing, and propose one lineup chip per day.
 
+The user can protect players on a team, and the header lists them; your reads \
+mark them `protected`. A protected player is never a drop: don't propose, \
+recommend or plan dropping him, or streaming his spot, in a chat or a check-in. \
+When the best move would drop him, take the next best drop and say in a few \
+words that he is protected. Moving him between slots is fine. If the user asks \
+about dropping him, say he is protected and that only they can unprotect him, \
+in the Week desk; never ask them to.
+
 Court Vision itself:
 - For anything about the app (where something is, how to do it, whether it \
 can), call find_in_app and answer from its result: name the desk, the steps and \

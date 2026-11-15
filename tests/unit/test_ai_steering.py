@@ -233,6 +233,21 @@ def test_a_lane_start_is_planned_as_the_preview_plans_it(chips, monkeypatch):
 
 
 @pytest.mark.unit
+def test_a_lane_on_a_protected_players_spot_is_refused_in_words_for_dime(chips, monkeypatch, protect):
+    from services.stream_lane_service import StreamLaneService
+
+    async def plan(team, league_info, req):
+        raise AssertionError("refused before the dry run")
+    monkeypatch.setattr(StreamLaneService, "plan", staticmethod(plan))
+    protect({21: [EDWARDS]})
+    with pytest.raises(AppError) as exc:
+        run(mod.set_lane(11, 7, TEAM, LEAGUE, mod.SetLaneInput(team_id=21, action="start", player_id=NBA_EDWARDS,
+                                                               reason="Edwards is out through Sunday"), NOW))
+    assert exc.value.error_code == "AI_PLAYER_PROTECTED" and "a stream lane can't take his spot" in exc.value.message
+    assert chips.inserted == []
+
+
+@pytest.mark.unit
 def test_a_lane_is_paused_resumed_or_stopped_only_from_a_state_it_can_leave(chips, monkeypatch):
     from services.stream_lane_service import StreamLaneService
     lanes = SimpleNamespace(open=[_lane(), _lane(id=4, status="paused")])

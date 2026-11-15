@@ -410,8 +410,9 @@ class AiDecisionAction(ApiModel):
     outcome: AiActionOutcome = Field(..., description="sent (it went out) · blocked (a rule of the policy stopped it "
                                                       "before anything was sent) · refused (the route or ESPN said "
                                                       "no) · failed (ESPN unreachable, credentials, an error)")
-    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, cap_matchup, reserve, protected, "
-                                                  "churn, paused, writes_off, ...) or the error code")
+    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, cap_matchup, reserve, protected "
+                                                  "(a top player), user_protected (the user protected him), churn, "
+                                                  "paused, writes_off, ...) or the error code")
     message: str = Field(..., description="What happened, in a sentence")
     at: Optional[datetime] = None
 

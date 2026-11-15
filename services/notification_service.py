@@ -278,7 +278,8 @@ class NotificationService:
 
         if outcome == "executed":
             subject = f"Court Vision picked up {add} for {team_name}"
-            made = f"Added {add}" + (f", dropped {drop}" if drop and reason not in ("drop_missing", "drop_locked") else "")
+            made = f"Added {add}" + (f", dropped {drop}" if drop and reason not in ("drop_missing", "drop_locked",
+                                                                                 "drop_protected") else "")
             made += " on ESPN."
             if result.get("verified") is False:
                 made += UNVERIFIED_SUFFIX
@@ -292,6 +293,8 @@ class NotificationService:
                 lines.append(f"{drop} was no longer on your roster, so this was an add only.")
             elif reason == "drop_locked" and drop:
                 lines.append(f"{drop} was locked for the day, so this was an add only.")
+            elif reason == "drop_protected" and drop:
+                lines.append(f"{drop} is protected, so this was an add only.")
         elif outcome == "skipped":
             subject = f"Pickup skipped: {add} for {team_name}"
             why = {
@@ -299,6 +302,7 @@ class NotificationService:
                 "already_on_roster": f"{add} is already on your roster.",
                 "drop_missing": f"{drop} is no longer on your roster and there was no open seat.",
                 "drop_locked": f"{drop} was locked for the day and there was no open seat.",
+                "drop_protected": f"{drop} is protected and there was no open seat.",
                 "roster_full": "your roster is full.",
                 "acquisition_limit": "you had used every add your league allows for it.",
             }.get(reason, (reason or "nothing to do") + ".")

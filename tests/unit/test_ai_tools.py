@@ -266,10 +266,26 @@ class TestGetMyTeams:
         assert seen == [42]
         teams = json.loads(outcome.content)["teams"]
         assert teams[0] == {"team_id": 7, "team_name": "Sengun Szn", "league_name": "Dorm League 26-27",
-                            "provider": "espn", "season": 2027, "scoring": "categories", "points_scoring": None}
+                            "provider": "espn", "season": 2027, "scoring": "categories", "points_scoring": None,
+                            "protected": []}
         assert (teams[1]["league_name"], teams[1]["scoring"]) == ("Work League", "points")
         # No synced league, so whether it scores ESPN's default points isn't known
         assert teams[1]["points_scoring"] is None
+
+    def test_each_team_lists_the_players_its_user_protected(self, monkeypatch, protect):
+        """The roster lock: Dime reads who is never a drop with the teams, by NBA id and name."""
+        from services.team_service import TeamService
+
+        async def fake(user_id):
+            return SimpleNamespace(data=[_team(7, "Sengun Szn"), _team(9, "Punt FT%")])
+        monkeypatch.setattr(TeamService, "get_teams", staticmethod(fake))
+        protect({7: [4277905]}, names={4277905: "Alperen Sengun"}, nba_ids={4277905: 1630578})
+
+        outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42)))
+
+        teams = {t["team_id"]: t for t in json.loads(outcome.content)["teams"]}
+        assert teams[7]["protected"] == [{"player_id": 1630578, "name": "Alperen Sengun"}]
+        assert teams[9]["protected"] == []
 
     def test_takes_no_arguments(self):
         outcome = asyncio.run(tools.run_tool("get_my_teams", {"user_id": 1}, ctx=tools.ToolContext(user_id=42)))

@@ -19,6 +19,7 @@ import pytest
 from core.errors import AppError, ConflictError, NotFoundError
 from schemas.common import FantasyProvider, LeagueInfo
 from schemas.lineup_editor import LineupPlayer, LineupState
+from services import roster_protection
 from services.ai import proposals as mod
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService
 
@@ -271,6 +272,18 @@ def test_every_problem_is_listed_in_order(checks):
         "A pickup of Kawhi Leonard is already scheduled for Sat Oct 24.",
         "Acquisition limit reached for the week (7 of 7).",
     ]
+
+
+@pytest.mark.unit
+def test_a_protected_drop_tells_dime_what_to_do_instead(checks, protect):
+    """The chip's backstop for the roster lock (the header and the reads say it first)."""
+    protect({21: [EDWARDS]})
+    assert run(mod._problems(TEAM, LEAGUE, state(board()), "transaction", ADD, DROP, TODAY)) == [
+        "Anthony Edwards is protected by the user, so he is never a drop: choose another player to drop (or none, "
+        "with an open seat), and don't suggest dropping him.",
+    ]
+    assert run(mod._problems(TEAM, LEAGUE, state(board(), counts={"11": 1, "12": 2}), "transaction", ADD, None,
+                             TODAY)) == []
 
 
 # ---- propose_move ---------------------------------------------------------------------------
@@ -673,6 +686,16 @@ def test_get_lineup_lists_the_board_with_eligibility_game_lock_and_the_fill(boar
     ]
     assert out["fill"]["summary"] == "2 move(s): start Anthony Edwards, bench Nikola Jokic (no game today)"
     assert out["notes"] == [] and "espn" not in str(out) and boards.reads == [None]
+
+
+@pytest.mark.unit
+def test_get_lineup_marks_the_players_the_user_protected(boards, protect):
+    boards.today = state(lineup_board())
+    protect({21: [EDWARDS]})
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21)))
+    jokic, edwards = out["players"]
+    assert edwards["protected"] is True and "protected" not in jokic
+    assert out["notes"] == [roster_protection.DIME_NOTE]
 
 
 @pytest.mark.unit

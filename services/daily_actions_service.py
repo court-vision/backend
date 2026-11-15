@@ -34,7 +34,7 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Mapping, NamedTuple, Optional, Sequence
+from typing import Collection, Mapping, NamedTuple, Optional, Sequence
 
 from core.logging import get_logger
 from db.base import run_db
@@ -49,7 +49,7 @@ from schemas.daily_actions import (
 from schemas.availability import Verdict
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
-from services import schedule_service, steering
+from services import roster_protection, schedule_service, steering
 from services.availability_service import SITS, SOURCE_WORDS, AvailabilityService, planner_verdicts
 from services.espn_service import EspnService
 from services.lineup_editor_service import (
@@ -125,10 +125,12 @@ def has_open_seat(state: LineupState) -> bool:
     return off_ir < seats
 
 
-def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool]) -> list[LineupPlayer]:
-    """Who the swap may drop: idle today, unlocked, off IR and not headed there."""
+def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool],
+                    protected: Collection[int] = ()) -> list[LineupPlayer]:
+    """Who the swap may drop: idle today, unlocked, off IR and not headed there, and not one the
+    user protected (`protected`, ESPN ids: the roster lock)."""
     return [p for p in state.players
-            if not p.locked and p.lineup_slot_id != IR_SLOT_ID
+            if not p.locked and p.lineup_slot_id != IR_SLOT_ID and p.player_id not in protected
             and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
 
 
@@ -170,6 +172,7 @@ def suggest_transaction(
     ir_eligible: Mapping[int, bool],
     ratio: float = STREAMABLE_RATIO,
     evidence: Optional[DropEvidence] = None,
+    protected: Collection[int] = (),
 ) -> Optional[TransactionSuggestion]:
     """The day's streamer swap, or None. `streamers` is the daily search in its own
     order (free agents with a game today, best first). The drop is the candidate
@@ -180,7 +183,7 @@ def suggest_transaction(
     drop: Optional[LineupPlayer] = None
     weighed: Optional[DropValue] = None
     if not has_open_seat(state):
-        valued = [(v, p) for p in drop_candidates(state, ir_eligible)
+        valued = [(v, p) for p in drop_candidates(state, ir_eligible, protected)
                   if (v := drop_value(p, evidence)) is not None]
         if not valued:
             return None
@@ -443,10 +446,13 @@ class DailyActionsService:
                 streamers_error = "value_kind_mismatch"
             else:
                 ir_eligible = {p.player_id: p.ir_eligible for p in players}
-                candidates = [] if has_open_seat(state) else drop_candidates(state, ir_eligible)
+                # Never a protected player as the drop (the write chain refuses one anyway)
+                protected = await roster_protection.ids_soft(team.team_id)
+                candidates = [] if has_open_seat(state) else drop_candidates(state, ir_eligible, protected)
                 evidence = await _drop_evidence_for(league_info, candidates) if candidates else None
                 suggestion = suggest_transaction(
                     state, pool_data.streamers, ir_eligible=ir_eligible, ratio=ratio, evidence=evidence,
+                    protected=protected,
                 )
             if suggestion is not None and board_day is not None:
                 pickup_game = await _pickup_game(suggestion.pickup, board_day)

@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,7 +39,7 @@ from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.espn import PlayerResp
-from services import schedule_service
+from services import roster_protection, schedule_service
 from services.acquisitions import adds_for_day
 from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
 from services.espn_service import EspnService, PoolEntry
@@ -404,6 +404,10 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
     espn_ids = {p.nba_player_id: p.player_id for p in md.your_team.roster if p.nba_player_id is not None} \
         if provider == FantasyProvider.ESPN else {}
     sources = {p.nba_player_id: p._value_source for p in md.your_team.roster if p.nba_player_id is not None}
+    # The players the user protected (the roster lock): never a drop, so the rule passes over them
+    # and a move naming one is refused in words that say what to do instead
+    protected_espn = await roster_protection.ids_soft(team.team_id) if espn_ids else frozenset()
+    protected = {pid for pid, eid in espn_ids.items() if eid in protected_espn}
 
     # The adds, resolved by NBA id
     add_ids = [m.add for m in args.moves if m.add is not None]
@@ -456,6 +460,7 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
     moves: list[Move] = []
     chosen: dict[int, str] = {}
     claimed: set[int] = set()        # the pure drops an add listed earlier the same day takes the spot of
+    passed_over: set[str] = set()    # the protected players the rule would otherwise have weighed
 
     def spoken_for(i: int) -> set[int]:
         """The holdings a later move drops itself, so the rule leaves them be. A drop that comes after
@@ -486,6 +491,8 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
         if drop_id is not None and drop_id not in holdings:
             name = identities[drop_id].name if drop_id in identities else f"player {drop_id}"
             raise AppError("AI_MOVE_INVALID", f"{name} is not on the roster on day {day}")
+        if drop_id is not None and drop_id in protected:
+            raise AppError("AI_MOVE_INVALID", roster_protection.dime_words(holdings[drop_id].name))
         if add is not None and add.player_id in holdings:
             raise AppError("AI_MOVE_INVALID", f"{add.name} is already on the roster on day {day}")
         if add is not None and drop_id is None:
@@ -501,11 +508,15 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
                 for pid, p in holdings.items():
                     if pid in on_ir or pid in reserved:
                         continue
+                    if pid in protected:
+                        passed_over.add(p.name)
+                        continue
                     w = weighed.get(pid)
                     candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected)))
                 choice = choose_drop(candidates, day=day, last_day=last_day)
                 if choice is None:
-                    raise AppError("AI_MOVE_INVALID", "The roster is full and nobody on it can be dropped by the rule; name the drop")
+                    raise AppError("AI_MOVE_INVALID", "The roster is full and nobody on it can be dropped by the rule; name the drop"
+                                   + (" (the protected players are never a drop)" if passed_over else ""))
                 drop_id = choice.candidate.player.player_id
                 chosen[len(moves)] = (
                     f"the rule's drop: {choice.games_lost} game(s) left at "
@@ -603,9 +614,17 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
         })
         if any(p.line is None for p, g in before_counted if p.counts and g):
             assumes.append("Some roster players have no per-game line in this read; they add nothing to the category totals.")
+    if passed_over:
+        assumes.append(f"The rule's drop passed over {_names(passed_over)}: protected by the user, never a drop.")
     out["assumes"] = assumes
     out["labels"] = LABELS
     return out
+
+
+def _names(names: Iterable[str]) -> str:
+    """Names in a sentence, in alphabetical order: "A", "A and B", "A, B and C"."""
+    ordered = sorted(names)
+    return ordered[0] if len(ordered) == 1 else ", ".join(ordered[:-1]) + " and " + ordered[-1]
 
 
 # ------------------------------- plan_streams ------------------------------- #
@@ -784,6 +803,8 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     # The holders: named, or the drop rule's. A player a scheduled pickup already drops leaves on its day,
     # so his spot is that pickup's to fill, not the plan's.
     leaving = {pk.drop_player_id: pk.nba_date for pk in pending if pk.drop_player_id is not None}
+    # A lane drops its spot's player at its first switch: a protected one never holds a planned spot
+    protected = await roster_protection.ids_soft(team.team_id)
     holders: list[Any] = []
     chosen_by: dict[int, str] = {}
     if args.holders:
@@ -796,14 +817,19 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
                 raise AppError("AI_NOT_ON_ROSTER", f"{p.name} is on IR; a streamed spot is an active one")
             if p.player_id in leaving:
                 raise AppError("AI_NOT_ON_ROSTER", f"{p.name} is already scheduled to be dropped on {leaving[p.player_id]}")
+            if p.player_id in protected:
+                raise AppError("AI_PLAYER_PROTECTED", roster_protection.dime_lane_words(p.name))
             if p.player_id not in chosen_by:
                 holders.append(p)
                 chosen_by[p.player_id] = "named"
     else:
         candidates = [p for p in board.players if p.lineup_slot_id != IR_SLOT_ID and p.player_id not in leaving
-                      and p.player_id not in steer.kept]
+                      and p.player_id not in steer.kept and p.player_id not in protected]
         if any(p.player_id in steer.kept for p in board.players):
             notes.append("The drop rule passes over the players your keep holds keep.")
+        passed = sorted(p.name for p in board.players if p.player_id in protected)
+        if passed:
+            notes.append(f"The drop rule passes over {_names(passed)}: protected by the user, never a drop.")
         evidence = await _evidence_for(league_info, [p.player_id for p in candidates])
         ranked = []
         for p in candidates:
