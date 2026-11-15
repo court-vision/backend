@@ -1,11 +1,14 @@
 """
 Standard-league valuation: the pipeline-token route the data platform's
 projections editor calls to rank a set of projections (`POST
-/v1/internal/jobs/valuation/standard`). See `services.valuation.standard`.
+/v1/internal/jobs/valuation/standard`, see `services.valuation.standard`), and
+the one its daily_rankings pipeline calls for the board to store each morning
+(`POST /v1/internal/jobs/rankings/daily`, see `services.valuation.daily`).
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import List, Optional
 
 from pydantic import Field
@@ -75,3 +78,42 @@ class StandardValuationData(ApiModel):
 
 class StandardValuationResp(BaseResponse):
     data: Optional[StandardValuationData] = None
+
+
+class DailyBoardPlace(ApiModel):
+    rank: int = Field(description="Place on this board, 1 is best")
+    value: float = Field(description="The per-game number the board shows: fantasy points, or the 9-cat index")
+    score: float = Field(
+        description="What the rank is ordered by: fantasy points over the games left, or the summed category score"
+    )
+    games: float = Field(description="The games he is expected to play from the board's day on")
+
+
+class DailyRankResp(ApiModel):
+    player_id: int = Field(description="NBA player id (nba.players.id)")
+    name: str
+    team: Optional[str] = Field(description="Current NBA team tricode")
+    line_source: str = Field(description="Where his line came from: projection, season or baseline")
+    season_gp: Optional[int] = Field(description="Games played this season; null before opening night")
+    injury_status: Optional[str] = Field(description="Today's flag (OUT, DAY_TO_DAY, ...); null when he plays")
+    points: DailyBoardPlace = Field(description="Standard points league, ESPN's default weights")
+    categories: DailyBoardPlace = Field(description="Standard nine-category league")
+
+
+class DailyRankingsData(ApiModel):
+    season: str
+    as_of: date = Field(description="The fantasy day the boards are for: games from this day on are counted")
+    in_season: bool = Field(description="False before opening night and after the regular season")
+    model: str = Field(description="What built the boards; stored with every row")
+    season_as_of: Optional[date] = Field(description="The newest box score the lines read; null out of season")
+    projections_as_of: Optional[date]
+    projection_source: Optional[str]
+    prior_games: int = Field(description="The projection's weight against this season, in games")
+    league_size: int
+    rounds: int
+    playoff_weight: float
+    players: List[DailyRankResp] = Field(description="Every valued player, in points-board order")
+
+
+class DailyRankingsResp(BaseResponse):
+    data: Optional[DailyRankingsData] = None

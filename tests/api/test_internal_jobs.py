@@ -4,7 +4,8 @@ routes. No Clerk user — a missing or wrong bearer is refused, the right one re
 the (stubbed) service.
 """
 
-from datetime import timedelta
+import asyncio
+from datetime import date, timedelta
 
 import pytest
 
@@ -198,3 +199,91 @@ def test_valuation_refuses_an_empty_pool_and_impossible_games(client, token):
                     headers=AUTH)
     assert r.status_code == 200
     assert [p["points_rank"] for p in r.json()["data"]["players"]] == [1, 2]
+
+
+# ---- /v1/internal/jobs/rankings/daily -------------------------------------------
+
+DAILY = "/v1/internal/jobs/rankings/daily"
+
+
+def _board_inputs(in_season: bool):
+    """Three players the way the stateless board reads them, best first by points."""
+    from services import draft_in_season
+    from services.draft_board_service import BoardInputs
+    from services.scoring.category_rank import PoolRow
+    from services.scoring.models import StatLine
+    from services.scoring.points import DEFAULT_POINTS
+
+    pool = []
+    for pid, pts in ((1, 30.0), (2, 21.0), (3, 12.0)):
+        line = StatLine.from_dict(_player(pid, pts)["line"])
+        fpts = round(DEFAULT_POINTS.score(line), 1)
+        pool.append(PoolRow(id=pid, name=f"Player {pid}", team="DEN", gp=70, line=line,
+                            fpts_avg=fpts, fpts_total=fpts * 70))
+    inputs = BoardInputs(season="2026-27", pool=pool, source={1: "projection", 2: "projection", 3: "season"},
+                         projected_gp={1: 70, 2: 70}, projections_as_of=date(2026, 10, 31),
+                         projection_source="cv", current_team={1: "DEN", 2: "BOS"})
+    if in_season:
+        inputs.in_season = draft_in_season.InSeason(games_from=date(2026, 11, 16), season_gp={1: 12, 3: 11},
+                                                    season_as_of=date(2026, 11, 15))
+        inputs.games_left = {1: 60.0, 2: 58.5, 3: 61.0}
+        inputs.live_injury = {2: "OUT"}
+    return inputs
+
+
+@pytest.fixture
+def daily_inputs(monkeypatch):
+    """The route's one read, answered from memory; returns a setter for what it reads."""
+    from services import schedule_service
+    from services.valuation import daily
+
+    held = {"inputs": _board_inputs(True)}
+
+    async def direct(operation_name, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(daily.db_base, "run_db", direct)
+    monkeypatch.setattr(daily, "load_inputs", lambda: held["inputs"])
+    monkeypatch.setattr(schedule_service, "get_nba_today", lambda: date(2026, 11, 16))
+    return lambda inputs: held.update(inputs=inputs)
+
+
+@pytest.mark.api
+def test_daily_rankings_need_the_pipeline_token(client, token, daily_inputs):
+    assert client.post(DAILY).status_code in (401, 403)
+    assert client.post(DAILY, headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+@pytest.mark.api
+def test_daily_rankings_are_the_two_boards_as_of_today(client, token, daily_inputs):
+    r = client.post(DAILY, headers=AUTH)
+
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert (data["season"], data["as_of"], data["in_season"]) == ("2026-27", "2026-11-16", True)
+    assert (data["model"], data["season_as_of"], data["prior_games"]) == ("season-blend-1", "2026-11-15", 10)
+    assert (data["league_size"], data["rounds"], data["playoff_weight"]) == (12, 13, 2.0)
+    assert (data["projections_as_of"], data["projection_source"]) == ("2026-10-31", "cv")
+    players = data["players"]
+    assert [p["player_id"] for p in players] == [1, 2, 3]
+    assert [p["points"]["rank"] for p in players] == [1, 2, 3]
+    assert sorted(p["categories"]["rank"] for p in players) == [1, 2, 3]
+    first, second, third = players
+    assert first["points"]["games"] == 60.0 and first["categories"]["games"] == 60.0
+    assert (first["season_gp"], second["season_gp"], third["season_gp"]) == (12, 0, 11)
+    assert (first["injury_status"], second["injury_status"]) == (None, "OUT")
+    assert (first["team"], second["team"], third["team"]) == ("DEN", "BOS", "DEN")
+    assert (first["line_source"], third["line_source"]) == ("projection", "season")
+    assert first["points"]["value"] > second["points"]["value"] > 0
+    assert first["points"]["score"] > second["points"]["score"]
+
+
+@pytest.mark.api
+def test_daily_rankings_say_when_it_is_not_the_season(client, token, daily_inputs):
+    daily_inputs(_board_inputs(False))
+
+    data = client.post(DAILY, headers=AUTH).json()["data"]
+
+    assert (data["in_season"], data["as_of"], data["model"]) == (False, "2026-11-16", "projection-1")
+    assert data["season_as_of"] is None
+    assert all(p["season_gp"] is None for p in data["players"])
