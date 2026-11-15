@@ -318,7 +318,11 @@ def proposing(checks, monkeypatch):
         h.inserted.append(fields)
         return row(**{**fields, "id": 31})
 
+    async def verdicts_today(nba_ids, game_date):
+        return [v for v in h.verdicts if v.nba_player_id in nba_ids and v.game_date == game_date.isoformat()]
+
     monkeypatch.setattr(mod, "_board", read_board)
+    monkeypatch.setattr(mod.AvailabilityService, "today", staticmethod(verdicts_today))
     monkeypatch.setattr(mod.schedule_service, "get_nba_today", lambda: TODAY)
     monkeypatch.setattr(mod.schedule_service, "get_current_matchup", lambda today: dict(WEEK))
     monkeypatch.setattr(mod, "_first_open_day", lambda today, idx, now: h.first_open)
@@ -645,7 +649,7 @@ def test_the_header_line_says_a_lineup_chip_s_moves(monkeypatch):
 @pytest.fixture
 def boards(monkeypatch):
     """Today's board and any later day's, read by ESPN scoring period; the insert is recorded."""
-    h = SimpleNamespace(today=state(lineup_board()), later={}, reads=[], inserted=[])
+    h = SimpleNamespace(today=state(lineup_board()), later={}, reads=[], inserted=[], verdicts=[])
     blank = dict(add_player_id=None, add_nba_id=None, add_name=None, add_team=None,
                  drop_player_id=None, drop_nba_id=None, drop_name=None, drop_team=None)
 
@@ -657,7 +661,11 @@ def boards(monkeypatch):
         h.inserted.append(fields)
         return row(**{**blank, **fields, "id": 40})
 
+    async def verdicts_today(nba_ids, game_date):
+        return [v for v in h.verdicts if v.nba_player_id in nba_ids and v.game_date == game_date.isoformat()]
+
     monkeypatch.setattr(mod, "_board", read_board)
+    monkeypatch.setattr(mod.AvailabilityService, "today", staticmethod(verdicts_today))
     monkeypatch.setattr(mod.schedule_service, "get_nba_today", lambda: TODAY)
     monkeypatch.setattr(mod.schedule_service, "get_current_matchup", lambda today: dict(WEEK))
     monkeypatch.setattr(mod, "_insert", insert)
@@ -701,6 +709,14 @@ def test_get_lineup_lists_the_week_desk_s_ir_moves_and_says_ir_wins_over_the_fil
     assert out["to_ir"] == [{"player_id": NBA_KAWHI, "name": "Kawhi Leonard", "from_slot": "BE", "to_slot": "IR",
                              "role": "shift", "note": "OUT"}]
     assert out["notes"] == [mod.TO_IR_NOTE]
+
+    # ESPN still says OUT but our verdict has him playing: no IR move, as on the Week desk
+    from schemas.availability import Verdict
+    boards.verdicts = [Verdict(nba_player_id=NBA_KAWHI, game_date=TODAY.isoformat(), verdict="available",
+                               decided_by="nba_report", reason=None, previous_verdict="out")]
+    out = run(mod.get_lineup(TEAM, LEAGUE, mod.GetLineupInput(team_id=21)))
+    assert out["to_ir"] == [] and out["notes"] == []
+    boards.verdicts = []
 
     # IR full: nothing to IR, and starting him over a player without a game is free
     held = lplayer(99, "Held On IR", 13, nba_id=990, status="OUT", injured=True, eligible=(PG, UT, BE, 13))
