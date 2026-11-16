@@ -133,12 +133,21 @@ def build(inputs: BoardInputs, today: date, playoff_weight: float = DEFAULT_PLAY
     )
 
 
-def load_inputs() -> BoardInputs:
+def load_inputs(live_source: str = live_projection.SOURCE) -> BoardInputs:
     """The stateless board's inputs: no room, no picks. One trip to the database."""
-    return DraftBoardService._fetch_inputs(frozenset(), None)
+    return DraftBoardService._fetch_inputs(frozenset(), None, live_source)
 
 
-async def today() -> DailyBoards:
-    """This morning's boards: the read in the database pool, the valuation off the event loop."""
-    inputs = await db_base.run_db("rankings.daily.fetch", load_inputs)
+async def today(shadow: bool = False) -> DailyBoards:
+    """This morning's boards: the read in the database pool, the valuation off the event loop.
+
+    `shadow` builds them on the projection that has the analyst's notes applied
+    (`live_projection.SHADOW_SOURCE`; the Live rankings plan, step 4). Nothing a
+    user sees reads those: the data platform stores them beside the day's own
+    boards so the two can be graded against what happened next. With no shadow
+    projection for the day the boards come back on the blend, and `model` and
+    `live_as_of` say so: the caller stores nothing then.
+    """
+    source = live_projection.SHADOW_SOURCE if shadow else live_projection.SOURCE
+    inputs = await db_base.run_db("rankings.daily.fetch", load_inputs, source)
     return await run_cpu("rankings.daily.build", build, inputs, schedule_service.get_nba_today())

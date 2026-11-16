@@ -224,6 +224,19 @@ class Settings(BaseSettings):
     # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
     autopilot_pause_refused: int = 2
     autopilot_pause_same_block: int = 2
+    # The live rankings' analyst (the Live rankings plan, step 4; services/ai/analyst.py):
+    # one short read per player the data platform's morning screen picks, answered as a
+    # note in the projection's own inputs (a return date, minutes, a share of the offense)
+    # with the stored items it rests on. It runs while AI_ENABLED and ANALYST_ENABLED are
+    # on, belongs to no user, and spends on a monthly line of its own, so a morning of
+    # reads can't use up the AI desk's budget or the check-ins'. Each read reserves
+    # ANALYST_READ_MAX_USD before its one model call and is settled to what it cost.
+    analyst_enabled: bool = True
+    analyst_model: str = "claude-opus-5-5"
+    analyst_effort: str = "medium"
+    analyst_monthly_budget_usd: float = 40.0
+    analyst_read_max_usd: float = 0.30
+    analyst_read_timeout_seconds: float = 75.0
     # Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py): a plan before
     # the draft (set as the room's punts), a note when the user's pick is near, a read of the recap,
     # and the user's seat in a mock room (Dime makes the user's picks through the room's own pick
@@ -363,7 +376,7 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid_levels}")
         return upper_v
 
-    @field_validator("ai_effort", "ai_agent_effort")
+    @field_validator("ai_effort", "ai_agent_effort", "analyst_effort")
     @classmethod
     def validate_ai_effort(cls, v: str) -> str:
         allowed = {"low", "medium", "high", "xhigh", "max"}
@@ -483,6 +496,9 @@ class Settings(BaseSettings):
             "dime_draft_max_model_calls": self.dime_draft_max_model_calls,
             "dime_draft_max_tool_calls": self.dime_draft_max_tool_calls,
             "dime_draft_timeout_seconds": self.dime_draft_timeout_seconds,
+            "analyst_monthly_budget_usd": self.analyst_monthly_budget_usd,
+            "analyst_read_max_usd": self.analyst_read_max_usd,
+            "analyst_read_timeout_seconds": self.analyst_read_timeout_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:

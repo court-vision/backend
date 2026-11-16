@@ -22,6 +22,11 @@ Dime's check-ins (services/ai/checkins.py) spend on a line of their own,
 `autopilot`, with one monthly budget for every autopilot team
 (`autopilot_monthly_budget_usd`): the caps above read the `desk` line only, so
 a day of check-ins can't use up the AI desk, and the other way round.
+
+The live rankings' analyst (services/ai/analyst.py) has a third line, `analyst`,
+with its own monthly budget (`analyst_monthly_budget_usd`). Its reads belong to
+no user, so their rows carry none; each reserves `analyst_read_max_usd` before
+its one model call and is settled to what the call cost.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ from schemas.common import ApiStatus
 
 # Serializes reservations; any key no other code uses
 _LEDGER_LOCK = 0x41_49_53_50
-DESK, AUTOPILOT = "desk", "autopilot"
+DESK, AUTOPILOT, ANALYST = "desk", "autopilot", "analyst"
 
 
 @dataclass(frozen=True)
@@ -107,9 +112,13 @@ def _sums(user_id: int, since: datetime) -> tuple[int, int]:
     return mine, everyone
 
 
-def _autopilot_sum(since: datetime) -> int:
+def _line_sum(line: str, since: datetime) -> int:
     return _total(AiSpend.select(fn.SUM(AiSpend.cost_micros))
-                  .where(AiSpend.created_at >= since, AiSpend.line == AUTOPILOT))
+                  .where(AiSpend.created_at >= since, AiSpend.line == line))
+
+
+def _autopilot_sum(since: datetime) -> int:
+    return _line_sum(AUTOPILOT, since)
 
 
 @db_operation("ai.month_spend")
@@ -212,6 +221,34 @@ def _autopilot_month(since: datetime) -> int:
 async def autopilot_month_spend() -> tuple[int, int]:
     """This month's check-in spend and the line's cap, in micro-dollars."""
     return await _autopilot_month(month_start()), _micros(settings.autopilot_monthly_budget_usd)
+
+
+@db_operation("ai.reserve_analyst_read")
+def _reserve_analyst(since: datetime, amount: int, cap: int) -> int | None:
+    """A read's reservation on the analyst's line, or None when the month's budget
+    can't take one more read's ceiling. Under the same lock as every other reservation."""
+    with db.atomic():
+        db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
+        if cap - _line_sum(ANALYST, since) < amount:
+            return None
+        return AiSpend.insert(user_id=None, cost_micros=amount, line=ANALYST).execute()
+
+
+async def reserve_analyst() -> int | None:
+    """Reserve one read's ceiling on the analyst's line; None when this month's
+    budget for reads is used up (the read is skipped, not failed)."""
+    return await _reserve_analyst(month_start(), _micros(settings.analyst_read_max_usd),
+                                  _micros(settings.analyst_monthly_budget_usd))
+
+
+@db_operation("ai.analyst_month_spend")
+def _analyst_month(since: datetime) -> int:
+    return _line_sum(ANALYST, since)
+
+
+async def analyst_month_spend() -> tuple[int, int]:
+    """This month's spend on the analyst's reads and the line's cap, in micro-dollars."""
+    return await _analyst_month(month_start()), _micros(settings.analyst_monthly_budget_usd)
 
 
 @db_operation("ai.cancel_reservation")

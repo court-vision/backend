@@ -76,10 +76,10 @@ def test_the_morning_board_reads_this_season_and_todays_report(season):
     assert 0 < by_id[STAR].points.games < 65
 
 
-def _live_row(player_id, as_of, pts, timeline, team="DEN"):
+def _live_row(player_id, as_of, pts, timeline, team="DEN", source="cv_live"):
     """One player's row of a live snapshot, as data-platform's live_projection pipeline writes it."""
     return PlayerProjection.create(
-        player=player_id, season="2026-27", source="cv_live", as_of_date=as_of, projected_gp=60,
+        player=player_id, season="2026-27", source=source, as_of_date=as_of, projected_gp=60,
         min=34, pts=pts, reb=6, ast=5, stl=1, blk=1, tov=2, fgm=pts / 2.5, fga=pts / 1.2,
         fg3m=2, fg3a=5, ftm=5, fta=6,
         raw={"version": "live-test", "games": 60.0, "team": team, "rates": {}, "timeline": timeline},
@@ -120,6 +120,31 @@ def test_a_live_projection_older_than_two_days_is_not_read(season):
 
     assert (boards.model, boards.live_as_of) == (daily.MODEL_IN_SEASON, None)
     assert {p.line_source for p in boards.players} == {"baseline", "season"}
+
+
+def test_the_shadow_boards_read_the_shadow_projection_and_the_live_ones_do_not(season):
+    # The analyst's note says the star is out until the middle of December: the
+    # shadow projection carries it, the live one does not
+    _live_row(STAR, TODAY, 36.0, [[TODAY.isoformat(), "2027-04-30", 75, 0.95, 36.0, 1.0]])
+    _live_row(STAR, TODAY, 36.0, [[TODAY.isoformat(), "2026-12-15", 14, 0.0, 36.0, 1.0],
+                                  ["2026-12-16", "2027-04-30", 61, 0.95, 36.0, 1.0]], source="cv_live_shadow")
+
+    live = daily.build(daily.load_inputs(), TODAY)
+    shadow = daily.build(daily.load_inputs(live_source="cv_live_shadow"), TODAY)
+
+    assert (live.model, live.live_as_of) == (shadow.model, shadow.live_as_of) == (daily.MODEL_LIVE, TODAY)
+    star, star_shadow = ({p.player_id: p for p in b.players}[STAR] for b in (live, shadow))
+    assert star.points.value == star_shadow.points.value == 55.8
+    assert star_shadow.points.games < star.points.games
+
+
+def test_with_no_shadow_projection_the_shadow_boards_say_what_they_stood_on(season):
+    _live_row(STAR, TODAY, 36.0, [[TODAY.isoformat(), "2027-04-30", 75, 0.95, 36.0, 1.0]])
+
+    shadow = daily.build(daily.load_inputs(live_source="cv_live_shadow"), TODAY)
+
+    # Not the live projection under another name: the caller checks before storing
+    assert (shadow.model, shadow.live_as_of) == (daily.MODEL_IN_SEASON, None)
 
 
 def test_a_days_boards_are_stored_replaced_and_read_back(season):
