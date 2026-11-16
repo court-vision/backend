@@ -25,6 +25,7 @@ from services.valuation.engine import (
     playoff_weight_of,
     points_per_game,
     replacement_level,
+    scored_games,
     value_pool,
 )
 
@@ -304,6 +305,26 @@ class TestReplacement:
         pool = _ladder() + [_p(1, games=0.0, team="X", pts=40.0)]
         valued = value_pool(pool, _fill_points())
         assert valued[-1].row.id == 1 and valued[-1].season_value == 0.0
+
+    def test_a_player_back_only_after_the_fantasy_playoffs_falls_off_the_board(self):
+        # Ten games left, every one after the league's last week: none of them is scored
+        late = ProjectedPlayer(row=_row(1, pts=40.0), games=10.0, team="X", phase_games=(0.0, 0.0, 10.0))
+        model = replace(_fill_points(), team_weeks={"X": TeamWeeks(regular=40, playoff=10, after=10)})
+        pool = _ladder() + [late]
+        assert scored_games(late, model) == 0.0
+        valued = value_pool(pool, model)
+        assert valued[-1].row.id == 1 and valued[-1].season_value == 0.0
+        # And he is nobody's replacement: the level is the eleventh of the healthy ladder
+        per_game = [points_per_game(p, DEFAULT_POINT_WEIGHTS) for p in pool]
+        assert replacement_level(per_game, pool, 10, model) == per_game[10]
+        # Roto scores every game left, so there he still plays
+        roto = LeagueModel(format="roto", categories=NINE_CAT, team_weeks=model.team_weeks)
+        assert scored_games(late, roto) == 10.0
+
+    def test_games_spread_evenly_count_their_share_of_the_scored_weeks(self):
+        model = replace(_fill_points(), team_weeks={"X": TeamWeeks(regular=40, playoff=10, after=10)})
+        even = _p(1, games=30.0, team="X", pts=40.0)
+        assert scored_games(even, model) == pytest.approx(0.5 * 50)
 
     def test_the_fill_counts_playoff_games_at_the_playoff_weight(self):
         # He misses the regular weeks and plays every playoff game: with the
