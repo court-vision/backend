@@ -2052,6 +2052,31 @@ def test_a_board_on_the_live_projection_fills_missed_games_and_charges_no_injury
 
 
 @pytest.mark.unit
+def test_a_live_player_is_valued_on_the_team_his_games_were_placed_on(monkeypatch):
+    """Traded since the snapshot: his games sit on the snapshot team's schedule,
+    so his full games are counted there too, or the gap would read as games
+    missed. A live player whose games were not placed by week, and everyone the
+    snapshot does not price, play where the profile says."""
+    import services.draft_board_service as board
+
+    seen = {}
+
+    def capture(players, model):
+        seen.update({p.row.id: p.team for p in players})
+        return []
+
+    monkeypatch.setattr(board, "value_pool", capture)
+    # Rows 1 and 2 carry the snapshot's team (apply stamps it); 3 is not priced
+    inputs = _inputs(pool=[_row(1, 50.0, team="BOS"), _row(2, 40.0, team="BOS"), _row(3, 30.0, team="DEN")],
+                     current_team={1: "MIA", 2: "MIA", 3: "LAL"},
+                     live_games={1: {3: 3.0, 4: 2.0}, 2: {}})
+
+    DraftBoardService.rank_pool(resolve_scoring(_league()), inputs, [])
+
+    assert seen == {1: "BOS", 2: "MIA", 3: "LAL"}
+
+
+@pytest.mark.unit
 def test_phase_games_follow_the_playoff_weeks():
     by_week = {18: 3.0, 19: 2.5, 20: 3.5, 21: 3.0, 22: 1.0}
     assert DraftBoardService._phase_games(by_week, (20, 21)) == (5.5, 6.5, 1.0)

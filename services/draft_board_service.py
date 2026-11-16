@@ -783,7 +783,7 @@ class DraftBoardService:
                 # historical `gp or DEFAULT_PROJECTED_GP` rule. In season, the
                 # games he has left.
                 games=DraftBoardService._games_of(inputs, row.id),
-                team=inputs.current_team.get(row.id) or row.team,
+                team=DraftBoardService._valued_team(inputs, row),
                 dd_rate=inputs.game_rates.get(row.id, (None, None))[0],
                 td_rate=inputs.game_rates.get(row.id, (None, None))[1],
                 # On the live projection, when his games fall: a player out
@@ -793,6 +793,18 @@ class DraftBoardService:
             for row in inputs.pool
         ]
         return value_pool(players, model)
+
+    @staticmethod
+    def _valued_team(inputs: BoardInputs, row: PoolRow) -> Optional[str]:
+        """The team whose schedule values his games. Where the live projection
+        placed them by week, the team it placed him on (`live_projection.apply`
+        stamps it on his row): his full games and his share are then counted on
+        the schedule his timeline was built for, so a trade since the snapshot
+        does not read as games missed. Everyone else plays where his profile
+        says; the board still shows that team either way."""
+        if inputs.live_games.get(row.id) and row.team:
+            return row.team
+        return inputs.current_team.get(row.id) or row.team
 
     @staticmethod
     def _playoff_weeks(scoring: "ResolvedScoring", inputs: BoardInputs) -> tuple[int, ...]:
