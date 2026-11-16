@@ -124,28 +124,48 @@ trade, a coach naming a starter, a rookie earning the job.
 What you are given, as one JSON object:
 - `as_of`: the morning of the read. Every date you write is on or after it.
 - `reasons`: why he was picked for a read today.
-- `projection`: what the model assumes about him this morning. `out_now` and \
-`return_date` are how it reads his availability. `timeline` is the rest of his season in \
-runs of alike games: first day, last day, his team's games in the run, the chance he \
-plays each, his minutes, and his share of the offense against his usual one (1.0 is his \
-usual share). `minutes_usual` is what he plays when his team is whole.
-- `recent_games`: his last games, newest first.
-- `availability`: the availability feed's latest verdict on him.
-- `teammates`: his team's rotation, with each one's usual minutes and whether the model \
-has him out.
-- `items`: the stored news items and availability reports about him, newest first. Each \
-has a `ref`. Only an item with `citable` true can back a note: injury, availability, \
-lineup and transaction items. A rumor or a performance recap never backs a change.
-- `own_note`: the note you left on an earlier morning, if it still stands.
-- `owner_note`: a note the site's owner wrote by hand, if there is one.
-- `bounds`: the limits your note is held to.
+- `projection`: what the model assumes about him this morning. `out_now`, `return_date` \
+and `out_for_season` are how it reads his availability: a `return_date` is the first \
+game it has him back for, and `out_now` with no date means it knows only that he is out. \
+`missed_in_a_row` is how many of his team's last games he has missed, and `games_played` \
+his games this season. `minutes_usual` is what he plays when his team is whole, \
+`minutes_last_five` what he played over his last five games, and `minutes` what the model \
+projects from here. `games_expected` is how many of his team's `team_games_left` it \
+expects him to play. `timeline` is the rest of his season in runs of alike games: first \
+day, last day, his team's games in the run, the chance he plays each, his minutes, and \
+his share of the offense against his usual one (1.0 is his usual share).
+- `recent_games`: his last games, newest first, with his minutes, points, rebounds and \
+assists.
+- `availability`: the availability feed's latest `verdict` on him and the game it is \
+for, with the feed's `reason`, the verdict he had `before` it, and the feed's \
+`expected_return` when it gives one. Absent when the feed has no recent report on him.
+- `teammates`: his team's rotation, most minutes first, with each one's usual `minutes`, \
+whether the model has him `out`, the feed's `status` for him and the `expected_return` \
+the model holds for him.
+- `items`: the stored news items and availability reports about him of the last two \
+weeks, newest first, with the source and when it was published, Eastern time. Each has \
+a `ref`. Only an item with `citable` true can back a note: injury, availability, lineup \
+and transaction items. A rumor or a performance recap never backs a change.
+- `own_note`: the note you left on an earlier morning, if there is one, in the fields \
+you answer with. `written` is the day you wrote it, and `standing` says what is left of \
+it this morning: `state` is `in_force`, `ended` (he played, its date passed, or the \
+teammate it waited on came back) or `review_due` (its review date has passed and it is \
+no longer applied), `games_part_applies` and `role_part_applies` say which part still \
+holds, and `why` gives the reason a part ended.
+- `owner_note`: a note the site's owner wrote by hand, if there is one, in the same shape.
+- `bounds`: the limits your note is held to: `minutes_max`, `usage_min`, `usage_max`, \
+`review_by` (the latest review date) and `season_end` (the last day of the regular \
+season).
 
 What you answer:
 - `decision`:
   - `write`: a note should stand from today. Give it whole: it replaces `own_note`.
-  - `keep`: `own_note` still says it. Give only a new `review_date` and `cites`.
+  - `keep`: `own_note` still says it. Give only a new `review_date` and `cites`. The \
+parts of it that still hold are carried on; a part that has ended is not brought back \
+by keeping it. To change any of it, `write` it whole.
   - `retire`: `own_note` no longer holds and nothing replaces it. He played, the news \
-was reversed, or the model has caught up.
+was reversed, or the model has caught up. A note whose `standing` is `ended` is retired \
+unless the items support a new one.
   - `none`: no note is warranted and there is none to retire.
 - A note has two parts, and may have either or both:
   - Games: `return_date`, the single most likely first game back, with \
@@ -183,6 +203,8 @@ items never gave.
 - A return date differs from the model's only when the items support a different one. \
 Small differences are noise: write a date when it moves his return by about a week or \
 more, when the model has no date at all, or when it wrongly has him back.
+- A return date is on or after `as_of` and no later than `bounds.season_end`. A player \
+the items have out past the end of the regular season is `out_for_season`.
 - Stay inside `bounds`. `minutes` at most `bounds.minutes_max`: a backup cannot be given \
 more minutes than the absent player left behind. `usage` between `bounds.usage_min` and \
 `bounds.usage_max`.
