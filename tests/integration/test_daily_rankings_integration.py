@@ -1,10 +1,10 @@
 """The daily boards over a real database (services/valuation/daily.py) and the table
-they are stored in (nba.daily_rankings, migration 0050).
+they are stored in (nba.daily_rankings, migration 0051).
 
 Today is pinned to Nov 16, 2026, inside the 2026-27 calendar.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
@@ -21,6 +21,7 @@ from db.models.nba.daily_rankings import (
     DailyRanking,
 )
 from db.models.nba.player_injuries import PlayerInjury
+from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.player_season_stats import PlayerSeasonStats
 from db.models.nba.players import Player
 from services import schedule_service
@@ -73,6 +74,52 @@ def test_the_morning_board_reads_this_season_and_todays_report(season):
     assert by_id[HURT].points.value == 40.0
     # Fewer games than a season are left
     assert 0 < by_id[STAR].points.games < 65
+
+
+def _live_row(player_id, as_of, pts, timeline, team="DEN"):
+    """One player's row of a live snapshot, as data-platform's live_projection pipeline writes it."""
+    return PlayerProjection.create(
+        player=player_id, season="2026-27", source="cv_live", as_of_date=as_of, projected_gp=60,
+        min=34, pts=pts, reb=6, ast=5, stl=1, blk=1, tov=2, fgm=pts / 2.5, fga=pts / 1.2,
+        fg3m=2, fg3a=5, ftm=5, fta=6,
+        raw={"version": "live-test", "games": 60.0, "team": team, "rates": {}, "timeline": timeline},
+    )
+
+
+def test_a_fresh_live_projection_prices_the_morning_board(season):
+    yesterday = TODAY - timedelta(days=1)
+    # Built yesterday morning, read today: the star plays nearly everything, the
+    # hurt player nothing for a month and then nine games in ten
+    _live_row(STAR, yesterday, 36.0, [[yesterday.isoformat(), "2027-04-30", 75, 0.95, 36.0, 1.0]])
+    _live_row(HURT, yesterday, 25.0, [[yesterday.isoformat(), "2026-12-15", 14, 0.0, 30.0, 1.0],
+                                      ["2026-12-16", "2027-04-30", 60, 0.9, 30.0, 1.0]])
+    # An older snapshot is not the one read
+    _live_row(STAR, TODAY - timedelta(days=2), 20.0, [["2026-11-14", "2027-04-30", 76, 0.1, 20.0, 1.0]])
+
+    boards = daily.build(daily.load_inputs(), TODAY)
+
+    assert (boards.model, boards.live_as_of, boards.as_of) == (daily.MODEL_LIVE, yesterday, TODAY)
+    by_id = {p.player_id: p for p in boards.players}
+    assert by_id[STAR].line_source == by_id[HURT].line_source == "live"
+    # The snapshot's 36-point line (55.8 on ESPN's default weights), not the blend's 51.0
+    assert by_id[STAR].points.value == 55.8
+    # His games walk the calendar: the hurt player's start in the middle of December
+    assert by_id[STAR].points.games > by_id[HURT].points.games > 0
+    assert by_id[HURT].injury_status == "OUT"
+    # The player the snapshot does not carry is still on the board, on this season's games
+    assert by_id[NEW].line_source == "season"
+    # What he has done so far is still read from the season's rows
+    assert by_id[STAR].season_gp == 10 and boards.season_as_of == date(2026, 11, 15)
+
+
+def test_a_live_projection_older_than_two_days_is_not_read(season):
+    stale = TODAY - timedelta(days=3)
+    _live_row(STAR, stale, 36.0, [[stale.isoformat(), "2027-04-30", 77, 0.95, 36.0, 1.0]])
+
+    boards = daily.build(daily.load_inputs(), TODAY)
+
+    assert (boards.model, boards.live_as_of) == (daily.MODEL_IN_SEASON, None)
+    assert {p.line_source for p in boards.players} == {"baseline", "season"}
 
 
 def test_a_days_boards_are_stored_replaced_and_read_back(season):

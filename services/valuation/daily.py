@@ -10,12 +10,15 @@ the two was right about what happened next.
 
 The boards are the ones a room with no league shows today, not a second
 opinion: `DraftBoardService._fetch_inputs` with no room and no picks, ranked by
-`services.valuation.standard.rank_boards`. In season that is the preseason
-projection blended with this season's games, priced on the games still to come
-(`services.draft_in_season`); before opening night it is the projection alone.
-`MODEL_*` names which, and is stored with every row, so the day a better model
-takes over is visible in the history instead of looking like a hundred players
-changing their minds at once.
+`services.valuation.standard.rank_boards`. In season that is the morning's live
+projection (`services.live_projection`: the data platform builds it just before
+it asks for these boards), each player's line and the games he is expected to
+play from here, a missed game charged at the gap to a replacement. On a morning
+with no fresh one it is the preseason projection blended with this season's
+games (`services.draft_in_season`), and before opening night the projection
+alone. `MODEL_*` names which, and is stored with every row, so the day a better
+model takes over is visible in the history instead of looking like a hundred
+players changing their minds at once.
 
 `build` is pure and `today` is the route's whole job (`POST
 /v1/internal/jobs/rankings/daily`): one read, then the valuation. Nothing here
@@ -30,13 +33,14 @@ from typing import Optional
 
 from core.compute import run_cpu
 from db import base as db_base
-from services import draft_in_season, schedule_service
+from services import draft_in_season, live_projection, schedule_service
 from services.draft_board_service import BoardInputs, DraftBoardService
 from services.valuation.engine import DEFAULT_PLAYOFF_WEIGHT, Valued
 from services.valuation.standard import rank_boards
 
 # What built the board. A change to how a line or its games are made is a new name.
-MODEL_IN_SEASON = "season-blend-1"      # the projection blended with this season's games, games left
+MODEL_LIVE = live_projection.MODEL      # the live projection: skill, role, a chance for each game left
+MODEL_IN_SEASON = draft_in_season.MODEL  # the projection blended with this season's games, games left
 MODEL_PRESEASON = "projection-1"        # the projection alone, a full season of games
 
 
@@ -57,7 +61,7 @@ class DailyRank:
     player_id: int
     name: str
     team: Optional[str]
-    line_source: str                    # projection | season | baseline: where his line came from
+    line_source: str                    # live | projection | season | baseline: where his line came from
     season_gp: Optional[int]            # games played this season; None before opening night
     injury_status: Optional[str]        # today's flag in the board's vocabulary; None plays
     points: BoardPlace
@@ -78,6 +82,7 @@ class DailyBoards:
     prior_games: int                    # the projection's weight, in games of this season
     playoff_weight: float
     players: list[DailyRank]            # in points-board order
+    live_as_of: Optional[date] = None   # the morning of the live projection behind it; None on the blend
 
 
 def _points_place(rank: int, valued: Valued) -> BoardPlace:
@@ -117,7 +122,8 @@ def build(inputs: BoardInputs, today: date, playoff_weight: float = DEFAULT_PLAY
         season=inputs.season,
         as_of=found.games_from if found is not None else today,
         in_season=found is not None,
-        model=MODEL_IN_SEASON if found is not None else MODEL_PRESEASON,
+        model=found.model if found is not None else MODEL_PRESEASON,
+        live_as_of=found.live_as_of if found is not None else None,
         season_as_of=found.season_as_of if found is not None else None,
         projections_as_of=inputs.projections_as_of,
         projection_source=inputs.projection_source,

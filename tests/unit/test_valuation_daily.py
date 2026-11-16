@@ -79,6 +79,27 @@ def _inputs(n: int = 40, *, in_season: bool) -> BoardInputs:
     return inputs
 
 
+def _on_the_live_projection(inputs: BoardInputs, out_until_week: int = 0) -> BoardInputs:
+    """`inputs` priced by this morning's live projection: every player at nine
+    games in ten of his team's, except the first, who sits out until `out_until_week`."""
+    ids = [row.id for row in inputs.pool]
+    by_team: dict[str, dict[int, int]] = {}
+    for week in inputs.calendar:
+        for day in week.days:
+            for team in day:
+                by_team.setdefault(team, {}).setdefault(week.number, 0)
+                by_team[team][week.number] += 1
+    inputs.live_games = {
+        pid: {week: 0.9 * n * (0.0 if (pid == ids[0] and week < out_until_week) else 1.0)
+              for week, n in by_team[inputs.current_team[pid]].items()}
+        for pid in ids
+    }
+    inputs.games_left = {pid: round(sum(weeks.values()), 2) for pid, weeks in inputs.live_games.items()}
+    inputs.source = {pid: "live" for pid in ids}
+    inputs.in_season.live_as_of, inputs.in_season.live = TODAY, len(ids)
+    return inputs
+
+
 def _room_ranks(inputs: BoardInputs, fmt: str) -> dict[int, int]:
     """The `cv_rank` a league-less room shows for the same inputs."""
     scoring = resolve_scoring(None, "categories" if fmt == "categories" else None)
@@ -89,9 +110,11 @@ def _room_ranks(inputs: BoardInputs, fmt: str) -> dict[int, int]:
     return {row.player_id: row.cv_rank for row in resp.data}
 
 
-@pytest.mark.parametrize("in_season", [True, False])
-def test_the_stored_ranks_are_the_ones_the_board_shows(in_season):
+@pytest.mark.parametrize("in_season, live", [(True, True), (True, False), (False, False)])
+def test_the_stored_ranks_are_the_ones_the_board_shows(in_season, live):
     inputs = _inputs(in_season=in_season)
+    if live:
+        inputs = _on_the_live_projection(inputs, out_until_week=5)
 
     boards = daily.build(inputs, TODAY)
 
@@ -123,6 +146,40 @@ def test_in_season_the_board_is_dated_and_priced_on_what_is_left():
     assert by_id[ids[4]].injury_status == "DAY_TO_DAY" and by_id[ids[3]].injury_status is None
     assert by_id[ids[-3]].line_source == "season" and by_id[ids[0]].line_source == "projection"
     assert by_id[ids[0]].team == "DEN"
+
+
+def test_on_the_live_projection_the_board_carries_its_name_and_its_morning():
+    inputs = _on_the_live_projection(_inputs(in_season=True))
+    boards = daily.build(inputs, TODAY)
+
+    assert (boards.model, boards.live_as_of) == ("three-part-1", TODAY) and boards.model == daily.MODEL_LIVE
+    assert {p.line_source for p in boards.players} == {"live"}
+    # A Denver player: nine in ten of its 36 shared nights and its 5 extra from week 8
+    denver = next(p for p in boards.players if p.player_id == inputs.pool[0].id)
+    assert denver.points.games == denver.categories.games == pytest.approx(0.9 * 41, abs=0.01)
+
+
+def test_a_star_out_for_a_month_is_charged_the_gap_to_a_replacement_not_the_month(monkeypatch):
+    # A league small enough for forty players to hold a replacement: two teams of thirteen
+    monkeypatch.setattr("services.valuation.standard.STANDARD_LEAGUE_SIZE", 2)
+
+    def rank_of_the_star(live: bool) -> tuple[int, int]:
+        inputs = _on_the_live_projection(_inputs(in_season=True), out_until_week=5)
+        if not live:
+            # The same lines and the same games, valued the way the blend's board values them
+            inputs.live_games = {}
+            inputs.in_season.live_as_of, inputs.in_season.live = None, 0
+        boards = daily.build(inputs, TODAY)
+        star = next(p for p in boards.players if p.player_id == inputs.pool[0].id)
+        return star.points.rank, star.categories.rank
+
+    live_points, live_categories = rank_of_the_star(live=True)
+    plain_points, plain_categories = rank_of_the_star(live=False)
+    # Four of his twelve weeks gone: by his own totals he falls most of the way
+    # down a forty-player board, by the seat he fills (a replacement plays the
+    # month) he stays near the top of it
+    assert live_points <= 10 < plain_points
+    assert live_categories <= 10 < plain_categories
 
 
 def test_before_opening_night_it_is_the_projection_board_dated_today():

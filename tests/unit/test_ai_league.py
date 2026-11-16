@@ -247,13 +247,32 @@ def test_a_board_in_season_carries_this_season_s_games_and_says_how_old_adp_is(r
     monkeypatch.setattr(DraftBoardService, "get_board", get_board)
     body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
 
-    assert body["in_season"] == {"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31"}
+    assert body["in_season"] == {"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31",
+                                 "model": "season-blend-1", "live_as_of": None}
     rec = body["recommendations"][0]
     assert (rec["season_gp"], rec["season_fpts_avg"]) == (12, 48.5)
     guard = next(r for r in body["best_available"] if r["name"] == "Guard One")
     assert (guard["season_gp"], guard["season_fpts_avg"]) == (12, 48.5)
     # Nobody else has played, so they carry neither
     assert "season_gp" not in next(r for r in body["best_available"] if r["name"] == "Big One")
+
+
+def test_a_board_on_the_live_projection_says_so(room, monkeypatch):
+    from schemas.draft import DraftInSeasonResp
+    from services.draft_board_service import DraftBoardService
+
+    board = _board()
+    board.meta.in_season = DraftInSeasonResp(games_from=date(2026, 11, 16), prior_games=10, blended=250,
+                                             season_only=3, injured=40, injured_since_projection=0,
+                                             model="three-part-1", live_as_of=date(2026, 11, 16), live=465)
+
+    async def get_board(scoring, picked_ids=(), my_ids=(), session=None):
+        return board
+
+    monkeypatch.setattr(DraftBoardService, "get_board", get_board)
+    body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
+
+    assert (body["in_season"]["model"], body["in_season"]["live_as_of"]) == ("three-part-1", "2026-11-16")
 
 
 def test_a_preseason_board_carries_neither(room):

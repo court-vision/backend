@@ -49,6 +49,14 @@ night, and the stateless board in season. An imported room, and a room that
 started before opening night, keeps the preseason valuation, so the recap of a
 preseason draft still grades it on what was known when it was drafted.
 
+Since the live projection (the Live rankings plan, step 2) this blend is the
+fallback. Every morning the data platform reprices every player, and a board
+with a fresh snapshot takes its lines and its games from that instead
+(`services.live_projection`): a weight per stat rather than one for the whole
+line, minutes that move with who is out, and a chance for each game left. The
+blend still runs first, for the players the snapshot does not carry and for the
+morning there is none; `InSeason.model` says which built the board.
+
 Pure, apart from `load_season_rows` and `load_live_injuries`.
 """
 
@@ -62,6 +70,10 @@ from zoneinfo import ZoneInfo
 from services.draft_congestion import SampleWeek
 from services.schedule_service import FANTASY_DAY_ROLLOVER_ET
 from services.scoring.category_rank import PoolRow
+
+# What a board built on this module's blend is called (nba.daily_rankings.model);
+# one built on the live projection carries `live_projection.MODEL` instead.
+MODEL = "season-blend-1"
 
 # The prior's weight, in games of this season (see the module docstring)
 SEASON_PRIOR_GAMES = 10
@@ -107,6 +119,18 @@ class InSeason:
     season_as_of: Optional[date] = None                 # the newest season row read
     blended: int = 0                                    # pool rows whose line took this season's games
     season_only: int = 0                                # players valued off this season alone
+    # The live projection, when a fresh snapshot priced the board
+    # (services.live_projection): its morning, the coefficients that built it,
+    # and how many players it values. None and 0 on the blend alone.
+    live_as_of: Optional[date] = None
+    live_version: Optional[str] = None
+    live: int = 0
+
+    @property
+    def model(self) -> str:
+        """What built the in-season values: the live projection's name, or the blend's."""
+        from services import live_projection
+        return live_projection.MODEL if self.live_as_of is not None else MODEL
 
 
 def games_from(

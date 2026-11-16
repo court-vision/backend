@@ -178,10 +178,11 @@ async def build_daily_rankings():
 
     Called by data-platform's daily_rankings pipeline each morning, which writes
     them to nba.daily_rankings beside ESPN's rank that day. The boards are the
-    ones a room with no league shows right now: in season the projection blended
-    with this season's games and priced on the games left, before opening night
-    the projection alone. `in_season` says which; the pipeline stores only the
-    first. Nothing is written here.
+    ones a room with no league shows right now: in season the morning's live
+    projection (the pipeline builds it first), or with no fresh one the
+    projection blended with this season's games; before opening night the
+    projection alone. `model` says which. `in_season` is false outside the
+    regular season, and the pipeline stores nothing then. Nothing is written here.
     """
     boards = await daily_boards.today()
     return respond(DailyRankingsResp(

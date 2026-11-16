@@ -93,7 +93,9 @@ class DailyRankResp(ApiModel):
     player_id: int = Field(description="NBA player id (nba.players.id)")
     name: str
     team: Optional[str] = Field(description="Current NBA team tricode")
-    line_source: str = Field(description="Where his line came from: projection, season or baseline")
+    line_source: str = Field(
+        description="Where his line came from: live (the morning's live projection), projection, season or baseline"
+    )
     season_gp: Optional[int] = Field(description="Games played this season; null before opening night")
     injury_status: Optional[str] = Field(description="Today's flag (OUT, DAY_TO_DAY, ...); null when he plays")
     points: DailyBoardPlace = Field(description="Standard points league, ESPN's default weights")
@@ -104,7 +106,16 @@ class DailyRankingsData(ApiModel):
     season: str
     as_of: date = Field(description="The fantasy day the boards are for: games from this day on are counted")
     in_season: bool = Field(description="False before opening night and after the regular season")
-    model: str = Field(description="What built the boards; stored with every row")
+    model: str = Field(
+        description=(
+            "What built the boards; stored with every row. three-part-1: the morning's live "
+            "projection. season-blend-1: the preseason projection blended with this season's "
+            "games, on a morning with no fresh live projection. projection-1: before opening night"
+        ),
+    )
+    live_as_of: Optional[date] = Field(
+        default=None, description="The morning of the live projection the boards read; null without one"
+    )
     season_as_of: Optional[date] = Field(description="The newest box score the lines read; null out of season")
     projections_as_of: Optional[date]
     projection_source: Optional[str]

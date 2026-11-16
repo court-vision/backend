@@ -1,5 +1,5 @@
 """
-nba.daily_rankings (migration 0050): a ranking stored every morning.
+nba.daily_rankings (migration 0051): a ranking stored every morning.
 
 One row per player per board per source per day. `source` is whose ranking it
 is: `cv` is Court Vision's board as the Draft lab shows it to a room with no

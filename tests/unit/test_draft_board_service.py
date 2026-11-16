@@ -1966,6 +1966,102 @@ def test_a_board_in_season_says_so_and_prices_an_injury_newer_than_the_projectio
     assert season.value == pytest.approx(30.0 * 50.0, rel=0.05)
 
 
+# ---- the live projection over it (services/live_projection.py) ----
+
+def _live_snapshot(as_of=date(2026, 11, 15)):
+    """Star, back for week 5 after sitting out what is left of week 4; and a
+    player nothing else values, on Denver."""
+    from services import live_projection as live
+    from services.scoring.models import StatLine
+
+    def player(pid, team, name, pts, timeline):
+        line = StatLine(pts=pts, reb=6.0, ast=5.0, stl=1.0, blk=1.0, tov=2.0, fgm=pts / 2.5, fga=pts / 1.2,
+                        fg3m=2.0, fg3a=5.0, ftm=5.0, fta=6.0, min=34.0, gp=1.0)
+        return live.LivePlayer(player_id=pid, name=name, espn_id=100 + pid, name_normalized=name.lower(),
+                               team=team, line=line, games=0.0, timeline=live.parse_timeline(timeline))
+
+    return live.LiveSnapshot(as_of=as_of, version="live-test", players={
+        1: player(1, "DEN", "Star", 33.0, [["2026-11-15", "2026-11-15", 1, 0.0, 36.0, 1.0],
+                                           ["2026-11-16", "2026-11-22", 7, 0.9, 36.0, 1.0]]),
+        7: player(7, "DEN", "Call Up", 9.0, [["2026-11-15", "2026-11-22", 8, 0.5, 18.0, 1.0]]),
+    })
+
+
+@pytest.mark.unit
+def test_fetch_with_a_fresh_live_projection_takes_its_lines_and_its_games(fake_tables):
+    fake_tables["market"] = [_market_row(1, overall_rank=1), _market_row(2, overall_rank=9)]
+    fake_tables["season_reads"] = _season_reads(live=_live_snapshot())
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    by_id = {r.id: r for r in inputs.pool}
+    # Star's line is the snapshot's, not the blend's; the call-up joins the pool with it
+    assert by_id[1].line.pts == 33.0 and inputs.source[1] == "live"
+    assert by_id[7].name == "Call Up" and inputs.source[7] == "live" and by_id[7].team == "DEN"
+    # His games are the ones the timeline gives him from today on, placed by week:
+    # none of week 4's last day, seven at 0.9 in week 5
+    assert inputs.live_games[1] == {4: 0.0, 5: pytest.approx(6.3)}
+    assert inputs.games_left[1] == pytest.approx(6.3) and inputs.games_left[7] == pytest.approx(4.0)
+    # The player the snapshot does not carry keeps the blend's line and its games
+    assert inputs.source[2] == "baseline" and inputs.games_left[2] == round(65 * 8 / 14, 2)
+    assert 2 not in inputs.live_games
+    # The board says which model priced it
+    found = inputs.in_season
+    assert (found.model, found.live_as_of, found.live, found.live_version) == (
+        "three-part-1", date(2026, 11, 15), 2, "live-test")
+    # Both are hurt today and were healthy in October. The live projection read
+    # this morning, so only the player it does not carry is "hurt since his projection"
+    assert inputs.live_injury == {2: "OUT", 1: "QUESTIONABLE"}
+    assert inputs.new_injury == frozenset({2})
+
+
+@pytest.mark.unit
+def test_fetch_without_a_live_projection_is_the_blend(fake_tables):
+    fake_tables["season_reads"] = _season_reads()
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+    assert inputs.live_games == {} and inputs.in_season.model == "season-blend-1"
+    assert inputs.in_season.live_as_of is None and inputs.in_season.live == 0
+    assert set(inputs.source.values()) <= {"baseline", "projection", "season"}
+
+
+@pytest.mark.unit
+def test_a_board_on_the_live_projection_fills_missed_games_and_charges_no_injury_twice(monkeypatch):
+    from services import draft_in_season as ins
+
+    found = ins.InSeason(games_from=date(2026, 11, 15), season_gp={1: 12, 3: 11},
+                         season_fpts={1: 61.5, 3: 44.0}, season_as_of=date(2026, 11, 14), blended=2,
+                         live_as_of=date(2026, 11, 15), live_version="live-test", live=6)
+    games = {1: 50.0, 2: 45.0, 3: 20.0, 4: 46.0, 5: 40.0, 6: 44.0}
+    # Player 3 is out today: the projection gave him 20 of the games left
+    inputs = _inputs(in_season=found, games_left=games, live_injury={3: "OUT"},
+                     live_games={pid: {} for pid in games},
+                     source={pid: "live" for pid in games})
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()))
+
+    meta = resp.meta.in_season
+    assert (meta.model, meta.live_as_of, meta.live) == ("three-part-1", date(2026, 11, 15), 6)
+    assert meta.injured == 1 and meta.injured_since_projection == 0
+    rows = {r.player_id: r for r in resp.data}
+    assert rows[3].value_source == "live" and rows[3].injury_status == "OUT"
+    recs = {r.player_id: r for r in resp.recommendations}
+    hurt = next(c for c in recs[3].components if c.key == "injury")
+    assert hurt.value == 0
+    assert hurt.detail == "listed OUT — already in the 20 games the live projection expects him to play"
+
+
+@pytest.mark.unit
+def test_phase_games_follow_the_playoff_weeks():
+    by_week = {18: 3.0, 19: 2.5, 20: 3.5, 21: 3.0, 22: 1.0}
+    assert DraftBoardService._phase_games(by_week, (20, 21)) == (5.5, 6.5, 1.0)
+    # No playoffs placed (roto, or no calendar): every game is a regular one
+    assert DraftBoardService._phase_games(by_week, ()) == (13.0, 0.0, 0.0)
+    # The projection did not place his games by week: spread evenly, as before
+    assert DraftBoardService._phase_games({}, (20, 21)) is None
+    assert DraftBoardService._phase_games(None, (20, 21)) is None
+
+
 @pytest.mark.unit
 def test_a_preseason_board_has_no_in_season_meta(stub_inputs):
     resp = _board(resolve_scoring(_league()))

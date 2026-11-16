@@ -1,4 +1,4 @@
--- Migration 0050: nba.daily_rankings, a ranking stored every morning (the Live
+-- Migration 0051: nba.daily_rankings, a ranking stored every morning (the Live
 -- rankings plan, step 1).
 --
 -- Court Vision's rankings were only ever computed on read, so nothing could say
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS nba.daily_rankings (
     games           numeric(6, 2),
     season_gp       smallint,                   -- games he had played this season that morning
     injury_status   varchar(20),                -- the source's own flag that morning; null is healthy
-    line_source     varchar(12),                -- cv: projection | season | baseline, where his line came from
+    line_source     varchar(12),                -- cv: live | projection | season | baseline, where his line came from
     model           varchar(32),                -- cv: what built the board
     pipeline_run_id uuid,
     created_at      timestamp with time zone NOT NULL DEFAULT now(),

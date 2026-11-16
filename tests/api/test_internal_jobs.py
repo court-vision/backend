@@ -279,6 +279,26 @@ def test_daily_rankings_are_the_two_boards_as_of_today(client, token, daily_inpu
 
 
 @pytest.mark.api
+def test_daily_rankings_name_the_live_projection_when_the_board_is_built_on_it(client, token, daily_inputs):
+    inputs = _board_inputs(True)
+    inputs.in_season.live_as_of, inputs.in_season.live = date(2026, 11, 16), 3
+    inputs.live_games = {1: {}, 2: {}, 3: {}}
+    inputs.source = {1: "live", 2: "live", 3: "live"}
+    daily_inputs(inputs)
+
+    data = client.post(DAILY, headers=AUTH).json()["data"]
+
+    assert (data["model"], data["live_as_of"]) == ("three-part-1", "2026-11-16")
+    assert {p["line_source"] for p in data["players"]} == {"live"}
+
+
+@pytest.mark.api
+def test_daily_rankings_on_the_blend_carry_no_live_date(client, token, daily_inputs):
+    data = client.post(DAILY, headers=AUTH).json()["data"]
+    assert (data["model"], data["live_as_of"]) == ("season-blend-1", None)
+
+
+@pytest.mark.api
 def test_daily_rankings_say_when_it_is_not_the_season(client, token, daily_inputs):
     daily_inputs(_board_inputs(False))
 

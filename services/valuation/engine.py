@@ -44,6 +44,22 @@ at all — no head-to-head matchup is played then. Everything is renormalized so
 the league-average player keeps his games: λ changes who ranks where, not how
 big the numbers are. Roto counts the whole schedule, once.
 
+**A missed game** is not an empty seat. With `fill_missed` (set when the
+player's games come from the live projection, which says which of his team's
+games he is expected to play), the games he misses are played by a replacement:
+the level of the first player past the draftable cohort, ranked per game among
+those expected to play at all. His season is then
+
+    his line × the games he plays + min(his line, the replacement's) × the games he misses
+
+so a star who is out for six weeks costs the gap to a replacement for six
+weeks, not six weeks of nothing, and a player below the replacement gains
+nothing by sitting. In a category league the same rule is applied to the
+weekly totals, the replacement's line being the average of the best
+`league_size` players past the cohort. A player with no game left gets no
+replacement: nobody holds his seat for him, and he falls off the board.
+Without the flag nothing here applies and every valuation is what it was.
+
 The output keeps the board's existing contract — a pool row, a display value,
 per-category display values, per-category z, and their sum, best first — and
 adds what the engine alone knows: the season value that orders it and the
@@ -82,6 +98,9 @@ DEFAULT_COUNTED_WEEKS = 23.0    # ESPN's default head-to-head season, weeks 1-23
 NBA_SEASON_GAMES = 82.0
 DEFAULT_PLAYOFF_WEIGHT = 2.0
 PLAYOFF_WEIGHTS: tuple[float, ...] = (1.0, 1.5, 2.0, 3.0, 4.0)
+# Under `fill_missed`: fewer expected games than this and he is not coming
+# back, so no replacement plays for him and he is no replacement himself.
+FILL_MIN_GAMES = 0.5
 
 VALUE_DECIMALS = 1
 Z_DECIMALS = 3
@@ -120,6 +139,9 @@ class LeagueModel:
     counted_weeks: float = 0.0              # length of the scored season, in 7-day weeks
     team_weeks: Mapping[str, TeamWeeks] = field(default_factory=dict)
     playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT
+    # A game he misses is played by a replacement (see module docstring). Only
+    # for games that say which he misses: the live projection's.
+    fill_missed: bool = False
 
     @property
     def cohort_size(self) -> int:
@@ -139,6 +161,10 @@ class ProjectedPlayer:
     team: Optional[str] = None              # current NBA team code, for the schedule split
     dd_rate: Optional[float] = None         # P(double-double) per game, points leagues
     td_rate: Optional[float] = None
+    # Where on the calendar `games` fall, when the projection says: his expected
+    # games in the regular fantasy weeks, the playoff weeks, and after them.
+    # None spreads `games` over his team's schedule evenly.
+    phase_games: Optional[tuple[float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -203,11 +229,46 @@ def effective_games(player: ProjectedPlayer, model: LeagueModel, norm: Optional[
     split = _split_of(player, model)
     if split is None or split.total <= 0:
         return games
+    scale = norm if norm is not None else _norm(model)
+    if player.phase_games is not None:
+        # The projection placed his games itself: no even spread to assume.
+        regular, playoff, after = (max(float(g), 0.0) for g in player.phase_games)
+        if model.format == "roto":
+            return regular + playoff + after
+        return (regular + model.playoff_weight * playoff) * scale
     share = games_share(player, model)
     if model.format == "roto":
         return share * split.total
     weighted = split.regular + model.playoff_weight * split.playoff
-    return share * weighted * (norm if norm is not None else _norm(model))
+    return share * weighted * scale
+
+
+def full_games(player: ProjectedPlayer, model: LeagueModel, norm: Optional[float] = None) -> Optional[float]:
+    """The effective games of a player who misses none of his team's: what a
+    seat is worth filling. None when no calendar says how many those are."""
+    split = _split_of(player, model)
+    if split is None or split.total <= 0:
+        return None
+    if model.format == "roto":
+        return float(split.total)
+    return (split.regular + model.playoff_weight * split.playoff) * (norm if norm is not None else _norm(model))
+
+
+def _plays(player: ProjectedPlayer) -> bool:
+    """Whether he is expected to play again at all (`FILL_MIN_GAMES`)."""
+    return player.games is None or float(player.games) >= FILL_MIN_GAMES
+
+
+def _missed(players: Sequence[ProjectedPlayer], games: Sequence[float], model: LeagueModel, norm: float) -> list[float]:
+    """Under `fill_missed`, the effective games each player's seat is filled by
+    a replacement; zeros without it, and for a player who is not coming back."""
+    if not model.fill_missed:
+        return [0.0] * len(players)
+    out: list[float] = []
+    for p, eg in zip(players, games):
+        full = full_games(p, model, norm) if _plays(p) else None
+        out.append(max(full - eg, 0.0) if full is not None else 0.0)
+    return out
 
 
 # ---- points ----------------------------------------------------------------------
@@ -226,15 +287,24 @@ def points_per_game(player: ProjectedPlayer, weights: Mapping[str, float]) -> fl
     return total
 
 
+def replacement_level(per_game: Sequence[float], players: Sequence[ProjectedPlayer], size: int) -> float:
+    """The per-game value of the first player past a cohort of `size`, ranked per
+    game among those expected to play; 0 for a pool no deeper than the cohort."""
+    ranked = sorted((v for v, p in zip(per_game, players) if _plays(p)), reverse=True)
+    return ranked[size] if len(ranked) > size else 0.0
+
+
 def _value_points(players: Sequence[ProjectedPlayer], model: LeagueModel) -> list[Valued]:
     norm = _norm(model)
+    games = [effective_games(p, model, norm) for p in players]
+    per_game = [points_per_game(p, model.point_weights) for p in players]
+    missed = _missed(players, games, model, norm)
+    level = replacement_level(per_game, players, model.cohort_size) if model.fill_missed else 0.0
     out: list[Valued] = []
-    for p in players:
-        eg = effective_games(p, model, norm)
-        fpg = points_per_game(p, model.point_weights)
+    for p, eg, fpg, gone in zip(players, games, per_game, missed):
         out.append(Valued(
             row=p.row, value=round(fpg, VALUE_DECIMALS), cats=None, z=None, z_sum=None,
-            season_value=round(fpg * eg, VALUE_DECIMALS), games=round(eg, 1),
+            season_value=round(fpg * eg + min(fpg, level) * gone, VALUE_DECIMALS), games=round(eg, 1),
             expected_games=DEFAULT_GAMES if p.games is None else float(p.games),
             share=games_share(p, model),
         ))
@@ -263,44 +333,109 @@ def _clean(x: float, decimals: int) -> float:
     return round(x, decimals) or 0.0
 
 
+# One seat's share of a period that someone else plays: the games, and whose line.
+Fill = Optional[tuple[float, StatLine]]
+
+
 def _category_scores(
     players: Sequence[ProjectedPlayer],
     model: LeagueModel,
     per_period: Sequence[float],
     cohort: Sequence[int],
     with_noise: bool,
-) -> tuple[list[dict[str, float]], list[float]]:
+    fill: Optional[Sequence[Fill]] = None,
+) -> tuple[list[dict[str, float]], list[float], dict[str, tuple[float, float, Optional[float]]]]:
     """Per-category signed scores for every player against `cohort` (indices).
 
     `per_period` is each player's games in the unit being compared: games per
-    week for head-to-head, the season's games for roto.
+    week for head-to-head, the season's games for roto. `fill`, when given, is
+    what plays the rest of each seat's period (`fill_missed`): the totals are
+    then the seat's, his games and the fill's together.
+
+    Also returns each category's scale, `(sign, denominator, cohort rate)`: what
+    one game of any line is worth on this board (`_worth`).
     """
+    def totals_of(key: str) -> list[float]:
+        own = [p.row.line.get(key) * n for p, n in zip(players, per_period)]
+        if fill is None:
+            return own
+        return [t + (f[1].get(key) * f[0] if f is not None else 0.0) for t, f in zip(own, fill)]
+
     zs: list[dict[str, float]] = [{} for _ in players]
     sums = [0.0] * len(players)
+    scale: dict[str, tuple[float, float, Optional[float]]] = {}
     for cat in model.categories:
         d = STATS[cat.key]
         sign = 1.0 if cat.higher_is_better else -1.0
+        pbar: Optional[float] = None
         if d.is_rate:
-            makes = [p.row.line.get(d.numerator) * n for p, n in zip(players, per_period)]
-            attempts = [p.row.line.get(d.denominator) * n for p, n in zip(players, per_period)]
+            makes = totals_of(d.numerator)
+            attempts = totals_of(d.denominator)
             c_makes = sum(makes[i] for i in cohort)
             c_att = sum(attempts[i] for i in cohort)
             pbar = c_makes / c_att if c_att > 0 else 0.0
             totals = [m - pbar * a for m, a in zip(makes, attempts)]
             noise = [_phi(cat) * a for a in attempts]
         else:
-            totals = [p.row.line.get(cat.key) * n for p, n in zip(players, per_period)]
+            totals = totals_of(cat.key)
             noise = [_phi(cat) * max(t, 0.0) for t in totals]
         c_vals = [totals[i] for i in cohort]
         mean = statistics.fmean(c_vals) if c_vals else 0.0
         var = statistics.pvariance(c_vals, mean) if len(c_vals) > 1 else 0.0
         tau2 = statistics.fmean(noise[i] for i in cohort) if (with_noise and cohort) else 0.0
         denom = (var + tau2) ** 0.5
+        scale[cat.key] = (sign, denom, pbar)
         for i, t in enumerate(totals):
             z = sign * (t - mean) / denom if denom > 1e-12 else 0.0
             zs[i][cat.key] = z
             sums[i] += z
-    return zs, sums
+    return zs, sums, scale
+
+
+def _worth(line: StatLine, scale: Mapping[str, tuple[float, float, Optional[float]]]) -> float:
+    """What one game of `line` adds to a seat's score, every category summed."""
+    total = 0.0
+    for key, (sign, denom, pbar) in scale.items():
+        if denom <= 1e-12:
+            continue
+        d = STATS[key]
+        amount = (line.get(d.numerator) - (pbar or 0.0) * line.get(d.denominator)) if d.is_rate else line.get(key)
+        total += sign * amount / denom
+    return total
+
+
+def _mean_line(lines: Sequence[StatLine]) -> StatLine:
+    out = lines[0].scaled(1.0 / len(lines))
+    for line in lines[1:]:
+        out = out + line.scaled(1.0 / len(lines))
+    return out
+
+
+def _fills(
+    players: Sequence[ProjectedPlayer],
+    model: LeagueModel,
+    missed: Sequence[float],
+    scale: Mapping[str, tuple[float, float, Optional[float]]],
+) -> Optional[list[Fill]]:
+    """Who plays the games each seat's player misses: the replacement, or the
+    player's own line when he is no better than one (the points rule, `min`).
+
+    The replacement's line is the average of the best `league_size` players
+    past the cohort, ranked by what a game of theirs is worth here among those
+    expected to play: one player's line would hand every injured guard a
+    center's blocks. None when the pool is no deeper than the cohort.
+    """
+    worth = [_worth(p.row.line, scale) for p in players]
+    ranked = sorted((i for i, p in enumerate(players) if _plays(p)), key=lambda i: -worth[i])
+    band = ranked[model.cohort_size: model.cohort_size + max(int(model.league_size), 1)]
+    if not band:
+        return None
+    replacement = _mean_line([players[i].row.line for i in band])
+    level = _worth(replacement, scale)
+    return [
+        (gone, replacement if worth[i] > level else p.row.line) if gone > 0 else None
+        for i, (p, gone) in enumerate(zip(players, missed))
+    ]
 
 
 def _value_categories(players: Sequence[ProjectedPlayer], model: LeagueModel) -> list[Valued]:
@@ -313,6 +448,10 @@ def _value_categories(players: Sequence[ProjectedPlayer], model: LeagueModel) ->
     # unit matters: with no calendar, assume ESPN's default season length.
     weeks = model.counted_weeks if model.counted_weeks > 0 else DEFAULT_COUNTED_WEEKS
     per_period = games if roto else [g / weeks for g in games]
+    missed = _missed(players, games, model, norm)
+    if not roto:
+        missed = [m / weeks for m in missed]
+    filling = model.fill_missed and any(m > 0 for m in missed)
 
     # Seed the cohort on per-game volume-free value (ESPN default points), then
     # let the category score choose its own cohort.
@@ -323,9 +462,14 @@ def _value_categories(players: Sequence[ProjectedPlayer], model: LeagueModel) ->
     cohort = sorted(range(len(players)), key=lambda i: -seed[i])[:n]
     zs: list[dict[str, float]] = []
     sums: list[float] = []
-    for _ in range(COHORT_ITERATIONS):
-        zs, sums = _category_scores(players, model, per_period, cohort, with_noise=not roto)
+    fill: Optional[list[Fill]] = None
+    # Filling the missed games needs a first pass to say what a game is worth,
+    # so it gets one more: the last two are scored on filled seats.
+    for _ in range(COHORT_ITERATIONS + (1 if filling else 0)):
+        zs, sums, scale = _category_scores(players, model, per_period, cohort, with_noise=not roto, fill=fill)
         cohort = sorted(range(len(players)), key=lambda i: -sums[i])[:n]
+        if filling:
+            fill = _fills(players, model, missed, scale)
 
     out: list[Valued] = []
     for i, p in enumerate(players):

@@ -7,6 +7,8 @@ across regular and playoff weeks by hand. The board wiring is
 `test_draft_board_service.py`'s.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from services.scoring.category_rank import PoolRow
@@ -18,9 +20,11 @@ from services.valuation.engine import (
     ProjectedPlayer,
     TeamWeeks,
     effective_games,
+    full_games,
     games_share,
     playoff_weight_of,
     points_per_game,
+    replacement_level,
     value_pool,
 )
 
@@ -234,3 +238,149 @@ class TestShape:
 ])
 def test_playoff_weight_snaps_to_the_offered_steps(raw, expected):
     assert playoff_weight_of(raw) == expected
+
+
+# ---- a missed game is played by a replacement (`fill_missed`) ---------------------------
+
+
+ONE_TEAM = {"X": TeamWeeks(regular=40, playoff=10, after=0)}
+
+
+def _fill_points(**kw):
+    """A two-team, five-seat league: a cohort of 10, so the eleventh player per game is the replacement."""
+    return LeagueModel(format="points", point_weights=DEFAULT_POINT_WEIGHTS, league_size=2, roster_size=5,
+                       team_weeks=ONE_TEAM, playoff_weight=1.0, fill_missed=True, **kw)
+
+
+def _ladder(n=20, games=50.0):
+    """Players 100.., each a point a game worse than the one before, healthy all the way."""
+    return [_p(100 + i, games=games, team="X", pts=30.0 - i) for i in range(n)]
+
+
+class TestReplacement:
+    def test_the_level_is_the_first_player_past_the_cohort_who_is_expected_to_play(self):
+        pool = _ladder()
+        per_game = [points_per_game(p, DEFAULT_POINT_WEIGHTS) for p in pool]
+        assert replacement_level(per_game, pool, 10) == per_game[10]
+        # A player with no game left is nobody's replacement: the level moves down one
+        gone = [_p(100, games=0.0, team="X", pts=30.0)] + pool[1:]
+        assert replacement_level(per_game, gone, 10) == per_game[11]
+        # A pool no deeper than the cohort has none
+        assert replacement_level(per_game[:10], pool[:10], 10) == 0.0
+
+    def test_a_missed_game_costs_the_gap_to_a_replacement(self):
+        star = _p(1, games=30.0, team="X", pts=40.0)        # out for 20 of the 50 left
+        pool = _ladder() + [star]
+        model = _fill_points()
+        v = _by_id(value_pool(pool, model))
+        level = points_per_game(pool[9], DEFAULT_POINT_WEIGHTS)     # the star makes eleven above it
+        fpg = points_per_game(star, DEFAULT_POINT_WEIGHTS)
+        assert v[1].season_value == pytest.approx(fpg * 30 + level * 20, abs=0.1)
+        # Without the rule the same player is 30 games of himself and 20 of nothing
+        plain = _by_id(value_pool(pool, replace(model, fill_missed=False)))
+        assert plain[1].season_value == pytest.approx(fpg * 30, abs=0.1)
+        # His own games and his share of the schedule are still his own
+        assert v[1].games == 30.0 and v[1].expected_games == 30.0 and v[1].share == pytest.approx(0.6)
+
+    def test_a_star_out_for_weeks_stays_above_a_healthy_role_player(self):
+        # 40 a game for 30 games against 24 a game for all 50: by totals 1200 plays 1200
+        star = _p(1, games=30.0, team="X", pts=40.0)
+        pool = _ladder() + [star]
+        order = [v.row.id for v in value_pool(pool, _fill_points())]
+        healthy_24 = 106
+        assert order.index(1) < order.index(healthy_24)
+        plain = [v.row.id for v in value_pool(pool, replace(_fill_points(), fill_missed=False))]
+        assert plain.index(1) > plain.index(104)             # without the rule he sits under the 26-a-game player
+
+    def test_a_player_below_the_replacement_gains_nothing_by_sitting(self):
+        pool = _ladder()
+        pool[15] = _p(115, games=10.0, team="X", pts=15.0)   # below the level, and out for 40
+        v = _by_id(value_pool(pool, _fill_points()))
+        fpg = points_per_game(pool[15], DEFAULT_POINT_WEIGHTS)
+        assert v[115].season_value == pytest.approx(fpg * 50, abs=0.1)
+        assert v[115].season_value < v[110].season_value     # never above the replacement himself
+
+    def test_a_player_with_no_game_left_falls_off_the_board(self):
+        pool = _ladder() + [_p(1, games=0.0, team="X", pts=40.0)]
+        valued = value_pool(pool, _fill_points())
+        assert valued[-1].row.id == 1 and valued[-1].season_value == 0.0
+
+    def test_the_fill_counts_playoff_games_at_the_playoff_weight(self):
+        # He misses the regular weeks and plays every playoff game: with the
+        # playoffs doubled his own ten games count for twenty
+        late = ProjectedPlayer(row=_row(1, pts=40.0), games=10.0, team="X", phase_games=(0.0, 10.0, 0.0))
+        model = _fill_points()
+        doubled = replace(model, playoff_weight=2.0)
+        assert effective_games(late, model) == pytest.approx(10.0)
+        norm = 50 / 60
+        assert effective_games(late, doubled) == pytest.approx(20 * norm)
+        assert full_games(late, doubled) == pytest.approx(50.0)
+        # Spread evenly, the same ten games would be a fifth of each phase
+        even = ProjectedPlayer(row=_row(2, pts=40.0), games=10.0, team="X")
+        assert effective_games(even, doubled) == pytest.approx(0.2 * 60 * norm)
+
+    def test_phase_games_in_roto_are_every_game_once(self):
+        roto = LeagueModel(format="roto", categories=NINE_CAT, team_weeks={"X": TeamWeeks(40, 6, 4)},
+                           playoff_weight=4.0)
+        late = ProjectedPlayer(row=_row(1), games=20.0, team="X", phase_games=(12.0, 5.0, 3.0))
+        assert effective_games(late, roto) == pytest.approx(20.0)
+        assert full_games(late, roto) == 50.0
+
+    def test_no_calendar_means_no_seat_to_fill(self):
+        model = LeagueModel(format="points", point_weights=DEFAULT_POINT_WEIGHTS, league_size=2, roster_size=5,
+                            fill_missed=True)
+        pool = [_p(100 + i, games=50.0, pts=30.0 - i) for i in range(20)] + [_p(1, games=30.0, pts=40.0)]
+        assert full_games(pool[-1], model) is None
+        v = _by_id(value_pool(pool, model))
+        assert v[1].season_value == pytest.approx(points_per_game(pool[-1], DEFAULT_POINT_WEIGHTS) * 30, abs=0.1)
+
+
+def _fill_cats(**kw):
+    return LeagueModel(format="categories", categories=NINE_CAT, league_size=2, roster_size=10,
+                       counted_weeks=10.0, team_weeks=ONE_TEAM, playoff_weight=1.0, **kw)
+
+
+class TestReplacementInCategories:
+    def _pool(self, star_games):
+        star = _p(1, games=star_games, team="X", pts=30.0, reb=10.0, ast=8.0, stl=1.8, blk=1.2, fg3m=3.0,
+                  fgm=10.5, fga=20.0, ftm=6.0, fta=7.0)
+        return _filler(100, 40, team="X", games=50.0) + [star]
+
+    def test_an_injured_star_keeps_the_games_a_replacement_plays_for_him(self):
+        pool = self._pool(star_games=25.0)
+        filled = _by_id(value_pool(pool, _fill_cats(fill_missed=True)))
+        plain = _by_id(value_pool(pool, _fill_cats()))
+        healthy = _by_id(value_pool(self._pool(star_games=50.0), _fill_cats(fill_missed=True)))
+        # Half his games at a replacement's line: worth more than half a season of
+        # nothing, less than playing them himself
+        assert plain[1].z_sum < filled[1].z_sum < healthy[1].z_sum
+        # What he shows per game is still his own line, and his games his own
+        assert filled[1].cats["pts"] == 30.0 and filled[1].games == 25.0
+
+    def test_healthy_players_are_valued_as_before(self):
+        # Nobody misses a game: there is nothing to fill, and the board is the old one
+        pool = self._pool(star_games=50.0)
+        filled = value_pool(pool, _fill_cats(fill_missed=True))
+        plain = value_pool(pool, _fill_cats())
+        assert [(v.row.id, v.z_sum) for v in filled] == [(v.row.id, v.z_sum) for v in plain]
+
+    def test_a_player_with_no_game_left_is_last(self):
+        pool = self._pool(star_games=0.0)
+        valued = value_pool(pool, _fill_cats(fill_missed=True))
+        assert valued[-1].row.id == 1
+
+    def test_a_player_no_better_than_a_replacement_fills_his_own_seat(self):
+        pool = self._pool(star_games=50.0)
+        weak = _p(2, games=10.0, team="X", pts=4.0, reb=1.5, ast=0.8, stl=0.2, blk=0.1, fg3m=0.2,
+                  fgm=1.5, fga=4.5, ftm=0.6, fta=1.0)
+        strong = _by_id(value_pool(pool + [weak], _fill_cats(fill_missed=True)))
+        # Sitting 40 of 50 does not lift him over the worst healthy player in the pool
+        assert strong[2].z_sum == min(v.z_sum for v in strong.values())
+
+    def test_roto_fills_the_season(self):
+        pool = self._pool(star_games=25.0)
+        roto = LeagueModel(format="roto", categories=NINE_CAT, league_size=2, roster_size=10,
+                           team_weeks=ONE_TEAM)
+        filled = _by_id(value_pool(pool, replace(roto, fill_missed=True)))
+        plain = _by_id(value_pool(pool, roto))
+        assert filled[1].z_sum > plain[1].z_sum
