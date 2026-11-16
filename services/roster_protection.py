@@ -328,10 +328,11 @@ class RosterProtectionService:
 SEED_DRAFT, SEED_VALUE = "draft", "value"
 
 
-def draft_core(payload: dict, espn_team_id: Optional[int], n: int) -> list[int]:
-    """The team's first `n` draft picks (ESPN ids): by pick number, or by price in an auction.
-    Empty when ESPN holds no completed draft for the league (or the team isn't known)."""
-    if espn_team_id is None or n <= 0:
+def draft_core(payload: dict, espn_team_id: Optional[int], n: Optional[int] = None) -> list[int]:
+    """The team's draft picks (ESPN ids), the first `n` or all of them: by pick number, or by
+    price in an auction. Empty when ESPN holds no completed draft for the league (or the team
+    isn't known)."""
+    if espn_team_id is None or (n is not None and n <= 0):
         return []
     picks = [p for p in ((payload.get("draftDetail") or {}).get("picks") or [])
              if int(p.get("playerId") or -1) > 0 and int(p.get("teamId") or -1) == espn_team_id]
@@ -340,7 +341,7 @@ def draft_core(payload: dict, espn_team_id: Optional[int], n: int) -> list[int]:
         picks.sort(key=lambda p: (-(p.get("bidAmount") or 0), int(p.get("overallPickNumber") or 0)))
     else:
         picks.sort(key=lambda p: int(p.get("overallPickNumber") or 0))
-    return [int(p["playerId"]) for p in picks[:n]]
+    return [int(p["playerId"]) for p in (picks if n is None else picks[:n])]
 
 
 def _moving_out(team_id: int) -> frozenset[int]:
@@ -381,36 +382,46 @@ def _store_seed(team_id: int, user_id: int, players: Sequence[Any], now: datetim
 async def seed(team, league_info: LeagueInfo, *, n: Optional[int] = None,
                now: Optional[datetime] = None) -> list[str]:
     """Protect the team's first `n` draft picks still on its roster (AUTOPILOT_SEED_PROTECTED),
-    once, and return the names newly protected. Raises when ESPN can't be read, so the next
-    check-in tries again; a team not on ESPN (Dime moves no one there) is marked with none."""
+    once, and return the names newly protected. The picks are taken in order past those no longer
+    rostered or being moved out, so up to `n` are protected. Raises when ESPN can't be read, so the
+    next check-in tries again; a team not on ESPN (Dime moves no one there) is marked with none."""
     from core.settings import settings
     from schemas.common import FantasyProvider
     from services.lineup_editor_service import _roster_slots
     from services.providers import get_provider_adapter
     from services.providers.http import provider_get
     from services.espn_service import EspnService
+    from services.roster_transaction_service import next_day_period
     from utils.constants import ESPN_FANTASY_ENDPOINT
 
     n = settings.autopilot_seed_protected if n is None else n
     now = now or datetime.now(timezone.utc)
     if league_info.provider != FantasyProvider.ESPN or n <= 0:
         return await run_db("protections.seed", _store_seed, team.team_id, team.user_id, [], now)
-    board = await get_provider_adapter(league_info.provider).read_lineup(
-        team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
+    adapter, slots = get_provider_adapter(league_info.provider), _roster_slots(team)
+    board = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots)
     payload = await provider_get(
         "espn", ESPN_FANTASY_ENDPOINT.format(int(league_info.year), int(league_info.league_id)),
         params={"view": ["mDraftDetail", "mSettings"]}, cookies=EspnService._cookies(league_info),
         expect_key="settings")
     rostered = {p.player_id: p for p in board.players}
-    picks = draft_core(payload, board.espn_team_id or league_info.espn_team_id, n)
-    source = SEED_DRAFT if picks else SEED_VALUE
-    if not picks:
-        picks = [p.player_id for p in sorted(board.players, key=lambda p: p.avg_points or 0.0, reverse=True)[:n]]
+    order = draft_core(payload, board.espn_team_id or league_info.espn_team_id)
+    source = SEED_DRAFT if order else SEED_VALUE
+    if order and any(pid not in rostered for pid in order):
+        # After today's first tip a player added tonight is on tomorrow's board only (as `protect`)
+        tomorrow = next_day_period(board, now)
+        if tomorrow is not None:
+            later = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=slots,
+                                              scoring_period_id=tomorrow)
+            for p in later.players:
+                rostered.setdefault(p.player_id, p)
+    if not order:
+        order = [p.player_id for p in sorted(board.players, key=lambda p: p.avg_points or 0.0, reverse=True)]
     moving = await run_db("protections.moving_out", _moving_out, team.team_id)
-    chosen = [rostered[pid] for pid in picks if pid in rostered and pid not in moving]
+    chosen = [rostered[pid] for pid in order if pid in rostered and pid not in moving][:n]
     made = await run_db("protections.seed", _store_seed, team.team_id, team.user_id, chosen, now)
     log.info("roster_protection_seeded", team_id=team.team_id, source=source, protected=made,
-             skipped=[rostered[pid].name for pid in picks if pid in moving and pid in rostered])
+             skipped=[rostered[pid].name for pid in order if pid in moving and pid in rostered])
     return made
 
 

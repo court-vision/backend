@@ -56,6 +56,7 @@ def test_the_core_is_the_team_s_first_picks_in_pick_order():
     payload = draft(pick(38, 1, 30), pick(3, 1, 10), pick(4, 2, 99), pick(18, 1, 20), pick(53, 1, -1))
     assert roster_protection.draft_core(payload, 1, 6) == [10, 20, 30]
     assert roster_protection.draft_core(payload, 1, 2) == [10, 20]
+    assert roster_protection.draft_core(payload, 1) == [10, 20, 30]
 
 
 def test_an_auction_s_core_is_by_price():
@@ -78,11 +79,12 @@ def espn(monkeypatch):
     from services import providers
     from services.providers import http
 
-    h = SimpleNamespace(board=board([]), payload=draft(), moving=frozenset(), stored=None)
+    h = SimpleNamespace(board=board([]), later=None, periods=[], payload=draft(), moving=frozenset(), stored=None)
 
     class Adapter:
         async def read_lineup(self, team_id, league_info, **kw):
-            return h.board
+            h.periods.append(kw.get("scoring_period_id"))
+            return h.later if kw.get("scoring_period_id") is not None else h.board
 
     async def provider_get(provider, url, **kw):
         return h.payload
@@ -101,15 +103,35 @@ def espn(monkeypatch):
 
 
 def test_the_seed_protects_the_first_picks_still_on_the_roster_less_what_the_user_moves_out(espn):
-    espn.board = board([player(10, "Jokic"), player(30, "Edwards"), player(40, "Kawhi"), player(50, "Streamer")])
-    espn.payload = draft(pick(3, 1, 10), pick(18, 1, 20), pick(23, 1, 40), pick(38, 1, 30), pick(83, 1, 50))
+    espn.board = board([player(10, "Jokic"), player(30, "Edwards"), player(40, "Kawhi"), player(50, "Streamer"),
+                        player(60, "Bench")])
+    espn.payload = draft(pick(3, 1, 10), pick(18, 1, 20), pick(23, 1, 40), pick(38, 1, 30), pick(83, 1, 50),
+                         pick(98, 1, 60))
     espn.moving = frozenset({40})          # a pickup of the user's drops Kawhi
-    assert run(roster_protection.seed(TEAM, ESPN, n=4)) == ["Jokic", "Edwards"]
+    # Pick 18 is gone and Kawhi is on his way out, so the next picks fill their places
+    assert run(roster_protection.seed(TEAM, ESPN, n=3)) == ["Jokic", "Edwards", "Streamer"]
 
 
 def test_a_league_with_no_draft_on_espn_takes_the_roster_s_top_by_value(espn):
-    espn.board = board([player(10, "Low", 5.0), player(20, "Best", 40.0), player(30, "Next", 30.0)])
+    espn.board = board([player(10, "Low", 5.0), player(20, "Best", 40.0), player(30, "Next", 30.0),
+                        player(40, "Leaving", 35.0)])
+    espn.moving = frozenset({40})
     assert run(roster_protection.seed(TEAM, ESPN, n=2)) == ["Best", "Next"]
+
+
+def test_after_the_first_tip_a_pick_added_tonight_is_found_on_tomorrow_s_board(espn):
+    from datetime import datetime, timezone
+    today = board([player(10, "Jokic")])
+    today.first_game_time_et, today.final_scoring_period_id = "19:00:00", 160
+    espn.board, espn.later = today, board([player(10, "Jokic"), player(20, "Re-added")])
+    espn.payload = draft(pick(3, 1, 10), pick(18, 1, 20), pick(23, 1, 30))
+    after_tip = datetime(2026, 11, 17, 1, 0, tzinfo=timezone.utc)       # 8 PM ET on the 16th
+    assert run(roster_protection.seed(TEAM, ESPN, n=6, now=after_tip)) == ["Jokic", "Re-added"]
+    assert espn.periods == [None, 29]
+    before_tip = datetime(2026, 11, 16, 20, 0, tzinfo=timezone.utc)     # 3 PM ET: today's board alone
+    espn.periods.clear()
+    run(roster_protection.seed(TEAM, ESPN, n=6, now=before_tip))
+    assert espn.periods == [None]
 
 
 def test_a_team_off_espn_is_marked_with_none(espn):
@@ -180,13 +202,15 @@ def limits(monkeypatch):
     from services import providers
     from services.ai import acting
 
-    h = SimpleNamespace(acq=None, pending=[])
+    h = SimpleNamespace(acq=None, pending=[], reads=[])
 
     class Adapter:
         async def read_lineup(self, team_id, league_info, **kw):
+            h.reads.append("board")
             return board([], acq=h.acq)
 
     async def pending(team_id):
+        h.reads.append("pending")
         return h.pending
 
     monkeypatch.setattr(providers, "get_provider_adapter", lambda provider: Adapter())
@@ -202,6 +226,16 @@ def test_the_matchup_s_adds_made_anywhere_and_what_is_left(limits):
     assert (out["per"], out["adds_per_game_day"], out["days_with_games_this_matchup"]) == ("game_day", 1, 7)
     assert (out["this_matchup"], out["team_adds_this_matchup"], out["left_this_matchup"]) == (7, 4, 3)
     assert (out["scheduled_this_matchup"], out["left_after_scheduled"]) == (1, 2)
+    # The pickups are read first: one made between the reads is counted twice, never missed
+    assert limits.reads == ["pending", "board"]
+
+
+def test_without_the_matchup_s_dates_the_pickups_waiting_are_unknown(limits):
+    limits.acq = AcquisitionState(per="matchup", limit=7, matchup_used=4)
+    limits.pending = [date(2026, 11, 18)]
+    out = run(adds.get_add_limits(TEAM, ESPN))
+    assert (out["left_this_matchup"], out["scheduled_this_matchup"], out["left_after_scheduled"]) == (3, None, None)
+    assert "matchup" not in out
 
 
 def test_a_league_without_a_matchup_limit_still_says_how_many_were_made(limits):
