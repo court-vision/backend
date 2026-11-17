@@ -63,7 +63,7 @@ from services.ai.proposals import CHIP_KEY
 from services.ai.service import FALLBACK_BETA, _names_in, _Run, _season_line, _served_content, map_sdk_error
 from services.ai.tools import (
     AGENT_TOOL_NAMES, AGENT_TOOLS, CHECKIN_ONLY_TOOLS, CHECKIN_TOOL_NAMES, DRAFT_ONLY_TOOLS, DRAFT_TOOL_NAMES,
-    STEERING_TOOLS, ToolContext, list_my_teams, run_tool,
+    STEERING_TOOLS, ToolContext, in_eastern, list_my_teams, run_tool,
 )
 
 # Progress notes between tool calls come back as `thinking` blocks on Opus 5.5;
@@ -382,6 +382,9 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         shown = {"type": "decision", "id": f"d{turn.decisions}", **decision}
         turn.parts.append({"kind": "block", "block": shown})
         emit("block", shown)
+    # What the model reads speaks Eastern, as the prompt says (the chip and the call above keep
+    # the server's own instants: they are the user's blocks)
+    data = in_eastern(data)
     turn.results[result_id] = {"tool": name, "input": raw if isinstance(raw, dict) else {}, "data": data}
     turn.run.names |= _names_in(outcome.content)
     return {"type": "tool_result", "tool_use_id": block.id,
@@ -433,14 +436,15 @@ def _source_numbers(value: Any, out: set[float]) -> None:
             _source_numbers(item, out)
 
 
-# A clock time: "7:30 PM", "7 pm", "7:30p.m.", or a bare "19:30" / "7:30"
-_CLOCK = re.compile(r"(?<![\w.:])(\d{1,2})(?::([0-5]\d))?\s?([AaPp])\.?[Mm]\b\.?"
-                    r"|(?<![\w.:])(\d{1,2}):([0-5]\d)(?::[0-5]\d)?(?!\d|[:.]\d)")
+# A clock time: "7:30 PM", "7 pm", "7:30:00 p.m.", or a bare "19:30" / "7:30", also inside
+# a timestamp ("2026-11-17T14:30:00-05:00", whose offset is not a clock)
+_CLOCK = re.compile(r"(?<![\w.:])(\d{1,2})(?::([0-5]\d)(?::[0-5]\d)?)?\s?([AaPp])\.?[Mm]\b\.?"
+                    r"|(?:(?<=\dT)|(?<![\w.:+-]))(\d{1,2}):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?(?!\d|[:.]\d)")
 
 
 def _clock_minutes(match: re.Match[str]) -> set[int]:
     """The times of day (minutes after midnight) a clock can mean: one with AM/PM is
-    one time, a bare one that could be on either half of the day is two."""
+    one time, a bare one that could be on either half of the day ("7:30", "12:30") is two."""
     h12, m12, half, h, m = match.groups()
     if half is not None:
         hour = int(h12)
@@ -450,7 +454,9 @@ def _clock_minutes(match: re.Match[str]) -> set[int]:
     hour, minute = int(h), int(m)
     if hour > 23:
         return set()
-    return {hour * 60 + minute} | ({((hour % 12) + 12) * 60 + minute} if 1 <= hour <= 12 else set())
+    if 1 <= hour <= 12:
+        return {(hour % 12) * 60 + minute, ((hour % 12) + 12) * 60 + minute}
+    return {hour * 60 + minute}
 
 
 def _source_clocks(value: Any, out: set[int]) -> None:

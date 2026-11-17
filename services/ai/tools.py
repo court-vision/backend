@@ -26,8 +26,9 @@ user's league.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Collection, Literal, Optional, Union
 
@@ -43,7 +44,7 @@ from db.models.nba.player_projections import PlayerProjection
 from db.models.nba.players import Player
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.streamer import StreamerMode
-from core.nba_calendar import nba_date_et
+from core.nba_calendar import EASTERN, nba_date_et
 from core.settings import settings
 from services.draft_service import DraftService
 from services.game_context import GameContext
@@ -1516,6 +1517,33 @@ assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_N
 class ToolOutcome:
     content: str
     is_error: bool
+
+
+# An instant written with its offset: "2026-11-17T19:30:00+00:00", "2026-11-17 19:30:00Z"
+_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})")
+
+
+def in_eastern(value: Any) -> Any:
+    """A tool's result with every instant in it moved to US Eastern, the NBA's clock and the
+    one the prompt says tool results speak: a news item's published_at or a move's `at`
+    (stored and returned in UTC) reach the model as Eastern times, so it never labels a UTC
+    clock ET (the agent applies it to what the model reads). Dates, wall times ("19:30") and
+    naive datetimes are left as they are; so is everything that isn't a datetime or a string."""
+    if isinstance(value, datetime):
+        return value.astimezone(EASTERN).isoformat() if value.tzinfo is not None else value
+    if isinstance(value, str):
+        if len(value) > 40 or not _INSTANT.fullmatch(value):
+            return value
+        try:
+            at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        return at.astimezone(EASTERN).isoformat()
+    if isinstance(value, dict):
+        return {k: in_eastern(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [in_eastern(v) for v in value]
+    return value
 
 
 async def run_tool(
