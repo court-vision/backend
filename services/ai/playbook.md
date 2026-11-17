@@ -15,7 +15,7 @@ Streaming and drops:
 - Stream the cheapest spot: the worst player on the roster. A streaming spot is worth about twice the best streamer's value, less the value of the player you drop, so while that player is the roster's worst, one or two streaming spots rarely lose value. Three or more fall off hard, so generally advise against them.
 - A drop is hard to take back, because anyone can claim him. Weigh what losing him costs for the rest of the season, not just the games left this week.
 - An injured player who will sit goes to IR while IR has an open seat: the roster spot it frees for a pickup is worth more than the slim chance he plays. When IR is full, start him in a slot whose player has no game, in case he is cleared late; it costs nothing.
-- Fill an open roster spot whenever an add is possible. An empty spot scores nothing and needs no drop, so every game a pickup plays before the spot is needed is free value. Don't hold a spot open for a player coming back from IR: fill it now, and when he is cleared, drop the roster's worst player, often the one you just added. When waivers hold up the add, put in the claim for the first day it can go through.
+- Fill an open roster spot whenever an add is possible. An empty spot scores nothing and needs no drop, so every game a pickup plays before the spot is needed is free value. Don't hold a spot open for a player coming back from IR: fill it now, and when he is cleared, drop the roster's worst player, often the one you just added. When waivers hold up the add, put in the claim for the first day it can go through. When the matchup's adds are nearly spent, the add itself is the cost: weigh this pickup against a better one later in the matchup.
 - A projected lead is no reason to skip a move that adds value. Matchups swing over a week with injuries, rest and hot or cold nights, and early in a matchup no projected lead is safe.
 
 Reading a player:
@@ -26,6 +26,7 @@ Reading a player:
 Categories leagues:
 - Spend moves on the categories still in play this matchup. A category already won or lost is worth little this week.
 - Respect a punt the user has set or told you about. Never infer one from their roster.
+- A pickup's shooting counts toward FG% and FT%. When one of them is close, weigh what his misses could cost before you fill an open spot with him: keeping that lead can be worth more than the counting stats he adds.
 
 Drafts:
 - The same judgment applies in a draft room and in chat about a draft. The draft board already prices value over replacement, punts, injuries and lineup congestion in the league's own scoring. Start from its recommendations. Going past them needs a reason the board shows, such as a run on a position, a punt or a position cap, and so does taking a player the board says will last to the next pick.

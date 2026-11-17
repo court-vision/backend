@@ -51,6 +51,9 @@ def test_the_playbook_fills_open_spots_whatever_the_projected_lead():
     assert "- Fill an open roster spot whenever an add is possible." in prompts.PLAYBOOK
     assert "Don't hold a spot open for a player coming back from IR" in prompts.PLAYBOOK
     assert "- A projected lead is no reason to skip a move that adds value." in prompts.PLAYBOOK
+    # ...qualified where the add really costs something (the review on backend#132)
+    assert "When the matchup's adds are nearly spent, the add itself is the cost" in prompts.PLAYBOOK
+    assert "- A pickup's shooting counts toward FG% and FT%." in prompts.PLAYBOOK
 
 
 def test_the_playbook_holds_the_draft_rules_chat_and_the_draft_room_share():
