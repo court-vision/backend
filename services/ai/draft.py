@@ -488,6 +488,15 @@ def _season_words(board: Optional[dict[str, Any]]) -> str:
     found = (board or {}).get("in_season")
     if not found:
         return ""
+    if found.get("live_as_of"):
+        return (
+            "This draft is held during the season: the board values each player on Court Vision's live "
+            f"projection of {found.get('live_as_of')} (his line from this season's games and the projection, "
+            "his minutes for who is out on his team, and the games he is expected to play from "
+            f"{found.get('games_from')} on), a game he misses costs the gap to a replacement, and its injury "
+            "flags are today's. season_gp and season_fpts_avg are what he has done so far. ADP is the "
+            "preseason crowd's. Weigh a hot or cold start by your playbook's draft rules.\n\n"
+        )
     return (
         "This draft is held during the season: the board's values blend this season's games (season_gp, "
         f"season_fpts_avg) with the projection, count only the games from {found.get('games_from')} on, and "

@@ -324,6 +324,8 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
         out["in_season"] = {
             "games_from": meta.in_season.games_from.isoformat(),
             "prior_games": meta.in_season.prior_games,
+            "model": meta.in_season.model,
+            "live_as_of": meta.in_season.live_as_of.isoformat() if meta.in_season.live_as_of else None,
             "adp_as_of": meta.market_as_of.isoformat() if meta.market_as_of else None,
         }
     if meta.category_need:

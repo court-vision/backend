@@ -458,14 +458,17 @@ class DraftBoardRow(ApiModel):
             "neither a projection nor last season's baseline can value (a rookie, before projections)."
         ),
     )
-    value_source: Literal["projection", "baseline", "season", "market"] = Field(
+    value_source: Literal["projection", "baseline", "season", "live", "market"] = Field(
         description=(
             "projection: a per-game projection for the coming season (`meta.projection_source` "
             "says whose). baseline: last season's per-game averages. In a draft held after "
             "opening night (`meta.in_season`) both are blended with this season's games "
             "(`season_gp`). season: nothing projects him and he had no qualifying last season, "
             "so this season's games alone value him (in season only, and only with enough of "
-            "them). market: no stat line at all — the row exists because ESPN drafts him."
+            "them). live: Court Vision's live projection, repriced every morning of the season "
+            "(`meta.in_season.live_as_of`): his line in a game he plays from here on, and the "
+            "games he is expected to play. market: no stat line at all — the row exists because "
+            "ESPN drafts him."
         ),
     )
     board_rank: Optional[int] = Field(
@@ -641,7 +644,7 @@ class DraftRosterEntry(ApiModel):
     primary_position: Optional[str] = None
     positions: Optional[List[str]] = None
     value: Optional[float] = None
-    value_source: Literal["projection", "baseline", "season", "market"] = "baseline"
+    value_source: Literal["projection", "baseline", "season", "live", "market"] = "baseline"
     injury_status: Optional[str] = None
 
 
@@ -751,10 +754,27 @@ class DraftInSeasonResp(ApiModel):
     season_as_of: Optional[date] = Field(
         default=None, description="The newest of this season's stat rows the values were blended with"
     )
+    model: str = Field(
+        default="season-blend-1",
+        description=(
+            "What built the values. three-part-1: the live projection, repriced every morning "
+            "(skill per minute with a weight per stat, minutes by who is out, a chance for each "
+            "game left); a game he misses is charged at the gap to a replacement, and no injury "
+            "term is added on top. season-blend-1: the projection blended with this season's "
+            "games by `prior_games`, his projected share of the games left; what a board shows "
+            "on a morning with no fresh live projection"
+        ),
+    )
+    live_as_of: Optional[date] = Field(
+        default=None,
+        description="The morning of the live projection the board read; null when it is built on the blend",
+    )
+    live: int = Field(default=0, description="Players valued by the live projection (`value_source` live)")
     prior_games: int = Field(
         description=(
-            "How many of this season's games the projection (or last season's line) counts as: "
-            "a player with this many games played is valued half on this season"
+            "On the blend: how many of this season's games the projection (or last season's "
+            "line) counts as, so a player with this many games played is valued half on this "
+            "season. The live projection weighs each stat on its own instead"
         ),
     )
     blended: int = Field(description="Players whose value took this season's games")
@@ -764,8 +784,9 @@ class DraftInSeasonResp(ApiModel):
     )
     injured_since_projection: int = Field(
         description=(
-            "Of them, those the market snapshot listed healthy: their injury term applies even "
-            "where their games are projected, since the projection couldn't know"
+            "Of them, those the market snapshot listed healthy and the live projection does not "
+            "value: their injury term applies even where their games are projected, since an "
+            "October projection couldn't know"
         ),
     )
 

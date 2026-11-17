@@ -1,10 +1,22 @@
 """
 Player Projections Table
 
-Preseason per-game stat projections (ESPN's published projections now, Court
-Vision's own later). One row per (player, season, source, as_of_date) snapshot;
-the latest as_of_date is the current projection. Written by the data-platform
-preseason-market pipeline; backend reads.
+Per-game stat projections. One row per (player, season, source, as_of_date)
+snapshot; the latest as_of_date of a source is its current projection.
+
+- `espn`: ESPN's published preseason projection (data-platform's
+  preseason-market pipeline).
+- `cv`: Court Vision's own preseason projection (cv-projection). It stops on
+  Oct 31.
+- `cv_live`: the live projection, a snapshot every morning of the season
+  (live-projection). The line is what he does in a game he plays from here on.
+  `projected_gp` is the games he is expected to play from that morning, not of
+  a full season. `raw` holds those games unrounded (`games`), his per-minute
+  rates (`rates`) and the `timeline` that prices any window of days: one run
+  of alike games per entry, [first day, last day, games, chance he plays,
+  minutes, share of the offense against his usual].
+
+Every reader names the source it wants. Written by data-platform; backend reads.
 """
 
 from datetime import datetime

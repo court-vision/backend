@@ -4,6 +4,8 @@ Service-to-service jobs, authenticated with the shared pipeline bearer token
 identity: the caller names the user and team, and ownership is re-checked here.
 """
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, Security
 
 from core.compute import run_cpu
@@ -17,6 +19,8 @@ from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, Lineu
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
 from schemas.valuation import (
+    DailyRankingsData,
+    DailyRankingsResp,
     StandardRankResp,
     StandardValuationData,
     StandardValuationReq,
@@ -27,6 +31,7 @@ from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
 from services.scheduled_pickup_service import ScheduledPickupService
+from services.valuation import daily as daily_boards
 from services.valuation.engine import playoff_weight_of
 from services.valuation.standard import (
     STANDARD_LEAGUE_SIZE,
@@ -164,4 +169,24 @@ async def value_standard_league(req: StandardValuationReq):
             playoff_weeks=list(standard_playoff_weeks(calendar)),
             players=[StandardRankResp(**vars(rank)) for rank in ranks],
         ),
+    ))
+
+
+@router.post("/rankings/daily", response_model=DailyRankingsResp)
+async def build_daily_rankings():
+    """Today's two standard boards (points and 9-cat), for the data platform to store.
+
+    Called by data-platform's daily_rankings pipeline each morning, which writes
+    them to nba.daily_rankings beside ESPN's rank that day. The boards are the
+    ones a room with no league shows right now: in season the morning's live
+    projection (the pipeline builds it first), or with no fresh one the
+    projection blended with this season's games; before opening night the
+    projection alone. `model` says which. `in_season` is false outside the
+    regular season, and the pipeline stores nothing then. Nothing is written here.
+    """
+    boards = await daily_boards.today()
+    return respond(DailyRankingsResp(
+        status=ApiStatus.SUCCESS,
+        message=f"Ranked {len(boards.players)} players as of {boards.as_of.isoformat()}",
+        data=DailyRankingsData(league_size=STANDARD_LEAGUE_SIZE, rounds=STANDARD_ROUNDS, **asdict(boards)),
     ))
