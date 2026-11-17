@@ -642,6 +642,20 @@ class TestUngroundedNumbers:
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins"}) == 1  # "76" from 76ers still counts
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins", "76ers"}) == 0
 
+    def test_a_clock_time_a_source_carries_in_any_form_is_supported(self):
+        # The prompt asks for "7:30 PM ET" where a tool gave "19:30"
+        sources = [{"start_time_et": "19:30:00", "note": "vs LAL · 10:00 PM", "opens_et": "18:55"}]
+        text = "He tips at 7:30 PM ET, the late game is 10 PM ET, and the window opens at 6:55 pm ET."
+        assert agent.ungrounded_numbers(text, sources) == 0
+        assert agent.ungrounded_numbers("Lock is at 7:30.", sources) == 0
+
+    def test_a_clock_time_no_source_carries_still_counts(self):
+        sources = [{"start_time_et": "19:30:00", "pts": 31}]
+        # Not a time any source has: its numbers count as ever ("30" is one of 19:30's)
+        assert agent.ungrounded_numbers("He tips at 8:30 PM ET.", sources) == 1
+        assert agent.ungrounded_numbers("He tips at 7:30 AM ET.", sources) == 1
+        assert agent.ungrounded_numbers("He scored 31 at 7:30 PM ET.", [{"pts": 31}]) == 2
+
 
 @pytest.mark.unit
 class TestUngroundedPlaces:

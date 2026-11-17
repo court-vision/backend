@@ -433,14 +433,53 @@ def _source_numbers(value: Any, out: set[float]) -> None:
             _source_numbers(item, out)
 
 
+# A clock time: "7:30 PM", "7 pm", "7:30p.m.", or a bare "19:30" / "7:30"
+_CLOCK = re.compile(r"(?<![\w.:])(\d{1,2})(?::([0-5]\d))?\s?([AaPp])\.?[Mm]\b\.?"
+                    r"|(?<![\w.:])(\d{1,2}):([0-5]\d)(?::[0-5]\d)?(?!\d|[:.]\d)")
+
+
+def _clock_minutes(match: re.Match[str]) -> set[int]:
+    """The times of day (minutes after midnight) a clock can mean: one with AM/PM is
+    one time, a bare one that could be on either half of the day is two."""
+    h12, m12, half, h, m = match.groups()
+    if half is not None:
+        hour = int(h12)
+        if not 1 <= hour <= 12:
+            return set()
+        return {((hour % 12) + (12 if half.lower() == "p" else 0)) * 60 + int(m12 or 0)}
+    hour, minute = int(h), int(m)
+    if hour > 23:
+        return set()
+    return {hour * 60 + minute} | ({((hour % 12) + 12) * 60 + minute} if 1 <= hour <= 12 else set())
+
+
+def _source_clocks(value: Any, out: set[int]) -> None:
+    if isinstance(value, str):
+        for match in _CLOCK.finditer(value):
+            out |= _clock_minutes(match)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _source_clocks(item, out)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _source_clocks(item, out)
+
+
 def ungrounded_numbers(text: str, sources: list[Any], names: set[str] = frozenset()) -> int:
     """Numbers in the answer that no source supports. A number is supported when
     a source number rounds to it at the precision it was written with, or does
     as a percentage (0.523 -> 52.3%). Dates and names ("76ers") are removed
-    first. Logged, not blocked; the eval is where it fails."""
+    first, and so is a clock time a source carries in any form (a tip the tool
+    gave as "19:30", written "7:30 PM ET" as the prompt asks). Logged, not
+    blocked; the eval is where it fails."""
     for name in sorted((n for n in names if n), key=len, reverse=True):
         text = re.sub(rf"(?<!\d){re.escape(name)}(?!\d)", " ", text, flags=re.IGNORECASE)
     text = _DATE.sub(" ", text)
+    clocks: set[int] = set()
+    for source in sources:
+        _source_clocks(source, clocks)
+    if clocks:
+        text = _CLOCK.sub(lambda match: " " if _clock_minutes(match) & clocks else match.group(), text)
     known: set[float] = set()
     for source in sources:
         _source_numbers(source, known)
