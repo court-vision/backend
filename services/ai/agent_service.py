@@ -56,8 +56,7 @@ def acting_info() -> dict:
         "writes": settings.roster_writes_enabled,
         "policy": {
             "adds_per_day": settings.autopilot_adds_per_day,
-            "adds_reserve": settings.autopilot_adds_reserve,
-            "protected_top": settings.autopilot_protected_top,
+            "seed_protected": settings.autopilot_seed_protected,
             "pause_refused": settings.autopilot_pause_refused,
             "pause_same_block": settings.autopilot_pause_same_block,
         },

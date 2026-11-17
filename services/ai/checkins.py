@@ -539,6 +539,7 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         await spend.cancel(reservation_id)
         await _settle(checkin_id, SKIPPED, "no_events", None, 0, now)
         return None
+    await _seed_protections(team_id, user_id, autopilot)
     conversation_id: Optional[int] = None
     try:
         conversation = await conversations.create(user_id, team_id, kind=conversations.CHECKIN,
@@ -573,6 +574,25 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
     _RUNNING.add(task)
     task.add_done_callback(_RUNNING.discard)
     return checkin_id
+
+
+# The automations whose moves drop a player: where Dime acts on one, the team's first draft picks
+# are protected once (services/roster_protection.py `seed`), before the check-in's header lists them
+DROPPING_ROWS = frozenset({autonomy.DAILY_ACTIONS, autonomy.LANES, autonomy.LATE_SCRATCH})
+
+
+async def _seed_protections(team_id: int, user_id: int, autopilot: Optional[Autopilot]) -> None:
+    """The cutover from Dime's top-six rule to the user's protections, once per team Dime drops
+    players on. A failure is logged and tried again at the next check-in; the check-in goes on."""
+    if autopilot is None or getattr(autopilot, "protections_seeded_at", None) is not None:
+        return
+    if not DROPPING_ROWS & set(autonomy.acting_rows(autopilot)):
+        return
+    from services import roster_protection
+    try:
+        await roster_protection.seed_for(team_id, user_id)
+    except Exception as exc:
+        get_logger().warning("roster_protection_seed_failed", team_id=team_id, error=str(exc))
 
 
 async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int, kind: str) -> None:

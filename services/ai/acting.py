@@ -31,11 +31,12 @@ plan's Guardrails table:
                    pickups already scheduled. They are ESPN's settings, read off the board, so
                    the matchup's cap is the league's; a per-game-day limit is a matchup total
                    too, usable on any day (`services.acquisitions`; ESPN still applies them at
-                   the write)
-    reserve        AUTOPILOT_ADDS_RESERVE of the matchup's adds are left for the user
-                   (injuries)
-    protected      never drops one of the roster's top AUTOPILOT_PROTECTED_TOP by the
-                   board's value (Dime's own keep holds already refuse at the proposal)
+                   the write). Dime may use all of them (James, 2026-11-15): the playbook says
+                   to pace them
+    protected      never drops a player the user protected (the roster lock). A team Dime
+                   starts acting on gets its first draft picks protected, once
+                   (`roster_protection.seed`, from the check-in's start); Dime's own keep
+                   holds already refuse at the proposal
 
 A player Dime added may be dropped again the next day: streaming a spot day by day is
 the point of a stream move.
@@ -61,7 +62,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from peewee import JOIN, IntegrityError, fn
 
@@ -85,7 +86,7 @@ AUTOPILOT = "autopilot"          # usr.roster_moves.source of every ESPN write D
 # The policy's rules, as `rule` names them
 R_AI_OFF, R_AUTOPILOT_OFF, R_PAUSED, R_NOT_ALLOWED = "ai_off", "autopilot_off", "paused", "not_allowed"
 R_WRITES_OFF, R_EXPIRED = "writes_off", "expired"
-R_CAP_DAY, R_LEAGUE, R_RESERVE, R_PROTECTED = "cap_day", "league_limit", "reserve", "protected"
+R_CAP_DAY, R_LEAGUE = "cap_day", "league_limit"
 R_CREDENTIALS = "credentials"
 # The user protected the drop (the roster lock, services/roster_protection.py). Dime can't propose
 # that drop, so one stopped here was proposed before the protection: not Dime's mistake either.
@@ -320,12 +321,6 @@ def live_summary(row: Any) -> str:
 # ------------------------------- the policy ------------------------------- #
 
 
-def _top(board: Any, n: int) -> set[int]:
-    """The roster's top `n` by the board's value (the Week desk's avg value), by ESPN id."""
-    ranked = sorted(board.players, key=lambda p: p.avg_points or 0.0, reverse=True)
-    return {p.player_id for p in ranked[:max(0, n)]}
-
-
 async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now: datetime
                      ) -> Optional[tuple[str, str]]:
     """The first rule the move breaks, as (rule, the sentence the user reads); None when it may go."""
@@ -360,36 +355,17 @@ async def blocked_by(team: Any, league_info: Any, row: Any, autopilot: Any, now:
         league = budget_block(board.acquisitions, row.nba_date, pending=pending)
         if league is not None:
             return R_LEAGUE, f"The league's add limit: {league}"
-        reserve = reserve_block(board.acquisitions, row.nba_date, pending=pending)
-        if reserve is not None:
-            return R_RESERVE, reserve
     if row.drop_player_id is not None:
         held = next((p for p in board.players if p.player_id == row.drop_player_id), None)
         name = held.name if held else (row.drop_name or "That player")
         if row.drop_player_id in await roster_protection.ids(team_id):
             return R_USER_PROTECTED, f"{name} is protected, so Dime never drops him"
-        if row.drop_player_id in _top(board, settings.autopilot_protected_top):
-            return R_PROTECTED, f"{name} is one of the roster's top {settings.autopilot_protected_top}, which Dime never drops"
-    return None
-
-
-def reserve_block(acq: Any, day: date, *, pending: Iterable[date] = ()) -> Optional[str]:
-    """Why an add for `day` would take one of the league's adds Dime keeps for the user, as the
-    sentence the user reads; None when there is room (or no matchup limit known, or `day` is in
-    a later matchup). `pending` are the days of pickups still to be made, which take adds too."""
-    from services.acquisitions import in_current_matchup, matchup_room
-    room = matchup_room(acq) if acq is not None else None
-    if room is None or not in_current_matchup(acq, day):
-        return None
-    room -= sum(1 for d in pending if in_current_matchup(acq, d))
-    if room <= settings.autopilot_adds_reserve:
-        return f"{max(0, room)} of the league's adds left this matchup; Dime keeps {settings.autopilot_adds_reserve} for you"
     return None
 
 
 # A pickup Dime scheduled itself, re-checked when it comes due: its reasons (usr.scheduled_pickups.reason)
 P_OFF, P_PAUSED = "dime_off", "dime_paused"
-P_NOT_ALLOWED, P_NOT_ACTING, P_RESERVE = "dime_not_allowed", "dime_not_acting", "dime_reserve"
+P_NOT_ALLOWED, P_NOT_ACTING = "dime_not_allowed", "dime_not_acting"
 
 
 async def pickup_block(team_id: int, user_id: int, pickup_id: Optional[int] = None) -> Optional[tuple[str, str]]:
@@ -686,10 +662,8 @@ async def policy_view(team_id: int, autopilot: Any, league: Optional[dict[str, A
     policy: dict[str, Any] = {
         "adds_per_day": settings.autopilot_adds_per_day,
         "league_add_limits": league,
-        "never_drops_top": settings.autopilot_protected_top,
+        "never_drops": "a player the user protected (listed under protected)",
     }
-    if league.get("this_matchup") is not None:
-        policy["adds_kept_for_the_user"] = settings.autopilot_adds_reserve
     return {
         "acting_on": autonomy.acting_rows(autopilot),
         "autopilot": autonomy.switch_on(autopilot),

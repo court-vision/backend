@@ -51,6 +51,8 @@ class Autopilot(BaseModel):
     ai_rows = ArrayField(TextField, default=list)
     autopilot = BooleanField(default=False)
     restore = BinaryJSONField(null=True)
+    # When the team's first draft picks were protected for Dime, once (0050; roster_protection.seed)
+    protections_seeded_at = DateTimeField(null=True)
 
     class Meta:
         table_name = "autopilot"

@@ -271,7 +271,8 @@ class TestRecap:
 
 class TestTools:
     def test_the_recap_is_appended_to_every_tool_list_and_the_draft_tools_to_a_draft_note_s_only(self):
-        assert tools.AGENT_TOOLS[-1]["name"] == "get_draft_recap"
+        names = [t["name"] for t in tools.AGENT_TOOLS]
+        assert names[names.index("get_draft_recap") + 1:] == ["get_add_limits"]      # appended after it since
         assert [t["name"] for t in agent.DRAFT_TOOLS[-2:]] == ["set_draft_plan", "draft_pick"]
         # A draft note's list is the AI desk's with the two appended, so the cached prefix is shared
         assert agent.DRAFT_TOOLS[:len(agent.TOOLS)] == agent.TOOLS

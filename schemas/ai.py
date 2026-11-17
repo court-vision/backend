@@ -410,9 +410,10 @@ class AiDecisionAction(ApiModel):
     outcome: AiActionOutcome = Field(..., description="sent (it went out) · blocked (a rule of the policy stopped it "
                                                       "before anything was sent) · refused (the route or ESPN said "
                                                       "no) · failed (ESPN unreachable, credentials, an error)")
-    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, league_limit, reserve, protected "
-                                                  "(a top player), user_protected (the user protected him), "
-                                                  "paused, writes_off, ...) or the error code")
+    rule: Optional[str] = Field(None, description="The rule that blocked it (cap_day, league_limit, user_protected "
+                                                  "(the user protected him), paused, writes_off, ...; reserve, "
+                                                  "protected and churn only on moves held back before they were "
+                                                  "removed) or the error code")
     message: str = Field(..., description="What happened, in a sentence")
     at: Optional[datetime] = None
 
@@ -563,8 +564,8 @@ class AiActingPolicy(ApiModel):
 
     adds_per_day: int = Field(..., description="Dime's own adds a day; over the matchup it keeps to the league's "
                                                "own add limits, which every add counts toward")
-    adds_reserve: int = Field(..., description="Adds of the matchup's limit Dime leaves for the user (injuries)")
-    protected_top: int = Field(..., description="Dime never drops one of the roster's top this many by value")
+    seed_protected: int = Field(..., description="Dime never drops a player the user protected; a team it starts "
+                                                 "acting on gets this many of its first draft picks protected, once")
     pause_refused: int = Field(..., description="It pauses itself after this many refused writes in a day")
     pause_same_block: int = Field(..., description="...or this many blocks by the same rule in a day")
 
