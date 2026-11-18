@@ -56,7 +56,8 @@ so a star who is out for six weeks costs the gap to a replacement for six
 weeks, not six weeks of nothing, and a player below the replacement gains
 nothing by sitting. In a category league the same rule is applied to the
 weekly totals, the replacement's line being the average of the best
-`league_size` players past the cohort. A player with no game left gets no
+`league_size` players past the cohort. A player with no game left that the
+league scores (out until after its playoffs, in head-to-head) gets no
 replacement: nobody holds his seat for him, and he falls off the board.
 Without the flag nothing here applies and every valuation is what it was.
 
@@ -98,8 +99,9 @@ DEFAULT_COUNTED_WEEKS = 23.0    # ESPN's default head-to-head season, weeks 1-23
 NBA_SEASON_GAMES = 82.0
 DEFAULT_PLAYOFF_WEIGHT = 2.0
 PLAYOFF_WEIGHTS: tuple[float, ...] = (1.0, 1.5, 2.0, 3.0, 4.0)
-# Under `fill_missed`: fewer expected games than this and he is not coming
-# back, so no replacement plays for him and he is no replacement himself.
+# Under `fill_missed`: fewer expected games than this in the scored season
+# and he is not coming back, so no replacement plays for him and he is no
+# replacement himself.
 FILL_MIN_GAMES = 0.5
 
 VALUE_DECIMALS = 1
@@ -254,9 +256,28 @@ def full_games(player: ProjectedPlayer, model: LeagueModel, norm: Optional[float
     return (split.regular + model.playoff_weight * split.playoff) * (norm if norm is not None else _norm(model))
 
 
-def _plays(player: ProjectedPlayer) -> bool:
-    """Whether he is expected to play again at all (`FILL_MIN_GAMES`)."""
-    return player.games is None or float(player.games) >= FILL_MIN_GAMES
+def scored_games(player: ProjectedPlayer, model: LeagueModel) -> float:
+    """His expected games that the league scores: every game left in roto, the
+    games before the fantasy season ends otherwise (the weeks after it count
+    for nobody). Unweighted, unlike `effective_games`."""
+    games = DEFAULT_GAMES if player.games is None else max(float(player.games), 0.0)
+    if player.phase_games is not None:
+        regular, playoff, after = (max(float(g), 0.0) for g in player.phase_games)
+        return regular + playoff + (after if model.format == "roto" else 0.0)
+    split = _split_of(player, model)
+    if model.format == "roto" or split is None or split.total <= 0:
+        return games
+    return games_share(player, model) * (split.regular + split.playoff)
+
+
+def _plays(player: ProjectedPlayer, model: Optional[LeagueModel] = None) -> bool:
+    """Whether he is expected to play again in a game that counts (`FILL_MIN_GAMES`):
+    a player back only after the fantasy playoffs holds no seat and is nobody's
+    replacement. With no model, any game left."""
+    if player.games is None:
+        return True
+    games = scored_games(player, model) if model is not None else float(player.games)
+    return games >= FILL_MIN_GAMES
 
 
 def _missed(players: Sequence[ProjectedPlayer], games: Sequence[float], model: LeagueModel, norm: float) -> list[float]:
@@ -266,7 +287,7 @@ def _missed(players: Sequence[ProjectedPlayer], games: Sequence[float], model: L
         return [0.0] * len(players)
     out: list[float] = []
     for p, eg in zip(players, games):
-        full = full_games(p, model, norm) if _plays(p) else None
+        full = full_games(p, model, norm) if _plays(p, model) else None
         out.append(max(full - eg, 0.0) if full is not None else 0.0)
     return out
 
@@ -287,10 +308,14 @@ def points_per_game(player: ProjectedPlayer, weights: Mapping[str, float]) -> fl
     return total
 
 
-def replacement_level(per_game: Sequence[float], players: Sequence[ProjectedPlayer], size: int) -> float:
+def replacement_level(
+    per_game: Sequence[float], players: Sequence[ProjectedPlayer], size: int,
+    model: Optional[LeagueModel] = None,
+) -> float:
     """The per-game value of the first player past a cohort of `size`, ranked per
-    game among those expected to play; 0 for a pool no deeper than the cohort."""
-    ranked = sorted((v for v, p in zip(per_game, players) if _plays(p)), reverse=True)
+    game among those expected to play in a game `model` scores; 0 for a pool no
+    deeper than the cohort."""
+    ranked = sorted((v for v, p in zip(per_game, players) if _plays(p, model)), reverse=True)
     return ranked[size] if len(ranked) > size else 0.0
 
 
@@ -299,7 +324,7 @@ def _value_points(players: Sequence[ProjectedPlayer], model: LeagueModel) -> lis
     games = [effective_games(p, model, norm) for p in players]
     per_game = [points_per_game(p, model.point_weights) for p in players]
     missed = _missed(players, games, model, norm)
-    level = replacement_level(per_game, players, model.cohort_size) if model.fill_missed else 0.0
+    level = replacement_level(per_game, players, model.cohort_size, model) if model.fill_missed else 0.0
     out: list[Valued] = []
     for p, eg, fpg, gone in zip(players, games, per_game, missed):
         out.append(Valued(
@@ -426,7 +451,7 @@ def _fills(
     center's blocks. None when the pool is no deeper than the cohort.
     """
     worth = [_worth(p.row.line, scale) for p in players]
-    ranked = sorted((i for i, p in enumerate(players) if _plays(p)), key=lambda i: -worth[i])
+    ranked = sorted((i for i, p in enumerate(players) if _plays(p, model)), key=lambda i: -worth[i])
     band = ranked[model.cohort_size: model.cohort_size + max(int(model.league_size), 1)]
     if not band:
         return None

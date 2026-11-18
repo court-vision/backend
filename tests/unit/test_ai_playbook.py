@@ -45,6 +45,17 @@ def test_the_playbook_carries_the_checks_before_a_move():
     assert "run your playbook's checks" in prompts.AGENT_PROMPT
 
 
+def test_the_playbook_fills_open_spots_whatever_the_projected_lead():
+    # James's correction to a check-in that left a bench spot open for a player due off IR
+    # because the team was projected well ahead: fill it, and a lead is no reason to sit
+    assert "- Fill an open roster spot whenever an add is possible." in prompts.PLAYBOOK
+    assert "Don't hold a spot open for a player coming back from IR" in prompts.PLAYBOOK
+    assert "- A projected lead is no reason to skip a move that adds value." in prompts.PLAYBOOK
+    # ...qualified where the add really costs something (the review on backend#132)
+    assert "When the matchup's adds are nearly spent, the add itself is the cost" in prompts.PLAYBOOK
+    assert "- A pickup's shooting counts toward FG% and FT%." in prompts.PLAYBOOK
+
+
 def test_the_playbook_holds_the_draft_rules_chat_and_the_draft_room_share():
     # One agent: the draft room's notes and a chat about a draft read the same rules
     assert "\nDrafts:\n" in prompts.PLAYBOOK

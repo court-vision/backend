@@ -131,9 +131,14 @@ def no_roster_protections(request, monkeypatch):
     async def no_teams(team_ids):
         return {}
 
+    async def no_seed(team_id, user_id):
+        return []
+
     monkeypatch.setattr(roster_protection, "ids", none)
     monkeypatch.setattr(roster_protection, "for_team", no_rows)
     monkeypatch.setattr(roster_protection, "for_teams", no_teams)
+    # A check-in's start protects a team's first draft picks once (`seed`): not in a unit test
+    monkeypatch.setattr(roster_protection, "seed_for", no_seed)
     yield
 
 

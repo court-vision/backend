@@ -214,12 +214,13 @@ class Settings(BaseSettings):
     # and the team's Pause stop them.
     # The policy every move Dime sends itself is held to. The day's cap counts Dime's own adds
     # (lanes keep their own budget); over the matchup and the season Dime keeps to the league's
-    # own add limits, ESPN's settings, which every add counts toward. The reserve keeps that many
-    # of the matchup's adds for the user (injuries). Top N by the board's value are never
-    # dropped. A player Dime added may be dropped the next day (streaming a spot).
+    # own add limits, ESPN's settings, which every add counts toward, and may use all of them
+    # (James, 2026-11-15). It never drops a player the user protected (the roster lock); a team
+    # Dime starts acting on gets its first this-many draft picks still on the roster protected,
+    # once (services/roster_protection.py `seed`). A player Dime added may be dropped the next
+    # day (streaming a spot).
     autopilot_adds_per_day: int = 2
-    autopilot_adds_reserve: int = 1
-    autopilot_protected_top: int = 6
+    autopilot_seed_protected: int = 6
     # Auto-pause: the team pauses (and the user gets an email) after this many refused writes
     # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
     autopilot_pause_refused: int = 2

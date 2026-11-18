@@ -53,7 +53,8 @@ from services.schedule_service import get_matchup_by_number, get_streaming_match
 from services import move_ledger, roster_protection
 from services import news_service
 from services.ai import (
-    app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news, steering as ai_steering,
+    adds, app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news,
+    steering as ai_steering,
 )
 from services.ai.fantasy import (
     AGENT_FANTASY_TOOLS,
@@ -1422,17 +1423,24 @@ async def _draft_pick(args: ai_draft.DraftPickInput, ctx: ToolContext | None) ->
     return await ai_draft.draft_pick(ctx.user_id, ctx.draft_note_id, args)
 
 
+# The league's add limit and the team's adds this matchup, read from ESPN (James, 2026-11-15)
+
+async def _get_add_limits(args: adds.GetAddLimitsInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team, league_info = await _owned(ctx, args.team_id)
+    return await adds.get_add_limits(team, league_info)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
 # memory, then the move ledger, then the league tools, then the automations and
-# the check-ins' decisions, then the news, then a draft room's recap. The order is
-# part of every request's cached prefix: append, never reorder.
+# the check-ins' decisions, then the news, then a draft room's recap, then the league's add
+# limit. The order is part of every request's cached prefix: append, never reorder.
 AGENT_TOOLS: list[dict[str, Any]] = [
     *TOOLS, AGENT_GET_MY_TEAMS, *AGENT_READ_TOOLS, *AGENT_MORE_TOOLS, *AGENT_STATS_TOOLS, *AGENT_FANTASY_TOOLS,
     PROPOSE_MOVE, GET_LINEUP, PROPOSE_LINEUP, *AGENT_APP_TOOLS, *memory.MEMORY_TOOLS, GET_MOVE_OUTCOMES,
     *league.LEAGUE_TOOLS, automations.GET_AUTOMATIONS, decisions.GET_DECISIONS, *ai_news.NEWS_TOOLS,
-    ai_draft.GET_DRAFT_RECAP,
+    ai_draft.GET_DRAFT_RECAP, adds.GET_ADD_LIMITS,
 ]
 AGENT_TOOL_NAMES = frozenset(t["name"] for t in AGENT_TOOLS)
 # A check-in's conversation gets these after the agent's (and its display tools)
@@ -1498,6 +1506,7 @@ _REGISTRY: dict[str, _Tool] = {
     ai_draft.GET_DRAFT_RECAP_NAME: _Tool(ai_draft.DraftRecapInput, _get_draft_recap),
     ai_draft.SET_DRAFT_PLAN_NAME: _Tool(ai_draft.SetDraftPlanInput, _set_draft_plan),
     ai_draft.DRAFT_PICK_NAME: _Tool(ai_draft.DraftPickInput, _draft_pick),
+    adds.GET_ADD_LIMITS_NAME: _Tool(adds.GetAddLimitsInput, _get_add_limits),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES | DRAFT_TOOL_NAMES \
     == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
