@@ -24,8 +24,10 @@ Spend is on a monthly line of its own (`services.ai.spend`, line `analyst`):
 each read reserves `analyst_read_max_usd` before its call and is settled to
 what the call cost, so a morning of reads cannot use up the AI desk's budget or
 the check-ins'. A read that went out and never answered keeps its reservation,
-because a request the API accepted may be billed after we stop listening. With
-the month's budget used up the answer is `budget` and nothing is asked.
+because a request the API accepted may be billed after we stop listening; one
+whose connection never opened sent nothing and gets its reservation back, so an
+outage does not use up the month. A read is one attempt, never retried here.
+With the month's budget used up the answer is `budget` and nothing is asked.
 
 The prompt is a cached prefix: nothing volatile in it (no dates, no names).
 The day, the player and everything about him are the user turn. It shares the
@@ -41,6 +43,7 @@ import time
 from typing import Any, Optional
 
 import anthropic
+import httpx2
 from pydantic import ValidationError
 
 from core.errors import AppError, ProviderTimeout
@@ -55,10 +58,18 @@ from services.ai.service import FALLBACK_BETA, _create, _Run, _served_content
 # with every read, so a change in what the analyst writes can be traced to it.
 PROMPT_VERSION = "analyst-1"
 MAX_TOKENS = 8_000  # a backstop the model never sees; the answer is a short object
+# A read is one attempt. The client's retry would hide a first attempt that went
+# out and never answered behind whatever the second came to, and the month would
+# count one call where two may be billed. The data platform asks again on its next
+# run instead.
+ATTEMPTS_AFTER_THE_FIRST = 0
 # The client's own timeout sits past the read's deadline, so the deadline is what
-# ends a slow read: the client never gives up first and sends the request again,
-# which would be a second call to pay for.
+# ends a slow read. Connecting gets a short one of its own: a connection that
+# never opens fails as one, which is a failure known to have sent nothing.
 CLIENT_TIMEOUT_MARGIN_SECONDS = 15.0
+CONNECT_TIMEOUT_SECONDS = 10.0
+# Transport failures that end before a request is written: nothing reached the API
+NEVER_SENT = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)
 
 _SECTION = "Reading a player:"
 
@@ -270,7 +281,9 @@ async def _ask(req: AnalystReadReq, run: _Run) -> Any:
         output_config={"effort": settings.analyst_effort, "format": {"type": "json_schema", "schema": ANSWER_SCHEMA}},
         betas=[FALLBACK_BETA],
         fallbacks="default",
-        timeout=settings.analyst_read_timeout_seconds + CLIENT_TIMEOUT_MARGIN_SECONDS,
+        max_retries=ATTEMPTS_AFTER_THE_FIRST,
+        timeout=httpx2.Timeout(settings.analyst_read_timeout_seconds + CLIENT_TIMEOUT_MARGIN_SECONDS,
+                               connect=CONNECT_TIMEOUT_SECONDS),
     )
     run.record(response)
     return response
@@ -278,12 +291,21 @@ async def _ask(req: AnalystReadReq, run: _Run) -> Any:
 
 def _went_unanswered(exc: BaseException) -> bool:
     """Whether a failed call may still be billed: the request may have gone out
-    and no answer came back. An error the API answered with (a status) is not
-    billed, and neither is a call that failed before anything was sent."""
+    and no answer came back.
+
+    Not billed, so False: an error the API answered with (a status), a call that
+    failed before the client was reached, and a connection that never opened
+    (`NEVER_SENT`: the name did not resolve, the connection was refused or timed
+    out, no connection was free). Any other transport failure is one the request
+    may have gone out on, and so is a call cut off from this side."""
     if isinstance(exc, (asyncio.TimeoutError, asyncio.CancelledError)):
         return True
-    # A timeout is a connection error to the SDK; a status error is not
-    return isinstance(exc, AppError) and isinstance(exc.__cause__, anthropic.APIConnectionError)
+    # The SDK's error is the cause of the app's, and the transport's the cause of
+    # that. A timeout is a connection error to the SDK; a status error is not.
+    sdk = exc.__cause__ if isinstance(exc, AppError) else None
+    if not isinstance(sdk, anthropic.APIConnectionError):
+        return False
+    return not isinstance(sdk.__cause__, NEVER_SENT)
 
 
 async def _month() -> tuple[int, int]:

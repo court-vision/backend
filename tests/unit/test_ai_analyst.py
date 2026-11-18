@@ -55,6 +55,18 @@ class FakeMessages:
         return step
 
 
+class FakeClient:
+    """The client as `_create` uses it: the messages, and the options a call set for itself."""
+
+    def __init__(self, messages):
+        self.beta = SimpleNamespace(messages=messages)
+        self.options = []
+
+    def with_options(self, **options):
+        self.options.append(options)
+        return self
+
+
 class Ledger:
     """services.ai.spend's analyst line, in memory."""
 
@@ -103,7 +115,8 @@ def ledger(monkeypatch):
 def script(monkeypatch, on, ledger):
     def install(*steps):
         fake = FakeMessages(steps)
-        monkeypatch.setattr(service, "get_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=fake)))
+        fake.client = FakeClient(fake)
+        monkeypatch.setattr(service, "get_client", lambda: fake.client)
         return fake
     return install
 
@@ -285,6 +298,13 @@ def _status_error(cls, status):
     return cls("no", response=httpx2.Response(status, request=request_), body=None)
 
 
+def _transport_error(cls, cause):
+    """The SDK's error for a transport failure, raised from it as the SDK raises it."""
+    error = cls(request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))
+    error.__cause__ = cause
+    return error
+
+
 @pytest.mark.unit
 class TestWhenTheProviderFails:
     """A failed read raises either way. What differs is the reservation: handed
@@ -311,6 +331,43 @@ class TestWhenTheProviderFails:
             read()
 
         assert ledger.cancelled == [1] and ledger.held == []
+
+    @pytest.mark.parametrize("error", [
+        _transport_error(anthropic.APIConnectionError, httpx2.ConnectError("Name or service not known")),
+        _transport_error(anthropic.APIConnectionError, httpx2.ConnectError("Connection refused")),
+        _transport_error(anthropic.APITimeoutError, httpx2.ConnectTimeout("timed out")),
+        _transport_error(anthropic.APITimeoutError, httpx2.PoolTimeout("no connection free")),
+    ], ids=["unresolved", "refused", "connect_timeout", "no_connection_free"])
+    def test_a_connection_that_never_opened_hands_the_reservation_back(self, script, ledger, error):
+        # Nothing reached the API, so nothing can be billed: an outage must not use up the month
+        script(error)
+
+        with pytest.raises((ProviderError, ProviderTimeout)):
+            read()
+
+        assert ledger.cancelled == [1] and ledger.held == [] and ledger.settled == {}
+
+    @pytest.mark.parametrize("error", [
+        _transport_error(anthropic.APIConnectionError, httpx2.ReadError("connection reset")),
+        _transport_error(anthropic.APIConnectionError, httpx2.RemoteProtocolError("server disconnected")),
+        _transport_error(anthropic.APIConnectionError, httpx2.WriteError("broken pipe")),
+        _transport_error(anthropic.APITimeoutError, httpx2.ReadTimeout("timed out")),
+    ], ids=["reset", "disconnected", "write_broke", "read_timeout"])
+    def test_a_connection_that_broke_once_open_keeps_the_reservation(self, script, ledger, error):
+        script(error)
+
+        with pytest.raises((ProviderError, ProviderTimeout)):
+            read()
+
+        assert ledger.held == [1] and ledger.cancelled == [] and ledger.settled == {}
+
+    def test_a_read_is_one_attempt(self, script):
+        # A retry inside the client would hide a first attempt that went out and never answered
+        fake = script(msg("end_turn", text(answer())))
+
+        read()
+
+        assert fake.client.options == [{"max_retries": 0}] and len(fake.calls) == 1
 
     def test_a_dropped_connection_keeps_the_reservation(self, script, ledger):
         request_ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
@@ -353,7 +410,10 @@ class TestWhenTheProviderFails:
 
         read()
 
-        assert fake.calls[0]["timeout"] > settings.analyst_read_timeout_seconds
+        timeout = fake.calls[0]["timeout"]
+        assert timeout.read > settings.analyst_read_timeout_seconds
+        # Connecting has a short one of its own, well inside the deadline
+        assert timeout.connect == analyst.CONNECT_TIMEOUT_SECONDS < settings.analyst_read_timeout_seconds
 
 
 @pytest.mark.unit
