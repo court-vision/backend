@@ -23,8 +23,9 @@ module asks, parses and counts the cost.
 Spend is on a monthly line of its own (`services.ai.spend`, line `analyst`):
 each read reserves `analyst_read_max_usd` before its call and is settled to
 what the call cost, so a morning of reads cannot use up the AI desk's budget or
-the check-ins'. With the month's budget used up the answer is `budget` and
-nothing is asked.
+the check-ins'. A read that went out and never answered keeps its reservation,
+because a request the API accepted may be billed after we stop listening. With
+the month's budget used up the answer is `budget` and nothing is asked.
 
 The prompt is a cached prefix: nothing volatile in it (no dates, no names).
 The day, the player and everything about him are the user turn. It shares the
@@ -39,9 +40,10 @@ import json
 import time
 from typing import Any, Optional
 
+import anthropic
 from pydantic import ValidationError
 
-from core.errors import ProviderTimeout
+from core.errors import AppError, ProviderTimeout
 from core.logging import get_logger
 from core.settings import settings
 from schemas.analyst import AnalystProposal, AnalystReadData, AnalystReadReq, AnalystSpendData, AnalystUsage
@@ -53,6 +55,10 @@ from services.ai.service import FALLBACK_BETA, _create, _Run, _served_content
 # with every read, so a change in what the analyst writes can be traced to it.
 PROMPT_VERSION = "analyst-1"
 MAX_TOKENS = 8_000  # a backstop the model never sees; the answer is a short object
+# The client's own timeout sits past the read's deadline, so the deadline is what
+# ends a slow read: the client never gives up first and sends the request again,
+# which would be a second call to pay for.
+CLIENT_TIMEOUT_MARGIN_SECONDS = 15.0
 
 _SECTION = "Reading a player:"
 
@@ -264,9 +270,20 @@ async def _ask(req: AnalystReadReq, run: _Run) -> Any:
         output_config={"effort": settings.analyst_effort, "format": {"type": "json_schema", "schema": ANSWER_SCHEMA}},
         betas=[FALLBACK_BETA],
         fallbacks="default",
+        timeout=settings.analyst_read_timeout_seconds + CLIENT_TIMEOUT_MARGIN_SECONDS,
     )
     run.record(response)
     return response
+
+
+def _went_unanswered(exc: BaseException) -> bool:
+    """Whether a failed call may still be billed: the request may have gone out
+    and no answer came back. An error the API answered with (a status) is not
+    billed, and neither is a call that failed before anything was sent."""
+    if isinstance(exc, (asyncio.TimeoutError, asyncio.CancelledError)):
+        return True
+    # A timeout is a connection error to the SDK; a status error is not
+    return isinstance(exc, AppError) and isinstance(exc.__cause__, anthropic.APIConnectionError)
 
 
 async def _month() -> tuple[int, int]:
@@ -293,11 +310,15 @@ async def read(req: AnalystReadReq) -> AnalystReadData:
     started = time.monotonic()
     outcome, detail = "error", None
     proposal: Optional[AnalystProposal] = None
+    unanswered = False
     try:
         try:
             response = await asyncio.wait_for(_ask(req, run), settings.analyst_read_timeout_seconds)
-        except asyncio.TimeoutError as exc:
-            raise ProviderTimeout("anthropic", "The analyst's read timed out", error_code="AI_TIMEOUT") from exc
+        except BaseException as exc:
+            unanswered = _went_unanswered(exc)
+            if isinstance(exc, asyncio.TimeoutError):
+                raise ProviderTimeout("anthropic", "The analyst's read timed out", error_code="AI_TIMEOUT") from exc
+            raise
 
         if response.stop_reason == "refusal":
             outcome = "declined"
@@ -311,9 +332,12 @@ async def read(req: AnalystReadReq) -> AnalystReadData:
             except ValueError as exc:
                 outcome, detail = "malformed", f"the answer could not be read: {str(exc)[:300]}"
     finally:
-        # A call that never answered reports no tokens: nothing was spent that can be counted
         if run.model_calls:
             await spend.settle(reservation, _usage(run).cost_micros)
+        elif unanswered:
+            # Sent and never answered: it reports no tokens and may still be billed,
+            # so the month counts the read at its ceiling
+            await spend.hold(reservation)
         else:
             await spend.cancel(reservation)
         get_logger().info(
@@ -333,6 +357,7 @@ async def read(req: AnalystReadReq) -> AnalystReadData:
             items=len(req.items),
             duration_ms=round((time.monotonic() - started) * 1000),
             request_ids=run.request_ids,
+            held=unanswered and not run.model_calls,
         )
     return _data(outcome, await _month(), proposal=proposal, detail=detail, usage=_usage(run))
 

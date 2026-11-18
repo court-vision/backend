@@ -5,8 +5,9 @@ no network, no API key, no database.
 What is pinned here is the envelope, not the judgment: nothing is asked while
 it is off or out of budget, a read is one model call with the fixed prompt and
 the answer's schema, every read is reserved and settled to what it cost,
-refusals and unreadable answers are outcomes and not errors, and a provider
-failure hands its reservation back.
+refusals and unreadable answers are outcomes and not errors, a failure the API
+answered with hands its reservation back, and a read that went out and never
+answered keeps it.
 """
 
 import asyncio
@@ -19,10 +20,10 @@ import httpx2
 import pytest
 from pydantic import SecretStr
 
-from core.errors import ProviderError, ProviderTimeout
+from core.errors import ProviderError, ProviderTimeout, ServiceUnavailableError
 from core.settings import settings
 from schemas.analyst import AnalystReadReq
-from services.ai import analyst, service, spend
+from services.ai import analyst, client, service, spend
 
 
 def text(t):
@@ -59,7 +60,7 @@ class Ledger:
 
     def __init__(self, room=True):
         self.room = room
-        self.reserved, self.settled, self.cancelled = [], {}, []
+        self.reserved, self.settled, self.cancelled, self.held = [], {}, [], []
 
     async def reserve_analyst(self):
         if not self.room:
@@ -73,8 +74,11 @@ class Ledger:
     async def cancel(self, reservation_id):
         self.cancelled.append(reservation_id)
 
+    async def hold(self, reservation_id):
+        self.held.append(reservation_id)
+
     async def analyst_month_spend(self):
-        return sum(self.settled.values()), 40_000_000
+        return sum(self.settled.values()) + 300_000 * len(self.held), 40_000_000
 
 
 @pytest.fixture
@@ -90,7 +94,7 @@ def on(monkeypatch):
 @pytest.fixture
 def ledger(monkeypatch):
     book = Ledger()
-    for name in ("reserve_analyst", "settle", "cancel", "analyst_month_spend"):
+    for name in ("reserve_analyst", "settle", "cancel", "hold", "analyst_month_spend"):
         monkeypatch.setattr(spend, name, getattr(book, name))
     return book
 
@@ -276,9 +280,39 @@ class TestWhenNothingIsAsked:
         assert data.month_cap_micros == 40_000_000
 
 
+def _status_error(cls, status):
+    request_ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return cls("no", response=httpx2.Response(status, request=request_), body=None)
+
+
 @pytest.mark.unit
 class TestWhenTheProviderFails:
-    def test_a_provider_error_raises_and_hands_the_reservation_back(self, script, ledger):
+    """A failed read raises either way. What differs is the reservation: handed
+    back only when the API answered, so nothing can have been billed."""
+
+    @pytest.mark.parametrize("error", [
+        _status_error(anthropic.RateLimitError, 429),
+        _status_error(anthropic.InternalServerError, 500),
+        _status_error(anthropic.BadRequestError, 400),
+    ], ids=["busy", "unavailable", "rejected"])
+    def test_an_error_the_api_answered_with_hands_the_reservation_back(self, script, ledger, error):
+        script(error)
+
+        with pytest.raises(Exception):
+            read()
+
+        assert ledger.cancelled == [1] and ledger.held == [] and ledger.settled == {}
+
+    def test_a_call_that_never_started_hands_the_reservation_back(self, monkeypatch, on, ledger):
+        monkeypatch.setattr(settings, "anthropic_api_key", None)
+        monkeypatch.setattr(client, "_client", None)
+
+        with pytest.raises(ServiceUnavailableError):
+            read()
+
+        assert ledger.cancelled == [1] and ledger.held == []
+
+    def test_a_dropped_connection_keeps_the_reservation(self, script, ledger):
         request_ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
         script(anthropic.APIConnectionError(request=request_))
 
@@ -286,9 +320,20 @@ class TestWhenTheProviderFails:
             read()
 
         assert exc.value.error_code == "AI_UNAVAILABLE"
-        assert ledger.cancelled == [1] and ledger.settled == {}
+        assert ledger.held == [1] and ledger.cancelled == [] and ledger.settled == {}
 
-    def test_a_read_that_runs_too_long_times_out(self, script, ledger, monkeypatch):
+    def test_a_client_timeout_keeps_the_reservation(self, script, ledger):
+        request_ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        script(anthropic.APITimeoutError(request=request_))
+
+        with pytest.raises(ProviderTimeout):
+            read()
+
+        assert ledger.held == [1] and ledger.cancelled == []
+
+    def test_a_read_that_runs_too_long_times_out_and_keeps_its_reservation(self, script, ledger, monkeypatch):
+        # The model accepted the request and is still working when we stop
+        # listening: it may be billed, so the month counts it at the ceiling
         monkeypatch.setattr(settings, "analyst_read_timeout_seconds", 0.01)
 
         async def slow():
@@ -299,7 +344,16 @@ class TestWhenTheProviderFails:
         with pytest.raises(ProviderTimeout):
             read()
 
-        assert ledger.cancelled == [1]
+        assert ledger.held == [1] and ledger.cancelled == [] and ledger.settled == {}
+        assert asyncio.run(spend.analyst_month_spend())[0] == 300_000
+
+    def test_the_reads_deadline_ends_a_slow_read_before_the_client_would_retry_it(self, script, monkeypatch):
+        monkeypatch.setattr(settings, "analyst_read_timeout_seconds", 75.0)
+        fake = script(msg("end_turn", text(answer())))
+
+        read()
+
+        assert fake.calls[0]["timeout"] > settings.analyst_read_timeout_seconds
 
 
 @pytest.mark.unit

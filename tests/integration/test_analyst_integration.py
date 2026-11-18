@@ -174,6 +174,17 @@ class TestItsSpendLine:
         run(spend.cancel(reservation))
         assert run(spend.analyst_month_spend()) == (0, 750_000)
 
+    def test_a_read_that_never_answered_stays_charged_at_its_ceiling(self):
+        reservation = run(spend.reserve_analyst())
+        run(spend.hold(reservation))
+
+        row = AiSpend.get_by_id(reservation)
+        assert (row.cost_micros, row.settled) == (300_000, True)
+        assert run(spend.analyst_month_spend()) == (300_000, 750_000)
+        # Final: a later cancel does not hand it back
+        run(spend.cancel(reservation))
+        assert run(spend.analyst_month_spend()) == (300_000, 750_000)
+
     def test_the_desks_and_the_check_ins_caps_do_not_see_it(self, monkeypatch):
         me = User.create(email="a1@courtvision.dev", clerk_user_id="user_a1", created_at=datetime.now(timezone.utc))
         monkeypatch.setattr(settings, "ai_agent_user_ids", [me.user_id])

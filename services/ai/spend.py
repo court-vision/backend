@@ -26,7 +26,9 @@ a day of check-ins can't use up the AI desk, and the other way round.
 The live rankings' analyst (services/ai/analyst.py) has a third line, `analyst`,
 with its own monthly budget (`analyst_monthly_budget_usd`). Its reads belong to
 no user, so their rows carry none; each reserves `analyst_read_max_usd` before
-its one model call and is settled to what the call cost.
+its one model call and is settled to what the call cost. A call that went out
+and never answered (a timeout, a dropped connection) keeps its reservation:
+the API may bill a request it accepted, whoever stopped listening.
 """
 
 from __future__ import annotations
@@ -255,6 +257,13 @@ async def analyst_month_spend() -> tuple[int, int]:
 def cancel(reservation_id: int) -> None:
     """Drop a reservation whose turn never started (nothing was spent)."""
     AiSpend.delete().where(AiSpend.id == reservation_id, AiSpend.settled == False).execute()  # noqa: E712
+
+
+@db_operation("ai.hold_reservation")
+def hold(reservation_id: int) -> None:
+    """Keep a reservation at its ceiling as the charge. For a call that went out
+    and never answered: it may be billed, and nothing came back to count."""
+    AiSpend.update(settled=True).where(AiSpend.id == reservation_id).execute()
 
 
 def settle_sync(reservation_id: int, cost: int, turn_id: int | None) -> None:
