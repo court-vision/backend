@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     # Every agent turn, priced from its token meters, counts against this in each
     # calendar month (UTC). Each allowed user may spend the budget divided by the
     # allowlist's size. The Console workspace spend limit stays the last line.
+    # This and the two monthly budgets below are defaults: a cap set on the data
+    # platform's AI spend page (usr.ai_caps, migration 0054) replaces any of them,
+    # and can give one user a cap of their own on the desk or autopilot line.
     ai_monthly_budget_usd: float = 100.0
     # One turn's bounds. Past the spend ceiling its next model call is its last,
     # made without tools; and a turn is refused while less than the ceiling is
