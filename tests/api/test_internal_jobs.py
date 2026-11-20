@@ -243,9 +243,18 @@ def daily_inputs(monkeypatch):
         return await asyncio.to_thread(fn, *args, **kwargs)
 
     monkeypatch.setattr(daily.db_base, "run_db", direct)
-    monkeypatch.setattr(daily, "load_inputs", lambda: held["inputs"])
+    def load(live_source="cv_live"):
+        held["sources"] = held.get("sources", []) + [live_source]
+        return held["inputs"]
+
+    monkeypatch.setattr(daily, "load_inputs", load)
     monkeypatch.setattr(schedule_service, "get_nba_today", lambda: date(2026, 11, 16))
-    return lambda inputs: held.update(inputs=inputs)
+
+    def set_inputs(inputs):
+        held.update(inputs=inputs)
+
+    set_inputs.sources = lambda: held.get("sources", [])
+    return set_inputs
 
 
 @pytest.mark.api
@@ -307,3 +316,108 @@ def test_daily_rankings_say_when_it_is_not_the_season(client, token, daily_input
     assert (data["in_season"], data["as_of"], data["model"]) == (False, "2026-11-16", "projection-1")
     assert data["season_as_of"] is None
     assert all(p["season_gp"] is None for p in data["players"])
+
+
+@pytest.mark.api
+def test_the_shadow_boards_are_built_on_the_projection_with_the_analysts_notes(client, token, daily_inputs):
+    assert client.post(DAILY, headers=AUTH).status_code == 200
+    assert client.post(DAILY, params={"shadow": "true"}, headers=AUTH).status_code == 200
+
+    assert daily_inputs.sources() == ["cv_live", "cv_live_shadow"]
+
+
+# ---- /v1/internal/jobs/analyst ---------------------------------------------------
+
+ANALYST_READ = "/v1/internal/jobs/analyst/read"
+ANALYST_SPEND = "/v1/internal/jobs/analyst/spend"
+READ_BODY = {
+    "season": "2026-27", "as_of": "2026-11-16", "player_id": 7, "name": "Player 7", "team": "DEN",
+    "reasons": ["A new injury item since his last read"],
+    "items": [{"ref": "news:91", "kind": "injury", "citable": True, "source": "espn_player_news",
+               "text": "Player 7 (calf) will be re-evaluated in two weeks."}],
+}
+
+
+@pytest.fixture
+def analyst_stub(monkeypatch):
+    """The analyst's read and month, answered from memory; returns what it was asked."""
+    from schemas.analyst import AnalystProposal, AnalystReadData, AnalystSpendData, AnalystUsage
+    from services.ai import analyst
+
+    asked = []
+
+    async def read(req):
+        asked.append(req)
+        return AnalystReadData(
+            outcome="read", prompt_version="analyst-1", month_spent_micros=18_200, month_cap_micros=40_000_000,
+            proposal=AnalystProposal(decision="write", reason="Re-evaluated in two weeks.", kind="injury_current",
+                                     return_date=date(2026, 12, 8), review_date=date(2026, 11, 30),
+                                     confidence="likely", cites=["news:91"]),
+            usage=AnalystUsage(model="claude-opus-5-5", input_tokens=2_000, output_tokens=500, cost_micros=18_000),
+        )
+
+    async def month():
+        return AnalystSpendData(enabled=True, month_spent_micros=18_200, month_cap_micros=40_000_000,
+                                read_max_micros=300_000, model="claude-opus-5-5", prompt_version="analyst-1")
+
+    monkeypatch.setattr(analyst, "read", read)
+    monkeypatch.setattr(analyst, "month", month)
+    return asked
+
+
+@pytest.mark.api
+def test_the_analyst_routes_need_the_pipeline_token(client, token, analyst_stub):
+    assert client.post(ANALYST_READ, json=READ_BODY).status_code in (401, 403)
+    assert client.post(ANALYST_READ, json=READ_BODY, headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.get(ANALYST_SPEND).status_code in (401, 403)
+    assert analyst_stub == []
+
+
+@pytest.mark.api
+def test_an_analyst_read_answers_with_the_proposal_and_what_it_cost(client, token, analyst_stub):
+    r = client.post(ANALYST_READ, json=READ_BODY, headers=AUTH)
+
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert (data["outcome"], data["prompt_version"]) == ("read", "analyst-1")
+    assert data["proposal"]["decision"] == "write" and data["proposal"]["return_date"] == "2026-12-08"
+    assert data["proposal"]["cites"] == ["news:91"]
+    assert data["usage"]["cost_micros"] == 18_000
+    (req,) = analyst_stub
+    assert (req.player_id, req.as_of, req.items[0].ref) == (7, date(2026, 11, 16), "news:91")
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("change", [
+    {"player_id": 0},
+    {"name": ""},
+    {"as_of": "soon"},
+    {"items": [{"ref": "news:91", "kind": "injury", "citable": True, "source": "espn", "text": ""}]},
+    {"items": [{"kind": "injury", "citable": True, "source": "espn", "text": "x"}]},
+])
+def test_an_analyst_read_refuses_a_request_it_cannot_read(client, token, analyst_stub, change):
+    r = client.post(ANALYST_READ, json={**READ_BODY, **change}, headers=AUTH)
+
+    assert r.status_code == 422 and analyst_stub == []
+
+
+@pytest.mark.api
+def test_an_analyst_read_while_the_ai_layer_is_off_asks_nothing(client, token, monkeypatch):
+    from core.settings import settings
+    from services.ai import service
+
+    monkeypatch.setattr(settings, "ai_enabled", False)
+    monkeypatch.setattr(service, "get_client", lambda: pytest.fail("no model call while off"))
+
+    r = client.post(ANALYST_READ, json=READ_BODY, headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["data"]["outcome"] == "off" and r.json()["data"]["proposal"] is None
+
+
+@pytest.mark.api
+def test_the_analysts_month(client, token, analyst_stub):
+    data = client.get(ANALYST_SPEND, headers=AUTH).json()["data"]
+
+    assert (data["enabled"], data["month_spent_micros"], data["month_cap_micros"]) == (True, 18_200, 40_000_000)
+    assert data["read_max_micros"] == 300_000

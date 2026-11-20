@@ -82,13 +82,15 @@ class AiSpend(BaseModel):
     deleting a conversation leaves its spend counted."""
 
     id = BigAutoField(primary_key=True)
-    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    # Null only on the analyst's line, whose reads belong to no user (migration 0053)
+    user_id = ForeignKeyField(User, column_name="user_id", null=True, on_delete="CASCADE")
     turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
     created_at = DateTimeField(default=_now)
     cost_micros = BigIntegerField()
     settled = BooleanField(default=False)
-    # desk (the AI desk's turns) or autopilot (the check-ins'): each has its own
-    # monthly budget (migration 0042)
+    # desk (the AI desk's turns), autopilot (the check-ins') or analyst (the
+    # morning reads of the live rankings): each has its own monthly budget
+    # (migrations 0042, 0053)
     line = TextField(default="desk")
 
     class Meta:

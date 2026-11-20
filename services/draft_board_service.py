@@ -425,11 +425,13 @@ class DraftBoardService:
     # ---- one trip to the database ---------------------------------------------
 
     @staticmethod
-    def _season_reads(session_id: Optional[int], season: str) -> Optional["_SeasonReads"]:
+    def _season_reads(session_id: Optional[int], season: str,
+                      live_source: str = live_projection.SOURCE) -> Optional["_SeasonReads"]:
         """What a draft held in season reads on top of the preseason inputs, or None
         when the room drafts on the preseason valuation (services.draft_in_season):
         before opening night or after the regular season, an imported room, or a
-        room whose draft started before opening night."""
+        room whose draft started before opening night. `live_source` is which
+        live projection: the shadow boards read the one with the analyst's notes."""
         today = schedule_service.get_nba_today()
         try:
             bounds = schedule_service.get_season_bounds(season)
@@ -454,10 +456,12 @@ class DraftBoardService:
                             injuries=draft_in_season.load_live_injuries(nba_date_et()),
                             calendar=calendar,
                             # Priced on the calendar's game days: without one, the blend
-                            live=live_projection.load(season, first_day) if calendar else None)
+                            live=(live_projection.load(season, first_day, source=live_source)
+                                  if calendar else None))
 
     @staticmethod
-    def _fetch_inputs(my_ids: frozenset[int], session_id: Optional[int] = None) -> BoardInputs:
+    def _fetch_inputs(my_ids: frozenset[int], session_id: Optional[int] = None,
+                      live_source: str = live_projection.SOURCE) -> BoardInputs:
         season = settings.nba_season
 
         session_picked: set[int] = set()
@@ -550,7 +554,7 @@ class DraftBoardService:
         # A draft held in season: this season's games folded into every line,
         # before the market-only rows are found, so a player valued off this
         # season alone is no longer one of them.
-        reads = DraftBoardService._season_reads(session_id, season)
+        reads = DraftBoardService._season_reads(session_id, season, live_source)
         in_season = (
             draft_in_season.apply(pool, source, reads.rows, reads.first_day, season_as_of=reads.as_of)
             if reads is not None else None

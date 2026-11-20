@@ -952,8 +952,13 @@ def fake_tables(monkeypatch):
     monkeypatch.setattr(DraftBoardService, "_calendar_weeks", staticmethod(lambda: ()))
     # Preseason unless a test says otherwise: today's date must not decide a fetch test.
     state["season_reads"] = None
-    monkeypatch.setattr(DraftBoardService, "_season_reads",
-                        staticmethod(lambda session_id, season: state["season_reads"]))
+    state["live_sources"] = []
+
+    def season_reads(session_id, season, live_source="cv_live"):
+        state["live_sources"].append(live_source)
+        return state["season_reads"]
+
+    monkeypatch.setattr(DraftBoardService, "_season_reads", staticmethod(season_reads))
     return state
 
 
@@ -2022,6 +2027,13 @@ def test_fetch_without_a_live_projection_is_the_blend(fake_tables):
     assert inputs.live_games == {} and inputs.in_season.model == "season-blend-1"
     assert inputs.in_season.live_as_of is None and inputs.in_season.live == 0
     assert set(inputs.source.values()) <= {"baseline", "projection", "season"}
+
+
+@pytest.mark.unit
+def test_fetch_reads_the_live_projection_unless_the_shadow_one_is_asked_for(fake_tables):
+    DraftBoardService._fetch_inputs(frozenset(), None)
+    DraftBoardService._fetch_inputs(frozenset(), None, live_source="cv_live_shadow")
+    assert fake_tables["live_sources"] == ["cv_live", "cv_live_shadow"]
 
 
 @pytest.mark.unit

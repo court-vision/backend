@@ -38,6 +38,9 @@ if TYPE_CHECKING:
     from services.draft_in_season import DatedWeek
 
 SOURCE = "cv_live"
+# The same projection with the analyst's notes applied (the Live rankings plan,
+# step 4): built beside the live one each morning, read by the shadow boards alone
+SHADOW_SOURCE = "cv_live_shadow"
 MODEL = "three-part-1"
 # A board row valued by it (`value_source`, and `line_source` on the daily boards)
 SOURCE_LABEL = "live"
@@ -211,12 +214,13 @@ def apply(
     return out
 
 
-def load(season: str, day: date, fresh_days: int = FRESH_DAYS) -> Optional[LiveSnapshot]:
-    """The newest live snapshot a board counting from `day` may read, or None."""
+def load(season: str, day: date, fresh_days: int = FRESH_DAYS, source: str = SOURCE) -> Optional[LiveSnapshot]:
+    """The newest live snapshot a board counting from `day` may read, or None.
+    `source` is whose: the live projection's unless the shadow one is asked for."""
     from db.models.nba.player_projections import PlayerProjection
     from db.models.nba.players import Player
 
-    of_season = (PlayerProjection.season == season) & (PlayerProjection.source == SOURCE)
+    of_season = (PlayerProjection.season == season) & (PlayerProjection.source == source)
     latest = (
         PlayerProjection.select(PlayerProjection.as_of_date)
         .where(of_season

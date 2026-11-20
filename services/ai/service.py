@@ -150,11 +150,15 @@ def map_sdk_error(exc: anthropic.AnthropicError) -> AppError:
     return AppError("AI_REQUEST_REJECTED", "The assistant couldn't process that question", status_code=500)
 
 
-async def _create(**kwargs: Any) -> Any:
-    """One Messages API call, with the SDK's errors mapped onto the app's taxonomy."""
+async def _create(*, max_retries: int | None = None, **kwargs: Any) -> Any:
+    """One Messages API call, with the SDK's errors mapped onto the app's taxonomy.
+    `max_retries` replaces the client's own for this call: 0 is one attempt."""
     try:
+        client = get_client()
+        if max_retries is not None:
+            client = client.with_options(max_retries=max_retries)
         with timed("claude", "POST claude messages"):
-            return await get_client().beta.messages.create(**kwargs)
+            return await client.beta.messages.create(**kwargs)
     except anthropic.AnthropicError as exc:
         raise map_sdk_error(exc) from exc
 

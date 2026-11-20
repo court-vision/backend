@@ -6,11 +6,12 @@ identity: the caller names the user and team, and ownership is re-checked here.
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, Security
+from fastapi import APIRouter, Query, Security
 
 from core.compute import run_cpu
 from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
+from schemas.analyst import AnalystReadReq, AnalystReadResp, AnalystSpendResp
 from schemas.autopilot import (
     CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData, CheckinRunResp, CheckinStarted,
 )
@@ -26,7 +27,7 @@ from schemas.valuation import (
     StandardValuationReq,
     StandardValuationResp,
 )
-from services.ai import checkins, events
+from services.ai import analyst, checkins, events
 from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
@@ -173,7 +174,12 @@ async def value_standard_league(req: StandardValuationReq):
 
 
 @router.post("/rankings/daily", response_model=DailyRankingsResp)
-async def build_daily_rankings():
+async def build_daily_rankings(
+    shadow: bool = Query(
+        False,
+        description="Build the boards on the projection that has the analyst's notes applied (cv_live_shadow).",
+    ),
+):
     """Today's two standard boards (points and 9-cat), for the data platform to store.
 
     Called by data-platform's daily_rankings pipeline each morning, which writes
@@ -183,10 +189,41 @@ async def build_daily_rankings():
     projection blended with this season's games; before opening night the
     projection alone. `model` says which. `in_season` is false outside the
     regular season, and the pipeline stores nothing then. Nothing is written here.
+
+    `shadow=true` is the analyst's second pair (the Live rankings plan, step 4):
+    the same boards built on the projection with its notes applied, which the
+    data platform's analyst pipeline stores under the source `cv_shadow`. No
+    user-facing board reads that projection.
     """
-    boards = await daily_boards.today()
+    boards = await daily_boards.today(shadow=shadow)
     return respond(DailyRankingsResp(
         status=ApiStatus.SUCCESS,
         message=f"Ranked {len(boards.players)} players as of {boards.as_of.isoformat()}",
         data=DailyRankingsData(league_size=STANDARD_LEAGUE_SIZE, rounds=STANDARD_ROUNDS, **asdict(boards)),
     ))
+
+
+@router.post("/analyst/read", response_model=AnalystReadResp)
+async def analyst_read(req: AnalystReadReq):
+    """One read of one player by the live rankings' analyst (the Live rankings plan, step 4).
+
+    Called by data-platform's analyst pipeline for each player its morning
+    screen picks, with what the live projection assumes about him and the stored
+    items about him. The answer is a proposal in the projection's own inputs (a
+    return date, minutes, a share of the offense, an end, the items it rests
+    on), or that nothing should be written. Nothing is written here: the data
+    platform checks the proposal against its stored items and bounds and owns
+    the tables. `data.outcome` carries every business result (`read`, `declined`,
+    `malformed`, `budget`, `off`); only a provider failure is an error, and the
+    pipeline reads the player again on its next run.
+    """
+    data = await analyst.read(req)
+    return respond(AnalystReadResp(status=ApiStatus.SUCCESS, message=f"Analyst read: {data.outcome}", data=data))
+
+
+@router.get("/analyst/spend", response_model=AnalystSpendResp)
+async def analyst_spend():
+    """What the analyst's reads have spent this month and what they may, for the
+    data platform's morning digest."""
+    data = await analyst.month()
+    return respond(AnalystSpendResp(status=ApiStatus.SUCCESS, message="Analyst spend this month", data=data))

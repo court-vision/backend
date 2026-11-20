@@ -5,7 +5,7 @@ box score cannot see — a role after a trade, a return date, a second-year jump
 Written by the dashboard's projections editor. Append-only: an edit supersedes
 the previous row, so every judgment call keeps its history.
 
-Two scopes, one live row of each per player per season (migration 0052):
+Three scopes, one live row of each per player per season (migrations 0052, 0053):
 
 - `preseason`: a season-long input to the preseason projection, read by the
   data-platform cv-projection pipeline.
@@ -14,6 +14,10 @@ Two scopes, one live row of each per player per season (migration 0052):
   until `until_date` or until `depends_on_player` plays again, its return date until
   he plays, and all of it until `review_date`. Nothing is written when a note
   ends: the reader works out what is still in force on its morning.
+- `analyst`: the same kind of note, written by the AI analyst from the stored
+  news (step 4). In a scope of its own so that a note written by hand is never
+  overwritten (where both are read, the one written by hand wins), and so that
+  in shadow only the second projection (`cv_live_shadow`) reads it.
 """
 
 from datetime import datetime
@@ -36,7 +40,10 @@ from db.models.nba.players import Player
 ADJUSTMENT_KINDS = ("year2", "trade", "role", "injury_return", "injury_current", "age", "other")
 SCOPE_PRESEASON = "preseason"
 SCOPE_SEASON = "season"
-SCOPES = (SCOPE_PRESEASON, SCOPE_SEASON)
+SCOPE_ANALYST = "analyst"
+SCOPES = (SCOPE_PRESEASON, SCOPE_SEASON, SCOPE_ANALYST)
+# The scopes whose rows are notes in season: dated, with a review date
+NOTE_SCOPES = (SCOPE_SEASON, SCOPE_ANALYST)
 CONFIDENCES = ("confirmed", "likely", "possible")
 
 
