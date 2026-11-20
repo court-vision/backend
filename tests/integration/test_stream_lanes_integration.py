@@ -66,6 +66,15 @@ def _pickup_fields(user, team, lane_id=None, add=FA, **kw):
     return fields
 
 
+def _clock(now):
+    """`datetime` with a fixed now(), for a service call that reads the clock: the rows here are dated NOW."""
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+    return Clock
+
+
 # ---- the schema --------------------------------------------------------------------------------
 
 
@@ -320,10 +329,11 @@ def test_a_pause_cancels_the_lanes_pickup_before_the_executor_can_claim_it(user,
     assert pickups._claim_due(NOW, 4) == []
 
 
-def test_a_pause_waits_while_the_lanes_pickup_is_being_made(user, team):
+def test_a_pause_waits_while_the_lanes_pickup_is_being_made(user, team, monkeypatch):
     lane = _lane(user, team, next_period=30)
     pickup = ScheduledPickup.create(**_pickup_fields(user, team, lane.id))
     (claimed,) = pickups._claim_due(NOW, 4)                                     # an attempt holds it
+    monkeypatch.setattr(svc, "datetime", _clock(NOW))                           # the pause comes inside its lease
     with pytest.raises(svc.StreamLaneBusy):
         asyncio.run(svc.StreamLaneService.update(team, None, lane.id, StreamLaneUpdateReq(status="paused")))
     assert StreamLane.get_by_id(lane.id).status == "active"
