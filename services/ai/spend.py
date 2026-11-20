@@ -35,7 +35,10 @@ replaces a line's number from the environment, or sets one user's cap on the des
 or autopilot line. With no row the environment applies, and a user's desk cap is
 the desk's cap (as set) divided by the allowlist, as before; on the autopilot line
 a user has no cap of their own until a row gives one. The data platform's AI spend
-page writes them (services/ai/spend_report.py).
+page writes them (services/ai/spend_report.py). A reservation reads its caps just
+before it takes the ledger lock, so a change applies to every reservation that
+starts after it commits; one already waiting on the lock (milliseconds) keeps the
+caps it read.
 """
 
 from __future__ import annotations

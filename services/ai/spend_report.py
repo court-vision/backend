@@ -230,25 +230,44 @@ async def report(days: int = 30, now: Optional[datetime] = None) -> AiSpendRepor
     return await _report(days, now or datetime.now(timezone.utc))
 
 
+# One cap write at a time: two saves of a cap nobody had set would otherwise both
+# find no row and both insert, and the second would hit the unique index.
+_CAPS_LOCK = 0x41_49_43_50
+
+
 @db_operation("ai.set_cap")
 def _set_cap(line: str, user_id: Optional[int], monthly_usd: Optional[Decimal], author: Optional[str],
-             now: datetime) -> tuple[Optional[Decimal], Optional[AiCap]]:
-    """Write (or delete) the row; returns the number it replaced and the row now in force."""
+             now: datetime) -> AiCapData:
+    """Write (or delete) the row and read back the cap in force, in one transaction under
+    one lock, so the answer is a single state. The change is logged once it commits."""
     with db.atomic():
+        db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_CAPS_LOCK,))
         who = AiCap.user_id.is_null() if user_id is None else AiCap.user_id == user_id
-        current = AiCap.select().where(AiCap.line == line, who).for_update().first()
-        before = current.monthly_usd if current is not None else None
+        row = AiCap.select().where(AiCap.line == line, who).first()
+        before = row.monthly_usd if row is not None else None
         if monthly_usd is None:
-            if current is not None:
-                current.delete_instance()
-            return before, None
-        if current is None:
-            current = AiCap.create(line=line, user_id=user_id, monthly_usd=monthly_usd,
-                                   updated_at=now, updated_by=author)
+            if row is not None:
+                row.delete_instance()
+            row = None
+        elif row is None:
+            row = AiCap.create(line=line, user_id=user_id, monthly_usd=monthly_usd,
+                               updated_at=now, updated_by=author)
         else:
-            current.monthly_usd, current.updated_at, current.updated_by = monthly_usd, now, author
-            current.save()
-        return before, current
+            row.monthly_usd, row.updated_at, row.updated_by = monthly_usd, now, author
+            row.save()
+
+        caps = spend.caps_sync(line, user_id)
+        if user_id is None:
+            default = spend._micros(spend.default_line_usd(line))
+            data = AiCapData(line=line, **_view(row, caps.line, default))
+        else:
+            default = spend.desk_share(caps.line) if line == DESK else None
+            data = AiCapData(line=line, user_id=user_id, **_view(row, caps.user, default))
+
+    get_logger().info("ai_cap_set", line=line, user_id=user_id,
+                      before_usd=float(before) if before is not None else None,
+                      after_usd=float(monthly_usd) if monthly_usd is not None else None, author=author)
+    return data
 
 
 @db_operation("ai.cap_user_exists")
@@ -264,14 +283,4 @@ async def set_cap(req: AiCapReq, now: Optional[datetime] = None) -> AiCapData:
         if not await _user_exists(req.user_id):
             raise NotFoundError("AI_CAP_USER_NOT_FOUND", f"No user {req.user_id}")
     author = (req.author or "").strip() or None
-    before, row = await _set_cap(req.line, req.user_id, req.monthly_usd, author, now or datetime.now(timezone.utc))
-    get_logger().info("ai_cap_set", line=req.line, user_id=req.user_id,
-                      before_usd=float(before) if before is not None else None,
-                      after_usd=float(req.monthly_usd) if req.monthly_usd is not None else None, author=author)
-
-    caps = await spend._caps(req.line, req.user_id)
-    if req.user_id is None:
-        default = spend._micros(spend.default_line_usd(req.line))
-        return AiCapData(line=req.line, **_view(row, caps.line, default))
-    default = spend.desk_share(caps.line) if req.line == DESK else None
-    return AiCapData(line=req.line, user_id=req.user_id, **_view(row, caps.user, default))
+    return await _set_cap(req.line, req.user_id, req.monthly_usd, author, now or datetime.now(timezone.utc))

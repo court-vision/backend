@@ -180,7 +180,7 @@ class TestReport:
     def test_each_row_lands_under_what_spent_it(self, integration_db, caps):
         me, other, mine, theirs = self._book()
 
-        r = run(spend_report.report(30))
+        r = run(spend_report.report(30, now=NOW))
 
         got = sorted((row.line, row.feature, row.detail, row.user_id, row.team_id, row.cost_micros, row.open_micros)
                      for row in r.rows)
@@ -199,7 +199,7 @@ class TestReport:
         self._book()
         _set("analyst", 2)
 
-        lines = {line.line: line for line in run(spend_report.report(30)).lines}
+        lines = {line.line: line for line in run(spend_report.report(30, now=NOW)).lines}
 
         assert (lines["desk"].spent_micros, lines["desk"].open_micros, lines["desk"].cap_micros) == (
             95_000, 1_000_000, 10_000_000)
@@ -214,7 +214,7 @@ class TestReport:
         outsider = _user(3)
         _set("desk", 1, outsider)
 
-        users = {u.user_id: u for u in run(spend_report.report(30)).users}
+        users = {u.user_id: u for u in run(spend_report.report(30, now=NOW)).users}
 
         assert set(users) == {me.user_id, other.user_id, outsider.user_id}
         assert users[me.user_id].allowed and not users[outsider.user_id].allowed
@@ -235,7 +235,7 @@ class TestReport:
             " input_tokens, output_tokens, cost_micros) VALUES ('2026-27', %s, 7, '[]', 'f', 'none',"
             " 'claude-opus-5-5', 3000, 400, 25000)", (NOW.date(),))
 
-        usage = {(u.feature, u.model): u for u in run(spend_report.report(30)).usage}
+        usage = {(u.feature, u.model): u for u in run(spend_report.report(30, now=NOW)).usage}
 
         assert set(usage) == {("chat", "claude-opus-5-5"), ("draft", "claude-opus-5-5"),
                               ("checkin", "claude-opus-5"), ("checkin_reply", "claude-opus-5-5"),
@@ -251,15 +251,25 @@ class TestReport:
         AiSpend.create(user_id=me.user_id, cost_micros=50_000, settled=True, created_at=NOW - timedelta(days=8))
         AiSpend.create(user_id=me.user_id, cost_micros=7_000, settled=True, created_at=NOW)
 
-        r = run(spend_report.report(7))
+        r = run(spend_report.report(7, now=NOW))
 
         assert [row.cost_micros for row in r.rows] == [7_000]
         assert r.since == NOW.date() - timedelta(days=6) and r.days == 7
         with pytest.raises(BadRequestError):
-            run(spend_report.report(91))
+            run(spend_report.report(91, now=NOW))
+
+    def test_the_same_spend_on_two_days_stays_two_rows(self, integration_db, caps):
+        me = _user(1)
+        AiSpend.create(user_id=me.user_id, cost_micros=11_000, settled=True, created_at=NOW - timedelta(days=1))
+        AiSpend.create(user_id=me.user_id, cost_micros=7_000, settled=True, created_at=NOW)
+
+        r = run(spend_report.report(7, now=NOW))
+
+        assert sorted((row.day, row.feature, row.cost_micros) for row in r.rows) == [
+            ((NOW - timedelta(days=1)).date(), "unlinked", 11_000), (NOW.date(), "unlinked", 7_000)]
 
     def test_an_empty_ledger_still_names_every_line(self, integration_db, caps):
-        r = run(spend_report.report(30))
+        r = run(spend_report.report(30, now=NOW))
 
         assert [line.line for line in r.lines] == ["desk", "autopilot", "analyst"]
         assert r.rows == [] and r.usage == [] and r.teams == []
