@@ -299,11 +299,13 @@ class TestTurn:
         events = _run(_turn())
 
         assert calls[0][0] == "propose_move"
-        # The model gets the proposal (NBA ids) with a result id, and no chip
+        # The model gets the proposal (NBA ids) with a result id, and no chip; its instants read
+        # in Eastern, as the prompt says tool times do
+        eastern = {**view, "expires_at": "2026-10-22T19:00:00-04:00"}
         result = json.loads(fake.calls[1]["messages"][-1]["content"][0]["content"])
-        assert result == {"result_id": "r1", **view}
+        assert result == {"result_id": "r1", **eastern}
         assert "espn_id" not in json.dumps(result)
-        # The user gets the chip as a block, in the stream and in the stored parts
+        # The user gets the chip as a block, in the stream and in the stored parts, as the server wrote it
         block = next(e[1] for e in events if e[0] == "block")
         assert block == {"type": "proposal", "id": "p1", **chip}
         assert ("status", {"text": "Checking the move", "kind": "tool", "tool": "propose_move"}) in events
@@ -311,7 +313,7 @@ class TestTurn:
         assert row["outcome"] == "ok" and row["proposal_ids"] == [31]
         assert [p["kind"] for p in row["parts"]] == ["block", "text"]
         assert row["parts"][0]["block"]["proposal_id"] == 31
-        assert row["results"]["r1"]["data"] == view
+        assert row["results"]["r1"]["data"] == eastern
 
     def test_a_chip_alone_is_an_answer(self, agent_on, recorded, monkeypatch):
         chip = {"proposal_id": 5, "state": "proposed"}
@@ -641,6 +643,33 @@ class TestUngroundedNumbers:
         text = "On 2026-10-21 the 76ers play the Lvl. 3 Goblins."
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins"}) == 1  # "76" from 76ers still counts
         assert agent.ungrounded_numbers(text, [], names={"Lvl. 3 Goblins", "76ers"}) == 0
+
+    def test_a_clock_time_a_source_carries_in_any_form_is_supported(self):
+        # The prompt asks for "7:30 PM ET" where a tool gave "19:30"
+        sources = [{"start_time_et": "19:30:00", "note": "vs LAL · 10:00 PM", "opens_et": "18:55"}]
+        text = "He tips at 7:30 PM ET, the late game is 10 PM ET, and the window opens at 6:55 pm ET."
+        assert agent.ungrounded_numbers(text, sources) == 0
+        assert agent.ungrounded_numbers("Lock is at 7:30.", sources) == 0
+
+    def test_a_clock_time_no_source_carries_still_counts(self):
+        sources = [{"start_time_et": "19:30:00", "pts": 31}]
+        # Not a time any source has: its numbers count as ever ("30" is one of 19:30's)
+        assert agent.ungrounded_numbers("He tips at 8:30 PM ET.", sources) == 1
+        assert agent.ungrounded_numbers("He tips at 7:30 AM ET.", sources) == 1
+        assert agent.ungrounded_numbers("He scored 31 at 7:30 PM ET.", [{"pts": 31}]) == 2
+
+    def test_a_source_s_stated_half_of_the_day_holds(self):
+        # "7:30:00 AM" is the morning only, not a bare 7:30 that could be either
+        assert agent.ungrounded_numbers("It came in at 19:30.", [{"at": "7:30:00 AM", "n": 30}]) == 1
+
+    def test_a_bare_twelve_is_noon_or_midnight(self):
+        assert agent.ungrounded_numbers("Waivers clear at 00:30.", [{"at": "12:30"}]) == 0
+        assert agent.ungrounded_numbers("Waivers clear at 12:30 PM ET.", [{"at": "12:30"}]) == 0
+
+    def test_a_timestamp_s_clock_supports_the_time_and_its_offset_does_not(self):
+        sources = [{"published_at": "2026-11-17T14:30:00-05:00"}]
+        assert agent.ungrounded_numbers("Rotowire had it at 2:30 PM ET.", sources) == 0
+        assert agent.ungrounded_numbers("Rotowire had it at 6 PM ET.", sources) == 1
 
 
 @pytest.mark.unit

@@ -150,6 +150,9 @@ plan_streams and project_matchup value players under the league's own scoring \
 judge a player for a league with its own point values or categories with them. \
 Never add a caveat about which formula a number uses, and never present fpts as \
 the points of a league with its own point values.
+- Clock times in tool results are US Eastern. Write each on a twelve-hour clock \
+with ET after it ("7:30 PM ET"), and never convert one to another zone yourself: \
+the app shows every ET time in the reader's own zone.
 
 Tables and charts:
 - For anything with more than three rows (players, games, categories), call \

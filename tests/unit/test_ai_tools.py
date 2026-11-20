@@ -784,3 +784,26 @@ class TestFindInApp:
         monkeypatch.setattr(tools.app_map, "load", none)
         out = self._find({"query": "market"})
         assert out.is_error and "isn't available yet" in out.content
+
+
+@pytest.mark.unit
+class TestInEastern:
+    """Tool results speak Eastern: an instant reaches the model in ET, everything else as it was."""
+
+    def test_instants_move_to_eastern_with_their_offset(self):
+        from datetime import datetime, timezone
+        out = tools.in_eastern({
+            "at": "2026-11-17T19:30:00+00:00", "z": "2026-11-17T19:30:00Z", "dt": datetime(2026, 7, 1, 23, 0, tzinfo=timezone.utc),
+            "items": [{"sent_at": "2026-11-17 03:05:00.123456+00:00"}], "pair": ("2026-11-17T19:30:00+00:00", 1),
+        })
+        assert out == {
+            "at": "2026-11-17T14:30:00-05:00", "z": "2026-11-17T14:30:00-05:00", "dt": "2026-07-01T19:00:00-04:00",
+            "items": [{"sent_at": "2026-11-16T22:05:00.123456-05:00"}], "pair": ["2026-11-17T14:30:00-05:00", 1],
+        }
+
+    def test_dates_wall_times_naive_times_and_other_text_stay(self):
+        from datetime import datetime
+        value = {"date": "2026-11-17", "tip": "19:30", "naive": "2026-11-17T19:30:00", "note": "vs LAL · 7:30 PM",
+                 "headline": "Out 2026-11-17T19:30:00+00:00 per report", "n": 3, "d": date(2026, 11, 17),
+                 "nd": datetime(2026, 11, 17, 19, 30), "bad": "2026-13-45T99:99:00+00:00", "none": None}
+        assert tools.in_eastern(value) == value

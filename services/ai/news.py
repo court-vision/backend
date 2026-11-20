@@ -49,7 +49,7 @@ class NewsInput(_Input):
 
 
 _ITEM_SHAPE = (
-    "Each item: news_id, published_at (UTC), source (espn_injuries, espn_player_news, rotowire_rss, "
+    "Each item: news_id, published_at (US Eastern), source (espn_injuries, espn_player_news, rotowire_rss, "
     "realgm_rss), kind (injury, availability, lineup, transaction, performance, rumor, other), headline, "
 )
 
