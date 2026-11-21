@@ -10,7 +10,7 @@ after the claim releases it (and the reservation) before the error goes out.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Optional
 
 from api.deps import ensure_team_owned, load_owned_league_info
@@ -30,6 +30,7 @@ from schemas.ai import (
     AiNote,
     AiProposalCheckData,
     AiProposalChip,
+    AiTimelineData,
     AiTurnView,
     AiUsageData,
 )
@@ -46,6 +47,7 @@ from services.ai import (
     memory,
     proposals,
     spend,
+    timeline,
 )
 
 
@@ -264,6 +266,13 @@ class AgentService:
         ensure_access(user_id)
         await AgentService._owned_team_or_404(team_id, user_id)
         return [AiAutopilotActionItem(**a) for a in await acting.list_actions(user_id, team_id, limit)]
+
+    @staticmethod
+    async def timeline(user_id: int, team_id: int, day: Optional[date]) -> AiTimelineData:
+        """One team's fantasy day on the AI desk's timeline (services/ai/timeline.py)."""
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return AiTimelineData(**await timeline.day(user_id, team_id, day))
 
     # ---- the account's AI features (services/ai/ai_settings.py) ----
 

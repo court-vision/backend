@@ -6,12 +6,12 @@ replaced outright.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
-from core.errors import ConflictError
+from core.errors import ConflictError, NotFoundError
 from core.settings import settings
 from schemas.ai import AiConversationDetail
 from services.ai import agent
@@ -288,3 +288,40 @@ def test_the_account_s_ai_features(authed_client, user, invited, monkeypatch):
     r = authed_client.put(f"{BASE}/settings", json={"memory": False})
     assert r.status_code == 200 and r.json()["data"] == {"memory": False, "draft_rooms": True}
     assert authed_client.put(f"{BASE}/settings", json={}).status_code == 422
+
+
+def test_a_team_s_day_on_the_timeline(authed_client, user, invited, monkeypatch):
+    from services.ai import timeline
+    asked = []
+
+    async def owned(team_id, user_id):
+        if team_id == 99:
+            raise NotFoundError("TEAM_NOT_FOUND", "Team not found")
+
+    async def day(user_id, team_id, d=None, now=None):
+        asked.append((user_id, team_id, d))
+        return {"team_id": team_id, "date": d or "2026-11-20", "today": "2026-11-20",
+                "starts_at": "2026-11-20T08:00:00+00:00", "ends_at": "2026-11-21T08:00:00+00:00",
+                "checkins_on": True, "first_tip": "2026-11-21T00:30:00+00:00",
+                "checkins": [{"checkin_id": 9, "team_id": team_id, "kind": "night", "date": "2026-11-19",
+                              "manual": False, "state": "done", "due_at": "2026-11-20T11:00:00+00:00",
+                              "started_at": "2026-11-20T11:00:00+00:00", "conversation_id": 31,
+                              "title": "Night follow-up", "cost_usd": 0.28, "decisions": 1, "changes": 0,
+                              "agree": 0, "disagree": 0,
+                              "calls": [{"decision_id": 4, "area": "lineup", "automation": "auto_lineup",
+                                         "call": "hold", "summary": "Keep the fill", "reason": "All play"}],
+                              "notes": []}],
+                "upcoming": [{"kind": "pre_lock", "date": "2026-11-20", "due_at": "2026-11-20T23:45:00+00:00"}],
+                "notes_due": []}
+
+    monkeypatch.setattr(AgentService, "_owned_team_or_404", staticmethod(owned))
+    monkeypatch.setattr(timeline, "day", day)
+    r = authed_client.get(f"{BASE}/timeline?team_id=21&date=2026-11-19")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["checkins"][0]["calls"][0]["result"] is None and data["upcoming"][0]["kind"] == "pre_lock"
+    assert asked == [(42, 21, date(2026, 11, 19))]
+    assert authed_client.get(f"{BASE}/timeline?team_id=21").status_code == 200 and asked[-1] == (42, 21, None)
+    assert authed_client.get(f"{BASE}/timeline?team_id=99").status_code == 404
+    for bad in ("", "?team_id=0", "?team_id=21&date=11-19"):
+        assert authed_client.get(f"{BASE}/timeline{bad}").status_code == 422
