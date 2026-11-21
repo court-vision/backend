@@ -81,20 +81,28 @@ def espn_day(as_of: date, season: str) -> Optional[date]:
     return DailyRanking.latest_date(SOURCE_ESPN, season, before=as_of + timedelta(days=1))
 
 
-def stored_days(source: str, season: str) -> list[date]:
-    """Every day of the season `source` has a board for, oldest first.
+def stored_days(source: str, season: str) -> dict[str, list[date]]:
+    """Every day of the season `source` has each board for, oldest first, keyed by board.
 
-    A player's history only has the days he was ranked. Beside this list a
-    reader can tell a day he was off the board from a morning no board was
+    A player's history only has the days he was ranked. Beside these days a
+    reader can tell a day he was off a board from a morning no board was
     stored, which a history alone cannot.
     """
     query = (
-        DailyRanking.select(DailyRanking.as_of_date)
+        DailyRanking.select(DailyRanking.as_of_date, DailyRanking.board)
         .where((DailyRanking.source == source) & (DailyRanking.season == season))
         .distinct()
         .order_by(DailyRanking.as_of_date)
     )
-    return [row.as_of_date for row in query]
+    days: dict[str, list[date]] = {}
+    for row in query:
+        days.setdefault(row.board, []).append(row.as_of_date)
+    return days
+
+
+def any_board(days: dict[str, list[date]]) -> list[date]:
+    """The days at least one board was stored, oldest first."""
+    return sorted({day for stored in days.values() for day in stored})
 
 
 def move(then: Optional[int], now: int) -> Optional[int]:
@@ -118,21 +126,28 @@ def _teams(player_ids: Iterable[int]) -> dict[int, Optional[str]]:
     }
 
 
-def espn_age(history: list[tuple[date, int]], first_stored: Optional[date]) -> Optional[EspnRankAge]:
-    """How long ESPN has held a player's newest rank, from his `(day, rank)` rows, oldest first.
+def espn_age(history: list[tuple[date, int]], stored: Iterable[date]) -> Optional[EspnRankAge]:
+    """How long ESPN has held a player's newest rank.
 
-    The run is counted over the days ESPN's ranks were stored. One that reaches
-    the first stored day is flagged: the rank is at least that old.
+    `history` is his `(day, rank)` rows on one of ESPN's boards, oldest first,
+    and `stored` the days that board was stored at all. The run is counted
+    over the stored days: a day ESPN's board was stored without him ends it,
+    as a different rank does, and a morning nothing was stored does not. A run
+    that reaches the first stored day is flagged: the rank is at least that old.
     """
     if not history:
         return None
-    _, rank = history[-1]
-    since = history[-1][0]
-    for day, earlier in reversed(history):
-        if earlier != rank:
+    held = dict(history)
+    newest, rank = history[-1]
+    days = sorted(set(stored) | set(held))
+    since = newest
+    for day in reversed(days):
+        if day > newest:
+            continue
+        if held.get(day) != rank:
             break
         since = day
-    return EspnRankAge(rank=rank, unchanged_since=since, since_first_stored=since == first_stored)
+    return EspnRankAge(rank=rank, unchanged_since=since, since_first_stored=since == days[0])
 
 
 class LiveRankingsService:
@@ -229,8 +244,9 @@ class LiveRankingsService:
             raise NotFoundError("PLAYER_NOT_FOUND", "Player not found")
         season = settings.nba_season
         team = _teams([player_id]).get(player_id)
-        board_days = stored_days(SOURCE_CV, season)
-        espn_days = stored_days(SOURCE_ESPN, season)
+        board_days = any_board(stored_days(SOURCE_CV, season))
+        espn_stored = stored_days(SOURCE_ESPN, season)
+        espn_days = any_board(espn_stored)
         as_of = board_days[-1] if board_days else None
 
         rows = list(
@@ -262,14 +278,16 @@ class LiveRankingsService:
 
         day, week = compared_days(as_of, season)
         espn_as_of = espn_day(as_of, season)
-        first_espn = espn_days[0] if espn_days else None
 
         def espn_now(board: str) -> Optional[EspnRankAge]:
             held = ranks.get((SOURCE_ESPN, board), {})
-            # A rank ESPN no longer gives him is not his rank: only the newest read counts.
+            # A rank ESPN no longer gives him is not his rank: only the read shown beside the board counts.
             if espn_as_of is None or espn_as_of not in held:
                 return None
-            return espn_age(sorted(held.items()), first_espn)
+            # ESPN's ranks can be stored on a morning the boards were not. A read newer than the
+            # board is history, not the rank beside it, so the age is counted up to `espn_as_of`.
+            upto = [(day, rank) for day, rank in sorted(held.items()) if day <= espn_as_of]
+            return espn_age(upto, espn_stored.get(board, []))
 
         espn = LivePlayerEspn(as_of=espn_as_of, points=espn_now(BOARD_POINTS), categories=espn_now(BOARD_CATEGORIES))
 

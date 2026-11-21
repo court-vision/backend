@@ -180,8 +180,44 @@ def test_a_players_sheet_has_todays_places_his_history_and_how_long_espn_has_sto
     star = sheet(STAR).data
     # ESPN has held him first since its ranks were first stored: the rank is at least that old
     assert star.espn.points.model_dump() == {"rank": 1, "unchanged_since": FIRST, "since_first_stored": True}
-    assert star.espn.categories.model_dump() == {"rank": 3, "unchanged_since": TODAY, "since_first_stored": False}
+    # Its 9-cat ranks were first stored this morning, so that rank is at least a day old too
+    assert star.espn.categories.model_dump() == {"rank": 3, "unchanged_since": TODAY, "since_first_stored": True}
     assert star.team == "DEN"
+
+
+def test_espns_rank_on_a_sheet_is_the_one_beside_the_board_when_espn_is_a_day_ahead(players):
+    # The boards were last stored yesterday; ESPN's ranks were stored again this morning
+    store(YESTERDAY, SOURCE_CV, BOARD_POINTS, {STAR: 1})
+    store(date(2026, 11, 19), SOURCE_ESPN, BOARD_POINTS, {STAR: 10})
+    store(YESTERDAY, SOURCE_ESPN, BOARD_POINTS, {STAR: 10})
+    store(TODAY, SOURCE_ESPN, BOARD_POINTS, {STAR: 20})
+
+    star = sheet(STAR).data
+
+    assert (star.as_of, star.espn.as_of) == (YESTERDAY, YESTERDAY)
+    # The rank of the read it names, as the board gives it, and how long ESPN had held it by then
+    assert star.espn.points.model_dump() == {
+        "rank": 10, "unchanged_since": date(2026, 11, 19), "since_first_stored": True,
+    }
+    assert star.points.espn_rank == 10 == board().data.players[0].points.espn_rank
+    # This morning's read is still part of his history
+    assert [(day.as_of, day.espn_points) for day in star.history][-1] == (TODAY, 20)
+    assert star.espn_days == [date(2026, 11, 19), YESTERDAY, TODAY]
+
+
+def test_a_day_off_espns_board_ends_how_long_it_has_held_his_rank(players):
+    store(TODAY, SOURCE_CV, BOARD_POINTS, {WING: 2, STAR: 1})
+    store(date(2026, 11, 19), SOURCE_ESPN, BOARD_POINTS, {WING: 10, STAR: 1})
+    store(YESTERDAY, SOURCE_ESPN, BOARD_POINTS, {STAR: 1})      # stored without the wing
+    store(TODAY, SOURCE_ESPN, BOARD_POINTS, {WING: 10, STAR: 1})
+
+    wing = sheet(WING).data
+
+    # Tenth before and tenth again, but not tenth yesterday: held since this morning
+    assert wing.espn.points.model_dump() == {"rank": 10, "unchanged_since": TODAY, "since_first_stored": False}
+    assert sheet(STAR).data.espn.points.model_dump() == {
+        "rank": 1, "unchanged_since": date(2026, 11, 19), "since_first_stored": True,
+    }
 
 
 def test_a_player_off_this_mornings_board_keeps_his_history(players):
