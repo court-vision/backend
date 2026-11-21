@@ -26,8 +26,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Iterable, Optional
 
-from peewee import fn
-
 from core.errors import NotFoundError
 from core.settings import settings
 from db.base import db_operation
@@ -81,6 +79,22 @@ def espn_day(as_of: date, season: str) -> Optional[date]:
     retries it on its next tick, and until then the day before's ranks stand.
     """
     return DailyRanking.latest_date(SOURCE_ESPN, season, before=as_of + timedelta(days=1))
+
+
+def stored_days(source: str, season: str) -> list[date]:
+    """Every day of the season `source` has a board for, oldest first.
+
+    A player's history only has the days he was ranked. Beside this list a
+    reader can tell a day he was off the board from a morning no board was
+    stored, which a history alone cannot.
+    """
+    query = (
+        DailyRanking.select(DailyRanking.as_of_date)
+        .where((DailyRanking.source == source) & (DailyRanking.season == season))
+        .distinct()
+        .order_by(DailyRanking.as_of_date)
+    )
+    return [row.as_of_date for row in query]
 
 
 def move(then: Optional[int], now: int) -> Optional[int]:
@@ -215,7 +229,9 @@ class LiveRankingsService:
             raise NotFoundError("PLAYER_NOT_FOUND", "Player not found")
         season = settings.nba_season
         team = _teams([player_id]).get(player_id)
-        as_of = DailyRanking.latest_date(SOURCE_CV, season)
+        board_days = stored_days(SOURCE_CV, season)
+        espn_days = stored_days(SOURCE_ESPN, season)
+        as_of = board_days[-1] if board_days else None
 
         rows = list(
             DailyRanking.select(
@@ -233,7 +249,7 @@ class LiveRankingsService:
                 message=f"No live rankings stored for this player in {season}",
                 data=LivePlayerRankData(
                     player_id=player.id, name=player.name, team=team, position=player.position,
-                    season=season, as_of=as_of,
+                    season=season, as_of=as_of, board_days=board_days, espn_days=espn_days,
                 ),
             )
 
@@ -246,9 +262,7 @@ class LiveRankingsService:
 
         day, week = compared_days(as_of, season)
         espn_as_of = espn_day(as_of, season)
-        first_espn = DailyRanking.select(fn.MIN(DailyRanking.as_of_date)).where(
-            (DailyRanking.source == SOURCE_ESPN) & (DailyRanking.season == season)
-        ).scalar()
+        first_espn = espn_days[0] if espn_days else None
 
         def espn_now(board: str) -> Optional[EspnRankAge]:
             held = ranks.get((SOURCE_ESPN, board), {})
@@ -306,5 +320,7 @@ class LiveRankingsService:
                 categories=place(BOARD_CATEGORIES),
                 espn=espn,
                 history=history,
+                board_days=board_days,
+                espn_days=espn_days,
             ),
         )

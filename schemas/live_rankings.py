@@ -122,7 +122,21 @@ class LivePlayerRankData(ApiModel):
     points: LiveBoardPlace | None = Field(None, description="His place on the newest points board; null when he is not on it")
     categories: LiveBoardPlace | None = Field(None, description="His place on the newest categories board; null when he is not on it")
     espn: LivePlayerEspn = Field(default_factory=LivePlayerEspn)
-    history: list[LiveRankDay] = Field(default_factory=list, description="His ranks on every stored day of the season, oldest first")
+    history: list[LiveRankDay] = Field(
+        default_factory=list,
+        description="His ranks on every stored day of the season he had one, oldest first",
+    )
+    board_days: list[date] = Field(
+        default_factory=list,
+        description=(
+            "Every day of the season a Court Vision board was stored, oldest first. A day here that `history` "
+            "has no Court Vision rank for is a day he was off the board, not a morning the board is missing."
+        ),
+    )
+    espn_days: list[date] = Field(
+        default_factory=list,
+        description="Every day of the season ESPN's ranks were stored, oldest first; read beside `history` as `board_days` is",
+    )
 
 
 class LivePlayerRankResp(BaseResponse):

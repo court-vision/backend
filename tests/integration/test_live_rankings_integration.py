@@ -149,6 +149,8 @@ def test_a_players_sheet_has_todays_places_his_history_and_how_long_espn_has_sto
     store(FIRST, SOURCE_ESPN, BOARD_POINTS, {GUARD: 12, STAR: 1})
     store(date(2026, 11, 19), SOURCE_ESPN, BOARD_POINTS, {GUARD: 9, STAR: 1})
     store(YESTERDAY, SOURCE_ESPN, BOARD_POINTS, {GUARD: 9, STAR: 1})
+    # A day only the shadow board was stored is not a day of the boards
+    store(date(2026, 11, 16), SHADOW, BOARD_POINTS, {GUARD: 1})
 
     guard = sheet(GUARD).data
 
@@ -171,6 +173,9 @@ def test_a_players_sheet_has_todays_places_his_history_and_how_long_espn_has_sto
         {"as_of": YESTERDAY, "points": 2, "categories": None, "espn_points": 9, "espn_categories": None},
         {"as_of": TODAY, "points": 1, "categories": 2, "espn_points": 9, "espn_categories": None},
     ]
+    # Every day each source stored anything, so a reader can tell a day he was off a board from a day it is missing
+    assert guard.board_days == [WEEK_AGO, YESTERDAY, TODAY]
+    assert guard.espn_days == [FIRST, date(2026, 11, 19), YESTERDAY, TODAY]
 
     star = sheet(STAR).data
     # ESPN has held him first since its ranks were first stored: the rank is at least that old
@@ -192,6 +197,8 @@ def test_a_player_off_this_mornings_board_keeps_his_history(players):
     # ESPN dropped him too: yesterday's rank is history, not his rank now
     assert (wing.espn.as_of, wing.espn.points) == (TODAY, None)
     assert [(day.as_of, day.points, day.espn_points) for day in wing.history] == [(YESTERDAY, 3, 40)]
+    # This morning's boards are days too: his history stops short of them because he is off them
+    assert (wing.board_days, wing.espn_days) == ([YESTERDAY, TODAY], [YESTERDAY, TODAY])
 
 
 def test_a_player_never_ranked_this_season_has_an_empty_sheet(players):
@@ -202,6 +209,7 @@ def test_a_player_never_ranked_this_season_has_an_empty_sheet(players):
 
     assert (big.player_id, big.name, big.as_of) == (BIG, "New Big", TODAY)
     assert big.points is None and big.history == [] and big.espn.points is None
+    assert (big.board_days, big.espn_days) == ([TODAY], [])
 
 
 def test_an_unknown_player_is_not_found(players):

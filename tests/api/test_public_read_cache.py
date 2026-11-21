@@ -166,6 +166,8 @@ LIVE_PLAYER = LivePlayerRankResp.model_validate({
             {"as_of": date(2026, 11, 20), "points": 2, "categories": None, "espn_points": 1, "espn_categories": 3},
             {"as_of": date(2026, 11, 21), "points": 1, "categories": None, "espn_points": 1, "espn_categories": None},
         ],
+        "board_days": [date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 21)],
+        "espn_days": [date(2026, 11, 17), date(2026, 11, 20), date(2026, 11, 21)],
     },
 })
 
