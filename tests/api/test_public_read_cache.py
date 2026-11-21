@@ -23,6 +23,7 @@ from core.errors import NotFoundError
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
 from schemas.games import GameDetailResp, GamesOnDateResp
+from schemas.live_rankings import LivePlayerRankResp, LiveRankingsResp
 from schemas.market import PlayerProjectionResp
 from schemas.player import PlayerOwnershipResp, PlayerPercentilesResp, PlayerStatsResp, PlayerStatusResp
 from schemas.player_profiles import PlayerProfileResp
@@ -134,6 +135,39 @@ GAME_DETAIL = GameDetailResp.model_validate({
         "lines_source": "settled",
     },
 })
+LIVE_BOARD = LiveRankingsResp.model_validate({
+    "status": "success", "message": "Court Vision live rankings",
+    "data": {
+        "season": "2026-27", "as_of": date(2026, 11, 21), "model": "live-1", "espn_as_of": date(2026, 11, 20),
+        "compared": {"day": date(2026, 11, 20), "week": None},
+        "players": [
+            {"player_id": 203999, "name": "Nikola Jokić", "team": "DEN", "position": "C", "injury_status": None,
+             "season_gp": 14, "games": 61.25,
+             "points": {"rank": 1, "value": 62.5, "move_1d": 0, "move_7d": None, "espn_rank": 1},
+             "categories": {"rank": 2, "value": 1.38, "move_1d": -1, "move_7d": None, "espn_rank": None}},
+            {"player_id": 1630162, "name": "Anthony Edwards", "team": None, "position": None, "injury_status": "OUT",
+             "season_gp": None, "games": None, "points": {"rank": 2, "value": None, "move_1d": None, "move_7d": None,
+                                                          "espn_rank": 7}, "categories": None},
+        ],
+    },
+})
+LIVE_PLAYER = LivePlayerRankResp.model_validate({
+    "status": "success", "message": "Court Vision live rankings for one player",
+    "data": {
+        "player_id": 203999, "name": "Nikola Jokić", "team": "DEN", "position": "C", "season": "2026-27",
+        "as_of": date(2026, 11, 21), "model": "live-1", "compared": {"day": date(2026, 11, 20), "week": None},
+        "injury_status": None, "season_gp": 14, "games": 61.25,
+        "points": {"rank": 1, "value": 62.5, "move_1d": 1, "move_7d": None, "espn_rank": 1},
+        "categories": None,
+        "espn": {"as_of": date(2026, 11, 21),
+                 "points": {"rank": 1, "unchanged_since": date(2026, 11, 17), "since_first_stored": True},
+                 "categories": None},
+        "history": [
+            {"as_of": date(2026, 11, 20), "points": 2, "categories": None, "espn_points": 1, "espn_categories": 3},
+            {"as_of": date(2026, 11, 21), "points": 1, "categories": None, "espn_points": 1, "espn_categories": None},
+        ],
+    },
+})
 
 
 def game_detail(**game) -> GameDetailResp:
@@ -155,6 +189,8 @@ ROUTES = [
     ("/v1/teams/DEN/roster", "nba_team_roster_service", "NBATeamRosterService", "get_team_roster", ROSTER, "TEAM_ROSTER"),
     ("/v1/games/2026-03-04", "games_service", "GamesService", "get_games_on_date", GAMES, "GAMES_SETTLED"),
     ("/v1/games/2026-03-02/0022500900", "game_detail_service", "GameDetailService", "get_game", GAME_DETAIL, "GAME_DETAIL_SETTLED"),
+    ("/v1/rankings/live", "live_rankings_service", "LiveRankingsService", "get_board", LIVE_BOARD, "LIVE_RANKINGS"),
+    ("/v1/rankings/live/players/203999", "live_rankings_service", "LiveRankingsService", "get_player", LIVE_PLAYER, "LIVE_RANKING_PLAYER"),
 ]
 ROUTE_IDS = [r[0] for r in ROUTES]
 
@@ -269,6 +305,7 @@ def test_an_error_envelope_is_never_cached(
     ("/v1/players/stats?player_id=1", "player_service", "PlayerService", "get_player_stats"),
     ("/v1/players/1/percentiles", "player_service", "PlayerService", "get_player_percentiles"),
     ("/v1/players/1/projection", "public_market_service", "PublicMarketService", "get_projection"),
+    ("/v1/rankings/live/players/1", "live_rankings_service", "LiveRankingsService", "get_player"),
 ])
 def test_a_raised_not_found_is_never_cached(client, monkeypatch, url, module, cls, method):
     service = AsyncMock(side_effect=NotFoundError("PLAYER_NOT_FOUND", "Player not found"))
