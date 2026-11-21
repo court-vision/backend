@@ -39,8 +39,11 @@ rebuilt from the public reads). From 2026-11 the score snapshots are the live
 box score's and move on every 30 s poll, not once in ten minutes, so a game's
 history is up to about 300 points at 128 bytes each rather than 30: its sheet
 is budgeted at 47 KB (an estimate from the point size, to be measured on the
-first night of such games). The byte budgets below add up to 36.3 MB, the most
-this module can ever hold however a caller varies the keys.
+first night of such games). The live rankings (2026-11) are sized from their
+shapes, not yet measured: the board is one body of about 520 players at
+roughly 0.4 KB each, some 200 KB, and a player's history about 0.1 KB a stored
+day, so 17 KB by the end of a season. The byte budgets below add up to
+41.3 MB, the most this module can ever hold however a caller varies the keys.
 """
 
 from __future__ import annotations
@@ -88,6 +91,11 @@ GAME_DETAIL_SETTLED = _cache("games.detail.settled", SETTLED_TTL_SECONDS, 256, 1
 
 SCHEDULE_WEEKS = _cache("schedule.weeks", SETTLED_TTL_SECONDS, 8, 64 * KB)
 
+# The live rankings: the boards stored once a morning (services/live_rankings_service.py).
+# One board body per season, and one history per player opened in Scout.
+LIVE_RANKINGS = _cache("rankings.live", DAILY_TTL_SECONDS, 4, 1 * MB)
+LIVE_RANKING_PLAYER = _cache("rankings.live.player", DAILY_TTL_SECONDS, 2048, 4 * MB)
+
 ALL_CACHES: tuple[ResponseCache, ...] = (
     PLAYER_STATS,
     PLAYER_PROFILE,
@@ -102,6 +110,8 @@ ALL_CACHES: tuple[ResponseCache, ...] = (
     GAME_DETAIL,
     GAME_DETAIL_SETTLED,
     SCHEDULE_WEEKS,
+    LIVE_RANKINGS,
+    LIVE_RANKING_PLAYER,
 )
 
 
