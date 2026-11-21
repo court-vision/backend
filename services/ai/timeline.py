@@ -28,11 +28,6 @@ from services import move_ledger, schedule_service
 from services.ai import acting, checkins, decisions, memory
 from services.scheduled_pickup_service import et_at, rollover_at
 
-# A note the check-in's turn wrote lands a moment before the turn is settled; one written after
-# this (a follow-up the user asked in its conversation) is that follow-up's, not the check-in's
-NOTE_SETTLE_MARGIN = timedelta(minutes=2)
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -63,11 +58,13 @@ class DayRows:
 
 
 def _written_by(note: AiMemory, checkin: AiCheckin, now: datetime) -> bool:
-    """Whether the check-in's own turn wrote `note` (not a later follow-up in its conversation)."""
+    """Whether the check-in's own turn wrote `note` (not a later follow-up in its conversation). The
+    turn's memory tools all run before the check-in is settled, on the same clock, so a note written
+    after `finished_at` is a follow-up's, however soon after."""
     at = _aware(note.created_at)
     start = _aware(checkin.started_at)
     end = _aware(checkin.finished_at) or now
-    return at is not None and start is not None and start <= at <= end + NOTE_SETTLE_MARGIN
+    return at is not None and start is not None and start <= at <= end
 
 
 @db_operation("ai.timeline_day")

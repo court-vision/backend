@@ -122,6 +122,8 @@ class TestTheDay:
         hold = _decision(night, me, team)
         mine = _note(me, team, "Reaves back 11-23: Barrett to IR", utc(DAY, 11, 2), night_conv)
         _note(me, team, "Written in a follow-up the user asked later", utc(DAY, 15), night_conv)
+        # A follow-up asked the moment the check-in settled is still the follow-up's
+        _note(me, team, "Written in a follow-up a minute after", utc(DAY, 11, 4), night_conv)
 
         event_conv = _conversation(me, team, "Event check-in")
         event = _checkin(team, me, "event", utc(DAY, 17, 10), utc(DAY, 17, 14), DAY, event_conv)
