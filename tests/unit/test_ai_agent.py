@@ -16,6 +16,7 @@ What is pinned here is the envelope, not answer quality:
 
 import asyncio
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import anthropic
@@ -945,6 +946,20 @@ class TestSpend:
         assert spend.price_of("claude-something-new") == spend.PRICES["claude-opus-5"]
         assert spend.price_of("claude-opus-5-5") == spend.PRICES["claude-opus-5-5"]
 
+    @pytest.fixture(autouse=True)
+    def cap_rows(self, monkeypatch):
+        """The caps set from the dashboard (usr.ai_caps), keyed (line, user_id); none by default."""
+        rows = {}
+
+        def read(line, user_id=None):
+            return {uid: usd for (ln, uid), usd in rows.items() if ln == line and uid in (None, user_id)}
+
+        async def caps(line, user_id=None):
+            return spend.caps_sync(line, user_id)
+        monkeypatch.setattr(spend, "cap_rows_sync", read)
+        monkeypatch.setattr(spend, "_caps", caps)
+        return rows
+
     def test_each_user_gets_the_budget_divided_by_the_allowlist(self, agent_on, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_user_ids", [42, 43, 44, 45])
 
@@ -980,6 +995,34 @@ class TestSpend:
             return 77
         monkeypatch.setattr(spend, "_reserve", reserve)
         assert asyncio.run(spend.reserve(42)) == 77
+
+    def test_a_desk_cap_set_on_the_dashboard_replaces_the_environment_s_and_its_shares(self, agent_on, monkeypatch,
+                                                                                         cap_rows):
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [42, 43, 44, 45])
+        cap_rows[("desk", None)] = Decimal("200.00")
+
+        assert spend.caps_sync("desk", 42) == spend.Caps(line=200_000_000, user=50_000_000)
+
+    def test_a_user_s_own_cap_wins_over_their_share(self, agent_on, monkeypatch, cap_rows):
+        monkeypatch.setattr(settings, "ai_agent_user_ids", [42, 43])
+        cap_rows[("desk", 42)] = Decimal("12.50")
+
+        assert spend.caps_sync("desk", 42) == spend.Caps(line=100_000_000, user=12_500_000)
+        assert spend.caps_sync("desk", 43) == spend.Caps(line=100_000_000, user=50_000_000)
+
+    def test_on_the_autopilot_line_a_user_has_no_cap_of_their_own_until_one_is_set(self, monkeypatch, cap_rows):
+        monkeypatch.setattr(settings, "autopilot_monthly_budget_usd", 60.0)
+        assert spend.caps_sync("autopilot", 42) == spend.Caps(line=60_000_000, user=None)
+
+        cap_rows[("autopilot", 42)] = Decimal("5")
+        assert spend.caps_sync("autopilot", 42) == spend.Caps(line=60_000_000, user=5_000_000)
+
+    def test_the_analyst_s_cap_is_the_line_s_alone(self, monkeypatch, cap_rows):
+        monkeypatch.setattr(settings, "analyst_monthly_budget_usd", 40.0)
+        assert spend.caps_sync("analyst") == spend.Caps(line=40_000_000)
+
+        cap_rows[("analyst", None)] = Decimal("0")
+        assert spend.caps_sync("analyst", 42) == spend.Caps(line=0)
 
 
 # ---- starting a turn ----

@@ -6,7 +6,8 @@ usr.ai_memory, the notes the agent keeps between conversations (migration 0041).
 Migration 0042 adds a conversation's `kind` (a chat, or the conversation a check-in
 started), the `shadow` proposal state and the spend `line` (services/ai/checkins.py).
 Migration 0043 adds the steering chips (`kind` steer, lane, cancel_pickup) and their `action`
-(services/ai/steering.py).
+(services/ai/steering.py). Migration 0054 adds usr.ai_caps, the monthly caps set from the
+dashboard that replace the environment's (services/ai/spend.py).
 
 A turn's `messages` are replayed verbatim by every later turn of its
 conversation, so they are written once and never edited; a failed turn has
@@ -17,7 +18,8 @@ these tables.
 from datetime import datetime, timezone
 
 from peewee import (
-    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, ForeignKeyField, IntegerField, TextField,
+    BigAutoField, BigIntegerField, BooleanField, DateField, DateTimeField, DecimalField, ForeignKeyField, IntegerField,
+    TextField,
 )
 from playhouse.postgres_ext import BinaryJSONField
 
@@ -95,6 +97,22 @@ class AiSpend(BaseModel):
 
     class Meta:
         table_name = "ai_spend"
+        schema = "usr"
+
+
+class AiCap(BaseModel):
+    """A monthly cap set from the dashboard (migration 0054): a line's when `user_id` is
+    NULL, one user's on that line otherwise. With no row the environment's number applies."""
+
+    id = BigAutoField(primary_key=True)
+    line = TextField()
+    user_id = ForeignKeyField(User, column_name="user_id", null=True, on_delete="CASCADE")
+    monthly_usd = DecimalField(max_digits=10, decimal_places=2)
+    updated_at = DateTimeField(default=_now)
+    updated_by = TextField(null=True)
+
+    class Meta:
+        table_name = "ai_caps"
         schema = "usr"
 
 
