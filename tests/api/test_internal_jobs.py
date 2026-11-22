@@ -421,3 +421,97 @@ def test_the_analysts_month(client, token, analyst_stub):
 
     assert (data["enabled"], data["month_spent_micros"], data["month_cap_micros"]) == (True, 18_200, 40_000_000)
     assert data["read_max_micros"] == 300_000
+
+
+# ---- /v1/internal/jobs/ai: the AI spend page and its caps ------------------------
+
+AI_SPEND = "/v1/internal/jobs/ai/spend"
+AI_CAPS = "/v1/internal/jobs/ai/caps"
+PIPE = {"Authorization": "Bearer pipe-token"}
+
+
+@pytest.fixture
+def spend_stub(monkeypatch):
+    """The report and the cap writes, answered from memory; returns what each was asked."""
+    from datetime import datetime, timezone
+
+    from schemas.ai_spend import AiCapData, AiSpendLine, AiSpendReport
+    from services.ai import spend_report
+
+    asked = {"report": [], "set": []}
+
+    async def report(days=30, now=None):
+        asked["report"].append(days)
+        return AiSpendReport(
+            as_of=datetime(2026, 11, 20, 12, tzinfo=timezone.utc), month_start=date(2026, 11, 1),
+            since=date(2026, 11, 20) - timedelta(days=days - 1), days=days,
+            turn_max_micros=1_000_000, read_max_micros=300_000,
+            lines=[AiSpendLine(line="analyst", spent_micros=2_400_000, open_micros=0, cap_micros=40_000_000,
+                               default_cap_micros=40_000_000, cap_set=False)],
+            rows=[], usage=[], users=[], teams=[])
+
+    async def set_cap(req, now=None):
+        asked["set"].append(req)
+        return AiCapData(line=req.line, user_id=req.user_id, cap_micros=25_000_000, default_cap_micros=50_000_000,
+                         cap_set=req.monthly_usd is not None, updated_by=req.author)
+
+    monkeypatch.setattr(spend_report, "report", report)
+    monkeypatch.setattr(spend_report, "set_cap", set_cap)
+    return asked
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("method, path", [("get", AI_SPEND), ("put", AI_CAPS)])
+def test_the_ai_spend_routes_take_the_pipeline_token(client, token, spend_stub, method, path):
+    body = {"json": {"line": "desk", "monthly_usd": 10}} if method == "put" else {}
+    assert getattr(client, method)(path, headers={"Authorization": "Bearer nope"}, **body).status_code == 401
+    assert spend_stub == {"report": [], "set": []}
+
+
+@pytest.mark.api
+def test_the_report_is_over_the_days_asked_for(client, token, spend_stub):
+    r = client.get(AI_SPEND, params={"days": 7}, headers=PIPE)
+
+    assert r.status_code == 200
+    assert r.json()["data"]["lines"][0]["spent_micros"] == 2_400_000
+    assert spend_stub["report"] == [7]
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("days", [0, 91])
+def test_the_window_is_one_to_ninety_days(client, token, spend_stub, days):
+    assert client.get(AI_SPEND, params={"days": days}, headers=PIPE).status_code == 422
+    assert spend_stub["report"] == []
+
+
+@pytest.mark.api
+def test_setting_a_user_s_cap_reaches_the_service(client, token, spend_stub):
+    r = client.put(AI_CAPS, json={"line": "desk", "user_id": 11, "monthly_usd": "25.00", "author": "James"},
+                   headers=PIPE)
+
+    assert r.status_code == 200
+    assert r.json()["message"] == "Set the desk cap for user 11 to $25.00"
+    assert r.json()["data"]["cap_micros"] == 25_000_000
+    req = spend_stub["set"][0]
+    assert (req.line, req.user_id, str(req.monthly_usd), req.author) == ("desk", 11, "25.00", "James")
+
+
+@pytest.mark.api
+def test_a_null_cap_clears_it(client, token, spend_stub):
+    r = client.put(AI_CAPS, json={"line": "analyst", "monthly_usd": None}, headers=PIPE)
+
+    assert r.status_code == 200 and r.json()["message"] == "Cleared the analyst cap"
+    assert spend_stub["set"][0].monthly_usd is None
+
+
+@pytest.mark.api
+@pytest.mark.parametrize("body", [
+    {"line": "everything", "monthly_usd": 10},
+    {"line": "desk", "monthly_usd": -1},
+    {"line": "desk", "monthly_usd": 1000.01},
+    {"line": "desk", "monthly_usd": "10.005"},
+    {"line": "desk", "user_id": 0, "monthly_usd": 10},
+])
+def test_a_cap_out_of_bounds_is_refused_before_the_service(client, token, spend_stub, body):
+    assert client.put(AI_CAPS, json=body, headers=PIPE).status_code == 422
+    assert spend_stub["set"] == []

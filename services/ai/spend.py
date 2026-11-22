@@ -29,12 +29,24 @@ no user, so their rows carry none; each reserves `analyst_read_max_usd` before
 its one model call and is settled to what the call cost. A call that went out
 and never answered (a timeout, a dropped connection) keeps its reservation:
 the API may bill a request it accepted, whoever stopped listening.
+
+Every cap can be changed without a deploy (migration 0054): a row in usr.ai_caps
+replaces a line's number from the environment, or sets one user's cap on the desk
+or autopilot line. With no row the environment applies, and a user's desk cap is
+the desk's cap (as set) divided by the allowlist, as before; on the autopilot line
+a user has no cap of their own until a row gives one. The data platform's AI spend
+page writes them (services/ai/spend_report.py). A reservation reads its caps just
+before it takes the ledger lock, so a change applies to every reservation that
+starts after it commits; one already waiting on the lock (milliseconds) keeps the
+caps it read.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Optional
 
 from peewee import fn
 
@@ -42,12 +54,13 @@ from core.errors import AppError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
 from db.base import db, db_operation
-from db.models.ai_conversations import AiSpend
+from db.models.ai_conversations import AiCap, AiSpend
 from schemas.common import ApiStatus
 
 # Serializes reservations; any key no other code uses
 _LEDGER_LOCK = 0x41_49_53_50
 DESK, AUTOPILOT, ANALYST = "desk", "autopilot", "analyst"
+LINES = (DESK, AUTOPILOT, ANALYST)
 
 
 @dataclass(frozen=True)
@@ -146,19 +159,61 @@ class Spend:
         return max(self.total_cap - self.total, 0)
 
 
-def _micros(dollars: float) -> int:
+def _micros(dollars: float | Decimal) -> int:
     return round(dollars * 1_000_000)
 
 
-def _caps() -> tuple[int, int]:
-    total_cap = _micros(settings.ai_monthly_budget_usd)
-    return total_cap // max(len(settings.ai_agent_user_ids), 1), total_cap
+def default_line_usd(line: str) -> float:
+    """A line's monthly budget from the environment, which a cap row replaces."""
+    return {
+        DESK: settings.ai_monthly_budget_usd,
+        AUTOPILOT: settings.autopilot_monthly_budget_usd,
+        ANALYST: settings.analyst_monthly_budget_usd,
+    }[line]
+
+
+def desk_share(line_cap: int) -> int:
+    """A user's desk cap when no row sets one: an equal part of the desk's cap."""
+    return line_cap // max(len(settings.ai_agent_user_ids), 1)
+
+
+@dataclass(frozen=True)
+class Caps:
+    """The monthly caps one line runs under, in micro-dollars. `user` is the given
+    user's cap on the line, or None when they have none of their own."""
+
+    line: int
+    user: Optional[int] = None
+
+
+def cap_rows_sync(line: str, user_id: Optional[int] = None) -> dict[Optional[int], Decimal]:
+    """The line's cap row (key None) and the user's, as set from the dashboard."""
+    who = AiCap.user_id.is_null()
+    if user_id is not None:
+        who = who | (AiCap.user_id == user_id)
+    return {row.user_id_id: row.monthly_usd
+            for row in AiCap.select(AiCap.user_id, AiCap.monthly_usd).where(AiCap.line == line, who)}
+
+
+def caps_sync(line: str, user_id: Optional[int] = None) -> Caps:
+    rows = cap_rows_sync(line, user_id)
+    line_cap = _micros(rows[None]) if None in rows else _micros(default_line_usd(line))
+    if user_id is None or line == ANALYST:
+        return Caps(line=line_cap)
+    if user_id in rows:
+        return Caps(line=line_cap, user=_micros(rows[user_id]))
+    return Caps(line=line_cap, user=desk_share(line_cap) if line == DESK else None)
+
+
+@db_operation("ai.caps")
+def _caps(line: str, user_id: Optional[int] = None) -> Caps:
+    return caps_sync(line, user_id)
 
 
 async def month_spend(user_id: int) -> Spend:
     mine, everyone = await _month_spend(user_id, month_start())
-    user_cap, total_cap = _caps()
-    return Spend(user=mine, total=everyone, user_cap=user_cap, total_cap=total_cap)
+    caps = await _caps(DESK, user_id)
+    return Spend(user=mine, total=everyone, user_cap=caps.user, total_cap=caps.line)
 
 
 @db_operation("ai.reserve_turn")
@@ -178,8 +233,8 @@ def _reserve(user_id: int, since: datetime, amount: int, user_cap: int, total_ca
 
 async def reserve(user_id: int) -> int:
     """Reserve one turn's ceiling against both caps; returns the reservation's id."""
-    user_cap, total_cap = _caps()
-    outcome = await _reserve(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd), user_cap, total_cap)
+    caps = await _caps(DESK, user_id)
+    outcome = await _reserve(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd), caps.user, caps.line)
     if outcome == "total":
         raise ServiceUnavailableError(
             "AI_MONTHLY_BUDGET_REACHED",
@@ -198,21 +253,30 @@ async def reserve(user_id: int) -> int:
 
 
 @db_operation("ai.reserve_checkin")
-def _reserve_autopilot(user_id: int, since: datetime, amount: int, cap: int) -> int | None:
-    """A check-in's reservation on the autopilot line, or None when the line's budget
-    can't take one more turn's ceiling. Under the same lock as the desk's reservations."""
+def _reserve_autopilot(user_id: int, since: datetime, amount: int, cap: int,
+                       user_cap: Optional[int] = None) -> int | None:
+    """A check-in's reservation on the autopilot line, or None when the line's budget,
+    or the user's own cap on it (when one is set), can't take one more turn's ceiling.
+    Under the same lock as the desk's reservations."""
     with db.atomic():
         db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
         if cap - _autopilot_sum(since) < amount:
             return None
+        if user_cap is not None:
+            theirs = _total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(
+                AiSpend.created_at >= since, AiSpend.line == AUTOPILOT, AiSpend.user_id == user_id))
+            if user_cap - theirs < amount:
+                return None
         return AiSpend.insert(user_id=user_id, cost_micros=amount, line=AUTOPILOT).execute()
 
 
 async def reserve_autopilot(user_id: int) -> int | None:
     """Reserve one check-in's ceiling on the autopilot line; None when this month's
-    budget for check-ins is used up (the check-in is skipped, not failed)."""
+    budget for check-ins, or the user's own cap on it, is used up (the check-in is
+    skipped, not failed)."""
+    caps = await _caps(AUTOPILOT, user_id)
     return await _reserve_autopilot(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd),
-                                    _micros(settings.autopilot_monthly_budget_usd))
+                                    caps.line, caps.user)
 
 
 @db_operation("ai.autopilot_month_spend")
@@ -222,7 +286,7 @@ def _autopilot_month(since: datetime) -> int:
 
 async def autopilot_month_spend() -> tuple[int, int]:
     """This month's check-in spend and the line's cap, in micro-dollars."""
-    return await _autopilot_month(month_start()), _micros(settings.autopilot_monthly_budget_usd)
+    return await _autopilot_month(month_start()), (await _caps(AUTOPILOT)).line
 
 
 @db_operation("ai.reserve_analyst_read")
@@ -240,7 +304,7 @@ async def reserve_analyst() -> int | None:
     """Reserve one read's ceiling on the analyst's line; None when this month's
     budget for reads is used up (the read is skipped, not failed)."""
     return await _reserve_analyst(month_start(), _micros(settings.analyst_read_max_usd),
-                                  _micros(settings.analyst_monthly_budget_usd))
+                                  (await _caps(ANALYST)).line)
 
 
 @db_operation("ai.analyst_month_spend")
@@ -250,7 +314,7 @@ def _analyst_month(since: datetime) -> int:
 
 async def analyst_month_spend() -> tuple[int, int]:
     """This month's spend on the analyst's reads and the line's cap, in micro-dollars."""
-    return await _analyst_month(month_start()), _micros(settings.analyst_monthly_budget_usd)
+    return await _analyst_month(month_start()), (await _caps(ANALYST)).line
 
 
 @db_operation("ai.cancel_reservation")
