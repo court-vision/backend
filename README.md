@@ -280,6 +280,8 @@ No authentication required. Rate-limited to **100 requests/minute per endpoint p
 | `GET` | `/v1/teams/{team_abbrev}/live-game` | Live, upcoming, or most recent team game |
 | `GET` | `/v1/rankings/espn` | ESPN draft ranks, ADP, auction values, eligibility, injury snapshot; paginated and historical |
 | `GET` | `/v1/rankings/espn/movement` | ESPN rank, ADP, and auction movement between two resolved snapshots |
+| `GET` | `/v1/rankings/live` | Court Vision's rest-of-season boards as stored this morning (points and 9-cat): each player's rank, his move over a day and a week, and ESPN's rank beside him |
+| `GET` | `/v1/rankings/live/players/{player_id}` | One player's place on this morning's boards, how long ESPN has held its own rank, and his rank on every stored day of the season |
 | `GET` | `/v1/players/projections` | Paginated ESPN preseason projections from one resolved snapshot |
 | `GET` | `/v1/players/{player_id}/projection` | ESPN projected games and per-game stats, with source and snapshot date |
 | `GET` | `/v1/playoff/bracket` | Playoff bracket for the latest or requested season |

@@ -12,13 +12,15 @@ data behind it changes once a day, after the post-game pipelines run.
 from typing import Literal, Optional
 from datetime import date
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 
+from core import public_read_cache
 from core.cache import ResponseCache
-from core.http_cache import render_envelope, serve_cached
+from core.http_cache import render_envelope, serve_cached, serve_cached_envelope
 from core.rate_limit import PUBLIC_RATE_LIMIT, limiter
 from core.responses import respond
 from core.settings import settings
+from schemas.live_rankings import LivePlayerRankResp, LiveRankingsResp
 from schemas.rankings import RankingsResp, RollingWindow
 from schemas.market import (
     ESPNMarketMovementResp,
@@ -27,6 +29,7 @@ from schemas.market import (
     MarketSort,
     SeasonKey,
 )
+from services.live_rankings_service import LiveRankingsService
 from services.public_market_service import PublicMarketService
 from services.rankings_service import RankingsService
 from services.scoring.category_rank import RANKABLE_KEYS
@@ -102,6 +105,71 @@ async def get_espn_rankings(
     return respond(await PublicMarketService.get_market(
         season=season, as_of=as_of, name=name, sort_by=sort_by, limit=limit, offset=offset,
     ))
+
+
+@router.get(
+    "/live",
+    response_model=LiveRankingsResp,
+    summary="Get Court Vision's live rest-of-season rankings",
+    description=(
+        "Court Vision's two standard rest-of-season boards as stored this morning: ESPN default points "
+        "(`points`) and standard 9-cat (`categories`). Each player carries his rank and per-game value on "
+        "both, the places he gained since the previous stored board (`move_1d`) and since the board of a "
+        "week ago (`move_7d`), and ESPN's own draft rank that day. `compared` names the two earlier boards; "
+        "a move against a board that does not exist is null, never zero. The boards are rebuilt once a "
+        "morning from box scores and availability, and price each player from that day to the end of the "
+        "season; `GET /v1/rankings/` ranks what players have scored so far. Before the first board of a "
+        "season is stored the response is a successful empty one.\n\n"
+        "Responses are cached briefly and carry an `ETag`; a conditional request with `If-None-Match` is "
+        "answered 304."
+    ),
+    responses={
+        304: {"description": "Not modified — the client's `If-None-Match` matches the current response"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_live_rankings(request: Request):
+    key = public_read_cache.key("board")
+    if not public_read_cache.LIVE_RANKINGS.enabled:
+        return respond(await LiveRankingsService.get_board())
+
+    async def render() -> bytes:
+        # About 200 KB of JSON: serialised off the event loop, as the rankings body is.
+        return await render_envelope("rankings.live.serialize", await LiveRankingsService.get_board())
+
+    return await serve_cached(request, public_read_cache.LIVE_RANKINGS, key, render)
+
+
+@router.get(
+    "/live/players/{player_id}",
+    response_model=LivePlayerRankResp,
+    summary="Get one player's live ranking and its history",
+    description=(
+        "One player's place on this morning's two boards with his moves over a day and a week, how long "
+        "ESPN has held its own rank for him, and his rank on every stored day of the season, oldest first. "
+        "`points` and `categories` are null when he is not on the newest board; his history still lists "
+        "the days he was. A player with no stored rank this season returns a successful response with an "
+        "empty history."
+    ),
+    responses={
+        304: {"description": "Not modified — the client's `If-None-Match` matches the current response"},
+        404: {"description": "Player not found"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+@limiter.limit(PUBLIC_RATE_LIMIT)
+async def get_live_player_ranking(
+    request: Request,
+    player_id: int = Path(..., gt=0, description="NBA player ID"),
+):
+    return await serve_cached_envelope(
+        request,
+        public_read_cache.LIVE_RANKING_PLAYER,
+        public_read_cache.key(player_id),
+        lambda: LiveRankingsService.get_player(player_id),
+    )
+
 
 RESPONSE_CACHE = ResponseCache(
     "rankings",
