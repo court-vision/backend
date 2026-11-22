@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 from schemas.app_map import BUILD_PATTERN
 from schemas.common import ApiModel, BaseResponse
 from schemas.lineup_editor import MoveRole
+from schemas.move_outcomes import MoveOutcome
 
 # Postgres text and jsonb cannot hold a NUL, so a string carrying one could
 # never be logged; it is refused before any quota or model call is spent on it
@@ -825,3 +826,56 @@ class AiNoteEditReq(ApiModel):
     kind: Optional[AiNoteKind] = None
     recheck_on: Optional[date_type] = None
     clear_recheck: bool = False
+
+
+# ---- the AI desk's timeline (the Dime desk redesign, step 1; services/ai/timeline.py) ----
+
+
+class AiTimelineCall(ApiModel):
+    """One call a check-in made, as the timeline shows it: the decision, what Dime did about it on its
+    own, and how the move it sent went."""
+
+    decision_id: int
+    area: AiDecisionArea
+    automation: AiDecisionAutomation
+    call: AiDecisionCall
+    summary: str
+    reason: str
+    proposal_id: Optional[int] = None
+    verdict: Optional[AiVerdict] = Field(None, description="The user's call on it; null until they make one")
+    action: Optional[AiDecisionAction] = Field(None, description="What Dime did about it on its own, where its row "
+                                                                 "is at AI; null where the change is a review")
+    result: Optional[MoveOutcome] = Field(None, description="How the move it sent went: the move ledger's row "
+                                                            "for its proposal, rebuilt each night; null until "
+                                                            "the ledger has it, and for anything not sent")
+
+
+class AiTimelineCheckin(AiCheckinSummary):
+    """A check-in on the timeline: its summary, its calls and the notes its own turn wrote."""
+
+    calls: list[AiTimelineCall] = Field(default_factory=list, description="In the order it made them")
+    notes: list[AiNote] = Field(default_factory=list, description="Notes its own turn wrote (a revision is a new "
+                                                                  "note), retired ones included")
+
+
+class AiTimelineData(ApiModel):
+    team_id: int
+    date: date_type = Field(..., description="The fantasy day shown (ESPN's day, turning at 3 AM ET)")
+    today: date_type = Field(..., description="The fantasy day it is now")
+    starts_at: datetime = Field(..., description="When the day began: 3 AM ET on it")
+    ends_at: datetime = Field(..., description="When it ends: 3 AM ET the next day")
+    checkins_on: bool = Field(..., description="The team's check-ins run on the schedule")
+    first_tip: Optional[datetime] = Field(None, description="The day's first fantasy tip; null on a day with no "
+                                                            "games")
+    checkins: list[AiTimelineCheckin] = Field(..., description="The check-ins that ran in the day, oldest first "
+                                                               "(by when they ran: the night follow-up about "
+                                                               "Thursday is on Friday)")
+    upcoming: list[AiCheckinSlot] = Field(..., description="The day's scheduled check-ins still to come; none on "
+                                                           "a past day or while check-ins are off")
+    notes_due: list[AiNote] = Field(..., description="Live notes set to recheck on the day")
+
+
+class AiTimelineResp(BaseResponse):
+    """Response for GET /v1/internal/ai/timeline."""
+
+    data: Optional[AiTimelineData] = None

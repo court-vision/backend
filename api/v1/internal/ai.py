@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import date as date_type
 
 from typing import Optional
 
@@ -34,6 +35,7 @@ from schemas.ai import (
     AiProposalResp,
     AiSettingsReq,
     AiSettingsResp,
+    AiTimelineResp,
     AiTurnCommentData,
     AiTurnCommentReq,
     AiTurnCommentResp,
@@ -475,6 +477,28 @@ async def set_autopilot(
     else:
         message = "Automations updated"
     return AiAutopilotResp(status=ApiStatus.SUCCESS, message=message, data=data)
+
+
+@router.get(
+    "/timeline",
+    response_model=AiTimelineResp,
+    summary="One team's day on the AI desk's timeline",
+    description=(
+        "A fantasy day of one team (ESPN's day, turning at 3 AM ET; today's without `date`), read-only: the "
+        "check-ins that ran in it, oldest first, each with its calls, what Dime did about each on its own, how "
+        "each move it sent went (the move ledger's row for its proposal) and the notes its own turn wrote; "
+        "the day's scheduled check-ins still to come while the team's check-ins are on; the day's first tip; "
+        "and the notes set to recheck that day."
+    ),
+    responses={**_AGENT_ERRORS, 404: _CHECKIN_ERRORS[404]},
+)
+async def get_timeline(
+    team_id: int = Query(..., gt=0, le=2_147_483_647),
+    date: Optional[date_type] = Query(None, description="The fantasy day, YYYY-MM-DD; default today's"),
+    user: UserContext = Depends(get_db_user),
+) -> AiTimelineResp:
+    data = await AgentService.timeline(user.user_id, team_id, date)
+    return AiTimelineResp(status=ApiStatus.SUCCESS, message="Timeline", data=data)
 
 
 @router.get(
