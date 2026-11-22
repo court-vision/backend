@@ -22,6 +22,8 @@ from schemas.ai import (
     AiAutopilotActionItem,
     AiAutopilotTeam,
     AiCheckinsData,
+    AiAskView,
+    AiAsksData,
     AiCheckinSummary,
     AiConversationDetail,
     AiConversationSummary,
@@ -38,6 +40,7 @@ from services.ai import (
     acting,
     agent,
     ai_settings,
+    asks,
     autonomy,
     checkins,
     conversations,
@@ -134,6 +137,7 @@ class AgentService:
         history = await conversations.history(conversation_id, user_id)
         # The chips and a check-in's decisions are shown as they stand now, not as the turn stored them
         parts = await proposals.refresh_history([t.parts or [] for t in turns], conversation_id, user_id)
+        parts = await asks.refresh_history(parts, user_id)
         checkin = None
         if _kind(row) == conversations.CHECKIN:
             parts = await decisions.refresh_history(parts, conversation_id, user_id)
@@ -273,6 +277,19 @@ class AgentService:
         ensure_access(user_id)
         await AgentService._owned_team_or_404(team_id, user_id)
         return AiTimelineData(**await timeline.day(user_id, team_id, day))
+
+    # ---- the user's asks (services/ai/asks.py; the Dime desk redesign, step 2) ----
+
+    @staticmethod
+    async def asks(user_id: int, team_id: int) -> AiAsksData:
+        ensure_access(user_id)
+        await AgentService._owned_team_or_404(team_id, user_id)
+        return AiAsksData(**await asks.team_asks(user_id, team_id))
+
+    @staticmethod
+    async def cancel_ask(user_id: int, ask_id: int) -> AiAskView:
+        ensure_access(user_id)
+        return AiAskView(**await asks.cancel(user_id, ask_id))
 
     # ---- the account's AI features (services/ai/ai_settings.py) ----
 

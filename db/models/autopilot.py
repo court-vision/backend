@@ -2,8 +2,9 @@
 usr.autopilot, usr.ai_checkins, usr.ai_decisions, usr.autopilot_actions and
 usr.autopilot_events -- Dime's check-ins (migration 0042, the Dime autopilot plan,
 step 3; services/ai/checkins.py), what it does on its own (migration 0044, step 5;
-services/ai/acting.py) and the events that start a check-in (migration 0045, step 6;
-services/ai/events.py).
+services/ai/acting.py), the events that start a check-in (migration 0045, step 6;
+services/ai/events.py) and what the user asks Dime to do at a time (migration 0055, the Dime
+desk redesign's step 2; services/ai/asks.py).
 
 A team Dime runs on has an `Autopilot` row (any team of an account with CV AI access),
 which also says which automations Dime does itself there (`ai_rows`, and the
@@ -12,7 +13,8 @@ claimed by its insert and settled with its turn; each call the check-in makes,
 holds included, is an `AiDecision`, which the user marks agree or disagree; a
 change Dime was allowed to act on is an `AutopilotAction`, with the policy's
 verdict and the write's outcome; a verdict change or news item about a rostered player
-is an `AutopilotEvent`, pending until a check-in takes it. Backend-only.
+is an `AutopilotEvent`, pending until a check-in takes it; an ask is an `AiAsk`, which runs
+as a check-in of kind ask when it falls due. Backend-only.
 """
 
 from datetime import datetime, timezone
@@ -60,8 +62,8 @@ class Autopilot(BaseModel):
 
 
 class AiCheckin(BaseModel):
-    """One turn Dime started itself: `kind` morning | weekly | pre_lock | night, about the game
-    day `nba_date`. `state` running | done | failed | missed | skipped."""
+    """One turn Dime started itself: `kind` morning | weekly | pre_lock | night | event | ask (the
+    user's ask, run at its time), about the game day `nba_date`. `state` running | done | failed | missed | skipped."""
 
     id = BigAutoField(primary_key=True)
     team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
@@ -179,4 +181,27 @@ class AutopilotEvent(BaseModel):
 
     class Meta:
         table_name = "autopilot_events"
+        schema = "usr"
+
+
+class AiAsk(BaseModel):
+    """Something the user asked Dime to do at `due_at` (migration 0055; services/ai/asks.py), saved
+    from the chat `conversation_id`. `state` pending | started (it ran as the check-in `checkin_id`,
+    of kind ask, whose state says how) | cancelled | missed | skipped | failed (with the `reason`)."""
+
+    id = BigAutoField(primary_key=True)
+    user_id = ForeignKeyField(User, column_name="user_id", on_delete="CASCADE")
+    team_id = ForeignKeyField(Team, column_name="team_id", on_delete="CASCADE")
+    conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", null=True,
+                                      on_delete="SET NULL")
+    what = TextField()
+    due_at = DateTimeField()
+    state = TextField(default="pending")
+    reason = TextField(null=True)
+    checkin_id = ForeignKeyField(AiCheckin, column_name="checkin_id", null=True, on_delete="SET NULL")
+    created_at = DateTimeField(default=_now)
+    updated_at = DateTimeField(default=_now)
+
+    class Meta:
+        table_name = "ai_asks"
         schema = "usr"

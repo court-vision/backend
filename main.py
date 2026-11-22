@@ -20,6 +20,7 @@ from core.warmup import warm_request_path
 from core.rate_limit import limiter, rate_limit_exceeded_handler
 from db.base import db, init_db, close_db, start_db_runtime, stop_db_runtime
 from services import request_timings
+from services.ai import asks as ai_asks
 from services.ai import questions as ai_questions
 from services.features_client import start_features_runtime, stop_features_runtime
 from services.sqlmate_client import start_sqlmate_runtime, stop_sqlmate_runtime
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
 
     watchdog = None
     retention = None
+    asks_clock = None
     timings = None
     try:
         # Startup migrations are deliberately synchronous before the server
@@ -92,12 +94,16 @@ async def lifespan(app: FastAPI):
         # background: it logs its own failure, and a slow or failing sweep must
         # never delay or fail a startup.
         retention = asyncio.create_task(ai_questions.keep_redacting())
+        # What users asked Dime to do at a time: started within a minute of it (services/ai/asks.py)
+        asks_clock = asyncio.create_task(ai_asks.keep_running())
         if settings.request_timings_enabled:
             timings = asyncio.create_task(request_timings.keep_writing())
         yield
     finally:
         if retention is not None:
             retention.cancel()
+        if asks_clock is not None:
+            asks_clock.cancel()
         if timings is not None:
             timings.cancel()
             try:  # the last few seconds of requests, while the DB runtime is still up

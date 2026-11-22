@@ -413,10 +413,12 @@ def test_the_header_and_a_decision_read_a_steering_chip():
 @pytest.mark.unit
 def test_the_agent_is_offered_the_steering_tools_after_everything_it_had():
     from services.ai import agent, tools
-    names = [t["name"] for t in agent.TOOLS]
+    names = [t["name"] for t in agent._BASE]
     steering = [t["name"] for t in mod.STEERING_TOOLS]
-    # Appended, so the prefix before them is the one every conversation already cached
+    # Appended, so the prefix before them is the one every conversation already cached (the asks came
+    # after them since: agent.TOOLS is _BASE and then the asks)
     assert names[-len(steering):] == steering
+    assert agent.TOOLS[:len(agent._BASE)] == agent._BASE
     assert names[:len(tools.AGENT_TOOLS)] == [t["name"] for t in tools.AGENT_TOOLS]
     for allowed in (agent.ALLOWED, agent.CHECKIN_ALLOWED, agent.DRAFT_ALLOWED):
         assert mod.STEERING_TOOL_NAMES <= allowed

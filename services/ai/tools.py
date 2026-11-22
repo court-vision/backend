@@ -54,7 +54,7 @@ from services.schedule_service import get_matchup_by_number, get_streaming_match
 from services import move_ledger, roster_protection
 from services import news_service
 from services.ai import (
-    adds, app_map, automations, decisions, draft as ai_draft, league, memory, news as ai_news,
+    adds, app_map, asks, automations, decisions, draft as ai_draft, league, memory, news as ai_news,
     steering as ai_steering,
 )
 from services.ai.fantasy import (
@@ -192,6 +192,14 @@ class ToolContext:
     # The draft note this turn writes (services/ai/draft.py): only it may set the room's plan or
     # make the user's pick in a mock seat
     draft_note_id: Optional[int] = None
+    # A check-in whose proposals are live chips the user can send, not shadow ones: the one that runs
+    # the user's ask (services/ai/asks.py)
+    live_chips: bool = False
+
+    @property
+    def shadow(self) -> bool:
+        """The proposals this turn makes are stored in shadow: a check-in's own, unless it runs an ask."""
+        return self.checkin_id is not None and not self.live_chips
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -828,7 +836,7 @@ async def _propose_move(args: ProposeMoveInput, ctx: ToolContext | None) -> dict
         raise AppError("AI_NO_CONVERSATION", "A move can only be proposed inside a conversation")
     team, league_info = await _owned(ctx, args.team_id)
     return await propose_move(ctx.user_id, ctx.conversation_id, team, league_info, args,
-                              shadow=ctx.checkin_id is not None)
+                              shadow=ctx.shadow)
 
 
 async def _get_lineup(args: GetLineupInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -843,7 +851,7 @@ async def _propose_lineup(args: ProposeLineupInput, ctx: ToolContext | None) -> 
         raise AppError("AI_NO_CONVERSATION", "A lineup can only be proposed inside a conversation")
     team, league_info = await _owned(ctx, args.team_id)
     return await propose_lineup(ctx.user_id, ctx.conversation_id, team, league_info, args,
-                                shadow=ctx.checkin_id is not None)
+                                shadow=ctx.shadow)
 
 
 async def _plan_streams(args: PlanStreamsInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -1386,21 +1394,21 @@ async def _steer(args: ai_steering.SteerInput, ctx: ToolContext | None) -> dict[
     ctx = _chip_caller(ctx, "A hold")
     team, league_info = await _owned(ctx, args.team_id)
     return await ai_steering.steer(ctx.user_id, ctx.conversation_id, team, league_info, args,
-                                   shadow=ctx.checkin_id is not None)
+                                   shadow=ctx.shadow)
 
 
 async def _set_lane(args: ai_steering.SetLaneInput, ctx: ToolContext | None) -> dict[str, Any]:
     ctx = _chip_caller(ctx, "A lane change")
     team, league_info = await _owned(ctx, args.team_id)
     return await ai_steering.set_lane(ctx.user_id, ctx.conversation_id, team, league_info, args,
-                                      shadow=ctx.checkin_id is not None)
+                                      shadow=ctx.shadow)
 
 
 async def _cancel_pickup(args: ai_steering.CancelPickupInput, ctx: ToolContext | None) -> dict[str, Any]:
     ctx = _chip_caller(ctx, "A cancelled pickup")
     team, _ = await _owned(ctx, args.team_id)
     return await ai_steering.cancel_pickup(ctx.user_id, ctx.conversation_id, team, args,
-                                           shadow=ctx.checkin_id is not None)
+                                           shadow=ctx.shadow)
 
 
 # Dime in the Draft desk (the Dime autopilot plan, step 7): a room's recap (a read, in every
@@ -1431,6 +1439,19 @@ async def _get_add_limits(args: adds.GetAddLimitsInput, ctx: ToolContext | None)
     return await adds.get_add_limits(team, league_info)
 
 
+# The user's asks (the Dime desk redesign, step 2): something to do at a time, which runs as a check-in
+# then. Only the user's own turns save or cancel one.
+
+async def _schedule_ask(args: asks.ScheduleAskInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team = await _owned_team(ctx, args.team_id)
+    return await asks.schedule(ctx.user_id, ctx.conversation_id, ctx.checkin_id, team.team_id, args)
+
+
+async def _cancel_ask(args: asks.CancelAskInput, ctx: ToolContext | None) -> dict[str, Any]:
+    team = await _owned_team(ctx, args.team_id)
+    return await asks.cancel_from_chat(ctx.user_id, ctx.checkin_id, team.team_id, args)
+
+
 # Stats and status (step 0), name lookup, the user's teams, their leagues, the
 # stats query, the fantasy logic (step 4), then the proposals (step 5: the add /
 # drop, then the lineup board and its moves), then the app map, then Dime's
@@ -1450,6 +1471,9 @@ CHECKIN_TOOL_NAMES = AGENT_TOOL_NAMES | frozenset(t["name"] for t in CHECKIN_ONL
 # Dime's steering tools, after all of those (agent.py)
 STEERING_TOOLS: list[dict[str, Any]] = ai_steering.STEERING_TOOLS
 STEERING_TOOL_NAMES = ai_steering.STEERING_TOOL_NAMES
+# The user's asks (services/ai/asks.py), after the steering tools (agent.py)
+DIME_ASK_TOOLS: list[dict[str, Any]] = asks.ASK_TOOLS
+DIME_ASK_TOOL_NAMES = asks.ASK_TOOL_NAMES
 # A draft note's conversation gets these after the agent's (services/ai/draft.py)
 DRAFT_ONLY_TOOLS: list[dict[str, Any]] = ai_draft.DRAFT_ONLY_TOOLS
 DRAFT_TOOL_NAMES = AGENT_TOOL_NAMES | ai_draft.DRAFT_ONLY_TOOL_NAMES
@@ -1508,9 +1532,11 @@ _REGISTRY: dict[str, _Tool] = {
     ai_draft.SET_DRAFT_PLAN_NAME: _Tool(ai_draft.SetDraftPlanInput, _set_draft_plan),
     ai_draft.DRAFT_PICK_NAME: _Tool(ai_draft.DraftPickInput, _draft_pick),
     adds.GET_ADD_LIMITS_NAME: _Tool(adds.GetAddLimitsInput, _get_add_limits),
+    asks.SCHEDULE_ASK_NAME: _Tool(asks.ScheduleAskInput, _schedule_ask),
+    asks.CANCEL_ASK_NAME: _Tool(asks.CancelAskInput, _cancel_ask),
 }
 assert ASK_TOOL_NAMES | ROUTER_TOOL_NAMES | CHECKIN_TOOL_NAMES | STEERING_TOOL_NAMES | DRAFT_TOOL_NAMES \
-    == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
+    | DIME_ASK_TOOL_NAMES == set(_REGISTRY), "every defined tool needs a handler, and vice versa"
 
 
 @dataclass(frozen=True)

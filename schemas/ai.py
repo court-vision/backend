@@ -439,7 +439,30 @@ class AiDecisionBlock(ApiModel):
                                                                  "is at AI; null where the change is a review")
 
 
-AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock], Field(discriminator="type")]
+# An ask's state as the desk shows it (services/ai/asks.py): the ask's own while it waits or if it never
+# ran, its check-in's (running, done, failed) once it did
+AiAskState = Literal["pending", "running", "done", "failed", "cancelled", "missed", "skipped"]
+
+
+class AiAskBlock(ApiModel):
+    """Something the user asked Dime to do at a time, saved (or cancelled) in this chat: shown with its time,
+    a Cancel while it waits, and its check-in's conversation once it ran. Shown as it stands now."""
+
+    type: Literal["ask"] = "ask"
+    id: str = Field(..., description="Unique within its turn, e.g. 'a1'")
+    ask_id: int
+    team_id: int
+    what: str = Field(..., description="What to do, in the words Dime saved")
+    due_at: datetime
+    state: AiAskState
+    reason: Optional[str] = Field(None, description="Why it closed without running: user (cancelled), late "
+                                                    "(missed), budget or not_allowed (skipped), start_failed")
+    checkin_id: Optional[int] = Field(None, description="The check-in that ran it")
+    conversation_id: Optional[int] = Field(None, description="That check-in's conversation, to open it")
+
+
+AiBlock = Annotated[Union[AiTable, AiChart, AiProposal, AiPlace, AiDecisionBlock, AiAskBlock],
+                    Field(discriminator="type")]
 
 
 class AiTextPart(ApiModel):
@@ -468,7 +491,7 @@ class AiTurnView(ApiModel):
 
 # ---- Dime's check-ins (services/ai/checkins.py; the Dime autopilot plan, step 3) ----
 
-AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night", "event"]
+AiCheckinKind = Literal["morning", "weekly", "pre_lock", "night", "event", "ask"]
 # What the user can run from the AI desk: an event check-in starts only for its events
 AiCheckinRunKind = Literal["morning", "weekly", "pre_lock", "night"]
 AiCheckinState = Literal["running", "done", "failed", "missed", "skipped"]
@@ -492,8 +515,9 @@ class AiCheckinSummary(ApiModel):
     checkin_id: int
     team_id: int
     kind: AiCheckinKind = Field(..., description="morning, weekly (a matchup's first morning), pre_lock (before "
-                                                 "the first tip), night (the next morning's follow-up) or event "
-                                                 "(news about a rostered player)")
+                                                 "the first tip), night (the next morning's follow-up), event "
+                                                 "(news about a rostered player) or ask (the user's ask, run at "
+                                                 "its time)")
     date: date_type = Field(..., description="The fantasy day it is about")
     manual: bool = Field(..., description="Run from the AI desk rather than on the schedule")
     state: AiCheckinState
@@ -850,12 +874,48 @@ class AiTimelineCall(ApiModel):
                                                             "the ledger has it, and for anything not sent")
 
 
+class AiAskView(ApiModel):
+    """Something the user asked Dime to do at a time (services/ai/asks.py). It runs as a check-in of kind ask
+    at `due_at`, one Dime turn on the check-ins budget."""
+
+    ask_id: int
+    team_id: int
+    what: str = Field(..., description="What to do, in the words Dime saved")
+    due_at: datetime
+    state: AiAskState
+    reason: Optional[str] = Field(None, description="Why it closed without running: user (cancelled), late "
+                                                    "(missed), budget or not_allowed (skipped), start_failed")
+    created_at: datetime
+    asked_in: Optional[int] = Field(None, description="The conversation it was asked in")
+    checkin_id: Optional[int] = Field(None, description="The check-in that ran it")
+    conversation_id: Optional[int] = Field(None, description="That check-in's conversation")
+
+
+class AiAsksData(ApiModel):
+    team_id: int
+    waiting: list[AiAskView] = Field(..., description="Asks still to run, soonest first")
+    recent: list[AiAskView] = Field(..., description="The others due in the last day, latest first")
+
+
+class AiAsksResp(BaseResponse):
+    """Response for GET /v1/internal/ai/asks."""
+
+    data: Optional[AiAsksData] = None
+
+
+class AiAskResp(BaseResponse):
+    """Response for DELETE /v1/internal/ai/asks/{ask_id}."""
+
+    data: Optional[AiAskView] = None
+
+
 class AiTimelineCheckin(AiCheckinSummary):
     """A check-in on the timeline: its summary, its calls and the notes its own turn wrote."""
 
     calls: list[AiTimelineCall] = Field(default_factory=list, description="In the order it made them")
     notes: list[AiNote] = Field(default_factory=list, description="Notes its own turn wrote (a revision is a new "
                                                                   "note), retired ones included")
+    ask: Optional[AiAskView] = Field(None, description="The ask it ran (kind ask)")
 
 
 class AiTimelineData(ApiModel):
@@ -873,6 +933,10 @@ class AiTimelineData(ApiModel):
     upcoming: list[AiCheckinSlot] = Field(..., description="The day's scheduled check-ins still to come; none on "
                                                            "a past day or while check-ins are off")
     notes_due: list[AiNote] = Field(..., description="Live notes set to recheck on the day")
+    asks: list[AiAskView] = Field(default_factory=list,
+                                  description="The user's asks due in the day that haven't run: waiting, or "
+                                              "closed without running (cancelled, missed, skipped). One that "
+                                              "ran is its check-in, with `ask` set")
 
 
 class AiTimelineResp(BaseResponse):

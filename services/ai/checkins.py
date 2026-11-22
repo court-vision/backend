@@ -2,7 +2,7 @@
 Dime's check-ins, in shadow (usr.autopilot / usr.ai_checkins, migration 0042;
 the Dime autopilot plan, step 3).
 
-A check-in is a turn Dime starts itself. Four kinds, each about one fantasy day
+A check-in is a turn Dime starts itself. Its kinds, each about one fantasy day
 (US Eastern, turning at 3 AM like ESPN's):
 
 - **morning**, 9 AM ET on a day of the season: what the automations will do
@@ -16,7 +16,12 @@ A check-in is a turn Dime starts itself. Four kinds, each about one fantasy day
   ledger are in: how the day's calls went, and what that teaches;
 - **event**, when a verdict changes or news lands about a player on the roster
   (services/ai/events.py; the plan's step 6): not on the clock, and not a slot,
-  so a team can have several a day, within their own cap.
+  so a team can have several a day, within their own cap;
+- **ask**, something the user asked Dime to do at a time (services/ai/asks.py; the
+  Dime desk redesign's step 2): run at that time with the user's words as its brief,
+  on a team whose check-ins are off too. Its proposals are live chips rather than
+  shadow ones: what it commits on an automation at AI is sent, and anything else
+  waits for the user to send.
 
 Each runs once per team, kind and day (claimed by inserting its row), inside a
 window; a window that closes before the check-in could run leaves it `missed`
@@ -57,7 +62,7 @@ from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from core.settings import settings
 from db.base import db_operation
-from db.models.autopilot import AiCheckin, AiDecision, Autopilot, AutopilotAction
+from db.models.autopilot import AiAsk, AiCheckin, AiDecision, Autopilot, AutopilotAction
 from db.models.nba.games import FANTASY_SEASON_TYPES, Game
 from db.models.teams import Team
 from schemas.common import ApiStatus
@@ -69,6 +74,9 @@ MORNING, WEEKLY, PRE_LOCK, NIGHT = "morning", "weekly", "pre_lock", "night"
 # What the schedule (and Run now) can start; an event check-in starts only for its events
 KINDS = (MORNING, WEEKLY, PRE_LOCK, NIGHT)
 EVENT = "event"
+# The user's ask, run at its time (services/ai/asks.py): a manual check-in, so outside the slots and the
+# schedule's daily cap
+ASK = "ask"
 RUNNING, DONE, FAILED, MISSED, SKIPPED = "running", "done", "failed", "missed", "skipped"
 # States that count toward the day's cap: a check-in that ran (or is running)
 _RAN = (RUNNING, DONE, FAILED)
@@ -86,11 +94,15 @@ _MANUAL_PRE_LOCK = timedelta(hours=2)
 _STALE_MARGIN = timedelta(minutes=10)
 
 LABELS = {MORNING: "Morning check-in", WEEKLY: "Weekly check-in", PRE_LOCK: "Pre-lock check-in",
-          NIGHT: "Night follow-up", EVENT: "Event check-in"}
+          NIGHT: "Night follow-up", EVENT: "Event check-in", ASK: "Your ask"}
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def fantasy_day(now: datetime) -> date:
@@ -262,6 +274,14 @@ def _claim(team_id: int, user_id: int, kind: str, nba_date: date, due_at: dateti
 @db_operation("ai.checkin_attach")
 def _attach(checkin_id: int, conversation_id: int) -> None:
     AiCheckin.update(conversation_id=conversation_id).where(AiCheckin.id == checkin_id).execute()
+
+
+@db_operation("ai.checkin_drop")
+def _drop(checkin_id: int) -> None:
+    """A claimed check-in that never started its turn (its ask was cancelled or taken meanwhile) goes
+    again, so it leaves no row."""
+    AiCheckin.delete().where(AiCheckin.id == checkin_id, AiCheckin.state == RUNNING,
+                             AiCheckin.conversation_id.is_null()).execute()
 
 
 @db_operation("ai.checkin_settle")
@@ -495,6 +515,42 @@ def brief(kind: str, nba_date: date, team_id: int, *, manual: bool,
     return f"{head}\n\n{news}{_STEPS[kind]}\n\n{close}"
 
 
+def ask_brief(team_id: int, what: str, due_at: datetime, asked_at: datetime, acting: Optional[list[str]]) -> str:
+    """The opening message of a check-in that runs the user's ask (services/ai/asks.py): their words, and
+    the rules of a turn whose proposals are live chips. Late scratches act only in event check-ins, so
+    they are left out of what Dime does itself here."""
+    from services.ai.asks import et_words
+    rows = [r for r in acting or [] if r != autonomy.LATE_SCRATCH]
+    if rows:
+        rules = (f"What you do yourself on this team: {autonomy.words(rows)}. Those automations are at AI: "
+                 "log_decision with call change and its proposal_id sends the move now through the user's own "
+                 "write routes if the policy allows (get_automations' autopilot section has the caps and what "
+                 "you have used). Anything else you propose is a chip the user sends themselves from this "
+                 "conversation. ")
+    else:
+        rules = ("No automation is at AI on this team, so you send nothing yourself: what you propose is a chip "
+                 "the user sends from this conversation. ")
+    rules += ("log_decision records each call you make, holds included, a change citing its chip. A move the policy "
+              "blocks or ESPN refuses is left as a chip for the user; don't try it again here. Never say a move was "
+              "made unless log_decision's action says sent. The user isn't here while you work: they read this "
+              "conversation later.")
+    head = (f"[The user's ask for team_id {team_id}, due {et_words(due_at)} ET; they asked you for it in a chat on "
+            f"{et_words(asked_at)} ET. {rules}]")
+    return (
+        f"{head}\n\nWhat they asked:\n\"{what}\"\n\n"
+        "Do it now:\n"
+        "- recall your notes on the team, then read what the ask needs (get_lineup, get_player_status, "
+        "get_automations, get_matchup, ...).\n"
+        "- If it calls for a change, propose it (propose_lineup, propose_move, or steer, set_lane or cancel_pickup) "
+        "and log it as a change citing the chip; run your playbook's checks before an add or a drop. If nothing "
+        "should change, log a hold and say why.\n"
+        "- If it can't be done as asked (the player's game has locked, the player is no longer on the team), say "
+        "so, and do the nearest thing that helps or nothing.\n\n"
+        "End with a short note for the user: what you did, what you left for them to send, and why, in a few "
+        "lines. Your decisions show as their own blocks, so don't list them again."
+    )
+
+
 # ------------------------------- running one ------------------------------- #
 
 # Check-ins still running, held so they aren't collected
@@ -510,10 +566,11 @@ class Started:
 
 
 async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: datetime, *, manual: bool,
-                 now: datetime) -> Optional[int]:
+                 now: datetime, ask: Optional[AiAsk] = None) -> Optional[int]:
     """Claim the check-in, reserve its spend, open its conversation and start its turn. Returns its id,
     or None when another tick has it. A scheduled one the budget refuses is claimed as `skipped`; a
-    manual one raises instead."""
+    manual one raises instead. With `ask`, it runs the user's ask (kind ask): it takes the ask (None
+    when a cancel or another start got there first), takes no events, and its proposals are live."""
     reservation_id = await spend.reserve_autopilot(user_id)
     if reservation_id is None:
         if manual:
@@ -526,11 +583,26 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
     if checkin_id is None:
         await spend.cancel(reservation_id)
         return None
+    if ask is not None:
+        from services.ai import asks
+        try:
+            took = await asks.take(ask.id, checkin_id, now)
+        except Exception:
+            await spend.cancel(reservation_id)
+            await _drop(checkin_id)
+            raise
+        if not took:
+            await spend.cancel(reservation_id)
+            await _drop(checkin_id)
+            return None
     from services.ai import events
     autopilot: Optional[Autopilot] = None
+    taken: list[Any] = []
     try:
         autopilot = await _autopilot_row(team_id)
-        taken = await events.take(team_id, checkin_id, now, row=autopilot)
+        if ask is None:
+            # An ask is the user's errand: events wait for the next check-in (or their own, once it ends)
+            taken = await events.take(team_id, checkin_id, now, row=autopilot)
     except Exception:
         get_logger().exception("ai_checkin_events_failed", checkin_id=checkin_id, team_id=team_id)
         taken = []
@@ -542,20 +614,21 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
     await _seed_protections(team_id, user_id, autopilot)
     conversation_id: Optional[int] = None
     try:
-        conversation = await conversations.create(user_id, team_id, kind=conversations.CHECKIN,
-                                                  title=title_of(kind, nba_date))
+        title = title_of(kind, nba_date) if ask is None else conversations.title_of(f"You asked: {ask.what}")
+        conversation = await conversations.create(user_id, team_id, kind=conversations.CHECKIN, title=title)
         conversation_id = conversation.id
         hold = timedelta(seconds=settings.autopilot_checkin_timeout_seconds + 30)
         await conversations.claim(conversation_id, user_id, hold)
         await _attach(checkin_id, conversation_id)
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
         acting = autonomy.acting_rows(autopilot if autopilot is not None else await _autopilot_row(team_id))
-        turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
-                          message=brief(kind, nba_date, team_id, manual=manual, acting=acting,
-                                        events=events.brief_lines(taken)),
+        message = (brief(kind, nba_date, team_id, manual=manual, acting=acting, events=events.brief_lines(taken))
+                   if ask is None else
+                   ask_brief(team_id, ask.what, _aware(ask.due_at), _aware(ask.created_at), acting))
+        turn = agent.Turn(conversation_id=conversation_id, user_id=user_id, message=message,
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.CHECKIN_TOOLS, allowed=agent.CHECKIN_ALLOWED, checkin_id=checkin_id,
-                          limits=agent.Limits.checkin())
+                          live_chips=ask is not None, limits=agent.Limits.checkin())
     except Exception:
         get_logger().exception("ai_checkin_start_failed", checkin_id=checkin_id, team_id=team_id, kind=kind)
         await spend.cancel(reservation_id)
@@ -636,6 +709,14 @@ async def start_slot(row: Autopilot, slot: Slot, now: datetime) -> Optional[Star
         return None
     checkin_id = await _start(team_id, user_id, slot.kind, slot.nba_date, slot.due_at, manual=False, now=now)
     return None if checkin_id is None else Started(checkin_id, team_id, slot.kind, slot.nba_date)
+
+
+async def start_ask(ask: AiAsk, now: datetime) -> Optional[int]:
+    """Start the check-in that runs the user's due ask (services/ai/asks.py), about the fantasy day it runs
+    on: its id, or None when the team has a check-in running (the ask waits) or the ask was taken first.
+    A budget that refuses it raises (AI_AUTOPILOT_BUDGET_REACHED)."""
+    return await _start(ask.team_id_id, ask.user_id_id, ASK, fantasy_day(now), _aware(ask.due_at), manual=True,
+                        now=now, ask=ask)
 
 
 async def start_event(row: Autopilot, today: date, now: datetime) -> Optional[Started]:

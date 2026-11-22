@@ -274,8 +274,9 @@ class TestTools:
         names = [t["name"] for t in tools.AGENT_TOOLS]
         assert names[names.index("get_draft_recap") + 1:] == ["get_add_limits"]      # appended after it since
         assert [t["name"] for t in agent.DRAFT_TOOLS[-2:]] == ["set_draft_plan", "draft_pick"]
-        # A draft note's list is the AI desk's with the two appended, so the cached prefix is shared
-        assert agent.DRAFT_TOOLS[:len(agent.TOOLS)] == agent.TOOLS
+        # A draft note's list is the AI desk's (before the asks) with the two appended, so the cached prefix
+        # is shared
+        assert agent.DRAFT_TOOLS == [*agent._BASE, *draft.DRAFT_ONLY_TOOLS]
         for allowed in (agent.ALLOWED, agent.CHECKIN_ALLOWED):
             assert "get_draft_recap" in allowed
             assert not ({"set_draft_plan", "draft_pick"} & allowed)

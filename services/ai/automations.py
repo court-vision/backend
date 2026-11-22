@@ -256,8 +256,19 @@ async def get_automations(team: Any, user_id: int, now: Optional[datetime] = Non
         "protected": [{"player_id": p.nba_player_id, "name": p.name}
                       for p in await roster_protection.for_team(team.team_id)],
         **await _autopilot(team, league_info),
+        # What the user asked you to do later (services/ai/asks.py): each runs as its own check-in then
+        "asks": await _asks(team.team_id, user_id),
         "notes": notes,
     }
+
+
+async def _asks(team_id: int, user_id: int) -> list[dict[str, Any]]:
+    from services.ai import asks
+    try:
+        return await asks.waiting_for_model(team_id, user_id)
+    except Exception:
+        log.exception("automations_asks_failed", team_id=team_id)
+        return []
 
 
 async def _autopilot(team: Any, league_info: Any) -> dict[str, Any]:
