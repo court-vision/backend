@@ -435,7 +435,7 @@ def spend_stub(monkeypatch):
     """The report and the cap writes, answered from memory; returns what each was asked."""
     from datetime import datetime, timezone
 
-    from schemas.ai_spend import AiCapData, AiSpendLine, AiSpendReport
+    from schemas.ai_spend import AiCapData, AiSpendApp, AiSpendLine, AiSpendReport
     from services.ai import spend_report
 
     asked = {"report": [], "set": []}
@@ -448,6 +448,8 @@ def spend_stub(monkeypatch):
             turn_max_micros=1_000_000, read_max_micros=300_000,
             lines=[AiSpendLine(line="analyst", spent_micros=2_400_000, open_micros=0, cap_micros=40_000_000,
                                default_cap_micros=40_000_000, cap_set=False)],
+            app=AiSpendApp(spent_micros=2_400_000, open_micros=0, cap_micros=100_000_000,
+                           default_cap_micros=100_000_000, cap_set=False),
             rows=[], usage=[], users=[], teams=[])
 
     async def set_cap(req, now=None):
@@ -474,6 +476,7 @@ def test_the_report_is_over_the_days_asked_for(client, token, spend_stub):
 
     assert r.status_code == 200
     assert r.json()["data"]["lines"][0]["spent_micros"] == 2_400_000
+    assert r.json()["data"]["app"]["cap_micros"] == 100_000_000
     assert spend_stub["report"] == [7]
 
 
@@ -494,6 +497,15 @@ def test_setting_a_user_s_cap_reaches_the_service(client, token, spend_stub):
     assert r.json()["data"]["cap_micros"] == 25_000_000
     req = spend_stub["set"][0]
     assert (req.line, req.user_id, str(req.monthly_usd), req.author) == ("desk", 11, "25.00", "James")
+
+
+@pytest.mark.api
+def test_the_whole_app_s_cap_is_set_on_line_app(client, token, spend_stub):
+    r = client.put(AI_CAPS, json={"line": "app", "monthly_usd": 100, "author": "James"}, headers=PIPE)
+
+    assert r.status_code == 200
+    assert r.json()["message"] == "Set the whole app's cap to $100"
+    assert (spend_stub["set"][0].line, spend_stub["set"][0].user_id) == ("app", None)
 
 
 @pytest.mark.api

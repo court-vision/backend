@@ -971,24 +971,29 @@ class TestSpend:
 
         assert (s.user_cap, s.total_cap, s.user_left) == (25_000_000, 100_000_000, 24_000_000)
 
-    @pytest.mark.parametrize("mine, everyone, code", [
-        (99_500_000, 99_500_000, "AI_MONTHLY_BUDGET_REACHED"),
-        (99_500_000, 10_000_000, "AI_USER_BUDGET_REACHED"),
+    @pytest.mark.parametrize("mine, everyone, app, code", [
+        (99_500_000, 99_500_000, 99_500_000, "AI_MONTHLY_BUDGET_REACHED"),
+        (10_000_000, 10_000_000, 99_500_000, "AI_APP_BUDGET_REACHED"),
+        (99_500_000, 10_000_000, 10_000_000, "AI_USER_BUDGET_REACHED"),
     ])
-    def test_a_turn_needs_one_turn_s_ceiling_left_under_both_caps(self, agent_on, monkeypatch, mine, everyone, code):
+    def test_a_turn_needs_one_turn_s_ceiling_left_under_every_cap(self, agent_on, monkeypatch, mine, everyone,
+                                                                   app, code):
+        monkeypatch.setattr(settings, "ai_app_monthly_budget_usd", 100.0)
         seen = []
 
-        async def reserve(user_id, since, amount, user_cap, total_cap):
-            seen.append((user_id, amount, user_cap, total_cap))
+        async def reserve(user_id, since, amount, user_cap, total_cap, app_cap):
+            seen.append((user_id, amount, user_cap, total_cap, app_cap))
             if total_cap - everyone < amount:
                 return "total"
+            if app_cap - app < amount:
+                return "app"
             return "user" if user_cap - mine < amount else 77
         monkeypatch.setattr(spend, "_reserve", reserve)
 
         with pytest.raises(AppError) as err:
             asyncio.run(spend.reserve(42))
         assert err.value.error_code == code
-        assert seen == [(42, 1_000_000, 100_000_000, 100_000_000)]
+        assert seen == [(42, 1_000_000, 100_000_000, 100_000_000, 100_000_000)]
 
     def test_a_reservation_s_id_comes_back(self, agent_on, monkeypatch):
         async def reserve(*args):
@@ -1016,6 +1021,30 @@ class TestSpend:
 
         cap_rows[("autopilot", 42)] = Decimal("5")
         assert spend.caps_sync("autopilot", 42) == spend.Caps(line=60_000_000, user=5_000_000)
+
+    def test_the_whole_app_s_cap_is_the_environment_s_until_a_row_replaces_it(self, monkeypatch, cap_rows):
+        monkeypatch.setattr(settings, "ai_app_monthly_budget_usd", 100.0)
+        assert spend.caps_sync("app") == spend.Caps(line=100_000_000)
+
+        cap_rows[("app", None)] = Decimal("80")
+        assert spend.caps_sync("app", 42) == spend.Caps(line=80_000_000)
+
+    def test_check_ins_and_reads_are_held_to_the_whole_app_s_cap(self, monkeypatch, cap_rows):
+        cap_rows[("app", None)] = Decimal("90")
+        seen = []
+
+        async def autopilot(user_id, since, amount, cap, user_cap, app_cap):
+            seen.append(("autopilot", app_cap))
+            return 7
+
+        async def analyst(since, amount, cap, app_cap):
+            seen.append(("analyst", app_cap))
+            return 8
+        monkeypatch.setattr(spend, "_reserve_autopilot", autopilot)
+        monkeypatch.setattr(spend, "_reserve_analyst", analyst)
+
+        assert (asyncio.run(spend.reserve_autopilot(42)), asyncio.run(spend.reserve_analyst())) == (7, 8)
+        assert seen == [("autopilot", 90_000_000), ("analyst", 90_000_000)]
 
     def test_the_analyst_s_cap_is_the_line_s_alone(self, monkeypatch, cap_rows):
         monkeypatch.setattr(settings, "analyst_monthly_budget_usd", 40.0)

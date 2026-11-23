@@ -1,10 +1,10 @@
 """
 Integration: the AI spend report and the caps set from the dashboard, against the real
-schema (migrations 0032, 0042, 0053, 0054).
+schema (migrations 0032, 0042, 0053, 0054, 0056).
 
 The caps: a row replaces the environment's number from the next reservation on, a
 user's own row wins over their share, clearing one hands the number back, and the
-analyst has no users. The report: each ledger row lands under what spent it (a chat,
+analyst has no users; the whole app's cap holds every line to their sum. The report: each ledger row lands under what spent it (a chat,
 the draft room, a check-in by kind, a reply in a check-in's conversation, an analyst
 read, or nothing left to say once its chat is deleted), open reservations are counted
 apart, and usage carries each record's model and tokens.
@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from peewee import IntegrityError
 
 from core.errors import AppError, BadRequestError, NotFoundError
 from db.base import db
@@ -58,6 +59,7 @@ def caps(monkeypatch):
     monkeypatch.setattr(settings, "ai_monthly_budget_usd", 10.0)
     monkeypatch.setattr(settings, "autopilot_monthly_budget_usd", 6.0)
     monkeypatch.setattr(settings, "analyst_monthly_budget_usd", 4.0)
+    monkeypatch.setattr(settings, "ai_app_monthly_budget_usd", 100.0)
     monkeypatch.setattr(settings, "ai_agent_turn_max_usd", 1.0)
     monkeypatch.setattr(settings, "analyst_read_max_usd", 0.30)
 
@@ -132,6 +134,40 @@ class TestCaps:
         with pytest.raises(NotFoundError):
             run(spend_report.set_cap(AiCapReq(line="desk", user_id=999, monthly_usd=Decimal("1"))))
         assert AiCap.select().count() == 0
+
+    def test_the_whole_app_s_cap_refuses_every_line_once_their_sum_reaches_it(self, integration_db, caps,
+                                                                              monkeypatch):
+        from core.settings import settings
+        monkeypatch.setattr(settings, "ai_app_monthly_budget_usd", 2.3)
+        me = _user(1)
+        run(spend.reserve(me.user_id))                     # $1 on the desk
+        run(spend.reserve_autopilot(me.user_id))           # $1 on check-ins: $0.30 left in all
+
+        assert run(spend.reserve_autopilot(me.user_id)) is None
+        with pytest.raises(AppError) as err:
+            run(spend.reserve(me.user_id))
+        assert err.value.error_code == "AI_APP_BUDGET_REACHED"
+        assert run(spend.reserve_analyst()) is not None    # one $0.30 read still fits
+        assert run(spend.reserve_analyst()) is None
+        assert AiSpend.select().count() == 3
+
+    def test_the_whole_app_s_cap_is_set_like_a_line_s_and_takes_no_user(self, integration_db, caps):
+        me = _user(1)
+
+        data = _set("app", 0.5)
+
+        assert (data.line, data.user_id, data.cap_micros, data.default_cap_micros, data.cap_set) == (
+            "app", None, 500_000, 100_000_000, True)
+        assert run(spend.reserve_analyst()) is not None
+        assert run(spend.reserve_analyst()) is None
+        assert run(spend.reserve_autopilot(me.user_id)) is None
+        with pytest.raises(BadRequestError):
+            _set("app", 1, me)
+        with pytest.raises(IntegrityError), db.atomic():
+            AiCap.create(line="app", user_id=me.user_id, monthly_usd=Decimal("1"))
+
+        assert _set("app", None).cap_micros == 100_000_000
+        assert run(spend.reserve_autopilot(me.user_id)) is not None
 
     def test_a_deleted_user_takes_their_caps_along(self, integration_db, caps):
         me = _user(1)
@@ -208,6 +244,15 @@ class TestReport:
         assert (analyst.spent_micros, analyst.open_micros, analyst.cap_micros, analyst.default_cap_micros,
                 analyst.cap_set, analyst.updated_by) == (25_000, 300_000, 2_000_000, 4_000_000, True, "James")
 
+    def test_the_whole_app_s_month_is_every_line_together(self, integration_db, caps):
+        self._book()
+        _set("app", 50)
+
+        app = run(spend_report.report(30, now=NOW)).app
+
+        assert (app.spent_micros, app.open_micros, app.cap_micros, app.default_cap_micros, app.cap_set,
+                app.updated_by) == (190_000, 1_300_000, 50_000_000, 100_000_000, True, "James")
+
     def test_users_carry_their_month_and_caps(self, integration_db, caps):
         me, other, _mine, _theirs = self._book()
         _set("autopilot", 3, other)
@@ -272,5 +317,6 @@ class TestReport:
         r = run(spend_report.report(30, now=NOW))
 
         assert [line.line for line in r.lines] == ["desk", "autopilot", "analyst"]
+        assert (r.app.spent_micros, r.app.open_micros, r.app.cap_micros, r.app.cap_set) == (0, 0, 100_000_000, False)
         assert r.rows == [] and r.usage == [] and r.teams == []
         assert r.month_start == date(NOW.year, NOW.month, 1)

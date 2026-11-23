@@ -39,6 +39,13 @@ page writes them (services/ai/spend_report.py). A reservation reads its caps jus
 before it takes the ledger lock, so a change applies to every reservation that
 starts after it commits; one already waiting on the lock (milliseconds) keeps the
 caps it read.
+
+Over the three lines sits one cap on the whole app (migration 0056; James,
+2026-11-23: his Claude plan's $100 a month): every reservation, on any line, is
+also refused while less than its ceiling is left under what all three lines
+spent this month together. Its default is `ai_app_monthly_budget_usd`, and a
+usr.ai_caps row with line `app` replaces it. It is a cap, not a ledger line: no
+spend is written on it.
 """
 
 from __future__ import annotations
@@ -61,6 +68,9 @@ from schemas.common import ApiStatus
 _LEDGER_LOCK = 0x41_49_53_50
 DESK, AUTOPILOT, ANALYST = "desk", "autopilot", "analyst"
 LINES = (DESK, AUTOPILOT, ANALYST)
+# The whole app's cap (migration 0056): every line's spend counts against it
+APP = "app"
+CAP_LINES = (*LINES, APP)
 
 
 @dataclass(frozen=True)
@@ -136,6 +146,20 @@ def _autopilot_sum(since: datetime) -> int:
     return _line_sum(AUTOPILOT, since)
 
 
+def _app_sum(since: datetime) -> int:
+    """Every line's spend since `since`: what the whole app's cap counts."""
+    return _total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(AiSpend.created_at >= since))
+
+
+def _app_refuses(app_cap: int, since: datetime, amount: int, line: str) -> bool:
+    """True when the whole app's cap can't take `amount` more. Callers hold the ledger lock."""
+    spent = _app_sum(since)
+    if app_cap - spent >= amount:
+        return False
+    get_logger().warning("ai_app_budget_reached", line=line, spent_micros=spent, cap_micros=app_cap)
+    return True
+
+
 @db_operation("ai.month_spend")
 def _month_spend(user_id: int, since: datetime) -> tuple[int, int]:
     return _sums(user_id, since)
@@ -164,11 +188,12 @@ def _micros(dollars: float | Decimal) -> int:
 
 
 def default_line_usd(line: str) -> float:
-    """A line's monthly budget from the environment, which a cap row replaces."""
+    """A line's monthly budget from the environment (or the whole app's), which a cap row replaces."""
     return {
         DESK: settings.ai_monthly_budget_usd,
         AUTOPILOT: settings.autopilot_monthly_budget_usd,
         ANALYST: settings.analyst_monthly_budget_usd,
+        APP: settings.ai_app_monthly_budget_usd,
     }[line]
 
 
@@ -198,7 +223,7 @@ def cap_rows_sync(line: str, user_id: Optional[int] = None) -> dict[Optional[int
 def caps_sync(line: str, user_id: Optional[int] = None) -> Caps:
     rows = cap_rows_sync(line, user_id)
     line_cap = _micros(rows[None]) if None in rows else _micros(default_line_usd(line))
-    if user_id is None or line == ANALYST:
+    if user_id is None or line in (ANALYST, APP):
         return Caps(line=line_cap)
     if user_id in rows:
         return Caps(line=line_cap, user=_micros(rows[user_id]))
@@ -217,27 +242,32 @@ async def month_spend(user_id: int) -> Spend:
 
 
 @db_operation("ai.reserve_turn")
-def _reserve(user_id: int, since: datetime, amount: int, user_cap: int, total_cap: int) -> int | str:
-    """The reservation's id, or which cap refused it ("total", "user"). The check
-    and the insert happen under one transaction-scoped lock, so two turns can't
-    both read the same total and both pass."""
+def _reserve(user_id: int, since: datetime, amount: int, user_cap: int, total_cap: int, app_cap: int) -> int | str:
+    """The reservation's id, or which cap refused it ("total", "app", "user"). The
+    check and the insert happen under one transaction-scoped lock, so two turns
+    can't both read the same total and both pass."""
     with db.atomic():
         db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
         mine, everyone = _sums(user_id, since)
         if total_cap - everyone < amount:
             return "total"
+        if _app_refuses(app_cap, since, amount, DESK):
+            return "app"
         if user_cap - mine < amount:
             return "user"
         return AiSpend.insert(user_id=user_id, cost_micros=amount).execute()
 
 
 async def reserve(user_id: int) -> int:
-    """Reserve one turn's ceiling against both caps; returns the reservation's id."""
+    """Reserve one turn's ceiling against the desk's caps and the whole app's; returns
+    the reservation's id."""
     caps = await _caps(DESK, user_id)
-    outcome = await _reserve(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd), caps.user, caps.line)
-    if outcome == "total":
+    app = await _caps(APP)
+    outcome = await _reserve(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd), caps.user, caps.line,
+                             app.line)
+    if outcome in ("total", "app"):
         raise ServiceUnavailableError(
-            "AI_MONTHLY_BUDGET_REACHED",
+            "AI_MONTHLY_BUDGET_REACHED" if outcome == "total" else "AI_APP_BUDGET_REACHED",
             "The assistant has used this month's budget; it resets on the 1st",
             log_level="warning",
         )
@@ -254,13 +284,15 @@ async def reserve(user_id: int) -> int:
 
 @db_operation("ai.reserve_checkin")
 def _reserve_autopilot(user_id: int, since: datetime, amount: int, cap: int,
-                       user_cap: Optional[int] = None) -> int | None:
+                       user_cap: Optional[int], app_cap: int) -> int | None:
     """A check-in's reservation on the autopilot line, or None when the line's budget,
-    or the user's own cap on it (when one is set), can't take one more turn's ceiling.
-    Under the same lock as the desk's reservations."""
+    the whole app's, or the user's own cap on it (when one is set), can't take one more
+    turn's ceiling. Under the same lock as the desk's reservations."""
     with db.atomic():
         db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
         if cap - _autopilot_sum(since) < amount:
+            return None
+        if _app_refuses(app_cap, since, amount, AUTOPILOT):
             return None
         if user_cap is not None:
             theirs = _total(AiSpend.select(fn.SUM(AiSpend.cost_micros)).where(
@@ -272,11 +304,12 @@ def _reserve_autopilot(user_id: int, since: datetime, amount: int, cap: int,
 
 async def reserve_autopilot(user_id: int) -> int | None:
     """Reserve one check-in's ceiling on the autopilot line; None when this month's
-    budget for check-ins, or the user's own cap on it, is used up (the check-in is
-    skipped, not failed)."""
+    budget for check-ins, the whole app's, or the user's own cap on it, is used up
+    (the check-in is skipped, not failed)."""
     caps = await _caps(AUTOPILOT, user_id)
+    app = await _caps(APP)
     return await _reserve_autopilot(user_id, month_start(), _micros(settings.ai_agent_turn_max_usd),
-                                    caps.line, caps.user)
+                                    caps.line, caps.user, app.line)
 
 
 @db_operation("ai.autopilot_month_spend")
@@ -290,21 +323,24 @@ async def autopilot_month_spend() -> tuple[int, int]:
 
 
 @db_operation("ai.reserve_analyst_read")
-def _reserve_analyst(since: datetime, amount: int, cap: int) -> int | None:
-    """A read's reservation on the analyst's line, or None when the month's budget
-    can't take one more read's ceiling. Under the same lock as every other reservation."""
+def _reserve_analyst(since: datetime, amount: int, cap: int, app_cap: int) -> int | None:
+    """A read's reservation on the analyst's line, or None when the line's budget or
+    the whole app's can't take one more read's ceiling. Under the same lock as every
+    other reservation."""
     with db.atomic():
         db.execute_sql("SELECT pg_advisory_xact_lock(%s)", (_LEDGER_LOCK,))
         if cap - _line_sum(ANALYST, since) < amount:
+            return None
+        if _app_refuses(app_cap, since, amount, ANALYST):
             return None
         return AiSpend.insert(user_id=None, cost_micros=amount, line=ANALYST).execute()
 
 
 async def reserve_analyst() -> int | None:
     """Reserve one read's ceiling on the analyst's line; None when this month's
-    budget for reads is used up (the read is skipped, not failed)."""
+    budget for reads, or the whole app's, is used up (the read is skipped, not failed)."""
     return await _reserve_analyst(month_start(), _micros(settings.analyst_read_max_usd),
-                                  (await _caps(ANALYST)).line)
+                                  (await _caps(ANALYST)).line, (await _caps(APP)).line)
 
 
 @db_operation("ai.analyst_month_spend")
