@@ -119,7 +119,8 @@ def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list,
             continue
         home, away = g.home_score, g.away_score
         if g.matchup == current:
-            home, away = settled.get(g.home, home), settled.get(g.away, away) if g.away is not None else away
+            # never the live score: it counts today's games, which the projection counts too
+            home, away = settled.get(g.home), settled.get(g.away) if g.away is not None else None
         pairings.append(lp.Pairing(matchup=g.matchup, home=g.home, away=g.away, home_score=home,
                                    away_score=away, winner=g.winner))
     rosters = []
@@ -171,7 +172,7 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
 
 
 def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: Optional[int],
-              divisions: int = 1) -> list[str]:
+              divisions: int = 1, tiebreaker: Optional[str] = None, unsettled: bool = False) -> list[str]:
     notes = []
     gaps = [w for w in result["incomplete_weeks"]
             if any(w in m["weeks"] and m["status"] != "final" for m in result["matchups"])]
@@ -190,6 +191,11 @@ def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: O
                      f"{'is' if one else 'are'} valued off stored stats.")
     if mine is None:
         notes.append("Court Vision could not tell which team in this league is yours.")
+    if unsettled:
+        notes.append("ESPN sent no settled score for this matchup, so it is counted from today on as if "
+                     "nothing had been scored yet.")
+    if tiebreaker == "head_to_head" and not result["in_playoffs"]:
+        notes.append("This league breaks tied records head to head; the odds break them by points for.")
     if divisions > 1:
         notes.append(f"This league has {divisions} divisions, and the odds treat it as one table, so a division "
                      "winner's place in the playoffs isn't modeled.")
@@ -224,6 +230,8 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     regular = _int(sched.get("matchupPeriodCount")) or current
     playoff_teams = _int(sched.get("playoffTeamCount")) or 0
 
+    rule = sched.get("playoffSeedingRule")
+    tiebreaker = TIEBREAKERS.get(str(rule), str(rule).lower()) if rule else None
     standings, pairings, entries = parse_inputs(payload, mine)
     rosters, snapshot = await run_db("league_projection.values", value_players, entries, league_info, today)
     weeks = await run_db("league_projection.calendar", dated_calendar)
@@ -249,10 +257,12 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
         "projection_as_of": snapshot.as_of.isoformat() if snapshot else None,
         "teams_count": len(rosters),
         "playoff_teams": playoff_teams,
-        "seed_tiebreaker": TIEBREAKERS.get(str(sched.get("playoffSeedingRule")),
-                                           str(sched.get("playoffSeedingRule") or "").lower() or None),
+        "seed_tiebreaker": tiebreaker,
         "lineup_slots": {k: v for k, v in league.roster_slots.items() if k not in ("BE", "IR")},
         **result,
         "notes": notes_for(result, snapshot.as_of if snapshot else None, mine,
-                           divisions=len(sched.get("divisions") or []) or 1),
+                           divisions=len(sched.get("divisions") or []) or 1, tiebreaker=tiebreaker,
+                           unsettled=any(p.matchup == current and (p.home_score is None or
+                                                                   (p.away is not None and p.away_score is None))
+                                         for p in pairings)),
     }

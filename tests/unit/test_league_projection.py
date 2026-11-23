@@ -337,6 +337,22 @@ def test_the_current_matchup_starts_from_espn_s_settled_score_not_the_live_one()
     ]}
     # the live total already counts today's games, which the projection counts from today on
     assert lps.settled_scores(payload) == {1: 412.3, 2: 380.0}
+    # no settled score is no score, never the live one
+    del payload["schedule"][1]["away"]["totalPoints"]
+    assert lps.settled_scores(payload) == {1: 412.3}
+
+
+def test_without_a_settled_score_the_current_matchup_never_takes_the_live_one(monkeypatch):
+    from services import league_overview, lineup_read_service
+    monkeypatch.setattr(league_overview, "standings", lambda payload, mine, categories: [
+        {"league_team_id": t, "team_name": f"T{t}", "rank": t, "wins": 0, "losses": 0, "ties": 0} for t in (1, 2)])
+    monkeypatch.setattr(lineup_read_service, "parse_espn_lineup",
+                        lambda payload, team_name, espn_team_id: SimpleNamespace(entries=()))
+    payload = {"status": {"currentMatchupPeriod": 6}, "schedule": [
+        {"matchupPeriodId": 6, "home": {"teamId": 1, "totalPoints": 400.0, "totalPointsLive": 450.0},
+         "away": {"teamId": 2, "totalPointsLive": 391.0}}]}
+    _, pairings, _ = lps.parse_inputs(payload, 1)
+    assert (pairings[0].home_score, pairings[0].away_score) == (400.0, None)
 
 
 def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(monkeypatch):
@@ -396,3 +412,5 @@ def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
     assert lps.notes_for(result, None, mine=None)[-1].startswith("Court Vision could not tell")
     assert lps.notes_for(result, MON, mine=1, divisions=2)[-1].startswith("This league has 2 divisions")
     assert not any("division" in n for n in lps.notes_for(result, MON, mine=1))
+    assert lps.notes_for(result, MON, mine=1, tiebreaker="head_to_head")[-1].endswith("break them by points for.")
+    assert lps.notes_for(result, MON, mine=1, unsettled=True)[-1].startswith("ESPN sent no settled score")
