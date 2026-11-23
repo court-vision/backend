@@ -101,7 +101,8 @@ def listing(players, actions, **kw):
 @pytest.fixture
 def h(monkeypatch):
     h = SimpleNamespace(level=("act", False), team=(TEAM, LEAGUE), pending=job.Pending(), reads=[],
-                        lineup_writes=[], txn_writes=[], validate=[], lineup_raise=None, txn_raise=None)
+                        lineup_writes=[], txn_writes=[], validate=[], lineup_raise=None, txn_raise=None,
+                        now=MORNING, clock_after={})
 
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -119,10 +120,12 @@ def h(monkeypatch):
         if h.lineup_raise:
             raise h.lineup_raise
         h.lineup_writes.append((kw["source"], [(m.player_id, m.from_slot_id, m.to_slot_id) for m in kw["moves"]]))
+        h.now = h.clock_after.get("lineup_write", h.now)
         return kw["state"], True, 100 + len(h.lineup_writes)
 
     async def validate(league_info, state, add_id, drop, **kw):
         h.validate.append((add_id, drop))
+        h.now = h.clock_after.get("validate", h.now)
         nxt = h.txn_raise if isinstance(h.txn_raise, RosterTransactionInvalid) else None
         if nxt:
             raise nxt
@@ -141,7 +144,7 @@ def h(monkeypatch):
     monkeypatch.setattr(job, "_level_of", level_of)
     monkeypatch.setattr(job, "_pending", lambda team_id: h.pending)
     monkeypatch.setattr(job, "_team", fake_team)
-    monkeypatch.setattr(job, "_now", lambda: MORNING)
+    monkeypatch.setattr(job, "_now", lambda: h.now)
     monkeypatch.setattr(job.DailyActionsService, "read", staticmethod(fake_read))
     monkeypatch.setattr(job.LineupEditorService, "_write", staticmethod(lineup_write))
     monkeypatch.setattr(job.RosterTransactionService, "_validate", staticmethod(validate))
@@ -250,6 +253,29 @@ def test_after_the_first_tip_nothing_is_sent(h):
     h.reads = [listing(FULL[:3], [add(90)], tip="11:30")]
     out = run()
     assert (out.outcome, out.reason) == ("skipped", "after_first_tip") and h.txn_writes == []
+
+
+TIP_PASSED = datetime(2026, 11, 25, 0, 31, tzinfo=timezone.utc)   # 7:31 PM ET, a minute past the tip
+
+
+@pytest.mark.unit
+def test_a_pass_that_runs_into_the_tip_keeps_its_ir_move_and_sends_no_pickup(h):
+    h.clock_after = {"lineup_write": TIP_PASSED}
+    h.reads = [listing([*FULL[:3], player(4, BE, status="OUT")], [ir_in(4)]),
+               listing([*FULL[:3], player(4, IR, status="OUT")], [add(90)])]
+    out = run()
+    assert out.outcome == "applied" and [m.player_id for m in out.ir_moves] == [4]
+    assert out.adds == [] and h.validate == [] and h.txn_writes == []
+    assert out.held == job.TIPPED_HELD
+
+
+@pytest.mark.unit
+def test_a_pickup_whose_check_runs_into_the_tip_is_not_sent(h):
+    h.clock_after = {"validate": TIP_PASSED}
+    h.reads = [listing(FULL[:3], [add(90)])]
+    out = run()
+    assert h.validate == [(90, None)] and h.txn_writes == []
+    assert (out.outcome, out.adds, out.held) == ("noop", [], job.TIPPED_HELD)
 
 
 @pytest.mark.unit

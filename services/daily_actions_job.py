@@ -82,6 +82,8 @@ IR_KINDS = ("ir_in", "ir_out")
 # (a healthy player off a full IR, then an injured one into the seat he left) and two pickups
 # cover a real day; the cap keeps a board that never settles from looping.
 MAX_WRITES = 4
+# What stops the pass once the first game has tipped: a move sent after it is next-day business
+TIPPED_HELD = "The first game tipped off, so nothing more was sent"
 
 
 def _now() -> datetime:
@@ -268,8 +270,12 @@ class DailyActionsJob:
                 # ESPN's read still trails a move already sent: never send it twice
                 held = "ESPN didn't show the last move yet, so nothing more was sent"
                 break
-            sent.update(a.id for a in step.rows)
             state = data.lineup
+            if tipped(state, _now()):
+                # The pass ran into the tip (a write and its reads take a few seconds): what went stands
+                held = TIPPED_HELD
+                break
+            sent.update(a.id for a in step.rows)
             try:
                 if step.kind == "ir":
                     await LineupEditorService._write(
@@ -281,6 +287,9 @@ class DailyActionsJob:
                     row = step.rows[0]
                     add_id = row.transaction.pickup.player_id
                     _, entry = await RosterTransactionService._validate(league_info, state, add_id, None)
+                    if tipped(state, _now()):
+                        held = TIPPED_HELD
+                        break
                     names = {add_id: entry.name if entry is not None else row.player.name}
                     _, verified, audit_id = await RosterTransactionService._write(
                         user_id=req.user_id, team_id=req.team_id, league_info=league_info, state=state,
