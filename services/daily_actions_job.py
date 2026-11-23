@@ -293,7 +293,7 @@ class DailyActionsJob:
             sent.update(a.id for a in step.rows)
             try:
                 if step.kind == "ir":
-                    await LineupEditorService._write(
+                    after, _, _ = await LineupEditorService._write(
                         user_id=req.user_id, team_id=req.team_id, league_info=league_info, state=state,
                         moves=_moves_of(step.rows), source=SOURCE, fallback_slot_counts=slots,
                     )
@@ -306,13 +306,16 @@ class DailyActionsJob:
                         held = TIPPED_HELD
                         break
                     names = {add_id: entry.name if entry is not None else row.player.name}
-                    _, verified, audit_id = await RosterTransactionService._write(
+                    after, verified, audit_id = await RosterTransactionService._write(
                         user_id=req.user_id, team_id=req.team_id, league_info=league_info, state=state,
                         add=add_id, drop=None, moves=_moves_json(add_id, None, names), fallback_slot_counts=slots,
                         source=SOURCE,
                     )
                     adds.append(DailyActionsAdd(player=row.player, detail=row.detail, verified=verified,
                                                 audit_id=audit_id))
+                # The board the write confirmed (the pre-write one when its check-read failed): the
+                # result reports it if the read below fails, and a good read replaces it
+                data = data.model_copy(update={"lineup": after})
             except RosterTransactionInvalid as exc:
                 return done("skipped", reason=(exc.data or {}).get("reason") or "add_invalid", held=exc.message)
             except RosterWriteRejected as exc:

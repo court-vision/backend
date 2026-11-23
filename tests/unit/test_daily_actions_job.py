@@ -102,7 +102,7 @@ def listing(players, actions, **kw):
 def h(monkeypatch):
     h = SimpleNamespace(level=("act", False), team=(TEAM, LEAGUE), pending=job.Pending(), reads=[],
                         lineup_writes=[], txn_writes=[], validate=[], lineup_raise=None, txn_raise=None,
-                        now=MORNING, clock_after={})
+                        now=MORNING, clock_after={}, boards={})
 
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -121,7 +121,7 @@ def h(monkeypatch):
             raise h.lineup_raise
         h.lineup_writes.append((kw["source"], [(m.player_id, m.from_slot_id, m.to_slot_id) for m in kw["moves"]]))
         h.now = h.clock_after.get("lineup_write", h.now)
-        return kw["state"], True, 100 + len(h.lineup_writes)
+        return h.boards.get("lineup_write", kw["state"]), True, 100 + len(h.lineup_writes)
 
     async def validate(league_info, state, add_id, drop, **kw):
         h.validate.append((add_id, drop))
@@ -135,7 +135,7 @@ def h(monkeypatch):
         if h.txn_raise and not isinstance(h.txn_raise, RosterTransactionInvalid):
             raise h.txn_raise
         h.txn_writes.append((kw["source"], kw["add"], kw["drop"], kw["moves"]))
-        return kw["state"], True, 200 + len(h.txn_writes)
+        return h.boards.get("txn_write", kw["state"]), True, 200 + len(h.txn_writes)
 
     monkeypatch.setattr(job, "run_db", direct_run_db)
     async def level_of(team_id, user_id):
@@ -339,6 +339,28 @@ def test_an_unreadable_board_is_a_failure_the_next_poll_retries(h):
     h.reads = [RuntimeError("ESPN timed out")]
     out = run()
     assert (out.outcome, out.reason) == ("failed", "read_failed")
+
+
+REREAD_HELD = "The roster couldn't be read again after the last move"
+
+
+@pytest.mark.unit
+def test_a_failed_read_after_a_pickup_reports_the_board_the_write_confirmed(h):
+    one_open = FULL[:3]
+    h.reads = [listing(one_open, [add(90)]), RuntimeError("ESPN timed out")]
+    h.boards["txn_write"] = board([*one_open, player(90, BE)])
+    out = run()
+    assert (out.outcome, out.held, out.open_spots) == ("applied", REREAD_HELD, 0)
+    assert [a.player.name for a in out.adds] == ["FA90"]
+
+
+@pytest.mark.unit
+def test_a_failed_read_after_an_ir_move_reports_the_spot_it_freed(h):
+    h.reads = [listing([*FULL[:3], player(4, BE, status="OUT")], [ir_in(4)]), RuntimeError("ESPN timed out")]
+    h.boards["lineup_write"] = board([*FULL[:3], player(4, IR, status="OUT")])
+    out = run()
+    assert (out.outcome, out.held, out.open_spots) == ("applied", REREAD_HELD, 1)
+    assert [m.player_id for m in out.ir_moves] == [4]
 
 
 def unread(data, error="ESPN timed out"):
