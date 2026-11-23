@@ -161,7 +161,7 @@ def test_the_scoreboard_is_this_matchup_s_pairings():
     assert out["season"] == {"current_matchup": 3, "regular_season_matchups": 4, "in_playoffs": False,
                              "regular_season_matchups_left": 1, "current_start": "2026-11-03",
                              "current_end": "2026-11-09"}
-    assert out["playoffs"]["seeded_by"] == "record" and out["league_name"] == "Atlas League"
+    assert out["playoffs"]["seed_tiebreaker"] == "head_to_head" and out["league_name"] == "Atlas League"
 
 
 def test_a_live_score_wins_over_the_stored_one_in_the_current_matchup():
