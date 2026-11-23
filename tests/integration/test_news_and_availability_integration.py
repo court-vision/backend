@@ -132,6 +132,7 @@ def test_0035_rollback_applies_and_the_forward_file_restores_it(integration_db):
     forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.rollback.sql").read_text()
     acting_forward = (Path(MIGRATIONS_DIR) / "0044__dime_acting.sql").read_text()
+    daily_forward = (Path(MIGRATIONS_DIR) / "0057__daily_actions_level.sql").read_text()
     assert _tables() == set(NEW_TABLES) and _trigger_column()
     try:
         with db.atomic():
@@ -141,7 +142,9 @@ def test_0035_rollback_applies_and_the_forward_file_restores_it(integration_db):
         with db.atomic():
             db.execute_sql(forward)                 # the chain's state is untouched
             db.execute_sql(acting_forward)          # 0044 widened the source CHECK after it ('autopilot')
+            db.execute_sql(daily_forward)           # and 0057 after that ('daily_actions')
     assert _tables() == set(NEW_TABLES) and _trigger_column()
     with db.atomic():
         db.execute_sql(forward)                     # idempotent: a second apply is a no-op
         db.execute_sql(acting_forward)
+        db.execute_sql(daily_forward)

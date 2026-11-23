@@ -9,9 +9,11 @@ rows:
 
     lineup         each day's slots: the tip-off email (notify), auto-lineup's fill (act);
                    at AI Dime reviews the fill before lock and moves slots or pins players
-    daily_actions  the Week desk's list of IR moves and the day's pickup and drop; at AI
-                   Dime makes its own adds and drops and may cancel a pickup the user
-                   scheduled. Its notify and act aren't built yet
+    daily_actions  the Week desk's list of IR moves and the day's pickup and drop: Court
+                   Vision making the list's IR moves and filling open roster spots, never
+                   dropping anyone (act; services/daily_actions_job.py); at AI Dime makes
+                   its own adds and drops and may cancel a pickup the user scheduled. Its
+                   notify isn't built yet
     lanes          stream lanes, which run as the user set them (act); at AI Dime also
                    starts, pauses, stops and steers them
     late_scratch   late scratches and news: an email with the swap a ruling calls for
@@ -20,8 +22,8 @@ rows:
                    services/ai/events.py)
     checkins       Dime's check-ins: off, or ai while the team isn't paused
 
-Below AI a level lives with its automation (lineup's and late scratches' in the
-notification preferences, services/ai/levels.py; lanes are always act), so what is
+Below AI a level lives with its automation (lineup's, daily actions' and late scratches'
+in the notification preferences, services/ai/levels.py; lanes are always act), so what is
 stored here is the AI part:
 `ai_rows`, and the `autopilot` switch, which puts every row that offers AI at AI while
 it is on (off, the stored rows count again).
@@ -61,7 +63,6 @@ NOT_OFFERED: dict[str, dict[str, str]] = {
     LINEUP: {},
     DAILY_ACTIONS: {
         NOTIFY: "Not built yet: a morning email with the day's list",
-        ACT: "Not built yet: Court Vision making the list's moves",
     },
     LANES: {
         OFF: "Lanes are started and stopped one at a time in the Week desk",
@@ -195,9 +196,11 @@ def words(rows: Iterable[str]) -> str:
 # ------------------------------- the table ------------------------------- #
 
 
-def level_of(autopilot: Any, row: str, lineup_below_ai: str, late_scratch_below_ai: str = OFF) -> str:
-    """The row's level now. Below AI, lineup's and late scratches' come from the notification
-    preferences (`lineup_below_ai`, `late_scratch_below_ai`), lanes are act, and the rest are off."""
+def level_of(autopilot: Any, row: str, lineup_below_ai: str, late_scratch_below_ai: str = OFF,
+             daily_actions_below_ai: str = OFF) -> str:
+    """The row's level now. Below AI, lineup's, late scratches' and daily actions' come from the
+    notification preferences (`lineup_below_ai`, `late_scratch_below_ai`, `daily_actions_below_ai`),
+    and lanes are act."""
     if row == CHECKINS:
         return AI if checkins_on(autopilot) else OFF
     if at_ai(autopilot, row):
@@ -206,13 +209,15 @@ def level_of(autopilot: Any, row: str, lineup_below_ai: str, late_scratch_below_
         return lineup_below_ai
     if row == LATE_SCRATCH:
         return late_scratch_below_ai
+    if row == DAILY_ACTIONS:
+        return daily_actions_below_ai
     if row == LANES:
         return ACT
     return OFF
 
 
 def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
-          late_scratch_below_ai: str = OFF) -> list[dict[str, Any]]:
+          late_scratch_below_ai: str = OFF, daily_actions_below_ai: str = OFF) -> list[dict[str, Any]]:
     """The team's automations table, as the API returns it: each row's level, each level's
     availability and why not, and a note when the row does less than its level says.
     `lineup_email` is whether the account's lineup email is on: without it no team's lineup
@@ -221,7 +226,7 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
     paused = not checkins_on(autopilot)
     out = []
     for row in ROWS:
-        level = level_of(autopilot, row, lineup_below_ai, late_scratch_below_ai)
+        level = level_of(autopilot, row, lineup_below_ai, late_scratch_below_ai, daily_actions_below_ai)
         options = []
         for lv in LEVELS:
             reason = offered(row, lv)

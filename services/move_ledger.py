@@ -458,7 +458,9 @@ def load_writes(cv_teams: dict[int, int], days: list[DayRoster]) -> list[CvWrite
             source = "dime"
         elif pickup is not None:
             source = "lane" if pickup.lane_id is not None else "scheduled"
-        elif r.source == "scheduled":
+        elif r.source in ("scheduled", "daily_actions"):
+            # A scheduled pickup's write without its row, or Daily actions at Act filling an open spot
+            # (services/daily_actions_job.py): Court Vision's own timed writes
             source = "scheduled"
         else:
             source = "you"

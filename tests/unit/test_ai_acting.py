@@ -155,7 +155,7 @@ class TestTheTable:
         assert list(t) == ["lineup", "daily_actions", "lanes", "late_scratch", "checkins"]
         assert [o["level"] for o in t["lineup"]["options"]] == ["off", "notify", "act", "ai"]
         assert offered(t["lineup"]) == {}
-        assert set(offered(t["daily_actions"])) == {"notify", "act"}
+        assert set(offered(t["daily_actions"])) == {"notify"}
         assert set(offered(t["lanes"])) == {"off", "notify"}
         assert offered(t["late_scratch"]) == {}
         assert offered(t["checkins"]) == {"notify": "Check-ins are Dime's own", "act": "Check-ins are Dime's own"}
@@ -168,6 +168,12 @@ class TestTheTable:
         at_ai = by_row(autonomy.table(pilot(ai_rows=["late_scratch"]), lineup_below_ai="act", lineup_email=True,
                                       late_scratch_below_ai="notify"))
         assert at_ai["late_scratch"]["level"] == "ai"
+        # Daily actions at Act come from the preferences too, and AI over them stays AI
+        t = by_row(autonomy.table(None, lineup_below_ai="act", lineup_email=True, daily_actions_below_ai="act"))
+        assert t["daily_actions"]["level"] == "act"
+        at_ai = by_row(autonomy.table(pilot(ai_rows=["daily_actions"]), lineup_below_ai="act", lineup_email=True,
+                                      daily_actions_below_ai="act"))
+        assert at_ai["daily_actions"]["level"] == "ai"
 
     def test_the_levels_and_notes_of_a_team_at_ai(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
@@ -249,6 +255,7 @@ class TestTheCheck:
     def test_a_level_a_row_doesn_t_offer_is_refused_with_why(self):
         assert levels.check(levels.Change(levels={"late_scratch": "act"}), email=False).levels == {"late_scratch": "act"}
         assert levels.check(levels.Change(levels={"late_scratch": "ai"}), email=True).levels == {"late_scratch": "ai"}
+        assert levels.check(levels.Change(levels={"daily_actions": "act"}), email=False).levels == {"daily_actions": "act"}
         with pytest.raises(levels.LevelUnavailable, match="Daily actions can't be notify: Not built yet"):
             levels.check(levels.Change(levels={"daily_actions": "notify"}), email=True)
         with pytest.raises(levels.LevelUnavailable, match="lineup email is off"):
@@ -839,3 +846,16 @@ class TestLateScratchBelowAi:
         assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level=None)) == "notify"
         assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level="act")) == "act"
         assert levels.late_scratch_below_ai(account, SimpleNamespace(late_scratch_level="off")) == "off"
+
+
+class TestDailyActionsBelowAi:
+    """Daily actions' level below AI: the team's override, else the account's, else off (notify isn't
+    built, so a stored one reads as off)."""
+
+    def test_the_override_wins_then_the_account(self):
+        account = SimpleNamespace(daily_actions_level="act")
+        assert levels.daily_actions_below_ai(None, None) == "off"
+        assert levels.daily_actions_below_ai(account, None) == "act"
+        assert levels.daily_actions_below_ai(account, SimpleNamespace(daily_actions_level=None)) == "act"
+        assert levels.daily_actions_below_ai(account, SimpleNamespace(daily_actions_level="off")) == "off"
+        assert levels.daily_actions_below_ai(SimpleNamespace(daily_actions_level="notify"), None) == "off"
