@@ -71,6 +71,9 @@ def test_an_operation_yahoo_lacks_refuses_with_the_mapped_code():
         asyncio.run(adapter.read_lineup(1, YAHOO))
     assert excinfo.value.error_code == "PROVIDER_NOT_SUPPORTED"
     assert excinfo.value.message == unavailable_message("lineup_editing", "yahoo")
+    with pytest.raises(ProviderCapabilityMissing) as excinfo:
+        asyncio.run(adapter.add_lineup_values(1, YAHOO, None))
+    assert excinfo.value.message == unavailable_message("lineup_editing", "yahoo")
     with pytest.raises(ProviderCapabilityMissing):
         asyncio.run(adapter.player_pool_entries(YAHOO, [1]))
     with pytest.raises(ProviderCapabilityMissing):
