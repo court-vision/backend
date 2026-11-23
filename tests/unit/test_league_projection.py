@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.errors import BadRequestError
-from schemas.common import FantasyProvider
+from schemas.common import FantasyProvider, LeagueInfo
 from schemas.league_projection import LeagueProjectionData
 from services import league_projection as lp
 from services import league_projection_service as lps
@@ -167,6 +167,24 @@ def test_a_six_team_field_gives_the_top_two_seeds_a_bye():
     assert odds.title[3] == pytest.approx(0.125, abs=0.03)
 
 
+def test_a_reseeding_league_sends_seed_1_against_the_lowest_seed_left():
+    ids = [1, 2, 3, 4, 5, 6]
+    st = {t: standing(t, 20 - t, t, 1000.0) for t in ids}          # seeds 1..6 locked in
+    # 6 beats 3, 4 and 5 are a coin flip, and 1, 2 and 6 are even
+    strength = {1: 100.0, 2: 100.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 100.0}
+    mean = {(t, m): strength[t] for t in ids for m in (20, 21, 22)}
+
+    def title(reseed):
+        return lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, "record", 100.0, runs=6000, seed=2,
+                           reseed=reseed).title
+
+    # fixed bracket: 1 meets the 4-5 winner and is in the final; 2 and 6 split the other side
+    assert title(False)[1] == pytest.approx(0.5, abs=0.03)
+    # reseeded: 1 meets 6 (the lowest seed left), and 2 gets the 4-5 winner instead
+    assert title(True)[1] == pytest.approx(0.25, abs=0.03)
+    assert title(True)[2] == pytest.approx(0.5, abs=0.03)
+
+
 # ------------------------------- the whole projection ------------------------------- #
 
 
@@ -289,7 +307,13 @@ def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(mo
     from services.scoring.models import StatLine
 
     weights = SimpleNamespace(points=SimpleNamespace(score=lambda line: line.pts * 1.0))
-    monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda info: weights))
+    previews = []
+
+    def scoring_for(info):
+        previews.append(info.scoring_preview)
+        return weights
+
+    monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(scoring_for))
     monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {101: 1, 102: 2})
     timeline = (Run(MON, MON + timedelta(60), 30, 0.9),)
     snapshot = live_projection.LiveSnapshot(as_of=MON, version="v", players={
@@ -308,8 +332,11 @@ def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(mo
         ParsedEntry(102, "Stored", "BOS", 0, (4, 11, 12), False, None, False),
         ParsedEntry(103, "Hurt", "FA", 13, (2, 6, 11), True, "OUT", False),
     )
-    rosters, snap = lps.value_players([(1, "Atlas", entries)], _league_info(), MON)
+    shown_as_categories = LeagueInfo(provider="espn", league_id=7, team_name="Atlas", year=2027,
+                                     scoring_preview="categories")
+    rosters, snap = lps.value_players([(1, "Atlas", entries)], shown_as_categories, MON)
     live, kept, hurt = rosters[0].players
+    assert previews == [None]                    # the league's own points, not the team's preview
     assert snap is snapshot and sorted(asked) == [102, 103]
     assert (live.value, live.team, live.timeline, live.projected) == (30.0, "DEN", timeline, True)
     assert live.slots == {"PG", "G", "UT", "BE"}

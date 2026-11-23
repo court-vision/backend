@@ -109,7 +109,9 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
     from services.player_value_service import PlayerValueService
     from services.providers.identity import nba_ids_by_espn_id
 
-    scoring = PlayerValueService.scoring_for(league_info)
+    # the league's own points, never the team's display preview: a points team shown as
+    # categories would otherwise value its stored-stats players in category units
+    scoring = PlayerValueService.scoring_for(league_info.model_copy(update={"scoring_preview": None}))
     espn_ids = sorted({e.player_id for _, _, entries in rosters for e in entries})
     nba_ids = nba_ids_by_espn_id(espn_ids)
     snapshot = live_projection.load(settings.nba_season, today)
@@ -200,6 +202,7 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
         periods=matchup_periods(payload), current_matchup=current, regular_season_matchups=regular,
         playoff_teams=playoff_teams, roster_slots=roster_slots(payload),
         seeded_by=SEEDING.get(str(sched.get("playoffSeedingRule")), "record"), mine=mine,
+        reseed=bool(sched.get("playoffReseed")),
     )
     # the same runs for the same league on the same day, so a reload doesn't move the odds
     seed = zlib.crc32(f"{league_info.league_id}:{league_info.year}:{today.isoformat()}".encode())

@@ -148,6 +148,7 @@ class League:
     roster_slots: Mapping[str, int]         # ESPN slot name -> count, bench and IR included
     seeded_by: str = "record"               # record | points_for
     mine: Optional[int] = None
+    reseed: bool = False                    # survivors re-paired by seed after each round
 
 
 # ------------------------------- the calendar ------------------------------- #
@@ -306,8 +307,10 @@ def simulate(
     typical_week: float,
     runs: int = SIMULATIONS,
     seed: int = 0,
+    reseed: bool = False,
 ) -> Odds:
-    """Play the rest of the season `runs` times (see the module docstring)."""
+    """Play the rest of the season `runs` times (see the module docstring). With `reseed`
+    the survivors of each round are paired again by seed, best against worst."""
     rng = np.random.default_rng(seed)
     idx = {tid: i for i, tid in enumerate(team_ids)}
     n_teams = len(team_ids)
@@ -365,6 +368,10 @@ def simulate(
         sa = sa + rng.standard_normal(sa.shape) * WEEK_SD * np.sqrt(np.maximum(sa, 0) * typical_week)
         sb = sb + rng.standard_normal(sb.shape) * WEEK_SD * np.sqrt(np.maximum(sb, 0) * typical_week)
         slots = np.where(b < 0, a, np.where(a < 0, b, np.where(sa >= sb, a, b)))
+        if reseed and slots.shape[1] > 2:
+            rank = np.where(slots >= 0, np.take_along_axis(seeds, np.maximum(slots, 0), axis=1), n_teams)
+            by_seed = np.take_along_axis(slots, np.argsort(rank, axis=1, kind="stable"), axis=1)
+            slots = by_seed[:, [s - 1 for s in bracket_order(slots.shape[1])]]
     champ = slots[:, 0]
     for tid in team_ids:
         odds.title[tid] = float((champ == idx[tid]).mean())
@@ -441,7 +448,8 @@ def project(league: League, weeks: Sequence[DatedWeek], today: date, *, runs: in
     odds = None
     if not in_playoffs and team_ids:
         odds = simulate(team_ids, standings, games, base, mean, playoff_matchups,
-                        league.playoff_teams, league.seeded_by, typical, runs=runs, seed=seed)
+                        league.playoff_teams, league.seeded_by, typical, runs=runs, seed=seed,
+                        reseed=league.reseed)
 
     # one row per matchup: the league's scores (final) or projections (to come)
     matchups = []
