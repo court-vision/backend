@@ -138,11 +138,12 @@ def with_live_scores(pairings: list, live: Mapping[int, float], current: int) ->
 
 
 def game_left(status: Optional[str], period: Optional[int], clock: Optional[str],
-              tip: Optional[datetime], now: datetime) -> float:
+              tip: Optional[datetime], now: datetime) -> Optional[float]:
     """The share of a game still to play: 1 before the tip, 0 once final, and under way
     the regulation time left on its period and clock (overtime counts as almost none).
     A game the live read hasn't caught up with is guessed from its tip time, so one long
-    over never counts again."""
+    over never counts again. None when nothing tells: not final, not under way, and no
+    tip time (the schedule file's games, which a live score can't be read beside)."""
     if status == "final":
         return 0.0
     if status == "in_progress":
@@ -150,14 +151,18 @@ def game_left(status: Optional[str], period: Optional[int], clock: Optional[str]
         if period and match:
             seconds = max(0, 4 - int(period)) * QUARTER_SECONDS + int(match[1]) * 60 + float(match[2])
             return min(max(seconds / REGULATION_SECONDS, 0.0), 1.0)
-    if tip is None or tip > now:
+    if tip is None:
+        return 0.5 if status == "in_progress" else None
+    if tip > now:
         return 1.0 if status != "in_progress" else 0.5
     return min(max(1.0 - (now - tip) / GAME_LENGTH, 0.0), 1.0)
 
 
-def today_left(games: Iterable[Any], now: datetime) -> dict[str, float]:
+def today_left(games: Iterable[Any], now: datetime) -> Optional[dict[str, float]]:
     """Each NBA team playing today -> the share of its game still to play (`game_left`),
-    off the day's games as `GamesService.get_games_on_date` reads them (ET tip times)."""
+    off the day's games as `GamesService.get_games_on_date` reads them (ET tip times);
+    None when any game's state can't be told, so the live score is never read beside a
+    guess that could count tonight twice."""
     out: dict[str, float] = {}
     for g in games:
         tip = None
@@ -169,6 +174,8 @@ def today_left(games: Iterable[Any], now: datetime) -> dict[str, float]:
             except ValueError:
                 tip = None
         share = game_left(g.status, g.period, g.game_clock, tip, now)
+        if share is None:
+            return None
         for team in (g.home_team, g.away_team):
             if team:
                 out[team] = min(out.get(team, 1.0), share)
@@ -184,7 +191,10 @@ async def games_left_today(today: date, now: Optional[datetime] = None) -> Optio
     if resp.status != ApiStatus.SUCCESS or resp.data is None:
         log.warning("league_projection_no_games_today", day=today.isoformat())
         return None
-    return today_left(resp.data.games, (now or datetime.now(EASTERN)).astimezone(EASTERN))
+    left = today_left(resp.data.games, (now or datetime.now(EASTERN)).astimezone(EASTERN))
+    if left is None:
+        log.warning("league_projection_games_state_unknown", day=today.isoformat())
+    return left
 
 
 def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list, list, list]:

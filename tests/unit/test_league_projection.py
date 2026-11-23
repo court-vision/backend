@@ -86,6 +86,9 @@ def test_once_a_game_starts_its_player_holds_his_slot_and_adds_only_the_rest_of_
     # a centre locked in the C seat leaves none for a centre still to play
     late_big = lp.ProjPlayer(name="Late Big", team="CHI", value=50, slots=frozenset({"C"}), slot="BE")
     assert lp.day_value([started, late_big], ALL, MON, ["C", "UT"], {"ATL": 0.0, "CHI": 1.0}) == 0
+    # and so does one valued at nothing: the seat is his once his game starts
+    worthless = lp.ProjPlayer(name="Worthless", team="ATL", value=0, slots=frozenset({"C"}), slot="C")
+    assert lp.day_value([worthless, late_big], ALL, MON, ["C"], {"ATL": 0.5, "CHI": 1.0}) == 0
 
 
 def test_a_roster_s_weeks_count_from_the_first_day():
@@ -471,6 +474,8 @@ def test_a_game_s_share_still_to_play_reads_its_status_and_clock():
     # a live read that hasn't caught up is guessed from the tip, and a game long over never counts again
     assert lps.game_left("scheduled", None, None, tip, now) == pytest.approx(1 - 90 / 135)
     assert lps.game_left("in_progress", None, None, at(16), now) == 0.0
+    # nothing to tell from: not final, not under way, no tip time
+    assert lps.game_left("scheduled", None, None, None, now) is None
 
 
 def test_today_s_games_give_each_team_its_share_still_to_play():
@@ -480,6 +485,8 @@ def test_today_s_games_give_each_team_its_share_still_to_play():
         game_clock=clock, start_time_et=start)
     games = [game("ATL", "BOS", "final", "19:00", 4, "PT00M00.00S"), game("CHI", "DEN", "scheduled", "22:00")]
     assert lps.today_left(games, now) == {"ATL": 0.0, "BOS": 0.0, "CHI": 1.0, "DEN": 1.0}
+    # the schedule file's games carry no tip time and no state: no read, so no live score
+    assert lps.today_left([*games, game("MIA", "NYK", "scheduled", None)], now) is None
 
 
 def test_the_current_matchup_takes_the_live_score_only_when_every_side_has_one():

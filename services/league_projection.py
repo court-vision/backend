@@ -200,15 +200,17 @@ def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, s
     free = list(slots)
     held = 0.0
     for p in players:
-        if p.team is None or p.team not in teams or p.value <= 0:
+        if p.team is None or p.team not in teams:
             continue
         share = 1.0 if left is None else min(max(left.get(p.team, 1.0), 0.0), 1.0)
         if share < 1.0:                     # his game has started: his lineup slot is locked
             if p.slot in NON_STARTING_SLOTS:
                 continue
-            if p.slot in free:
+            if p.slot in free:              # held whatever he's worth: nobody else can take it
                 free.remove(p.slot)
-            held += p.value * p.chance_on(day) * share
+            held += max(p.value, 0.0) * p.chance_on(day) * share
+            continue
+        if p.value <= 0:
             continue
         ev = p.value * p.chance_on(day)
         if ev <= 0:
