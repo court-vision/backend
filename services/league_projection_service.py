@@ -21,7 +21,7 @@ from datetime import date
 from typing import Any, Mapping, Optional
 
 from core.compute import run_cpu
-from core.errors import BadRequestError, ServiceUnavailableError
+from core.errors import BadRequestError, ProviderError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
@@ -172,7 +172,7 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
 
 
 def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: Optional[int],
-              divisions: int = 1, tiebreaker: Optional[str] = None, unsettled: bool = False) -> list[str]:
+              divisions: int = 1, tiebreaker: Optional[str] = None) -> list[str]:
     notes = []
     gaps = [w for w in result["incomplete_weeks"]
             if any(w in m["weeks"] and m["status"] != "final" for m in result["matchups"])]
@@ -191,9 +191,6 @@ def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: O
                      f"{'is' if one else 'are'} valued off stored stats.")
     if mine is None:
         notes.append("Court Vision could not tell which team in this league is yours.")
-    if unsettled:
-        notes.append("ESPN sent no settled score for this matchup, so it is counted from today on as if "
-                     "nothing had been scored yet.")
     if tiebreaker == "head_to_head" and not result["in_playoffs"]:
         notes.append("This league breaks tied records head to head; the odds break them by points for.")
     if divisions > 1:
@@ -233,6 +230,11 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     rule = sched.get("playoffSeedingRule")
     tiebreaker = TIEBREAKERS.get(str(rule), str(rule).lower()) if rule else None
     standings, pairings, entries = parse_inputs(payload, mine)
+    if any(p.matchup == current and (p.home_score is None or (p.away is not None and p.away_score is None))
+           for p in pairings):
+        # a side without its score so far would skew the matchup and the odds, so no projection
+        raise ProviderError("espn", "ESPN didn't send this matchup's scores so far; try again in a minute",
+                            error_code="LEAGUE_PROJECTION_NO_SETTLED_SCORE")
     rosters, snapshot = await run_db("league_projection.values", value_players, entries, league_info, today)
     weeks = await run_db("league_projection.calendar", dated_calendar)
     if weeks is None:
@@ -261,8 +263,5 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
         "lineup_slots": {k: v for k, v in league.roster_slots.items() if k not in ("BE", "IR")},
         **result,
         "notes": notes_for(result, snapshot.as_of if snapshot else None, mine,
-                           divisions=len(sched.get("divisions") or []) or 1, tiebreaker=tiebreaker,
-                           unsettled=any(p.matchup == current and (p.home_score is None or
-                                                                   (p.away is not None and p.away_score is None))
-                                         for p in pairings)),
+                           divisions=len(sched.get("divisions") or []) or 1, tiebreaker=tiebreaker),
     }

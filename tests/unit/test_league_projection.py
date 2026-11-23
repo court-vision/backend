@@ -354,6 +354,19 @@ def test_without_a_settled_score_the_current_matchup_never_takes_the_live_one(mo
     _, pairings, _ = lps.parse_inputs(payload, 1)
     assert (pairings[0].home_score, pairings[0].away_score) == (400.0, None)
 
+    # and a side without its score so far stops the projection rather than skew the matchup and the odds
+    from core.errors import ProviderError
+    from services.espn_service import EspnService
+
+    async def fetch(league_info, views):
+        return {**payload, "settings": {"scoringSettings": {"scoringType": "H2H_POINTS"}}, "teams": []}
+
+    monkeypatch.setattr(EspnService, "fetch_league", staticmethod(fetch))
+    monkeypatch.setattr(EspnService, "resolve_team", staticmethod(lambda info, teams: None))
+    with pytest.raises(ProviderError) as err:
+        asyncio.run(lps.league_projection(_league_info(), today=MON))
+    assert err.value.error_code == "LEAGUE_PROJECTION_NO_SETTLED_SCORE" and err.value.status_code == 502
+
 
 def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(monkeypatch):
     from services import live_projection
@@ -413,4 +426,3 @@ def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
     assert lps.notes_for(result, MON, mine=1, divisions=2)[-1].startswith("This league has 2 divisions")
     assert not any("division" in n for n in lps.notes_for(result, MON, mine=1))
     assert lps.notes_for(result, MON, mine=1, tiebreaker="head_to_head")[-1].endswith("break them by points for.")
-    assert lps.notes_for(result, MON, mine=1, unsettled=True)[-1].startswith("ESPN sent no settled score")
