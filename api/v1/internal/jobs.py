@@ -14,7 +14,8 @@ from core.responses import respond
 from schemas.ai_spend import AiCapReq, AiCapResp, AiSpendResp
 from schemas.analyst import AnalystReadReq, AnalystReadResp, AnalystSpendResp
 from schemas.autopilot import (
-    CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData, CheckinRunResp, CheckinStarted,
+    AskRunData, AskRunResp, AskStarted, CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData,
+    CheckinRunResp, CheckinStarted,
 )
 from schemas.common import ApiStatus
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, LineupReactReq, LineupReactResp
@@ -28,7 +29,7 @@ from schemas.valuation import (
     StandardValuationReq,
     StandardValuationResp,
 )
-from services.ai import analyst, checkins, events, spend_report
+from services.ai import analyst, asks, checkins, events, spend_report
 from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
@@ -115,6 +116,26 @@ async def run_checkins():
         message="Check-ins are off" if out["off"] else f"Started {len(started)} check-in(s)",
         data=CheckinRunData(off=out["off"], teams=out["teams"], started=started, missed=out["missed"],
                             skipped=out["skipped"], stale=out["stale"]),
+    ))
+
+
+@router.post("/asks/run", response_model=AskRunResp)
+async def run_asks():
+    """The asks that fell due: start each one's check-in (services/ai/asks.py).
+
+    Called by data-platform's dime_asks pipeline every minute (its route gates on
+    whether any ask is due, so an idle minute never reaches here). An ask is saved
+    to the minute, so it starts at its minute. One per team a call: a team with a
+    check-in running keeps its ask waiting for the next call, and one an hour past
+    its time is missed. Check-ins left running by a dead process are failed first.
+    The check-ins run on here after the response, so this answers in a second or two.
+    """
+    out = await asks.run_due()
+    return respond(AskRunResp(
+        status=ApiStatus.SUCCESS,
+        message="Check-ins are off" if out["off"] else f"Started {len(out['started'])} ask(s)",
+        data=AskRunData(off=out["off"], started=[AskStarted(**s) for s in out["started"]], waiting=out["waiting"],
+                        closed=out["closed"], stale=out["stale"]),
     ))
 
 

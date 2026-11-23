@@ -18,15 +18,17 @@ is sent when log_decision commits it, as in any check-in (services/ai/acting.py)
 else waits in its conversation as a chip the user sends. It runs on a team whose check-ins are
 off too (then nothing is at AI, so every change is a chip).
 
-The clock is in this process: `keep_running` looks for due asks every minute, so an ask
-starts within a minute of its time. One that finds a check-in already running on its team
-waits for it (one at a time per team, as every check-in), and one still waiting an hour past
-its time is missed. A restart loses nothing: the next look finds what fell due meanwhile.
+The clock is cron-runner's, like every schedule the users' things run on: its dime-asks job
+fires on every minute, data-platform's dime_asks pipeline asks here only when an ask is due (one
+EXISTS query), and POST /v1/internal/jobs/asks/run calls `run_due`. An ask is saved to the
+minute, so it starts at its minute. One that finds a check-in already running on its team waits
+for it (one at a time per team, as every check-in), and one still waiting an hour past its time
+is missed. Nothing is held in memory: a look after a restart, or after a tick that didn't come,
+finds what fell due meanwhile.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -58,8 +60,6 @@ PER_TEAM = 10
 AHEAD = timedelta(days=14)
 # An ask still waiting this long past its time (the team was busy, the server was down) is missed
 GRACE = timedelta(hours=1)
-# How often this process looks for due asks
-EVERY_SECONDS = 60
 
 
 def _now() -> datetime:
@@ -434,18 +434,19 @@ async def run_one(row: AiAsk, now: datetime) -> Optional[int]:
         return None
 
 
-async def run_due(now: Optional[datetime] = None) -> dict[str, int]:
-    """One look: fail the check-ins that died with their process (the schedule's tick does too, but it only
-    comes while some team has check-ins on), then start each due ask (one per team a look: a second would
-    find the first running), and close the ones past their grace as missed."""
+async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
+    """One look (POST /v1/internal/jobs/asks/run, every minute from cron-runner): fail the check-ins that
+    died with their process (the schedule's tick does too, but it comes only every quarter hour and only
+    while some team has check-ins on), then start each due ask (one per team a look: a second would find
+    the first running), and close the ones past their grace as missed. `off` when the server has Dime's
+    check-ins switched off: nothing is read."""
     from services.ai import checkins
-    out = {"started": 0, "waiting": 0, "closed": 0}
+    out: dict[str, Any] = {"off": False, "started": [], "waiting": 0, "closed": 0, "stale": 0}
     if not (settings.ai_enabled and settings.autopilot_enabled):
+        out["off"] = True
         return out
     now = now or _now()
-    stale = await checkins.sweep_stale(now)
-    if stale:
-        log.info("ai_asks_stale_checkins_failed", stale=stale)
+    out["stale"] = await checkins.sweep_stale(now)
     started_teams: set[int] = set()
     for row in await _due(now):
         if row.team_id_id in started_teams and _aware(row.due_at) >= now - GRACE:
@@ -457,7 +458,7 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, int]:
             log.exception("ai_ask_run_failed", ask_id=row.id)
             continue
         if checkin_id is not None:
-            out["started"] += 1
+            out["started"].append({"ask_id": row.id, "team_id": row.team_id_id, "checkin_id": checkin_id})
             started_teams.add(row.team_id_id)
             log.info("ai_ask_started", ask_id=row.id, team_id=row.team_id_id, checkin_id=checkin_id)
         else:
@@ -467,16 +468,3 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, int]:
             else:
                 out["closed"] += 1
     return out
-
-
-async def keep_running() -> None:
-    """Every minute, the asks that fell due (from the app's lifespan, main.py). Logs its own failures and
-    never stops on one."""
-    while True:
-        await asyncio.sleep(EVERY_SECONDS)
-        try:
-            await run_due()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("ai_asks_look_failed")

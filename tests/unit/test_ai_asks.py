@@ -179,29 +179,11 @@ class TestShadow:
         assert tools.ToolContext(user_id=1).shadow is False
 
 
-class TestClock:
+class TestLook:
     def test_off_on_the_server_a_look_reads_nothing(self, monkeypatch):
         monkeypatch.setattr(settings, "autopilot_enabled", False)
 
         async def boom(now):
             raise AssertionError("read")
         monkeypatch.setattr(asks, "_due", boom)
-        assert run(asks.run_due()) == {"started": 0, "waiting": 0, "closed": 0}
-
-    def test_a_look_that_fails_is_logged_and_the_clock_keeps_going(self, monkeypatch):
-        looks = []
-
-        async def run_due(now=None):
-            looks.append(1)
-            if len(looks) == 1:
-                raise RuntimeError("db down")
-            if len(looks) == 3:
-                raise asyncio.CancelledError
-
-        async def no_wait(seconds):
-            return None
-        monkeypatch.setattr(asks, "run_due", run_due)
-        monkeypatch.setattr(asks.asyncio, "sleep", no_wait)
-        with pytest.raises(asyncio.CancelledError):
-            run(asks.keep_running())
-        assert len(looks) == 3
+        assert run(asks.run_due()) == {"off": True, "started": [], "waiting": 0, "closed": 0, "stale": 0}

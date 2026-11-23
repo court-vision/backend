@@ -102,6 +102,11 @@ def _fake_turn(monkeypatch, act=None):
     return calls
 
 
+def _counts(out):
+    """A look's started, waiting and closed."""
+    return len(out["started"]), out["waiting"], out["closed"]
+
+
 async def _drain():
     while checkins._RUNNING:
         await asyncio.gather(*list(checkins._RUNNING))
@@ -210,7 +215,7 @@ class TestRunning:
             await _drain()
             return out
 
-        assert run(go()) == {"started": 1, "waiting": 0, "closed": 0}
+        assert _counts(run(go())) == (1, 0, 0)
         turn = calls[0]
         assert turn.live_chips is True and turn.tools is agent.CHECKIN_TOOLS
         assert turn.checkin_id is not None and turn.limits == agent.Limits.checkin()
@@ -239,13 +244,13 @@ class TestRunning:
             await _drain()
             return out
 
-        assert run(go()) == {"started": 0, "waiting": 1, "closed": 0}
+        assert _counts(run(go())) == (0, 1, 0)
         assert AiAsk.get_by_id(ask.id).state == "pending" and calls == []
         # The ask's lost claim left no row and handed back its reservation
         assert AiCheckin.select().where(AiCheckin.kind == "ask").count() == 0
         assert AiSpend.select().where(AiSpend.cost_micros > 0).count() == 0
         run(checkins._settle(busy, "done", None, None, 0, _now()))
-        assert run(go())["started"] == 1 and len(calls) == 1
+        assert len(run(go())["started"]) == 1 and len(calls) == 1
 
     def test_a_check_in_that_died_with_its_process_is_failed_and_the_ask_runs(self, mine, monkeypatch):
         # A restart mid-turn leaves a check-in running; with check-ins off nothing else sweeps it
@@ -261,7 +266,9 @@ class TestRunning:
             await _drain()
             return out
 
-        assert run(go()) == {"started": 1, "waiting": 0, "closed": 0}
+        out = run(go())
+        assert _counts(out) == (1, 0, 0) and out["stale"] == 1
+        assert out["started"][0]["ask_id"] == ask.id and out["started"][0]["team_id"] == team.team_id
         assert (AiCheckin.get_by_id(dead).state, AiCheckin.get_by_id(dead).reason) == ("failed", "stale")
         assert AiAsk.get_by_id(ask.id).state == "started" and len(calls) == 1
 
@@ -276,8 +283,8 @@ class TestRunning:
             await _drain()
             return out
 
-        assert run(go()) == {"started": 1, "waiting": 1, "closed": 0}
-        assert run(go()) == {"started": 1, "waiting": 0, "closed": 0}
+        assert _counts(run(go())) == (1, 1, 0)
+        assert _counts(run(go())) == (1, 0, 0)
 
     def test_late_not_allowed_or_over_budget_closes_it_instead(self, mine, on, monkeypatch):
         me, team, chat = mine
@@ -311,7 +318,7 @@ class TestRunning:
         me, team, chat = mine
         _ask(me, team, chat, _now() - timedelta(minutes=1))
         on.setattr(settings, "autopilot_enabled", False)
-        assert run(asks.run_due()) == {"started": 0, "waiting": 0, "closed": 0}
+        assert run(asks.run_due())["off"] is True
 
 
 class TestViews:

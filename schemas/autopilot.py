@@ -1,9 +1,11 @@
 """
 The check-ins' jobs: POST /v1/internal/jobs/checkins/run, one tick of Dime's
 schedule, called by data-platform's dime_checkins pipeline every fifteen minutes
-(services/ai/checkins.py); and POST /v1/internal/jobs/checkins/events, what came
+(services/ai/checkins.py); POST /v1/internal/jobs/checkins/events, what came
 in about players (a verdict change, a news item), posted by data-platform's
-availability and news pipelines (services/ai/events.py). The check-ins they
+availability and news pipelines (services/ai/events.py); and POST
+/v1/internal/jobs/asks/run, the asks that fell due, called by data-platform's
+dime_asks pipeline every minute (services/ai/asks.py). The check-ins they
 start run on in the backend; the response says what started, not how it went.
 """
 
@@ -35,6 +37,24 @@ class CheckinRunData(ApiModel):
 
 class CheckinRunResp(BaseResponse):
     data: Optional[CheckinRunData] = None
+
+
+class AskStarted(ApiModel):
+    ask_id: int
+    team_id: int
+    checkin_id: int
+
+
+class AskRunData(ApiModel):
+    off: bool                                    # AI_ENABLED or AUTOPILOT_ENABLED is off: nothing ran
+    started: list[AskStarted]                    # due asks whose check-in started
+    waiting: int                                 # due, but their team has a check-in running: the next look
+    closed: int                                  # due and closed instead: missed (an hour late) or skipped
+    stale: int                                   # running check-ins whose process died, closed as failed
+
+
+class AskRunResp(BaseResponse):
+    data: Optional[AskRunData] = None
 
 
 class VerdictChangeIn(ApiModel):
