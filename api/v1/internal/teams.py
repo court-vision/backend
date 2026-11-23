@@ -8,8 +8,10 @@ from schemas.team_insights import TeamInsightsResp
 from schemas.common import ApiStatus, FantasyProvider
 from schemas.league import LeagueGetResp, LeagueSyncResp
 from schemas.league_projection import LeagueProjectionResp
+from schemas.team_overview import TeamsOverviewResp
 from services.league_service import LeagueService
 from services.league_projection_service import league_projection
+from services import team_overview_service
 from api.deps import UserContext, OwnedTeamContext, get_db_user, get_owned_team, load_owned_league_info
 from core.responses import respond
 
@@ -20,6 +22,16 @@ router = APIRouter(prefix="/teams", tags=["team management"])
 @router.get('/', response_model=TeamGetResp)
 async def get_teams(user: UserContext = Depends(get_db_user)):
     return respond(await TeamService.get_teams(user.user_id))
+
+@router.get('/overview', response_model=TeamsOverviewResp)
+async def get_teams_overview(user: UserContext = Depends(get_db_user)):
+    """Every team of the account at a glance: each one's state (needs you, your call, set,
+    autopilot, can't read) with the day's actions behind it, tonight's lineup, the matchup and
+    its week, the season line, and what is scheduled next. One team that can't be read never
+    fails the others. Never writes."""
+    data = await team_overview_service.overview(user.user_id)
+    return respond(TeamsOverviewResp(status=ApiStatus.SUCCESS, message=f"{len(data.teams)} team(s)", data=data))
+
 
 @router.post('/add', response_model=TeamAddResp)
 async def add_team(team_add_req: TeamAddReq, user: UserContext = Depends(get_db_user)):
