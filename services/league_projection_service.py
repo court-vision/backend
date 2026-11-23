@@ -21,7 +21,7 @@ from datetime import date
 from typing import Any, Mapping, Optional
 
 from core.compute import run_cpu
-from core.errors import BadRequestError
+from core.errors import BadRequestError, ServiceUnavailableError
 from core.logging import get_logger
 from core.settings import settings
 from db.base import run_db
@@ -33,7 +33,8 @@ from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("league_projection")
 
-SEEDING = {"H2H_RECORD": "record", "TOTAL_POINTS_SCORED": "points_for"}
+# ESPN's `playoffSeedingRule` is the tiebreaker between equal records, not the seeding
+TIEBREAKERS = {"H2H_RECORD": "head_to_head", "TOTAL_POINTS_SCORED": "points_for"}
 
 
 class LeagueProjectionUnavailable(BadRequestError):
@@ -72,15 +73,32 @@ def matchup_periods(payload: Mapping[str, Any]) -> dict[int, tuple[int, ...]]:
     return out
 
 
-def dated_calendar() -> tuple[lp.DatedWeek, ...]:
-    """The season's calendar weeks with their first day; empty without a calendar."""
+def dated_calendar() -> Optional[tuple[lp.DatedWeek, ...]]:
+    """The season's calendar weeks with their first day; None when the season has no
+    calendar file (which is not a season with no games left)."""
     try:
         return tuple(
             lp.DatedWeek.of(w["start_date"], week_from_calendar(w["matchup_number"], w["game_span"], w["games"]))
             for w in schedule_service.iter_weeks()
         )
     except FileNotFoundError:
-        return ()
+        return None
+
+
+def settled_scores(payload: Mapping[str, Any]) -> dict[int, float]:
+    """Each team's current-matchup score as ESPN settled it overnight (`totalPoints`,
+    through yesterday). `totalPointsLive` also counts today's games, which the
+    projection already counts from today on."""
+    current = _int((payload.get("status") or {}).get("currentMatchupPeriod"))
+    out: dict[int, float] = {}
+    for m in payload.get("schedule") or []:
+        if current is None or _int(m.get("matchupPeriodId")) != current:
+            continue
+        for side in (m.get("home") or {}, m.get("away") or {}):
+            tid, points = _int(side.get("teamId")), side.get("totalPoints")
+            if tid is not None and isinstance(points, (int, float)):
+                out[tid] = round(float(points), 1)
+    return out
 
 
 def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list, list, list]:
@@ -88,14 +106,22 @@ def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list,
     from services.lineup_read_service import parse_espn_lineup
 
     rows = league_overview.standings(payload, mine, categories=False)
+    current = _int((payload.get("status") or {}).get("currentMatchupPeriod"))
+    settled = settled_scores(payload)
     standings = [lp.Standing(
         league_team_id=r["league_team_id"], team_name=r["team_name"], rank=r["rank"],
         wins=r["wins"], losses=r["losses"], ties=r["ties"],
         points_for=r.get("points_for") or 0.0, points_against=r.get("points_against") or 0.0,
     ) for r in rows]
-    pairings = [lp.Pairing(matchup=g.matchup, home=g.home, away=g.away, home_score=g.home_score,
-                           away_score=g.away_score, winner=g.winner)
-                for g in league_overview.matchups(payload, categories=False) if g.home is not None]
+    pairings = []
+    for g in league_overview.matchups(payload, categories=False):
+        if g.home is None:
+            continue
+        home, away = g.home_score, g.away_score
+        if g.matchup == current:
+            home, away = settled.get(g.home, home), settled.get(g.away, away) if g.away is not None else away
+        pairings.append(lp.Pairing(matchup=g.matchup, home=g.home, away=g.away, home_score=home,
+                                   away_score=away, winner=g.winner))
     rosters = []
     for r in rows:
         parsed = parse_espn_lineup(dict(payload), team_name="", espn_team_id=r["league_team_id"])
@@ -144,7 +170,8 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
     return tuple(out), snapshot
 
 
-def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: Optional[int]) -> list[str]:
+def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: Optional[int],
+              divisions: int = 1) -> list[str]:
     notes = []
     gaps = [w for w in result["incomplete_weeks"]
             if any(w in m["weeks"] and m["status"] != "final" for m in result["matchups"])]
@@ -163,6 +190,9 @@ def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: O
                      f"{'is' if one else 'are'} valued off stored stats.")
     if mine is None:
         notes.append("Court Vision could not tell which team in this league is yours.")
+    if divisions > 1:
+        notes.append(f"This league has {divisions} divisions, and the odds treat it as one table, so a division "
+                     "winner's place in the playoffs isn't modeled.")
     if result["in_playoffs"]:
         notes.append("The playoffs have started: odds are no longer simulated.")
     return notes
@@ -197,12 +227,14 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     standings, pairings, entries = parse_inputs(payload, mine)
     rosters, snapshot = await run_db("league_projection.values", value_players, entries, league_info, today)
     weeks = await run_db("league_projection.calendar", dated_calendar)
+    if weeks is None:
+        raise ServiceUnavailableError("LEAGUE_PROJECTION_NO_CALENDAR",
+                                      "The season calendar isn't loaded, so the league can't be projected")
     league = lp.League(
         rosters=rosters, standings=tuple(standings), schedule=tuple(pairings),
         periods=matchup_periods(payload), current_matchup=current, regular_season_matchups=regular,
         playoff_teams=playoff_teams, roster_slots=roster_slots(payload),
-        seeded_by=SEEDING.get(str(sched.get("playoffSeedingRule")), "record"), mine=mine,
-        reseed=bool(sched.get("playoffReseed")),
+        mine=mine, reseed=bool(sched.get("playoffReseed")),
     )
     # the same runs for the same league on the same day, so a reload doesn't move the odds
     seed = zlib.crc32(f"{league_info.league_id}:{league_info.year}:{today.isoformat()}".encode())
@@ -217,8 +249,10 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
         "projection_as_of": snapshot.as_of.isoformat() if snapshot else None,
         "teams_count": len(rosters),
         "playoff_teams": playoff_teams,
-        "seeded_by": league.seeded_by,
+        "seed_tiebreaker": TIEBREAKERS.get(str(sched.get("playoffSeedingRule")),
+                                           str(sched.get("playoffSeedingRule") or "").lower() or None),
         "lineup_slots": {k: v for k, v in league.roster_slots.items() if k not in ("BE", "IR")},
         **result,
-        "notes": notes_for(result, snapshot.as_of if snapshot else None, mine),
+        "notes": notes_for(result, snapshot.as_of if snapshot else None, mine,
+                           divisions=len(sched.get("divisions") or []) or 1),
     }

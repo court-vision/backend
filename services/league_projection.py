@@ -19,8 +19,8 @@ the rest: the timeline already has them out until their return.
 
 **A week, a matchup.** Calendar weeks are the calendar's (`schedule_service`); a
 matchup period is the weeks ESPN maps it to (a two-week playoff round is two).
-The current matchup is the score so far plus the days left, today included, as the
-Week desk's own projection counts it.
+The current matchup is ESPN's settled score (through yesterday) plus the days left,
+today included, so a game played today is counted once, as projected.
 
 **Weeks the calendar can't count.** The NBA sets some games late (the NBA Cup's
 knockout window in December). A week with more empty days than its span explains
@@ -30,9 +30,12 @@ since every roster is undercounted there alike.
 **Playoff odds.** The remaining regular-season matchups are played `SIMULATIONS`
 times. Each roster's projection carries a season-long error (`TEAM_SD`) and each
 matchup its own noise, whose spread grows with the points still to score
-(`WEEK_SD` of a typical week for a typical week). The standings then seed the
-playoff field by the league's rule, and the bracket is played over the league's
-playoff matchups with the same noise. Seeds, playoff and title odds are counts over
+(`WEEK_SD` of a typical week for a typical week). The final records then seed the
+playoff field, ties broken by points for (a league that breaks ties head to head
+gets points for too: the runs don't track who beat whom), and the bracket is
+played over the league's playoff matchups with the same noise, re-paired by seed
+each round when the league reseeds. Divisions aren't modeled: the league is one
+table. Seeds, playoff and title odds are counts over
 the runs. The noise is not yet calibrated against this season's results; the
 constants are the prototype's.
 
@@ -146,7 +149,6 @@ class League:
     regular_season_matchups: int
     playoff_teams: int
     roster_slots: Mapping[str, int]         # ESPN slot name -> count, bench and IR included
-    seeded_by: str = "record"               # record | points_for
     mine: Optional[int] = None
     reseed: bool = False                    # survivors re-paired by seed after each round
 
@@ -303,7 +305,6 @@ def simulate(
     mean: Mapping[tuple[int, int], float],             # (team, matchup) -> points still to come
     playoff_matchups: Sequence[int],
     playoff_teams: int,
-    seeded_by: str,
     typical_week: float,
     runs: int = SIMULATIONS,
     seed: int = 0,
@@ -335,9 +336,8 @@ def simulate(
         pf[:, hi] += h
         pf[:, ai] += a
 
-    # seeds: by record then points for, or by points for alone
-    keys = (-pf,) if seeded_by == "points_for" else (-pf, -wins)
-    order = np.lexsort(keys, axis=1)                    # order[r, k] = team index seeded k+1
+    # seeds: by record, ties broken by points for
+    order = np.lexsort((-pf, -wins), axis=1)                    # order[r, k] = team index seeded k+1
     seeds = np.empty_like(order)
     np.put_along_axis(seeds, order, np.arange(n_teams)[None, :].repeat(runs, axis=0), axis=1)
 
@@ -448,7 +448,7 @@ def project(league: League, weeks: Sequence[DatedWeek], today: date, *, runs: in
     odds = None
     if not in_playoffs and team_ids:
         odds = simulate(team_ids, standings, games, base, mean, playoff_matchups,
-                        league.playoff_teams, league.seeded_by, typical, runs=runs, seed=seed,
+                        league.playoff_teams, typical, runs=runs, seed=seed,
                         reseed=league.reseed)
 
     # one row per matchup: the league's scores (final) or projections (to come)

@@ -41,7 +41,7 @@ def _benchmark(you):
 def _projection():
     return {
         "league_name": "Test", "format": "points", "today": "2026-11-23", "projection_as_of": "2026-11-23",
-        "teams_count": 10, "playoff_teams": 6, "seeded_by": "record", "lineup_slots": {"PG": 1, "UT": 3},
+        "teams_count": 10, "playoff_teams": 6, "seed_tiebreaker": "points_for", "lineup_slots": {"PG": 1, "UT": 3},
         "current_matchup": 6, "regular_season_matchups": 19, "playoff_matchups": [20, 21, 22],
         "playoff_weeks": [21, 22, 23], "incomplete_weeks": [7, 8], "typical_week": 1100.0,
         "simulations": 10000, "in_playoffs": False,

@@ -116,12 +116,12 @@ def standing(tid, w, l, pf, rank=None):
     return lp.Standing(tid, f"Team {tid}", rank or tid, w, l, 0, pf, 0.0)
 
 
-def four_team_sim(means, runs=4000, seeded_by="record", playoff_teams=2, standings=None):
+def four_team_sim(means, runs=4000, playoff_teams=2, standings=None):
     ids = [1, 2, 3, 4]
     st = standings or {t: standing(t, 2, 2, 400.0) for t in ids}
     games = [(5, 1, 2), (5, 3, 4), (6, 1, 3), (6, 2, 4)]
     mean = {(t, m): means[t] for t in ids for m in (5, 6, 7)}
-    return lp.simulate(ids, st, games, {}, mean, [7], playoff_teams, seeded_by, 100.0, runs=runs, seed=3)
+    return lp.simulate(ids, st, games, {}, mean, [7], playoff_teams, 100.0, runs=runs, seed=3)
 
 
 def test_the_simulation_s_odds_add_up_and_favour_the_stronger_roster():
@@ -149,18 +149,22 @@ def test_a_record_already_out_of_reach_decides_the_seed_whatever_the_roster():
     assert odds.playoffs[2] == 0.0
 
 
-def test_seeding_by_points_for_ignores_the_record():
-    st = {1: standing(1, 9, 0, 100.0), 2: standing(2, 0, 9, 5000.0), 3: standing(3, 5, 4, 800.0),
-          4: standing(4, 4, 5, 700.0)}
-    odds = four_team_sim({1: 100.0, 2: 100.0, 3: 100.0, 4: 100.0}, standings=st, seeded_by="points_for")
-    assert odds.seeds[2][0] == 1.0 and odds.playoffs[1] == 0.0
+def test_records_seed_the_field_and_points_for_breaks_a_tie():
+    ids = [1, 2, 3, 4]
+    st = {1: standing(1, 6, 3, 100.0), 2: standing(2, 6, 3, 5000.0), 3: standing(3, 9, 0, 50.0),
+          4: standing(4, 0, 9, 9000.0)}
+    mean = {(t, 7): 100.0 for t in ids}
+    odds = lp.simulate(ids, st, [], {}, mean, [7], 2, 100.0, runs=500, seed=3)
+    assert odds.seeds[3][0] == 1.0                     # the best record, whatever its points
+    assert odds.seeds[2][1] == 1.0                     # 6-3 like team 1, with more points for
+    assert odds.playoffs[1] == 0.0 and odds.playoffs[4] == 0.0
 
 
 def test_a_six_team_field_gives_the_top_two_seeds_a_bye():
     ids = [1, 2, 3, 4, 5, 6]
     st = {t: standing(t, 20 - t, t, 1000.0) for t in ids}          # seeds 1..6 locked in
     mean = {(t, m): 100.0 for t in ids for m in (20, 21, 22)}
-    odds = lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, "record", 100.0, runs=6000, seed=1)
+    odds = lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, 100.0, runs=6000, seed=1)
     assert all(odds.playoffs[t] == 1.0 for t in ids)
     # a bye is one game fewer to win: 1/4 against 1/8 for even rosters
     assert odds.title[1] == pytest.approx(0.25, abs=0.03)
@@ -175,7 +179,7 @@ def test_a_reseeding_league_sends_seed_1_against_the_lowest_seed_left():
     mean = {(t, m): strength[t] for t in ids for m in (20, 21, 22)}
 
     def title(reseed):
-        return lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, "record", 100.0, runs=6000, seed=2,
+        return lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, 100.0, runs=6000, seed=2,
                            reseed=reseed).title
 
     # fixed bracket: 1 meets the 4-5 winner and is in the final; 2 and 6 split the other side
@@ -262,7 +266,7 @@ def test_no_odds_once_the_playoffs_have_started():
 def test_the_result_fits_the_response_schema():
     out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=200, seed=5)
     LeagueProjectionData(league_name="L", format="points", today="2026-11-24", teams_count=4, playoff_teams=2,
-                         seeded_by="record", lineup_slots={"UT": 2}, notes=[], **out)
+                         seed_tiebreaker="points_for", lineup_slots={"UT": 2}, notes=[], **out)
 
 
 # ------------------------------- the service ------------------------------- #
@@ -296,6 +300,43 @@ def test_a_category_league_is_told_projections_are_points_only(monkeypatch):
     with pytest.raises(BadRequestError) as err:
         asyncio.run(lps.league_projection(_league_info(), today=MON))
     assert err.value.error_code == "LEAGUE_PROJECTION_POINTS_ONLY"
+
+
+def test_without_a_calendar_the_league_is_not_projected(monkeypatch):
+    from core.errors import ServiceUnavailableError
+    from services import schedule_service
+    from services.espn_service import EspnService
+
+    def no_calendar():
+        raise FileNotFoundError("matchupsPerDay")
+
+    monkeypatch.setattr(schedule_service, "iter_weeks", no_calendar)
+    assert lps.dated_calendar() is None                # not the same as a season with no weeks left
+
+    async def fetch(league_info, views):
+        return {"settings": {"scoringSettings": {"scoringType": "H2H_POINTS"}}, "teams": [], "status": {}}
+
+    async def direct(name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(EspnService, "fetch_league", staticmethod(fetch))
+    monkeypatch.setattr(EspnService, "resolve_team", staticmethod(lambda info, teams: None))
+    monkeypatch.setattr(lps, "run_db", direct)
+    monkeypatch.setattr(lps, "parse_inputs", lambda payload, mine: ([], [], []))
+    monkeypatch.setattr(lps, "value_players", lambda rosters, info, today: ((), None))
+    with pytest.raises(ServiceUnavailableError) as err:
+        asyncio.run(lps.league_projection(_league_info(), today=MON))
+    assert err.value.error_code == "LEAGUE_PROJECTION_NO_CALENDAR" and err.value.status_code == 503
+
+
+def test_the_current_matchup_starts_from_espn_s_settled_score_not_the_live_one():
+    payload = {"status": {"currentMatchupPeriod": 6}, "schedule": [
+        {"matchupPeriodId": 5, "home": {"teamId": 1, "totalPoints": 900.0}, "away": {"teamId": 2, "totalPoints": 800.0}},
+        {"matchupPeriodId": 6, "home": {"teamId": 1, "totalPoints": 412.34, "totalPointsLive": 470.0},
+         "away": {"teamId": 2, "totalPoints": 380.0, "totalPointsLive": 391.0}},
+    ]}
+    # the live total already counts today's games, which the projection counts from today on
+    assert lps.settled_scores(payload) == {1: 412.3, 2: 380.0}
 
 
 def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(monkeypatch):
@@ -353,3 +394,5 @@ def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
     assert notes[1] == "1 rostered player had no live projection and is valued off stored stats."
     assert lps.notes_for(result, None, mine=None)[1].startswith("No live projection this morning")
     assert lps.notes_for(result, None, mine=None)[-1].startswith("Court Vision could not tell")
+    assert lps.notes_for(result, MON, mine=1, divisions=2)[-1].startswith("This league has 2 divisions")
+    assert not any("division" in n for n in lps.notes_for(result, MON, mine=1))

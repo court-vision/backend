@@ -43,8 +43,8 @@ class TeamProjection(ApiModel):
 
 
 class MatchupBenchmark(Benchmark):
-    """One matchup across the league: scores when final, the score so far plus the days
-    left when current, projections when to come."""
+    """One matchup across the league: scores when final, ESPN's settled score (through
+    yesterday) plus the days left when current, projections when to come."""
     matchup: int
     weeks: list[int]
     start: Optional[str] = None
@@ -71,7 +71,7 @@ class LeagueProjectionData(ApiModel):
     projection_as_of: Optional[str] = None
     teams_count: int
     playoff_teams: int
-    seeded_by: str
+    seed_tiebreaker: Optional[str] = None         # how the league breaks equal records: head_to_head | points_for
     lineup_slots: dict[str, int]
     current_matchup: int
     regular_season_matchups: int
