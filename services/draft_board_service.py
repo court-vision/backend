@@ -137,6 +137,7 @@ from schemas.draft import (
     DraftBoardRow,
     DraftCongestionResp,
     DraftInSeasonResp,
+    DraftLiveRanksResp,
     DraftPlayoffsResp,
     DraftRecommendation,
     DraftRosterEntry,
@@ -156,7 +157,7 @@ from services.draft_congestion import (
     build_congestion_model,
     week_from_calendar,
 )
-from services import draft_in_season, live_projection
+from services import draft_in_season, draft_live, live_projection
 from services.draft_fit import FitModel, build_fit_model, draftable_tier_size
 from services.draft_market import market_auction_of, market_rank_of, rank_basis_for, rank_type_for
 from services.draft_service import (
@@ -357,6 +358,13 @@ class BoardInputs:
     # injury term is charged on top: the games already carry it. Empty on the
     # blend alone, and before opening night.
     live_games: dict[int, dict[int, float]] = field(default_factory=dict)
+    # What stands beside an in-season board (services.draft_live): the stored
+    # daily boards' moves and ESPN's rank that morning, and what the live
+    # projection recorded about each player it values, which the reason beside
+    # his rank is read from. None and empty before opening night, and the
+    # second also on the blend.
+    stored_ranks: Optional[draft_live.StoredRanks] = None
+    live_parts: dict[int, Mapping] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -369,6 +377,7 @@ class _SeasonReads:
     injuries: dict[int, str]                            # today's flags, board vocabulary
     calendar: tuple[draft_in_season.DatedWeek, ...]     # the whole season, dated
     live: Optional[live_projection.LiveSnapshot] = None  # the morning's projection, when fresh
+    ranks: Optional[draft_live.StoredRanks] = None      # the stored daily boards beside it
 
 
 @dataclass
@@ -457,7 +466,10 @@ class DraftBoardService:
                             calendar=calendar,
                             # Priced on the calendar's game days: without one, the blend
                             live=(live_projection.load(season, first_day, source=live_source)
-                                  if calendar else None))
+                                  if calendar else None),
+                            # The boards a user sees: the shadow ones are graded, never shown
+                            ranks=(draft_live.load(season, first_day)
+                                   if live_source == live_projection.SOURCE else None))
 
     @staticmethod
     def _fetch_inputs(my_ids: frozenset[int], session_id: Optional[int] = None,
@@ -664,6 +676,9 @@ class DraftBoardService:
             in_season=in_season, games_left=games_left,
             live_injury=live_injury, new_injury=new_injury,
             live_games=live.week_games if live is not None else {},
+            stored_ranks=reads.ranks if reads is not None else None,
+            live_parts=({pid: p.parts for pid, p in reads.live.players.items() if p.parts}
+                        if live is not None else {}),
         )
 
     @staticmethod
@@ -949,9 +964,33 @@ class DraftBoardService:
         league_size = DraftBoardService._league_size(scoring, session)
         horizon = DraftBoardService._availability_horizon(session)
 
+        # In season the stored daily boards stand beside this one (services.draft_live):
+        # each player's move on the standard board of this format, and ESPN's rank
+        # this morning, which takes the place of the preseason snapshot's.
+        stored = (inputs.stored_ranks.board(scoring.is_categories)
+                  if inputs.stored_ranks is not None else draft_live.BoardRanks())
+        espn_now = stored.espn if stored.espn_as_of is not None else None
+        today = inputs.in_season.games_from if inputs.in_season is not None else None
+        names = {pid: name for pid, (name, _espn_id) in inputs.names.items()} if inputs.live_parts else {}
+
+        def espn_rank(player_id: int, market: Mapping) -> Optional[int]:
+            if espn_now is None:
+                return market_rank_of(market, rank_type)
+            return espn_now[player_id].rank if player_id in espn_now else None
+
+        def espn_auction(player_id: int, market: Mapping) -> Optional[float]:
+            if espn_now is None:
+                return market_auction_of(market, rank_type)
+            return espn_now[player_id].value if player_id in espn_now else None
+
+        def espn_since(player_id: int) -> tuple[Optional[date], bool]:
+            now = espn_now.get(player_id) if espn_now is not None else None
+            return (now.since, now.since_first_stored) if now is not None else (None, False)
+
         # Whose board this is — decided before a row exists, because every row's
         # `board_rank` is that decision applied to one player.
-        has_market = any(market_rank_of(m, rank_type) is not None for m in inputs.market.values())
+        has_market = bool(espn_now) or any(
+            market_rank_of(m, rank_type) is not None for m in inputs.market.values())
         basis, basis_reason = rank_basis_for(
             scoring.league, session.espn_league_id, has_market, requested=session.board_source
         )
@@ -961,11 +1000,13 @@ class DraftBoardService:
         for cv_rank, entry in enumerate(entries, start=1):
             row, value = entry.row, entry.value
             market = inputs.market.get(row.id, {})
-            market_rank = market_rank_of(market, rank_type)
+            market_rank = espn_rank(row.id, market)
             blocked = cap_check(row.id)
             team = inputs.current_team.get(row.id) or row.team
             po = playoffs.teams.get(team) if (playoffs is not None and team) else None
             if row.id not in removed:
+                move_1d, move_7d = stored.moves.get(row.id, (None, None))
+                since, since_first = espn_since(row.id)
                 rows.append(DraftBoardRow(
                     player_id=row.id,
                     espn_id=row.espn_id,
@@ -991,8 +1032,16 @@ class DraftBoardService:
                     season_fpts_avg=(inputs.in_season.season_fpts.get(row.id) if inputs.in_season else None),
                     market_rank=market_rank,
                     adp=market.get("adp"),
-                    auction_value=market_auction_of(market, rank_type),
+                    auction_value=espn_auction(row.id, market),
                     market_delta=(market_rank - cv_rank) if market_rank is not None else None,
+                    move_1d=move_1d,
+                    move_7d=move_7d,
+                    rank_reason=(draft_live.reason_of(
+                        inputs.live_parts.get(row.id), today,
+                        moved=move_7d if move_7d is not None else move_1d, names=names,
+                    ) if today is not None else None),
+                    espn_rank_since=since,
+                    espn_rank_since_first_stored=since_first,
                     fit_value=fit_values.get(row.id),
                     fit_rank=fit_ranks.get(row.id),
                     availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
@@ -1034,9 +1083,10 @@ class DraftBoardService:
             if entry.id in removed:
                 continue
             market = inputs.market.get(entry.id, {})
-            market_rank = market_rank_of(market, rank_type)
+            market_rank = espn_rank(entry.id, market)
             team = inputs.current_team.get(entry.id)
             po = playoffs.teams.get(team) if (playoffs is not None and team) else None
+            since, since_first = espn_since(entry.id)
             rows.append(DraftBoardRow(
                 player_id=entry.id,
                 espn_id=entry.espn_id,
@@ -1059,8 +1109,10 @@ class DraftBoardService:
                 fpts_avg=None,
                 market_rank=market_rank,
                 adp=market.get("adp"),
-                auction_value=market_auction_of(market, rank_type),
+                auction_value=espn_auction(entry.id, market),
                 market_delta=None,
+                espn_rank_since=since,
+                espn_rank_since_first_stored=since_first,
                 fit_value=None,
                 fit_rank=None,
                 availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
@@ -1201,6 +1253,7 @@ class DraftBoardService:
                              if not scoring.is_categories and not inputs.game_rates else []),
                 projection_source=inputs.projection_source,
                 in_season=DraftBoardService._in_season_meta(inputs),
+                live_ranks=DraftBoardService._live_ranks_meta(inputs, scoring.is_categories),
             ),
         )
 
@@ -1373,6 +1426,20 @@ class DraftBoardService:
             season_only=found.season_only,
             injured=len(inputs.live_injury or {}),
             injured_since_projection=len(inputs.new_injury),
+        )
+
+    @staticmethod
+    def _live_ranks_meta(inputs: BoardInputs, categories: bool) -> Optional[DraftLiveRanksResp]:
+        """The stored boards the rows' moves and ESPN ranks were read from; None
+        before opening night and while nothing near enough is stored."""
+        found = inputs.stored_ranks
+        if found is None:
+            return None
+        board = found.board(categories)
+        return DraftLiveRanksResp(
+            board="categories" if categories else "points",
+            as_of=found.as_of, day=found.day, week=found.week,
+            espn_as_of=board.espn_as_of,
         )
 
     @staticmethod
