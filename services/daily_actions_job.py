@@ -34,7 +34,8 @@ team while ROSTER_WRITES_ENABLED is off.
 Every outcome comes back, never raised: applied (at least one write went;
 `ir_moves`, `adds`), noop (nothing of these kinds on the list), skipped (with why),
 rejected (ESPN refused the first write, so nothing went), failed (the board or the
-writer couldn't be reached first). Once a write has gone, a later refusal or outage
+writer couldn't be reached first, or a spot is open and the free-agent pool couldn't be
+read, so the next poll tries again). Once a write has gone, a later refusal or outage
 ends the pass as applied with `held` saying what didn't go.
 """
 
@@ -84,6 +85,11 @@ IR_KINDS = ("ir_in", "ir_out")
 MAX_WRITES = 4
 # What stops the pass once the first game has tipped: a move sent after it is next-day business
 TIPPED_HELD = "The first game tipped off, so nothing more was sent"
+# The list has no pickup because the free-agent pool couldn't be read this time (the free-agent
+# call failed, or it answered for another day), not because no free agent fits: a later poll can
+# read it. A pool scored another way than the board never fits, so it is no reason to retry.
+POOL_HELD = "The free-agent list couldn't be read, so an open spot stays open"
+POOL_FOR_GOOD = ("value_kind_mismatch",)
 
 
 def _now() -> datetime:
@@ -105,7 +111,8 @@ class Pending:
 @dataclass(frozen=True)
 class Step:
     """What the pass does next with the list it just read: `ir` (write these rows' moves), `add`
-    (pick up this row's free agent), `held` (a spot stays open: `why`) or `done`."""
+    (pick up this row's free agent), `held` (a spot stays open: `why`), `unread` (a spot is open and
+    free to fill, but the free-agent pool couldn't be read: `why`) or `done`."""
 
     kind: str
     rows: tuple[DailyAction, ...] = ()
@@ -134,9 +141,11 @@ def next_step(data: DailyActionsData, pending: Pending, *, adds_left: bool = Tru
     if ir:
         return Step("ir", ir)
     add = next((a for a in data.actions if a.kind == "add" and a.transaction is not None), None)
-    if add is None:
-        return Step("done")
     state = data.lineup
+    unread = (add is None and state is not None and open_spots(state) > 0
+              and bool(data.streamers_error) and data.streamers_error not in POOL_FOR_GOOD)
+    if add is None and not unread:
+        return Step("done")
     if state is not None and pending.add_only and open_spots(state) <= len(pending.add_only):
         name, day = min(pending.add_only, key=lambda p: p[1])
         return Step("held", why=f"The open spot is kept for the pickup you scheduled: {name} on {_day(day)}")
@@ -144,6 +153,8 @@ def next_step(data: DailyActionsData, pending: Pending, *, adds_left: bool = Tru
         blocked = budget_block(state.acquisitions, date.fromisoformat(state.nba_date), pending=pending.days)
         if blocked is not None:
             return Step("held", why=f"An open spot stays open: {blocked}")
+    if unread:
+        return Step("unread", why=POOL_HELD)
     if not adds_left:
         return Step("held", why="An open spot stays open: the pass made as many moves as it makes in a day")
     return Step("add", (add,))
@@ -256,13 +267,17 @@ class DailyActionsJob:
         pending = await run_db("daily_actions_job.pending", _pending, req.team_id)
         slots = _roster_slots(team)
         held: Optional[str] = None
+        unread = False
         sent: set[str] = set()
         for writes in range(MAX_WRITES + 1):
             step = next_step(data, pending, adds_left=writes < MAX_WRITES)
             if step.kind == "done":
                 break
-            if step.kind == "held":
+            if step.kind in ("held", "unread"):
                 held = step.why
+                unread = step.kind == "unread"
+                if unread:
+                    log.warning("daily_actions_pool_unread", team_id=req.team_id, error=data.streamers_error)
                 break
             if writes >= MAX_WRITES:
                 break
@@ -318,5 +333,8 @@ class DailyActionsJob:
                 break
 
         if not ir_moves and not adds:
+            if unread:
+                # Nothing went and a spot is open: the next poll reads the pool again (a noop would settle the day)
+                return done("failed", reason="pool_unread", held=held)
             return done("noop", held=held)
         return done("applied", held=held)

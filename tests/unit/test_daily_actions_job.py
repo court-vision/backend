@@ -341,6 +341,42 @@ def test_an_unreadable_board_is_a_failure_the_next_poll_retries(h):
     assert (out.outcome, out.reason) == ("failed", "read_failed")
 
 
+def unread(data, error="ESPN timed out"):
+    return data.model_copy(update={"streamers_error": error})
+
+
+@pytest.mark.unit
+def test_an_unread_free_agent_pool_with_a_spot_open_is_a_failure_the_next_poll_retries(h):
+    # The pool's fetch failed, so the list has no pickup: that's no reason to settle the day as noop
+    h.reads = [unread(listing(FULL[:3], []))]
+    out = run()
+    assert (out.outcome, out.reason, out.held) == ("failed", "pool_unread", job.POOL_HELD)
+    assert h.txn_writes == [] and out.open_spots == 1
+
+
+@pytest.mark.unit
+def test_an_unread_pool_after_an_ir_move_keeps_the_move_and_says_the_spot_stayed_open(h):
+    h.reads = [listing([*FULL[:3], player(4, BE, status="OUT")], [ir_in(4)]),
+               unread(listing([*FULL[:2], player(4, IR, status="OUT")], []))]
+    out = run()
+    assert out.outcome == "applied" and [m.player_id for m in out.ir_moves] == [4]
+    assert out.adds == [] and out.held == job.POOL_HELD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("players, pending, error", [
+    (FULL, job.Pending(), "ESPN timed out"),                                    # no spot open: nothing to pick
+    (FULL[:3], job.Pending(), "value_kind_mismatch"),                           # a pool that never fits
+    (FULL[:3], job.Pending(days=(date(2026, 11, 26),), add_only=(("Toumani Camara", date(2026, 11, 26)),)),
+     "ESPN timed out"),                                                         # the spot is kept anyway
+])
+def test_an_unread_pool_is_no_failure_when_no_pickup_could_go(h, players, pending, error):
+    h.pending = pending
+    h.reads = [unread(listing(players, []), error)]
+    out = run()
+    assert out.outcome == "noop" and h.txn_writes == []
+
+
 @pytest.mark.unit
 def test_next_step_puts_ir_before_the_pickup():
     data = listing(FULL[:3], [add(90), ir_in(3)])
