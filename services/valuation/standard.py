@@ -97,18 +97,16 @@ def _inputs(lines: Sequence[ProjectedLine], calendar: Sequence[SampleWeek]) -> B
     )
 
 
-def standard_ranks(
-    lines: Sequence[ProjectedLine],
-    calendar: Sequence[SampleWeek] = (),
-    playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT,
-) -> list[StandardRank]:
-    """Rank `lines` in the standard league, in points and in 9-cat.
+def rank_boards(
+    inputs: BoardInputs, playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT
+) -> tuple[dict[int, tuple[int, Valued]], dict[int, tuple[int, Valued]]]:
+    """`inputs`' pool on the standard league's two boards, points then 9-cat:
+    each a player id -> (rank, the valuation behind it).
 
-    One entry per line, in the order given. A duplicate player id keeps its
-    last line: the pool is keyed by player.
+    The one place the standard league is ranked: the editor's ranks
+    (`standard_ranks`) and the board stored every morning
+    (`services.valuation.daily`) both come through here.
     """
-    unique = list({p.player_id: p for p in lines}.values())
-    inputs = _inputs(unique, calendar)
     session = BoardSession(
         league_size=STANDARD_LEAGUE_SIZE, rounds=STANDARD_ROUNDS, playoff_weight=playoff_weight
     )
@@ -130,6 +128,21 @@ def standard_ranks(
             start=1,
         )
     }
+    return points, categories
+
+
+def standard_ranks(
+    lines: Sequence[ProjectedLine],
+    calendar: Sequence[SampleWeek] = (),
+    playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT,
+) -> list[StandardRank]:
+    """Rank `lines` in the standard league, in points and in 9-cat.
+
+    One entry per line, in the order given. A duplicate player id keeps its
+    last line: the pool is keyed by player.
+    """
+    unique = list({p.player_id: p for p in lines}.values())
+    points, categories = rank_boards(_inputs(unique, calendar), playoff_weight)
 
     out: list[StandardRank] = []
     for p in lines:

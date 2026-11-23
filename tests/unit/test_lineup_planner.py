@@ -15,11 +15,18 @@ import pytest
 from services.lineup_planner import (
     BENCH_SLOT_ID,
     IR_SLOT_ID,
+    TIER_A,
+    TIER_A2,
+    TIER_B,
+    TIER_C,
     Move,
     PlannerPlayer,
     apply_moves,
+    ir_first,
     plan_fill,
     plan_ir,
+    plan_reaction,
+    plays_today,
     validate_moves,
 )
 
@@ -33,11 +40,12 @@ WING = frozenset({SF, PF, F, UT, BE})
 BIG = frozenset({C, PF, F, UT, BE})
 
 
-def player(pid, slot, eligible=GUARD, *, game=True, status=None, locked=False, value=10.0, name=None):
+def player(pid, slot, eligible=GUARD, *, game=True, status=None, locked=False, value=10.0, name=None,
+           previous=None):
     return PlannerPlayer(
         player_id=pid, name=name or f"P{pid}", slot_id=slot, eligible_slot_ids=frozenset(eligible),
         has_game=game, injury_status=status, locked=locked, value=value,
-        game_note="vs LAL · 7:30 PM" if game else None,
+        game_note="vs LAL · 7:30 PM" if game else None, previous_status=previous,
     )
 
 
@@ -208,6 +216,187 @@ def test_no_game_bench_player_never_moves_even_into_an_empty_slot():
     roster = [p for p in full_lineup({11: player(11, BE, game=False), 12: player(12, BE, WING, game=False),
                                         13: player(13, BE, BIG, game=False)}) if p.player_id != 6]
     assert plan_fill(roster, SLOT_COUNTS).is_noop
+
+
+# ---- the doubtful tier (A2) ---------------------------------------------------------------
+
+NO_GAME_BENCH = {11: player(11, BE, game=False), 12: player(12, BE, WING, game=False),
+                 13: player(13, BE, BIG, game=False)}
+
+
+@pytest.mark.unit
+def test_doubtful_starter_yields_to_a_healthy_bench_player():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                          13: player(13, BE, BIG)})
+    plan = plan_fill(roster, SLOT_COUNTS)
+    assert moves_of(plan) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+    assert plan.moves[1].note == "DOUBTFUL"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["OUT", "DOUBTFUL", "SUSPENSION"])
+def test_never_benched_just_for_being_out_or_doubtful(status):
+    """The invariant: with no better-tier bench player that has a game, he stays."""
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status=status)})
+    assert plan_fill(roster, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_doubtful_bench_player_does_not_displace_a_doubtful_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                          13: player(13, BE, BIG, status="DOUBTFUL", value=99.0)})
+    assert plan_fill(roster, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_doubtful_bench_player_replaces_an_out_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="OUT"),
+                          13: player(13, BE, BIG, status="DOUBTFUL")})
+    plan = plan_fill(roster, SLOT_COUNTS)
+    assert moves_of(plan) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_doubtful_bench_player_replaces_a_no_game_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, game=False),
+                          13: player(13, BE, BIG, status="DOUBTFUL")})
+    plan = plan_fill(roster, SLOT_COUNTS)
+    assert moves_of(plan) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_out_bench_player_does_not_displace_a_doubtful_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                          13: player(13, BE, BIG, status="OUT", value=99.0)})
+    assert plan_fill(roster, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_healthy_bench_player_is_preferred_over_a_doubtful_one_for_one_hole():
+    roster = full_lineup({**NO_GAME_BENCH, 8: player(8, UT, game=False),
+                          11: player(11, BE, status="DOUBTFUL", value=50.0), 12: player(12, BE, WING, value=1.0)})
+    plan = plan_fill(roster, SLOT_COUNTS)
+    assert moves_of(plan) == [(12, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_upgraded_doubtful_starter_is_healthy_tier_and_stays():
+    """DOUBTFUL after OUT is trending toward playing: tier A, never displaced."""
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL", previous="OUT"),
+                          13: player(13, BE, BIG, value=99.0)})
+    assert plan_fill(roster, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_upgraded_doubtful_bench_player_displaces_a_doubtful_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                          13: player(13, BE, BIG, status="DOUBTFUL", previous="out")})
+    plan = plan_fill(roster, SLOT_COUNTS)
+    assert moves_of(plan) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("previous", [None, "QUESTIONABLE", "DOUBTFUL", "ACTIVE"])
+def test_doubtful_without_an_out_before_it_is_a2(previous):
+    p = player(5, C, BIG, status="DOUBTFUL", previous=previous)
+    assert p.tier == TIER_A2 and not p.playable
+
+
+# ---- plan_reaction: the late-scratch pass ------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_starter_ruled_out_sits_for_the_best_healthy_bench_player():
+    roster = full_lineup({5: player(5, C, BIG, status="OUT"), 11: player(11, BE, game=False),
+                          12: player(12, BE, WING, game=False), 13: player(13, BE, BIG)})
+    plan = plan_reaction(roster, SLOT_COUNTS, 5)
+    assert moves_of(plan) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_a_reaction_reaches_the_slot_through_a_chain():
+    roster = full_lineup({5: player(5, C, BIG, status="OUT"), 12: player(12, BE, WING, game=False),
+                          13: player(13, BE, BIG, game=False)})
+    plan = plan_reaction(roster, SLOT_COUNTS, 5)
+    assert moves_of(plan) == [(11, BE, UT, "start"), (10, UT, C, "shift"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_a_reaction_leaves_the_rest_of_the_board_alone():
+    """An idle UT starter the user left there is the morning pass's, not the scratch's."""
+    roster = full_lineup({5: player(5, C, BIG, status="OUT"), 8: player(8, UT, game=False),
+                          11: player(11, BE, value=30.0), 12: player(12, BE, WING, game=False),
+                          13: player(13, BE, BIG, value=20.0)})
+    assert len(plan_fill(roster, SLOT_COUNTS).moves) == 4
+    plan = plan_reaction(roster, SLOT_COUNTS, 5)
+    assert moves_of(plan) == [(11, BE, UT, "start"), (10, UT, C, "shift"), (5, C, BE, "bench")]
+    assert all(m.player_id != 8 for m in plan.moves)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["OUT", "DOUBTFUL"])
+def test_a_scratch_with_no_better_bench_player_is_no_reaction(status):
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status=status)})
+    assert plan_reaction(roster, SLOT_COUNTS, 5).is_noop
+
+
+@pytest.mark.unit
+def test_a_doubtful_starter_sits_only_for_a_healthy_player_not_an_out_one():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                          13: player(13, BE, BIG, status="OUT", value=99.0)})
+    assert plan_reaction(roster, SLOT_COUNTS, 5).is_noop
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"), 13: player(13, BE, BIG)})
+    assert moves_of(plan_reaction(roster, SLOT_COUNTS, 5)) == [(13, BE, C, "start"), (5, C, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_doubtful_after_out_is_no_reaction():
+    roster = full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL", previous="OUT"),
+                          13: player(13, BE, BIG, value=99.0)})
+    assert plan_reaction(roster, SLOT_COUNTS, 5).is_noop
+
+
+@pytest.mark.unit
+def test_a_bench_player_who_fills_an_open_slot_instead_is_no_reaction():
+    """The fill would put the healthy big in the empty UT and keep the doubtful center: nothing to react to."""
+    roster = [p for p in full_lineup({**NO_GAME_BENCH, 5: player(5, C, BIG, status="DOUBTFUL"),
+                                      13: player(13, BE, BIG)}) if p.player_id != 10]
+    assert [m.player_id for m in plan_fill(roster, SLOT_COUNTS).moves] == [13]
+    assert plan_reaction(roster, SLOT_COUNTS, 5).is_noop
+
+
+@pytest.mark.unit
+def test_a_bench_player_now_available_starts_over_a_worse_starter():
+    roster = full_lineup({**NO_GAME_BENCH, 8: player(8, UT, game=False), 11: player(11, BE, value=40.0),
+                          9: player(9, UT, WING, status="OUT")})
+    plan = plan_reaction(roster, SLOT_COUNTS, 11)
+    assert moves_of(plan) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_an_available_bench_player_the_fill_would_not_start_is_no_reaction():
+    roster = full_lineup({11: player(11, BE, value=99.0)})
+    assert plan_reaction(roster, SLOT_COUNTS, 11).is_noop
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pid,overrides", [
+    (5, {5: player(5, C, BIG, status="OUT", locked=True), 13: player(13, BE, BIG)}),   # locked
+    (99, {13: player(13, BE, BIG)}),                                                      # not on the roster
+])
+def test_a_locked_or_missing_trigger_is_no_reaction(pid, overrides):
+    roster = full_lineup({11: player(11, BE, game=False), 12: player(12, BE, WING, game=False), **overrides})
+    assert plan_reaction(roster, SLOT_COUNTS, pid).is_noop
+
+
+@pytest.mark.unit
+def test_tiers():
+    assert player(1, PG).tier == TIER_A
+    assert player(1, PG, status="QUESTIONABLE").tier == TIER_A
+    assert player(1, PG, status="doubtful", previous="OUT").tier == TIER_A
+    assert player(1, PG, status="DOUBTFUL").tier == TIER_A2
+    assert player(1, PG, status="OUT").tier == TIER_B
+    assert player(1, PG, status="DOUBTFUL", game=False).tier == TIER_C
 
 
 # ---- validate_moves / apply_moves ---------------------------------------------------------
@@ -388,7 +577,8 @@ def test_locked_players_never_move_on_or_off_ir():
 @pytest.mark.unit
 def test_ir_eligibility_is_espns_injury_rule_not_the_status_alone():
     assert plan_ir(full_lineup({5: player(5, C, IR_BIG, status="SUSPENSION")}), SLOT_COUNTS) == ()
-    flagged = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    # Flagged injured with no game today: ESPN lets him on IR whatever the status word says
+    flagged = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, False, "DAY_TO_DAY", False, 10.0, injured=True)})
     assert ir_of(plan_ir(flagged, SLOT_COUNTS)) == [("ir_in", 5, (C, IR), None)]
     assert plan_ir(full_lineup({5: player(5, C, BIG, status="OUT")}), SLOT_COUNTS) == ()   # 13 not listed
 
@@ -397,3 +587,65 @@ def test_ir_eligibility_is_espns_injury_rule_not_the_status_alone():
 def test_an_ir_out_does_not_free_the_seat_for_an_ir_in_in_the_same_pass():
     roster = without(full_lineup({5: player(5, C, IR_BIG, status="OUT")}), 13) + [player(14, IR, IR_GUARD)]
     assert ir_of(plan_ir(roster, SLOT_COUNTS)) == [("ir_out", 14, (IR, BE), None)]
+
+
+# ---- IR wins over a start ------------------------------------------------------------
+# An OUT bench player with a game is tier B, so the fill would start him over a starter with no
+# game; when IR has an open seat he goes there instead, and only with IR full does the fill start him.
+
+
+def out_on_bench():
+    """P11 is OUT with a game tonight, on the bench; P8 (UT) and the rest of the bench have no game; IR is open."""
+    return full_lineup({11: player(11, BE, IR_GUARD, status="OUT", value=30.0), 8: player(8, UT, game=False),
+                        12: player(12, BE, WING, game=False), 13: player(13, BE, BIG, game=False)})
+
+
+@pytest.mark.unit
+def test_an_out_bench_player_with_an_open_ir_seat_goes_to_ir_and_the_fill_does_not_start_him():
+    roster = out_on_bench()
+    assert moves_of(plan_fill(roster, SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]   # alone, it would
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 11, (BE, IR), None)]
+    board = ir_first(roster, ir)
+    assert {p.player_id: p.slot_id for p in board}[11] == IR
+    assert plan_fill(board, SLOT_COUNTS).is_noop
+
+
+@pytest.mark.unit
+def test_with_ir_full_the_out_bench_player_starts_over_one_without_a_game():
+    roster = out_on_bench() + [player(14, IR, IR_GUARD, status="OUT")]
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir == ()
+    assert moves_of(plan_fill(ir_first(roster, ir), SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_one_open_seat_and_two_out_bench_players_the_other_one_starts():
+    roster = full_lineup({11: player(11, BE, IR_GUARD, status="OUT", value=30.0),
+                          12: player(12, BE, IR_GUARD | WING, status="OUT", value=5.0),
+                          13: player(13, BE, BIG, game=False), 8: player(8, UT, game=False)})
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 12, (BE, IR), None)]      # the lower value takes the seat
+    assert moves_of(plan_fill(ir_first(roster, ir), SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_an_out_starter_headed_to_ir_stays_on_the_fill_s_board_so_his_replacement_still_starts():
+    roster = full_lineup({8: player(8, UT, IR_GUARD, status="OUT")})
+    ir = plan_ir(roster, SLOT_COUNTS)
+    assert ir_of(ir) == [("ir_in", 8, (UT, IR), None)]
+    assert ir_first(roster, ir) == roster
+    assert moves_of(plan_fill(roster, SLOT_COUNTS)) == [(11, BE, UT, "start"), (8, UT, BE, "bench")]
+
+
+@pytest.mark.unit
+def test_a_player_expected_to_play_today_stays_off_ir():
+    # Day-to-day with a game tonight: the fill counts on him, so no IR move
+    dtd = full_lineup({5: PlannerPlayer(5, "P5", C, IR_BIG, True, "DAY_TO_DAY", False, 10.0, injured=True)})
+    assert 5 in plays_today(dtd) and plan_ir(dtd, SLOT_COUNTS) == ()
+    # ESPN still says OUT, but the fill's board (our verdict) has him playing: he starts, no IR move
+    roster = out_on_bench()
+    cleared = [p if p.player_id != 11 else player(11, BE, IR_GUARD, status="ACTIVE", value=30.0) for p in roster]
+    assert plan_ir(roster, SLOT_COUNTS, playing=plays_today(cleared)) == ()
+    # Doubtful, or no game today, is someone who sits
+    assert plays_today([player(1, PG, status="DOUBTFUL"), player(2, SG, game=False)]) == frozenset()

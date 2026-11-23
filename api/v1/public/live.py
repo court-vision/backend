@@ -11,6 +11,7 @@ import pytz
 from fastapi import APIRouter, Request
 
 from core.errors import ProviderError, ProviderTimeout
+from core.live_age import live_age_ms
 from core.logging import get_logger
 from core.rate_limit import limiter, PUBLIC_RATE_LIMIT
 from db.models.nba.live_player_stats import LivePlayerStats
@@ -36,12 +37,13 @@ def get_live_players_today(request: Request) -> dict:
 
     Returns current box score stats for every player in an active or
     recently-completed game, ordered by fantasy points descending.
-    Updated every ~60 seconds by the live polling pipeline.
+    Written every 15 seconds by the live pipeline while games are on;
+    `live_age_ms` says how old its newest write is (core/live_age.py).
     """
     game_date = _get_nba_date()
     log.debug("live_players_request", game_date=str(game_date))
 
-    rows = (
+    rows = list(
         LivePlayerStats
         .select(LivePlayerStats, Player)
         .join(Player)
@@ -85,6 +87,7 @@ def get_live_players_today(request: Request) -> dict:
             "game_date": str(game_date),
             "player_count": len(players),
             "players": players,
+            "live_age_ms": live_age_ms(row.last_updated for row in rows),
         },
     }
 

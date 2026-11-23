@@ -73,6 +73,88 @@ def test_seasons_are_independent():
     assert [float(a.minutes) for a in ProjectionAdjustment.active_for(SEASON)] == [30.0]
 
 
+# ---- notes in season (migration 0052) -------------------------------------------------
+
+
+def _note(pid=1, **fields):
+    fields = {"kind": "injury_current", "return_date": date(2026, 12, 8), "review_date": date(2026, 11, 29),
+              "note": "re-evaluated in two weeks", "author": "t", **fields}
+    return ProjectionAdjustment.record(pid, SEASON, scope="season", **fields)
+
+
+def test_a_season_note_sits_beside_the_preseason_adjustment():
+    _player()
+    _player(2)
+    before = ProjectionAdjustment.record(1, SEASON, kind="year2", usage=1.05, note="second-year jump", author="t")
+    note = _note(return_earliest=date(2026, 12, 1), return_latest=date(2026, 12, 20), confidence="likely",
+                 minutes=24, until_date=date(2026, 12, 22), depends_on_player=2,
+                 evidence=[{"type": "news", "id": 7, "headline": "Out two weeks"}])
+
+    # Neither supersedes the other, and each reader gets its own
+    assert [a.id for a in ProjectionAdjustment.active_for(SEASON)] == [before.id]
+    assert [a.id for a in ProjectionAdjustment.active_for(SEASON, "season")] == [note.id]
+    assert ProjectionAdjustment.get_by_id(before.id).superseded_by_id is None
+    stored = ProjectionAdjustment.get_by_id(note.id)
+    assert (stored.scope, stored.until_date, stored.depends_on_player_id) == ("season", date(2026, 12, 22), 2)
+    assert (stored.return_earliest, stored.return_latest, stored.confidence) == (
+        date(2026, 12, 1), date(2026, 12, 20), "likely")
+    assert stored.evidence == [{"type": "news", "id": 7, "headline": "Out two weeks"}]
+    assert before.scope == "preseason" and before.review_date is None
+
+
+def test_a_new_season_note_supersedes_the_note_and_leaves_the_adjustment():
+    _player()
+    before = ProjectionAdjustment.record(1, SEASON, kind="role", minutes=30, note="starter", author="t")
+    first = _note()
+    second = _note(return_date=date(2026, 12, 15))
+
+    assert ProjectionAdjustment.get_by_id(first.id).superseded_by_id == second.id
+    assert [a.id for a in ProjectionAdjustment.active_for(SEASON, "season")] == [second.id]
+    assert [a.id for a in ProjectionAdjustment.active_for(SEASON)] == [before.id]
+    # Retiring is by scope too
+    assert ProjectionAdjustment.retire(1, SEASON, "season") == 1
+    assert ProjectionAdjustment.active_for(SEASON, "season") == []
+    assert [a.id for a in ProjectionAdjustment.active_for(SEASON)] == [before.id]
+
+
+def test_a_second_live_season_note_is_refused():
+    _player()
+    _note()
+    with pytest.raises(IntegrityError), db.atomic():
+        ProjectionAdjustment.insert(player=1, season=SEASON, scope="season", kind="role", minutes=30,
+                                    review_date=date(2026, 12, 1), note="y", author="t").execute()
+
+
+@pytest.mark.parametrize("fields", [
+    dict(scope="season", kind="role", minutes=30),                                       # no day to read it again
+    dict(scope="season", kind="role", rates={"blk": 1.1}, review_date=date(2026, 12, 1)),
+    dict(scope="preseason", kind="role", minutes=30, until_date=date(2026, 12, 1)),
+    dict(scope="preseason", kind="role", minutes=30, review_date=date(2026, 12, 1)),
+    dict(scope="other", kind="role", minutes=30),
+    dict(scope="season", kind="role", minutes=30, review_date=date(2026, 12, 1), confidence="certain"),
+    dict(scope="season", kind="role", minutes=30, review_date=date(2026, 12, 1), depends_on_player=1),   # on himself
+    # A range is around a date
+    dict(scope="season", kind="injury_current", minutes=20, review_date=date(2026, 12, 1),
+         return_earliest=date(2026, 12, 1)),
+    dict(scope="season", kind="injury_current", return_date=date(2026, 12, 8), review_date=date(2026, 12, 1),
+         return_earliest=date(2026, 12, 9)),
+    dict(scope="season", kind="injury_current", return_date=date(2026, 12, 8), review_date=date(2026, 12, 1),
+         return_latest=date(2026, 12, 7)),
+])
+def test_constraints_refuse_bad_season_notes(fields):
+    _player()
+    with pytest.raises(IntegrityError), db.atomic():
+        ProjectionAdjustment.insert(player=1, season=SEASON, note="x", author="t", **fields).execute()
+
+
+def test_a_note_outlives_the_teammate_it_depended_on():
+    _player()
+    _player(2)
+    note = _note(kind="role", return_date=None, minutes=32, depends_on_player=2)
+    Player.delete().where(Player.id == 2).execute()
+    assert ProjectionAdjustment.get_by_id(note.id).depends_on_player_id is None
+
+
 def test_player_history_holds_players_outside_nba_players():
     PlayerHistory.create(player_id=2544, season="2012-13", player_name="LeBron James", gp=76, min=2877.0,
                          pts=2036, age=28.0, from_year=2003)

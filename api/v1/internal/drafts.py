@@ -52,6 +52,7 @@ from services.draft_import_service import DraftImportService
 from services.draft_mock_service import DraftMockService
 from services.draft_recap_service import DraftRecapService
 from services.draft_service import DraftService
+from services.draft_adoption_service import DraftAdoptionService
 from services.draft_sync_service import DraftSyncService
 from services.scoring.resolver import resolve_scoring_for_room
 
@@ -167,7 +168,11 @@ async def get_draft_board(
     description=(
         "Creates a draft room. With a `team_id`, everything the provider already told us is "
         "prefilled from that team's synced league: draft type, pick order, rounds (the league's "
-        "draftable roster size) and the keeper allowance. Omit `team_id` for generic settings.\n\n"
+        "draftable roster spots, starters plus bench) and the keeper allowance. Omit `team_id` for "
+        "generic settings: a snake of 13 rounds.\n\n"
+        "A `live` room without a `team_id` is `league_pending`: for a league joined minutes before "
+        "its draft. It opens on the generic settings and, when the Draft Tap connects, links to "
+        "that ESPN draft, syncs the league and adds your team there (`sync/init`).\n\n"
         "`kind` says where the picks come from. `live` follows the team's own ESPN draft and is "
         "linked to it at once — one active live room per league, so a second is refused with the "
         "first's id. `mock` follows an ESPN mock lobby and links to the first one it reconciles "
@@ -410,7 +415,12 @@ async def remove_draft_pick(
         "it records every pick the room has made, at that pick's ESPN number, skipping the ones "
         "already recorded and reporting (never overwriting) any that disagree.\n\n"
         "Idempotent by design: the room's tab posts this on every connect, so a reconnect re-posts "
-        "the whole snapshot and only the newly-made picks are inserted."
+        "the whole snapshot and only the newly-made picks are inserted.\n\n"
+        "A `league_pending` room (a live room started without a team) links to the ESPN draft "
+        "this INIT came from and then adopts its league: the league's settings are synced and "
+        "your team in it is added to your account, as the add-team flow would, and the room takes "
+        "the league's scoring and roster. `league_adopted` reports it; when ESPN cannot be read "
+        "`league_adoption_error` says why and the next connect tries again."
     ),
     responses={
         200: {"description": "Reconciled — see `inserted`, `skipped`, `conflicts`, `warnings`"},
@@ -422,7 +432,9 @@ async def remove_draft_pick(
 async def sync_draft_init(
     req: DraftInitSyncRequest, session: OwnedDraftSessionContext = Depends(get_owned_session)
 ):
-    return respond(await DraftSyncService.sync_init(session.session_id, req))
+    resp = await DraftSyncService.sync_init(session.session_id, req)
+    # A league-pending room (live, no team) adopts the league it just linked to.
+    return respond(await DraftAdoptionService.adopt_after_init(session.session_id, session.user_id, resp))
 
 
 @router.post(

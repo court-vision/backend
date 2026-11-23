@@ -18,10 +18,9 @@ from services.providers.blocking import run_blocking_provider
 from db.models.teams import Team
 from db.models.nba.games import Game
 from db.models.notifications import NotificationPreference, NotificationLog, NotificationTeamPreference
-from services import credential_service
+from services import credential_service, steering
 from services.lineup_check_service import LineupCheckService
-from services.lineup_editor_service import move_results, planner_players, slot_counts_of, unfilled_results
-from services.lineup_planner import plan_fill
+from services.lineup_editor_service import move_results, unfilled_results
 from services.lineup_read_service import LineupReadService  # noqa: F401
 from services.providers import get_provider_adapter, unavailable_message
 from services.notification_service import NotificationService
@@ -39,6 +38,7 @@ from schemas.notifications import (
     LineupCheckResp,
     LineupCheckResponse,
 )
+from services.espn_team_match import find_espn_team
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
@@ -48,12 +48,11 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 lineup_checker = LineupCheckService()
 
 
-def _parse_espn_roster_with_slots(data: dict, team_name: str) -> list[dict] | None:
+def _parse_espn_roster_with_slots(
+    data: dict, team_name: str, espn_team_id: int | None = None, swid: str | None = None
+) -> list[dict] | None:
     """Pure parser for the notification-specific roster representation."""
-    target = next(
-        (team for team in data.get("teams", []) if team.get("name", "").strip() == team_name.strip()),
-        None,
-    )
+    target = find_espn_team(data.get("teams", []), team_name=team_name, espn_team_id=espn_team_id, swid=swid)
     if target is None:
         return None
     roster = []
@@ -84,7 +83,9 @@ async def _fetch_espn_roster_with_slots(league_info: dict) -> list[dict] | None:
         cookies={"espn_s2": league_info.get("espn_s2", ""), "SWID": league_info.get("swid", "")},
         expect_key="teams",
     )
-    return _parse_espn_roster_with_slots(data, league_info.get("team_name", ""))
+    return _parse_espn_roster_with_slots(
+        data, league_info.get("team_name", ""), league_info.get("espn_team_id"), league_info.get("swid")
+    )
 
 
 def _lineup_check_context(user_id: int, team_id: int) -> dict | None:
@@ -129,6 +130,7 @@ def get_preferences(user: UserContext = Depends(get_db_user)):
             alert_injured_active=prefs.alert_injured_active,
             alert_minutes_before=prefs.alert_minutes_before,
             auto_lineup_enabled=prefs.auto_lineup_enabled,
+            late_scratch_level=prefs.late_scratch_level,
             email=prefs.email,
         )
     else:
@@ -164,6 +166,8 @@ def update_preferences(
         prefs.alert_injured_active = req.alert_injured_active
         prefs.alert_minutes_before = req.alert_minutes_before
         prefs.auto_lineup_enabled = req.auto_lineup_enabled
+        if req.late_scratch_level is not None:
+            prefs.late_scratch_level = req.late_scratch_level
         prefs.email = req.email
         prefs.save()
     else:
@@ -175,6 +179,7 @@ def update_preferences(
             alert_injured_active=req.alert_injured_active,
             alert_minutes_before=req.alert_minutes_before,
             auto_lineup_enabled=req.auto_lineup_enabled,
+            late_scratch_level=req.late_scratch_level or "off",
             email=req.email,
         )
 
@@ -185,6 +190,7 @@ def update_preferences(
         alert_injured_active=prefs.alert_injured_active,
         alert_minutes_before=prefs.alert_minutes_before,
         auto_lineup_enabled=prefs.auto_lineup_enabled,
+        late_scratch_level=prefs.late_scratch_level,
         email=prefs.email,
     )
 
@@ -216,6 +222,7 @@ def get_team_preferences(user: UserContext = Depends(get_db_user)):
             alert_injured_active=row.alert_injured_active,
             alert_minutes_before=row.alert_minutes_before,
             auto_lineup_enabled=row.auto_lineup_enabled,
+            late_scratch_level=row.late_scratch_level,
             email=row.email,
         )
         for row in rows
@@ -283,6 +290,7 @@ def upsert_team_preference(
         alert_injured_active=row.alert_injured_active,
         alert_minutes_before=row.alert_minutes_before,
         auto_lineup_enabled=row.auto_lineup_enabled,
+        late_scratch_level=row.late_scratch_level,
         email=row.email,
     )
 
@@ -425,7 +433,7 @@ async def send_test_alert(
 
     state = await adapter.read_lineup(team.team_id, league_info,
                                       fallback_slot_counts=dict(getattr(team.league, "roster_slots", None) or {}))
-    plan = plan_fill(planner_players(state), slot_counts_of(state))
+    plan = await steering.team_fill(team.team_id, state)
     moves = [m.model_dump() for m in move_results(list(plan.moves), state)]
     unfilled = [u.model_dump() for u in unfilled_results(plan)]
     first_game_time = _dt.strptime(state.first_game_time_et, "%H:%M").time() if state.first_game_time_et else None

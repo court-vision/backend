@@ -2,16 +2,17 @@
 Today's lineup as ESPN sees it — slots, eligibility, per-game locks — and the
 moves that change it.
 
-Three consumers share these shapes: the `/teams/{id}/lineup` read behind the
+Four consumers share these shapes: the `/teams/{id}/lineup` read behind the
 manual editor, the manual `POST .../lineup/moves` write, and the
 pipeline-token `POST /jobs/lineup/evaluate` route the data-platform alerts
-pipeline calls for every opted-in team. Slot ids are ESPN's
+pipeline calls for every opted-in team, and `POST /jobs/lineup/react`, its
+late-scratch swap after a verdict change. Slot ids are ESPN's
 (`utils.espn_helpers.POSITION_MAP`): 0-11 active, 12 bench, 13 IR.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal, Optional
 
 from pydantic import Field
@@ -70,11 +71,13 @@ class LineupPlayer(ApiModel):
 
 class AcquisitionState(ApiModel):
     """ESPN's limits on adds and what this team has used: `settings.acquisitionSettings`
-    (mSettings) and the team's `transactionCounter` (mTeam). A day's own adds (what a
-    per-day limit counts) are not in the counter: `services.acquisitions.adds_for_day`."""
+    (mSettings) and the team's `transactionCounter` (mTeam). Either kind of limit is a matchup
+    total the team may use on any day: `per` says how ESPN sets it (`services.acquisitions`)."""
 
-    per: Literal["matchup", "day"]               # what `limit` counts over
-    limit: Optional[int] = None                  # adds per matchup (or per day); None = no limit
+    per: Literal["matchup", "game_day"]          # a number per matchup, or per day of it with games
+    limit: Optional[int] = None                  # adds this matchup; None = no limit, or not known yet
+    per_game_day: Optional[int] = None           # "game_day": adds for each of the matchup's days with games
+    game_days: Optional[int] = None              # "game_day": the matchup's days with games, once known
     matchup_period_id: Optional[int] = None      # ESPN's current matchup
     matchup_start: Optional[date] = None         # its first and last days
     matchup_end: Optional[date] = None
@@ -133,6 +136,10 @@ class ApplyLineupMovesReq(ApiModel):
     # later than today edits that day (ESPN's FUTURE_ROSTER).
     expected_scoring_period_id: int = Field(gt=0)
     roster_version: str = Field(min_length=1, max_length=64)
+    # The AI desk's lineup chip these moves send (usr.ai_proposals.id): checked before the write to
+    # be every move the chip still needs on this board (each player to the slot it names, from
+    # wherever the board has him) on the same day, marked sent after it. Omitted for the Week desk's own.
+    proposal_id: Optional[int] = Field(default=None, gt=0)
 
 
 class LineupMoveResult(ApiModel):
@@ -209,3 +216,51 @@ class LineupEvaluationData(ApiModel):
 
 class LineupEvaluationResp(BaseResponse):
     data: Optional[LineupEvaluationData] = None
+
+
+# ------------------------------- The late-scratch swap ------------------------------- #
+
+ReactionVerdict = Literal["out", "doubtful", "available"]
+
+
+class LineupReactReq(ApiModel):
+    """One verdict change from data-platform's availability pipeline, for a game that
+    has not tipped (the news plan's late-scratch pass). Posted once per change."""
+
+    player_id: int = Field(gt=0)                 # NBA player id
+    game_date: date
+    verdict: ReactionVerdict
+    previous_verdict: Optional[str] = Field(default=None, max_length=12)
+    reason: Optional[str] = Field(default=None, max_length=100)    # "Left Ankle; Sprain"
+    source: Optional[str] = Field(default=None, max_length=16)     # the source that decided it (decided_by)
+    changed_at: Optional[datetime] = None
+
+
+class LineupReactTeam(ApiModel):
+    """What the change did to one team: the outcomes are evaluate's (`applied`,
+    `planned` at notify or when writes are off, `noop` when no move answers it,
+    `skipped` with why, `rejected` / `failed` when ESPN or the writer said no).
+    `level` is the team's Late scratches level (notify or act)."""
+
+    team_id: int
+    user_id: int
+    level: Literal["notify", "act"] = "act"
+    outcome: EvaluationOutcome
+    reason: Optional[str] = None
+    player_name: Optional[str] = None
+    moves: list[LineupMoveResult] = []
+    verified: Optional[bool] = None
+    nba_date: Optional[str] = None
+    first_game_time_et: Optional[str] = None
+    team_name: str = ""
+    audit_id: Optional[int] = None
+
+
+class LineupReactData(ApiModel):
+    player_id: int
+    verdict: ReactionVerdict
+    teams: list[LineupReactTeam] = []            # every team at notify or act, rostering him or not
+
+
+class LineupReactResp(BaseResponse):
+    data: Optional[LineupReactData] = None

@@ -170,10 +170,10 @@ class TestRosterWriteContracts:
 
     def test_transaction_request_and_data_shapes(self, schemas):
         req = schemas["RosterTransactionReq"]["properties"]
-        assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version"}
+        assert set(req) == {"add_player_id", "drop_player_id", "expected_scoring_period_id", "roster_version", "proposal_id"}
         assert set(schemas["RosterTransactionReq"]["required"]) == {"expected_scoring_period_id", "roster_version"}
         data = schemas["RosterTransactionData"]["properties"]
-        assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id"}
+        assert set(data) == {"lineup", "added", "dropped", "verified", "audit_id", "scoring_period_id", "counts_from"}
         assert data["lineup"]["$ref"].endswith("/LineupState")
         assert set(schemas["StreamerPlayerResp"]["properties"]) >= {"acquisition_status", "waivers_until"}
         assert set(schemas["StreamerData"]["properties"]) >= {"start_date", "end_date", "upcoming"}
@@ -197,7 +197,13 @@ class TestDailyActionsContract:
         assert row["moves"]["items"]["$ref"].endswith("/LineupMoveResult")
         assert schemas["DailyActionTransaction"]["properties"]["pickup"]["$ref"].endswith("/StreamerPlayerResp")
 
-    def test_kinds_are_the_five_the_widget_renders(self, schemas):
+    def test_kinds_are_the_six_the_widget_renders(self, schemas):
         kind = schemas["DailyAction"]["properties"]["kind"]
         enum = kind.get("enum") or schemas[kind["$ref"].rsplit("/", 1)[-1]]["enum"]
-        assert enum == ["start", "ir_in", "ir_out", "add", "add_drop"]
+        assert enum == ["start", "scratch", "ir_in", "ir_out", "add", "add_drop"]
+
+    def test_the_team_availability_route_declares_its_verdicts(self, paths, schemas):
+        schema = _response_schema(paths, "/v1/internal/teams/{team_id}/availability", "get")
+        assert schema is not None and schema.get("$ref", "").endswith("/TeamAvailabilityResp"), schema
+        assert set(schemas["Verdict"]["properties"]) >= {"nba_player_id", "game_date", "verdict", "decided_by",
+                                                        "reason", "changed_at"}

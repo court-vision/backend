@@ -94,7 +94,14 @@ LAL_HOME = SimpleNamespace(home_team_id="LAL", away_team_id="BOS", start_time_et
 @pytest.fixture
 def harness(monkeypatch):
     h = SimpleNamespace(board=None, pool=NO_POOL, find_calls=[], games=[], game_days={},
-                        sample={}, projected={}, evidence_calls=[], evidence_error=None)
+                        sample={}, projected={}, evidence_calls=[], evidence_error=None,
+                        verdicts=[], verdicts_error=None, verdict_calls=[])
+
+    async def fake_today(nba_ids, game_date):
+        h.verdict_calls.append((sorted(nba_ids), game_date))
+        if h.verdicts_error is not None:
+            raise h.verdicts_error
+        return list(h.verdicts)
 
     async def fake_read(team_id, league_info, **kwargs):
         if isinstance(h.board, Exception):
@@ -122,6 +129,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(svc, "run_db", direct_run_db)
     monkeypatch.setattr(svc, "_games_on", lambda nba_date: h.games)
     monkeypatch.setattr(svc, "_drop_evidence", fake_evidence)
+    monkeypatch.setattr(svc.AvailabilityService, "today", staticmethod(fake_today))
     monkeypatch.setattr(svc.schedule_service, "get_remaining_game_days",
                         lambda team, current_date=None: h.game_days.get(team, []))
     return h
@@ -201,6 +209,54 @@ def test_unfilled_bench_players_are_reported_beside_the_rows(harness):
     assert [(u.player_id, u.reason) for u in resp.data.unfilled] == [(11, "slot_holder_locked"), (12, "slot_holder_locked")]
 
 
+# ---- our verdicts: a starter ruled out before ESPN says so ----------------------------------
+
+
+def ruled(pid, verdict="out", *, reason="Left Ankle; Sprain", by="espn_injuries", day="2026-10-20"):
+    from schemas.availability import Verdict
+    return Verdict(nba_player_id=pid * 10, game_date=day, verdict=verdict, decided_by=by, reason=reason,
+                   previous_verdict="questionable")
+
+
+@pytest.mark.unit
+def test_a_starter_our_verdict_rules_out_is_a_scratch_row_first(harness):
+    harness.board = state(full_board())                       # ESPN lists everyone healthy
+    harness.verdicts = [ruled(8)]
+    resp = read()
+
+    assert rows(resp) == [("scratch", 11, 8)]
+    row = resp.data.actions[0]
+    assert (row.id, row.title) == ("scratch:11", "P8 ruled out: start P11")
+    assert row.detail == "vs LAL · 7:30 PM · UT · Left Ankle; Sprain, per ESPN's injury list"
+    assert [(m.player_id, m.role) for m in row.moves] == [(11, "start"), (8, "bench")]
+    assert harness.verdict_calls == [([10, 20, 50, 80, 110, 120, 140], date(2026, 10, 20))]
+
+
+@pytest.mark.unit
+def test_doubtful_is_a_scratch_too_and_a_scratch_leads_the_ir_rows(harness):
+    harness.board = state([p for p in full_board({5: player(5, "P5", C, eligible=(C, UT, BE, IR), status="OUT")})
+                           if p.player_id != 14])
+    harness.verdicts = [ruled(8, "doubtful", reason=None, by="nba_report")]
+    resp = read()
+    assert rows(resp) == [("scratch", 11, 8), ("ir_in", 5, None)]
+    assert resp.data.actions[0].detail == "vs LAL · 7:30 PM · UT · per the NBA injury report"
+
+
+@pytest.mark.unit
+def test_ir_stays_on_espns_status_and_other_verdicts_or_days_change_nothing(harness):
+    # Ruled out by us at C with no bench player for C: no swap, and no IR move ESPN would refuse
+    harness.board = state([p for p in full_board() if p.player_id != 14])
+    harness.verdicts = [ruled(5), ruled(1, "questionable"), ruled(2, day="2026-10-21")]
+    assert rows(read()) == []
+
+
+@pytest.mark.unit
+def test_verdicts_that_cant_be_read_leave_espns_rows(harness):
+    harness.board = state(full_board({8: player(8, "P8", UT, game=False)}))
+    harness.verdicts_error = RuntimeError("db down")
+    assert rows(read()) == [("start", 11, 8)]
+
+
 # ---- IR rows ---------------------------------------------------------------------------
 
 
@@ -227,6 +283,37 @@ def test_a_healthy_ir_player_gets_an_ir_out_row_or_a_blocked_one(harness):
     row = resp.data.actions[0]
     assert (row.kind, row.blocked_reason, row.moves) == ("ir_out", "roster_full", [])
     assert row.detail == svc.ROSTER_FULL_DETAIL
+
+
+def out_bench_player(*, ir_full):
+    """P11 is OUT with a game tonight, on the bench, and fits SG, where P2 has no game today: the
+    fill alone would start him, and IR is open unless `ir_full`."""
+    board = full_board({2: player(2, "P2", SG, game=False), 11: player(11, "P11", BE, status="OUT"),
+                        12: player(12, "P12", BE, game=False)})
+    return state(board if ir_full else [p for p in board if p.player_id != 14])
+
+
+@pytest.mark.unit
+def test_an_out_bench_player_goes_to_ir_and_is_not_also_started_while_ir_has_a_seat(harness):
+    harness.board = out_bench_player(ir_full=False)
+    resp = read()
+    assert rows(resp) == [("ir_in", 11, None)]
+    assert resp.data.actions[0].detail == "OUT · frees BE" and resp.data.unfilled == []
+
+
+@pytest.mark.unit
+def test_with_ir_full_the_out_bench_player_starts_over_one_without_a_game(harness):
+    harness.board = out_bench_player(ir_full=True)
+    resp = read()
+    assert rows(resp) == [("start", 11, 2)]
+    assert resp.data.actions[0].detail == "vs LAL · 7:30 PM · SG over P2 (no game today)"
+
+
+@pytest.mark.unit
+def test_a_player_our_verdict_clears_starts_instead_of_going_to_ir(harness):
+    harness.board = out_bench_player(ir_full=False)            # ESPN still says OUT
+    harness.verdicts = [ruled(11, "available", reason=None, by="nba_report")]
+    assert rows(read()) == [("start", 11, 2)]
 
 
 # ---- the daily swap ---------------------------------------------------------------------------
@@ -378,6 +465,17 @@ def test_two_games_are_too_few_to_call_a_player_the_weakest(harness):
     assert rows(read()) == [("add_drop", 99, 11)]
 
 
+@pytest.mark.unit
+def test_the_days_swap_never_suggests_dropping_a_protected_player(harness, protect):
+    harness.board = state(full_board({11: player(11, "P11", BE, game=False, value=8.0),
+                                      12: player(12, "P12", BE, game=False, value=18.0)}))
+    harness.pool = pool(pick(99, "Kawhi", value=30.0))
+    assert rows(read()) == [("add_drop", 99, 11)]
+    protect({21: [11]})
+    assert rows(read()) == [("add_drop", 99, 12)]
+    assert 11 not in harness.evidence_calls[-1]            # nor weighed as one
+
+
 # ---- suggest_transaction (pure) ---------------------------------------------------------------------------
 
 
@@ -404,6 +502,17 @@ def test_a_drop_candidate_is_worth_his_average_only_on_a_real_sample(value, sour
     p = player(11, "P11", BE, game=False, value=value, source=source)
     ev = evidence({11: games} if games is not None else {}, {11: projected} if projected is not None else {})
     assert svc.drop_value(p, ev) == (svc.DropValue(*expected) if expected else None)
+
+
+@pytest.mark.unit
+def test_weigh_drop_is_the_rule_by_id_value_and_source():
+    """The what-if projection's drop choice weighs roster players through the same rule, keyed by
+    whatever id its evidence is keyed by."""
+    ev = evidence({11: 1}, {11: 35.0})
+    assert svc.weigh_drop(11, 6.0, "rolling", ev) == svc.DropValue(35.0, True)
+    assert svc.weigh_drop(11, 6.0, "baseline", ev) == svc.DropValue(6.0, False)
+    assert svc.weigh_drop(12, 0.0, None, ev) is None
+    assert svc.weigh_drop(12, 9.0, "provider", None) == svc.DropValue(9.0, False)
 
 
 @pytest.mark.unit
@@ -441,6 +550,14 @@ def test_locked_ir_and_ir_eligible_players_are_never_the_drop():
     assert suggest(players, [pick(99, value=50.0)]) is None
     players[3] = player(8, "P8", UT, game=False, value=3.0)
     assert suggest(players, [pick(99, value=50.0)]).drop.player_id == 8
+
+
+@pytest.mark.unit
+def test_a_protected_player_is_never_the_drop():
+    """The roster lock: the swap takes the next weakest, or none when he was the only one."""
+    players = full_board({11: player(11, "P11", BE, game=False, value=25.0), 12: player(12, "P12", BE, game=False, value=9.0)})
+    assert suggest(players, [pick(99, value=40.0)], protected={12}).drop.player_id == 11
+    assert suggest(players, [pick(99, value=40.0)], protected={11, 12}) is None
 
 
 @pytest.mark.unit

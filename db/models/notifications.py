@@ -39,8 +39,13 @@ class NotificationPreference(BaseModel):
     alert_active_non_playing = BooleanField(default=True)
     alert_injured_active = BooleanField(default=True)
     alert_minutes_before = IntegerField(default=90)
-    # Auto-set my lineup: apply the fill plan before tip-off instead of only emailing it
+    # Auto-set my lineup: apply the fill plan before tip-off instead of only emailing it.
+    # Since migration 0049 the Account desk sets this and late_scratch_level per team only
+    # (each team's override); the account's stay at their defaults (off), which is where a
+    # team without its own value, a team added later, starts.
     auto_lineup_enabled = BooleanField(default=False)
+    # Late scratches below AI (migration 0047): off | notify (email the swap) | act (make it)
+    late_scratch_level = CharField(max_length=8, default="off")
     email = CharField(max_length=255, null=True)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
@@ -118,6 +123,7 @@ class NotificationTeamPreference(BaseModel):
     alert_injured_active = BooleanField(null=True, default=None)
     alert_minutes_before = IntegerField(null=True, default=None)
     auto_lineup_enabled = BooleanField(null=True, default=None)
+    late_scratch_level = CharField(max_length=8, null=True, default=None)   # null = the account's
     email = CharField(max_length=255, null=True, default=None)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)

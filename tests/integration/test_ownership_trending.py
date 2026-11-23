@@ -78,3 +78,59 @@ class TestNewestSnapshotWinsAtEveryHour:
     def test_no_snapshots_is_a_clean_empty_response(self, integration_db):
         resp = asyncio.run(OwnershipService.get_trending(days=7))
         assert resp.data.trending_up == [] and resp.data.trending_down == []
+
+
+def _trending(days: int = 7):
+    with freeze_time("2026-03-05T12:00:00Z"):
+        resp = asyncio.run(OwnershipService.get_trending(days=days, min_change=0, min_ownership=0))
+    return {p.player_id: p for p in resp.data.trending_up + resp.data.trending_down}
+
+
+@pytest.mark.integration
+class TestAPlayerMissingFromTheBaselineIsNotZero:
+    """A partial baseline snapshot must not read a missing player as 0% owned.
+
+    The 2026-11-14 run matched 594 of ~620 players, and the 7-day Adds list
+    then showed Donovan Mitchell going 0% -> 99.9%.
+    """
+
+    @pytest.fixture
+    def partial_baseline(self, integration_db):
+        baseline = NIGHT - timedelta(days=7)
+        # Player 1 is in every snapshot: the baseline exists and is used.
+        _player(1)
+        _snapshot(1, baseline, 10.0)
+        _snapshot(1, NIGHT, 30.0)
+        # Player 2 is a star the baseline snapshot skipped; he was read the day before.
+        _player(2)
+        _snapshot(2, baseline - timedelta(days=1), 99.8)
+        _snapshot(2, NIGHT, 99.9)
+        # Player 3 has no reading at or before the baseline at all.
+        _player(3)
+        _snapshot(3, NIGHT - timedelta(days=3), 40.0)
+        _snapshot(3, NIGHT, 45.0)
+        # Player 4's only earlier reading is older than the fill window.
+        _player(4)
+        _snapshot(4, baseline - timedelta(days=30), 5.0)
+        _snapshot(4, NIGHT, 60.0)
+        yield
+
+    def test_the_baseline_snapshot_still_wins(self, partial_baseline):
+        p = _trending()[1]
+        assert (p.previous_ownership, p.change) == (10.0, 20.0)
+
+    def test_a_skipped_player_uses_his_reading_from_the_day_before(self, partial_baseline):
+        p = _trending()[2]
+        assert p.previous_ownership == 99.8
+        assert p.change == 0.1
+
+    def test_no_reading_in_the_window_is_left_off_not_read_as_zero(self, partial_baseline):
+        players = _trending()
+        assert 3 not in players
+        assert 4 not in players
+
+    def test_no_baseline_snapshot_at_all_lists_nobody(self, integration_db):
+        _player(1)
+        _snapshot(1, NIGHT - timedelta(days=2), 10.0)
+        _snapshot(1, NIGHT, 30.0)
+        assert _trending(days=7) == {}

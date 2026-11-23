@@ -11,7 +11,7 @@ Timing. ESPN counts a transaction for the day it is made only before that day's
 first game: a swap sent after D-1's first tip-off leaves D-1's roster as it was
 (the player dropped plays out D-1) and takes effect for D. So the first attempt
 for day D is the first tip-off of D-1, TIP_MARGIN after it and checked again on
-the board it is sent from (the rollover into D-1, 02:00 ET, when D-1 has no
+the board it is sent from (the rollover into D-1, 3 AM ET, when D-1 has no
 games), and the add and the drop go out as one transaction. On that attempt
 today's locks are ESPN's business, not ours: the pre-checks skip them and
 an ESPN refusal other than a full roster or a position limit gets one more try
@@ -37,11 +37,10 @@ on it settles the row executed (and seats him), his absence settles it failed
 free slot, no connection) clears the mark, so that retry may send.
 
 Acquisition limits. Scheduling refuses, and an attempt skips, an add the league's limit
-certainly leaves no room for (`services.acquisitions.budget_block`): the season used up, a
-per-matchup limit used up for a day in the current matchup, or a per-day limit used up on
-the day itself. ESPN refusing an add as over the limit waits for the rollover into the day
-when that brings a fresh allowance (a per-day limit, or a day that opens a new matchup),
-and is skipped otherwise (`on_limit_refusal`).
+certainly leaves no room for (`services.acquisitions.budget_block`): the season used up, or
+the matchup's adds used up for a day in the current matchup (a per-game-day limit is a
+matchup total too). ESPN refusing an add as over the limit waits for the rollover into the
+day when that day opens a new matchup, and is skipped otherwise (`on_limit_refusal`).
 
 Stream lanes. Each run first makes the lane decisions that are due
 (`StreamLaneService.decide_due`); a decision that switches inserts a pickup with the lane's
@@ -65,7 +64,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 import pytz
@@ -90,7 +89,8 @@ from schemas.scheduled_pickup import (
     ScheduledPickupPlayer,
     ScheduledPickupResp,
 )
-from services.acquisitions import adds_for_day, budget_block, in_current_matchup, is_limit_refusal
+from services import roster_protection
+from services.acquisitions import budget_block, in_current_matchup, is_limit_refusal
 from services.daily_actions_service import has_open_seat
 from services.fantasy_writer_client import FantasyWriterUnavailable
 from services.lineup_editor_service import (
@@ -109,6 +109,7 @@ from services.lineup_read_service import LineupReadService
 from services.providers import get_provider_adapter, unavailable_message
 from services.providers.identity import nba_ids_by_espn_id
 from services.roster_transaction_service import RosterTransactionInvalid, RosterTransactionService, _moves_json
+from services.schedule_service import FANTASY_DAY_ROLLOVER_ET
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("scheduled_pickup")
@@ -118,7 +119,7 @@ DEFERRED = "deferred"
 IN_PROGRESS = "in_progress"         # a claimed row's reason while its attempt runs
 
 EASTERN = pytz.timezone("US/Eastern")
-ROLLOVER_ET = time(2, 0)            # the ESPN fantasy day starts here (schedule_service.get_nba_today)
+ROLLOVER_ET = FANTASY_DAY_ROLLOVER_ET   # 3 AM ET: the ESPN fantasy day starts here, as schedule_service.get_nba_today counts it
 RETRY = timedelta(minutes=10)
 TIP_MARGIN = timedelta(minutes=2)   # the day-before swap waits this long past the first tip, clear of ESPN's cutoff
 WAIVER_RETRY = timedelta(minutes=60)
@@ -188,8 +189,14 @@ def et_at(d: date, t: time) -> datetime:
 
 
 def rollover_at(d: date) -> datetime:
-    """When the ESPN fantasy day `d` begins (02:00 ET), as UTC."""
+    """When the ESPN fantasy day `d` begins (3 AM ET, `schedule_service.FANTASY_DAY_ROLLOVER_ET`), as UTC."""
     return et_at(d, ROLLOVER_ET)
+
+
+def _audit_source(row: Any) -> str:
+    """The usr.roster_moves source of the executor's writes for a pickup: 'autopilot' for one Dime
+    scheduled on its own (migration 0044), 'scheduled' for every other."""
+    return "autopilot" if getattr(row, "made_by_autopilot", False) else "scheduled"
 
 
 def _lease_from_now(now: datetime) -> datetime:
@@ -259,15 +266,21 @@ def on_refusal(reason: str, *, period: int, day: int, nba_date: date, seat_free:
         return Decision("settle", SKIPPED, "already_on_roster")
     if reason == "drop_not_on_roster":
         return Decision("add_only", reason="drop_missing") if seat_free else Decision("settle", SKIPPED, "drop_missing")
+    if reason == roster_protection.DROP_PROTECTED:
+        # The user protected him after scheduling (protecting cancels the pickup; this catches one
+        # claimed at that moment): never dropped, so an add only into an open seat, else nothing.
+        return (Decision("add_only", reason=roster_protection.DROP_PROTECTED) if seat_free
+                else Decision("settle", SKIPPED, roster_protection.DROP_PROTECTED))
     return Decision("settle", FAILED, reason)                       # nothing_to_do / same_player: not storable
 
 
 def on_limit_refusal(acq: Optional[AcquisitionState], *, period: int, day: int, nba_date: date) -> Decision:
     """ESPN refused the add for day `day` (on `nba_date`), attempted on ESPN day `period`, as over
     its acquisition limit. Before the day itself, the rollover into it brings a fresh allowance
-    when the limit is per day, or when the day opens a new matchup: wait for it. Otherwise
-    nothing frees up before the day's games: skipped."""
-    fresh = acq is not None and (acq.per == "day" or (acq.limit is not None and not in_current_matchup(acq, nba_date)))
+    when the day opens a new matchup: wait for it. Otherwise nothing frees up before the day's
+    games: skipped."""
+    has_matchup_limit = acq is not None and (acq.limit is not None or acq.per_game_day is not None)
+    fresh = has_matchup_limit and not in_current_matchup(acq, nba_date)
     if period < day and fresh:
         return Decision("defer", at=rollover_at(nba_date))
     return Decision("settle", SKIPPED, "acquisition_limit")
@@ -417,10 +430,10 @@ def _window_for(nba_date: date) -> AttemptWindow:
     return attempt_window(nba_date, first_tip=Game.get_earliest_game_time_on_date)
 
 
-def _lane_holder(team_id: int) -> Optional[int]:
-    """The player an active stream lane holds its spot with, whom no pickup may drop."""
-    from db.models.stream_lanes import active_lane_holder
-    return active_lane_holder(team_id)
+def _lane_holders(team_id: int) -> set[int]:
+    """The players active stream lanes hold their spots with, whom no pickup may drop."""
+    from db.models.stream_lanes import active_lane_holders
+    return active_lane_holders(team_id)
 
 
 def _lane_status(lane_id: int) -> Optional[str]:
@@ -477,7 +490,10 @@ class ScheduledPickupService:
     # ---- the user's routes ----
 
     @staticmethod
-    async def schedule(team, league_info: LeagueInfo, req: SchedulePickupReq) -> ScheduledPickupResp:
+    async def schedule(team, league_info: LeagueInfo, req: SchedulePickupReq, *,
+                       by_autopilot: bool = False) -> ScheduledPickupResp:
+        """`by_autopilot`: Dime schedules its own chip (services/ai/acting.py), through every check
+        made here; the pickup is marked so, and the executor's writes for it are source autopilot."""
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         adapter = get_provider_adapter(league_info.provider)
@@ -502,18 +518,24 @@ class ScheduledPickupService:
 
         add, drop = req.add_player_id, req.drop_player_id
         try:
-            holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                          for_future_day=True)
+            holder, pool_entry = await RosterTransactionService._validate(
+                league_info, state, add, drop, for_future_day=True,
+                protected=await roster_protection.ids(team.team_id) if drop is not None else frozenset())
         except RosterTransactionInvalid as exc:
             raise ScheduledPickupInvalid(message=exc.message, data=exc.data) from exc
         assert pool_entry is not None  # `add` is required, so _validate looked him up
-        if drop is not None and holder is not None and await run_db("pickup.lane_holder", _lane_holder,
-                                                                    team.team_id) == drop:
+        if drop is not None and holder is not None and drop in await run_db("pickup.lane_holder", _lane_holders,
+                                                                            team.team_id):
             raise _invalid("drop_is_lane_holder", f"{holder.name} holds the spot a stream lane is streaming — "
                                                   "stop the lane to drop them", drop)
         blocked = budget_block(state.acquisitions, nba_date)
         if blocked:
             raise _invalid("acquisition_limit", blocked)
+        if req.proposal_id is not None:
+            # An AI desk chip: the same move it shows, still proposed, before the pickup is stored
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.SCHEDULED,
+                                     add=add, drop=drop, scoring_period_id=day)
 
         window = await run_db("pickup.window", _window_for, nba_date)
         now = datetime.now(timezone.utc)
@@ -524,10 +546,14 @@ class ScheduledPickupService:
             drop_name=holder.name if holder else None, drop_team=holder.team if holder else None,
             scoring_period_id=day, nba_date=nba_date, not_before_at=window.not_before_at,
             deadline_at=window.deadline_at, status=PENDING, created_at=now, updated_at=now,
+            made_by_autopilot=by_autopilot,
         )
         log.info("scheduled_pickup_created", team_id=team.team_id, pickup_id=row.id, add=add, drop=drop,
                  day=day, nba_date=nba_date.isoformat(), rule=window.rule,
                  not_before_at=window.not_before_at.isoformat())
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, pickup_id=row.id)
         when = window.not_before_at.astimezone(EASTERN).strftime("%a %b %-d, %-I:%M %p ET")
         return ScheduledPickupResp(
             status=ApiStatus.SUCCESS,
@@ -550,7 +576,12 @@ class ScheduledPickupService:
         )
 
     @staticmethod
-    async def cancel(team, pickup_id: int) -> ScheduledPickupResp:
+    async def cancel(team, pickup_id: int, proposal_id: Optional[int] = None) -> ScheduledPickupResp:
+        chip = None
+        if proposal_id is not None:
+            # Dime's cancel_pickup chip: checked to be this very pickup before anything changes
+            from services.ai.steering import for_apply
+            chip = await for_apply(proposal_id, team.user_id, team.team_id, "cancel_pickup", pickup_id=pickup_id)
         found = await run_db("pickup.cancel", _cancel_pickup, team.team_id, pickup_id, datetime.now(timezone.utc))
         if found is None:
             raise NotFoundError("SCHEDULED_PICKUP_NOT_FOUND", "Scheduled pickup not found")
@@ -559,7 +590,10 @@ class ScheduledPickupService:
             raise ScheduledPickupInProgress(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
         if prior != PENDING:
             raise ScheduledPickupNotPending(data={"status": row.status, "pickup": to_schema(row).model_dump(mode="json")})
-        log.info("scheduled_pickup_cancelled", team_id=team.team_id, pickup_id=pickup_id)
+        log.info("scheduled_pickup_cancelled", team_id=team.team_id, pickup_id=pickup_id, proposal_id=proposal_id)
+        if chip is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(chip.id, pickup_id=pickup_id)
         return ScheduledPickupResp(status=ApiStatus.SUCCESS, message=f"Pickup of {row.add_name} cancelled",
                                    data=to_schema(row))
 
@@ -626,6 +660,16 @@ class ScheduledPickupService:
                              lane_status=lane_status)
                 return None
 
+        by_dime = bool(getattr(row, "made_by_autopilot", False)) and row.audit_id is None
+        if by_dime:
+            # Dime scheduled this itself: it goes only if Dime still acts on adds and drops here now
+            # (a pause, the automation it was committed under below AI, or a switch turned off since
+            # stops it). A user's pickup isn't asked.
+            from services.ai import acting
+            stop = await acting.pickup_block(row.team_id, row.user_id, row.id)
+            if stop is not None:
+                return await settle(row, now, SKIPPED, stop[0], detail=stop[1])
+
         try:
             league_info, slots = await run_db("pickup.job_team", _load_team_for_job, row.team_id, row.user_id)
         except NotFoundError:
@@ -691,22 +735,29 @@ class ScheduledPickupService:
         # dropped plays out today whatever his lock says, so locks are only checked on D itself.
         check_locks = period == day
 
-        # The league's add limit: skip what it certainly leaves no room for. A per-day limit needs
-        # the day's own adds; when they can't be read, ESPN refuses an over-limit add itself.
-        acq, day_adds = state.acquisitions, None
-        if acq is not None and acq.per == "day" and acq.limit is not None and state.espn_team_id is not None:
-            try:
-                day_adds = await adds_for_day(league_info, state.espn_team_id, day)
-            except Exception as exc:
-                log.warning("scheduled_pickup_day_adds_unavailable", pickup_id=row.id, team_id=row.team_id,
-                            error=str(exc))
-        blocked = budget_block(acq, nba_date, day_adds=day_adds)
+        # The league's add limit: skip what it certainly leaves no room for (ESPN's counter, read
+        # with this board, already has every add made before this one).
+        acq = state.acquisitions
+        blocked = budget_block(acq, nba_date)
         if blocked:
             return await settle(row, now, SKIPPED, "acquisition_limit", detail=blocked, team_name=team_name)
 
+        protected: frozenset[int] = frozenset()
+        if drop is not None:
+            try:
+                protected = await roster_protection.ids(row.team_id)
+            except Exception as exc:
+                # The drop may be protected: nothing is sent until that can be read
+                return await defer(row, now, "protections_unread", detail=str(exc)[:300], team_name=team_name)
+            if drop in protected and lane_id is not None:
+                # A lane's switch: protecting him stops the lane, and its add alone would leave the
+                # lane's spot to no one. Nothing is sent; the lane ends at its next decision.
+                return await settle(row, now, SKIPPED, roster_protection.DROP_PROTECTED,
+                                    detail=roster_protection.refusal_words(holder.name if holder else "That player"),
+                                    team_name=team_name)
         try:
             holder, pool_entry = await RosterTransactionService._validate(league_info, state, add, drop,
-                                                                          check_locks=check_locks)
+                                                                          check_locks=check_locks, protected=protected)
         except RosterTransactionInvalid as exc:
             decision = on_refusal(exc.data["reason"], period=period, day=day, nba_date=nba_date, seat_free=seat_free)
             if decision.action == "defer":
@@ -744,11 +795,18 @@ class ScheduledPickupService:
             fresh, verified, audit_id = await RosterTransactionService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=state,
                 add=add, drop=drop, moves=_moves_json(add, drop, names), fallback_slot_counts=slots,
-                source="scheduled", before_send=last_check, verify_scoring_period_id=day if period < day else None,
+                source=_audit_source(row), before_send=last_check,
+                verify_scoring_period_id=day if period < day else None,
             )
         except ClaimLost:
             log.warning("scheduled_pickup_claim_lost", pickup_id=row.id, team_id=row.team_id, step="send")
             return None
+        except RosterTransactionInvalid as exc:
+            # The check before ESPN (the roster lock): protected since this attempt's own check.
+            # Nothing was sent, so the in-flight mark the last check may have set comes off with it.
+            row.audit_id = None
+            return await settle(row, now, SKIPPED, exc.data.get("reason") or "refused", detail=exc.message,
+                                team_name=team_name)
         except RosterWriteRejected as exc:
             code = (exc.data or {}).get("espn_error_code")
             if code == ROSTER_FULL_CODE:
@@ -859,7 +917,7 @@ class ScheduledPickupService:
                 return Seated(note=f"seat:{errors[0].code}")
             _, verified, audit_id = await LineupEditorService._write(
                 user_id=row.user_id, team_id=row.team_id, league_info=league_info, state=board,
-                moves=moves, source="scheduled", fallback_slot_counts=slots,
+                moves=moves, source=_audit_source(row), fallback_slot_counts=slots,
             )
             log.info("scheduled_pickup_seated", pickup_id=row.id, team_id=row.team_id, slot=target,
                      day=day, future=board.future, verified=verified, audit_id=audit_id)

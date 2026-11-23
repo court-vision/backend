@@ -53,6 +53,9 @@ class EspnAccountTeam(ApiModel):
     scoring_type: Optional[str] = None
     # The Court Vision team already tracking this one, if any
     tracked_team_id: Optional[int] = None
+    # The Court Vision team tracking this one in an earlier season, when none
+    # tracks it in this one: adding this entry moves that team to this season
+    previous_season_team_id: Optional[int] = None
 
 
 class EspnConnectReq(BaseRequest):

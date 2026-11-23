@@ -27,6 +27,9 @@ class TeamAddResp(BaseResponse):
     data: Optional[TeamResponse] = None
     team_id: Optional[int] = None
     already_exists: bool = False
+    # The season the team was on when this add moved it to the requested one
+    # (the same team on ESPN, saved for an earlier season); None otherwise
+    moved_from_season: Optional[int] = None
 
 class TeamRemoveResp(BaseResponse):
     """Remove team response"""

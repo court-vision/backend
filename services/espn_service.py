@@ -7,6 +7,7 @@ import pytz
 from core.errors import BadRequestError
 from core.logging import get_logger
 from db.base import run_db
+from services.espn_team_match import find_espn_team
 from services.nba_id_resolver import nba_ids_by_espn_id
 from services.providers.http import provider_get
 from services.player_value_service import PlayerValueService, ValueResult
@@ -175,21 +176,40 @@ class EspnService:
         # Rejected cookies (403 PROVIDER_AUTH_EXPIRED), an unknown league (400 LEAGUE_NOT_FOUND) and an
         # ESPN outage (502/504) raise from provider_get; only "this team isn't in the league" is valid=False.
         data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
-        teams = [team['name'] for team in data['teams']]
-        if league_info.team_name in teams:
+        if EspnService.resolve_team(league_info, data['teams']) is not None:
             # league_payload is excluded from serialization; LeagueService reuses it for settings sync
             return ValidateLeagueResp(status=ApiStatus.SUCCESS, valid=True, message="Team found", league_payload=data)
+        teams = [team['name'] for team in data['teams']]
         return ValidateLeagueResp(
             status=ApiStatus.SUCCESS, valid=False, error_code="TEAM_NAME_NOT_IN_LEAGUE",
             message=f"Team '{league_info.team_name}' not found in league {league_info.league_id}; teams: {', '.join(teams)}",
         )
 
     @staticmethod
-    def get_roster(team_name, teams):
-        for team in teams:
-            if team_name.strip() == team['name']:
-                return team['roster']['entries']
-        return None
+    def resolve_team(league_info: LeagueInfo, teams: list[dict]) -> Optional[dict]:
+        """The user's team in `teams` (see find_espn_team), or None.
+
+        Brings `league_info` up to date with what ESPN calls the team now, so a
+        caller that persists it (add, update, the adapter's heal) stores the
+        id and the current name instead of a name the user has since changed.
+        """
+        team = find_espn_team(
+            teams,
+            team_name=league_info.team_name,
+            espn_team_id=league_info.espn_team_id,
+            swid=league_info.swid,
+        )
+        if team is not None:
+            if team.get('id') is not None:
+                league_info.espn_team_id = int(team['id'])
+            if (team.get('name') or '').strip():
+                league_info.team_name = team['name'].strip()
+        return team
+
+    @staticmethod
+    def get_roster(league_info: LeagueInfo, teams: list[dict]):
+        team = EspnService.resolve_team(league_info, teams)
+        return team['roster']['entries'] if team is not None else None
 
     @staticmethod
     def _cookies(league_info: LeagueInfo) -> dict:
@@ -320,7 +340,7 @@ class EspnService:
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
         data = await provider_get("espn", endpoint, params=params, cookies=EspnService._cookies(league_info), expect_key="teams")
 
-        roster = EspnService.get_roster(league_info.team_name, data['teams'])
+        roster = EspnService.get_roster(league_info, data['teams'])
         if roster is None:
             raise BadRequestError(
                 "TEAM_NAME_NOT_IN_LEAGUE",
@@ -336,23 +356,46 @@ class EspnService:
 
     @staticmethod
     async def get_free_agents(league_info: LeagueInfo, fa_count: int) -> TeamDataResp:
+        """The `fa_count` most-owned free agents and waiver claims: the market's read."""
+        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Free agents fetched successfully",
+            data=await EspnService._free_agents(league_info, filters),
+        )
+
+    @staticmethod
+    async def get_free_agents_by_ids(league_info: LeagueInfo, player_ids: list[int]) -> TeamDataResp:
+        """The free agents and waiver claims among specific ESPN ids, built as `get_free_agents`
+        builds its players; a rostered or unknown id is simply absent. For a player named
+        outside the market's read, which is ESPN's most-owned `fa_count`. The same `filterIds`
+        read as `get_player_pool_entries` (a sort, since ESPN refuses `limit` without one),
+        with the pool status checked here rather than asked of the filter."""
+        ids = sorted({int(i) for i in player_ids})
+        if not ids:
+            return TeamDataResp(status=ApiStatus.SUCCESS, message="No players asked for", data=[])
+        filters = {"players": {"filterIds": {"value": ids}, "limit": len(ids),
+                               "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+        players = await EspnService._free_agents(league_info, filters)
+        return TeamDataResp(
+            status=ApiStatus.SUCCESS,
+            message="Free agents fetched successfully",
+            data=[p for p in players if p.acquisition_status in ("free_agent", "waivers")],
+        )
+
+    @staticmethod
+    async def _free_agents(league_info: LeagueInfo, filters: dict) -> list[PlayerResp]:
         params = {
             'view': 'kona_player_info',
             'scoringPeriodId': 0,
         }
-        filters = {"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"filterSlotIds":{"value":[]},"limit":fa_count,"sortPercOwned":{"sortPriority":1,"sortAsc":False},"sortDraftRanks":{"sortPriority":100,"sortAsc":True,"value":"STANDARD"}}}
         headers = {'x-fantasy-filter': json.dumps(filters)}
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
         data = await provider_get("espn", endpoint, params=params, headers=headers,
                             cookies=EspnService._cookies(league_info), expect_key="players")
         players = [Player(player, league_info.year) for player in data['players']]
-
-        return TeamDataResp(
-            status=ApiStatus.SUCCESS,
-            message="Free agents fetched successfully",
-            data=await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info),
-        )
+        return await run_db("espn.value_free_agents", EspnService._to_player_resps, players, league_info)
 
     @staticmethod
     async def get_player_pool_entries(
@@ -493,13 +536,8 @@ class EspnService:
 
         # Find our team
         teams = data.get('teams', [])
-        our_team = None
-        our_team_id = None
-        for team in teams:
-            if team.get('name', '').strip() == league_info.team_name.strip():
-                our_team = team
-                our_team_id = team.get('id')
-                break
+        our_team = EspnService.resolve_team(league_info, teams)
+        our_team_id = our_team.get('id') if our_team else None
 
         if not our_team:
             raise BadRequestError(
@@ -627,10 +665,14 @@ class EspnService:
                 ours = our_values.get(player_id)
                 if ours is not None and ours.value is not None and (scoring.is_categories or not avg_points):
                     avg_points = ours.value
+                    value_source = ours.source
                 elif not avg_points and any(getattr(avg_line, k) for k in StatLine.ROW_KEYS):
                     # Last resort (no stored stats for this player): value the player with the
                     # league's point weights (default formula) over ESPN's raw averages.
                     avg_points = round(scoring.points.score(avg_line), 2)
+                    value_source = "provider"
+                else:
+                    value_source = "provider" if avg_points else None
 
                 # Calculate games remaining for this player using schedule service
                 games_remaining = get_remaining_games(team_abbrev)
@@ -641,7 +683,7 @@ class EspnService:
                     projected_total += avg_points * games_remaining
                 proj_inputs.append((avg_line, games_remaining, counts_toward_projection))
 
-                players.append(MatchupPlayerResp(
+                player = MatchupPlayerResp(
                     player_id=player_id,
                     name=name,
                     team=team_abbrev,
@@ -652,7 +694,12 @@ class EspnService:
                     games_remaining=games_remaining,
                     injured=injured,
                     injury_status=injury_status
-                ))
+                )
+                # The what-if projection re-runs this projection with moves applied, from
+                # the same inputs (services.matchup_projection)
+                player._avg_line = avg_line
+                player._value_source = value_source
+                players.append(player)
 
             return players, projected_total, proj_inputs
 

@@ -231,4 +231,10 @@ def setup_middleware(app: FastAPI) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Retry-After", "ETag", CORRELATION_HEADER, ERROR_CODE_HEADER],
+        # How long a browser may reuse a preflight. Starlette's default is 600 s,
+        # so a return visit more than 10 minutes later paid one extra round trip
+        # (~90 ms from the West Coast) per wave of new URLs, and Chrome keys the
+        # cache by full URL, so each per-day lineup URL has its own. 7200 s is
+        # Chrome's cap (Firefox allows a day).
+        max_age=7200,
     )

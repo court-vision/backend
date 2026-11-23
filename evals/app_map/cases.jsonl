@@ -1,0 +1,27 @@
+{"id": "pickup-free-agent", "question": "Where do I pick up a free agent?", "expect": [{"desk": "week", "steps": "Market"}, {"desk": "week", "steps": "Replace with a free agent"}]}
+{"id": "add-off-waivers", "question": "How do I add a player off waivers?", "expect": [{"desk": "week", "steps": "Market"}, {"desk": "week", "steps": "Replace with a free agent"}]}
+{"id": "schedule-pickup", "question": "Can I schedule a pickup for a later day this week?", "expect": [{"desk": "week", "steps": "Market"}]}
+{"id": "breakouts", "question": "Where can I see breakout candidates?", "expect": [{"desk": "week", "steps": "BREAKOUTS"}]}
+{"id": "stream-spot", "question": "How do I stream one of my roster spots for the rest of the week?", "expect": [{"desk": "week", "steps": "Stream this spot"}]}
+{"id": "matchup-score", "question": "Where can I see my matchup score?", "expect": [{"desk": "week", "steps": "MATCHUP"}, {"desk": "week", "steps": "The week's race"}]}
+{"id": "lineup-tomorrow", "question": "How do I set my lineup for tomorrow?", "expect": [{"desk": "week", "steps": "Autoslot"}, {"desk": "week", "steps": "› (MON|TUE|WED|THU|FRI|SAT|SUN) "}, {"desk": "week", "steps": "Move "}, {"desk": "week", "steps": "^Week$"}]}
+{"id": "undo-staged", "question": "I staged a move by mistake. How do I undo it?", "expect": [{"desk": "week", "steps": "Stage"}]}
+{"id": "auto-lineup", "question": "How do I turn on auto lineup?", "expect": [{"desk": "account", "steps": "AI and automation"}]}
+{"id": "email-alerts", "question": "Where do I turn off the email I get before tip-off?", "expect": [{"desk": "account", "steps": "Notifications"}]}
+{"id": "connect-espn", "question": "Where do I connect my ESPN league?", "expect": [{"desk": "account", "steps": "Connect ESPN|Add a team"}, {"desk": "week", "steps": "Add a team"}]}
+{"id": "add-yahoo", "question": "How do I add my Yahoo team?", "expect": [{"desk": "account", "steps": "Add a team"}, {"desk": "week", "steps": "Add a team"}]}
+{"id": "espn-cookies", "question": "ESPN says my login expired. How do I update my ESPN cookies?", "expect": [{"desk": "account", "steps": "Update cookies"}]}
+{"id": "remove-team", "question": "How do I remove a team I don't play in anymore?", "expect": [{"desk": "account", "steps": "Remove"}]}
+{"id": "rankings", "question": "Where are the player rankings?", "expect": [{"desk": "scout", "steps": "Rankings"}, {"desk": "scout", "steps": "^Scout$"}]}
+{"id": "standings", "question": "Where can I see the NBA standings?", "expect": [{"desk": "scout", "steps": "Standings|TEAMS"}]}
+{"id": "tonight", "question": "Where can I see who's playing tonight?", "expect": [{"desk": "scout", "steps": "SLATE|tracker"}]}
+{"id": "compare-players", "question": "How do I compare two players side by side?", "expect": [{"desk": "scout", "steps": "Pin"}]}
+{"id": "ownership-rising", "question": "Which players are people adding the most right now?", "expect": [{"desk": "scout", "steps": "Adds|MARKET"}, {"desk": "week", "steps": "Market"}]}
+{"id": "mock-draft", "question": "How do I start a mock draft?", "expect": [{"desk": "draft", "steps": "New room"}]}
+{"id": "dime-memory", "question": "What does Dime remember about me, and can I change it?", "expect": [{"desk": "ai", "steps": "What Dime knows"}]}
+{"id": "dime-moves", "question": "Where can I see how the moves Dime suggested worked out?", "expect": [{"desk": "ai", "steps": "How moves went"}]}
+{"id": "delete-conversation", "question": "How do I delete a conversation with the AI?", "expect": [{"desk": "ai", "steps": "Delete this conversation"}]}
+{"id": "api-key", "question": "How do I get an API key?", "expect": [{"desk": "developer", "steps": "Keys|key"}]}
+{"id": "theme", "question": "Can I switch to a light theme?", "expect": [{"desk": "week|draft|scout|ai|developer|account", "steps": "Theme"}]}
+{"id": "trade", "question": "Can I propose a trade to another team in my league?", "absent": true}
+{"id": "sleeper", "question": "Does Court Vision work with Sleeper leagues?", "absent": true}

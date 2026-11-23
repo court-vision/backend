@@ -3,41 +3,43 @@ ESPN's limits on adds (acquisitions), and what a team has used.
 
 The rules are in mSettings `settings.acquisitionSettings`:
 
-    matchupAcquisitionLimit       adds per matchup, or per scoring period (day) when
+    matchupAcquisitionLimit       adds per matchup, or per game day of the matchup when
     matchupLimitPerScoringPeriod  is true; -1 = no limit
     acquisitionLimit              adds per season; -1 = no limit
     waiverHours                   how long a dropped player sits on waivers
 
-The counts are in mTeam `teams[].transactionCounter`: `acquisitions` (the season)
-and `matchupAcquisitionTotals` ({matchupPeriodId: adds}). A day's own adds, which
-is what a per-day limit counts, are not in the counter; they are read from the
-league's transactions (`mTransactions2`): free-agent and waiver adds, executed,
-for the team, recorded for that scoring period, made once the season's first day
-began. Pre-season adds do not count (seen 2026-10-08: six pre-season adds, the
-counter's `acquisitions` 0), and ESPN records them under day 1.
+A per-scoring-period limit is still a matchup total, not a daily one: ESPN gives that many adds
+for each day of the matchup with at least one NBA game and lets the team use them on any day (a
+week with a day without games has 6, the merged All-Star matchup more; read off James's league
+2026-11-15, where one team logged three adds on one day). ESPN sends no total: it is the limit
+times the matchup's game days, counted on ESPN's own pro schedule (`proTeamSchedules_wl`), which
+is what ESPN counts. Our calendar doesn't stand in: it lacks games the NBA has published since it
+was built (the Cup's December week), and a short count would refuse adds ESPN allows. Until the
+matchup's days are known on ESPN's schedule the total is None, which refuses nothing.
 
-Which day's allowance an add made after a day's first tip-off uses (that day's, or
-the next day's it takes effect on) is unconfirmed, and so is the code ESPN refuses
-an over-limit add with. `budget_block` therefore only refuses what is certain
-under either reading, and `is_limit_refusal` recognises the refusal by its words.
+The counts are in mTeam `teams[].transactionCounter`: `acquisitions` (the season) and
+`matchupAcquisitionTotals` ({matchupPeriodId: adds}). Pre-season adds do not count (seen
+2026-10-08: six pre-season adds, the counter's `acquisitions` 0).
+
+The code ESPN refuses an over-limit add with is unconfirmed, so `is_limit_refusal` recognises the
+refusal by its words, and `budget_block` only refuses what is certain.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+import time
+from datetime import date
 from typing import Any, Iterable, Mapping, Optional
 
-import pytz
-
 from core.logging import get_logger
-from schemas.common import LeagueInfo
 from schemas.lineup_editor import AcquisitionState
 
 log = get_logger("acquisitions")
 
-ACQUIRING_TYPES = frozenset({"FREEAGENT", "WAIVER"})
-EASTERN = pytz.timezone("US/Eastern")
-ROLLOVER_ET = time(2, 0)       # an ESPN fantasy day starts here
+PRO_SCHEDULE_ENDPOINT = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}"
+PRO_SCHEDULE_TTL_S = 6 * 3600        # ESPN adds games as the NBA publishes them (the Cup's December week)
+PRO_SCHEDULE_RETRY_S = 15 * 60       # after a failed read, the calendar stands in for this long
+_pro_schedule: dict[int, tuple[float, Optional[frozenset[int]]]] = {}
 
 
 def _limit(value: Any) -> Optional[int]:
@@ -59,16 +61,20 @@ def _hours(value: Any) -> Optional[int]:
 
 def parse_acquisitions(payload: Mapping[str, Any], team: Mapping[str, Any]) -> Optional[AcquisitionState]:
     """The league's add limits and `team`'s counts from one mSettings + mTeam read; None when
-    the league sends no acquisition settings."""
+    the league sends no acquisition settings. A per-game-day limit has no matchup total yet:
+    `with_game_days` adds it once the matchup's days are known."""
     rules = (payload.get("settings") or {}).get("acquisitionSettings")
     if not isinstance(rules, Mapping):
         return None
     counter = team.get("transactionCounter") or {}
     matchup = (payload.get("status") or {}).get("currentMatchupPeriod")
     totals = counter.get("matchupAcquisitionTotals") or {}
+    limit = _limit(rules.get("matchupAcquisitionLimit", -1))
+    per_game_day = bool(rules.get("matchupLimitPerScoringPeriod"))
     return AcquisitionState(
-        per="day" if rules.get("matchupLimitPerScoringPeriod") else "matchup",
-        limit=_limit(rules.get("matchupAcquisitionLimit", -1)),
+        per="game_day" if per_game_day else "matchup",
+        limit=None if per_game_day else limit,
+        per_game_day=limit if per_game_day else None,
         matchup_period_id=int(matchup) if matchup else None,
         matchup_used=int(totals.get(str(matchup), 0) or 0) if matchup else 0,
         season_limit=_limit(rules.get("acquisitionLimit", -1)),
@@ -77,9 +83,63 @@ def parse_acquisitions(payload: Mapping[str, Any], team: Mapping[str, Any]) -> O
     )
 
 
+def with_game_days(acq: AcquisitionState, game_days: Optional[int]) -> AcquisitionState:
+    """A per-game-day limit with its matchup total: the limit for each of the matchup's
+    `game_days`. Unchanged for a per-matchup limit, or when the game days are unknown."""
+    if acq.per != "game_day" or acq.per_game_day is None or game_days is None:
+        return acq
+    return acq.model_copy(update={"game_days": game_days, "limit": acq.per_game_day * game_days})
+
+
+def parse_pro_schedule(payload: Mapping[str, Any]) -> frozenset[int]:
+    """ESPN's scoring periods (days) with at least one NBA game, from `proTeamSchedules_wl`."""
+    days: set[int] = set()
+    for team in (payload.get("settings") or {}).get("proTeams") or []:
+        for period, games in (team.get("proGamesByScoringPeriod") or {}).items():
+            if games:
+                try:
+                    days.add(int(period))
+                except (TypeError, ValueError):
+                    continue
+    return frozenset(days)
+
+
+async def espn_game_days(year: int) -> Optional[frozenset[int]]:
+    """The season's ESPN days with games, from ESPN's public pro schedule, kept for a few hours;
+    None when it can't be read (or came back empty)."""
+    now = time.monotonic()
+    cached = _pro_schedule.get(year)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    from services.providers.http import provider_get   # the parse above stays import-light
+
+    try:
+        payload = await provider_get("espn", PRO_SCHEDULE_ENDPOINT.format(year),
+                                     params={"view": ["proTeamSchedules_wl"]}, expect_key="settings")
+        days: Optional[frozenset[int]] = parse_pro_schedule(payload) or None
+    except Exception as exc:
+        log.warning("acquisitions_pro_schedule_unavailable", year=year, error=str(exc))
+        days = None
+    _pro_schedule[year] = (now + (PRO_SCHEDULE_TTL_S if days else PRO_SCHEDULE_RETRY_S), days)
+    return days
+
+
+async def matchup_game_days(year: int, start: date, end: date) -> Optional[int]:
+    """How many days from `start` through `end` have at least one NBA game on ESPN's own schedule;
+    None when it can't be read (no total then, so nothing is refused over one)."""
+    from services import schedule_service
+
+    espn = await espn_game_days(year)
+    if espn is None:
+        return None
+    opening = schedule_service.get_season_bounds().opening_night
+    first, last = (start - opening).days + 1, (end - opening).days + 1
+    return sum(1 for period in range(first, last + 1) if period in espn)
+
+
 def matchup_room(acq: AcquisitionState) -> Optional[int]:
-    """Adds left this matchup under a per-matchup limit; None when no such limit applies."""
-    if acq.per != "matchup" or acq.limit is None:
+    """Adds left this matchup; None when the matchup has no limit (or its total isn't known)."""
+    if acq.limit is None:
         return None
     return max(0, acq.limit - acq.matchup_used)
 
@@ -96,77 +156,30 @@ def in_current_matchup(acq: AcquisitionState, day: date) -> bool:
     return acq.matchup_start is not None and acq.matchup_end is not None and acq.matchup_start <= day <= acq.matchup_end
 
 
-def budget_block(acq: Optional[AcquisitionState], day: date, *, day_adds: Optional[int] = None) -> Optional[str]:
+def budget_block(acq: Optional[AcquisitionState], day: date, *, pending: Iterable[date] = ()) -> Optional[str]:
     """Why an add for ESPN day `day` (a calendar date) certainly cannot count, as a sentence; None
-    when it may. `day_adds` is the adds already recorded for that day (per-day limits only).
+    when it may. `pending` are the days of the team's pickups still to be made, which draw on the
+    same adds (callers that pass none check the counter alone).
 
-    Certain only: the season is used up; a per-matchup limit is used up and `day` is in the
-    current matchup (an add for a later matchup's day may count toward that one); a per-day
-    limit is used up on `day` itself (an add for it is recorded there whichever day's
-    allowance it draws on)."""
+    Certain only: the season is used up; the matchup's adds are used up and `day` is in the
+    current matchup (an add for a later matchup's day counts toward that one)."""
     if acq is None:
         return None
-    if season_room(acq) == 0:
-        return f"Every add the league allows this season is used ({acq.season_used} of {acq.season_limit})"
+    days = list(pending)
+    room = season_room(acq)
+    if room is not None and room - len(days) <= 0:
+        return f"Every add the league allows this season is used ({acq.season_used} of {acq.season_limit})" + (
+            f", with {len(days)} more scheduled" if days and room > 0 else "")
     room = matchup_room(acq)
-    if room == 0 and in_current_matchup(acq, day):
-        return f"Every add this matchup allows is used ({acq.matchup_used} of {acq.limit})"
-    if acq.per == "day" and acq.limit is not None and day_adds is not None and day_adds >= acq.limit:
-        return f"That day's add{'s are' if acq.limit != 1 else ' is'} already used ({day_adds} of {acq.limit})"
+    if room is not None and in_current_matchup(acq, day):
+        waiting = sum(1 for d in days if in_current_matchup(acq, d))
+        if room - waiting <= 0:
+            return f"Every add this matchup allows is used ({acq.matchup_used} of {acq.limit})" + (
+                f", with {waiting} more scheduled" if waiting and room > 0 else "")
     return None
-
-
-def count_adds(transactions: Iterable[Mapping[str, Any]], espn_team_id: int, scoring_period_id: int, *,
-               since_ms: Optional[int] = None) -> int:
-    """Adds `espn_team_id` made that are recorded for `scoring_period_id`: executed free-agent and
-    waiver transactions, one per ADD item to the team, made at or after `since_ms` (epoch ms, ESPN's
-    `proposedDate`) when given. Each transaction counts once by its id."""
-    seen: set[Any] = set()
-    n = 0
-    for t in transactions:
-        key = t.get("id")
-        if key is not None:
-            if key in seen:
-                continue
-            seen.add(key)
-        if (t.get("type") not in ACQUIRING_TYPES or t.get("status") != "EXECUTED"
-                or t.get("teamId") != espn_team_id or t.get("scoringPeriodId") != scoring_period_id):
-            continue
-        if since_ms is not None and int(t.get("proposedDate") or 0) < since_ms:
-            continue
-        n += sum(1 for i in t.get("items") or [] if i.get("type") == "ADD" and i.get("toTeamId") == espn_team_id)
-    return n
 
 
 def is_limit_refusal(code: Optional[str], message: Optional[str]) -> bool:
     """ESPN refused an add over its acquisition limit. The code is unconfirmed, so the words decide;
     "LIMIT" alone is not enough (TRAN_ROSTER_POSITION_LIMIT_EXCEEDED is a position cap)."""
     return "ACQUISITION" in (code or "").upper() or "acquisition" in (message or "").lower()
-
-
-def season_start_ms() -> Optional[int]:
-    """When the season's first ESPN day began (its 02:00 ET rollover), as epoch ms; None when the
-    calendar can't say."""
-    from services import schedule_service
-
-    try:
-        opening = schedule_service.date_for_espn_scoring_period(1)
-    except Exception as exc:  # no calendar: count every add, as ESPN would once the season runs
-        log.warning("acquisitions_season_start_unknown", error=str(exc))
-        return None
-    start = EASTERN.localize(datetime.combine(opening, ROLLOVER_ET)).astimezone(timezone.utc)
-    return int(start.timestamp() * 1000)
-
-
-async def adds_for_day(league_info: LeagueInfo, espn_team_id: int, scoring_period_id: int) -> int:
-    """The team's adds recorded for ESPN day `scoring_period_id`, pre-season ones left out. The
-    transactions view is read for that day and the day before, since an add made the evening
-    before may be listed under it."""
-    from services.espn_service import EspnService   # the parse above stays import-light
-
-    rows: list[Mapping[str, Any]] = []
-    for period in sorted({max(1, scoring_period_id - 1), scoring_period_id}):
-        payload = await EspnService.fetch_league(league_info, ["mTransactions2"], expect_key="transactions",
-                                                 scoring_period_id=period)
-        rows.extend(payload.get("transactions") or [])
-    return count_adds(rows, espn_team_id, scoring_period_id, since_ms=season_start_ms())

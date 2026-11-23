@@ -12,10 +12,11 @@ DraftKind = Literal["live", "manual", "mock", "import"]
 DraftStatus = Literal["active", "completed", "abandoned"]
 DraftType = Literal["snake", "auction"]
 Availability = Literal["likely", "tossup", "gone"]
-PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock"]
+PickSource = Literal["manual", "espn_sync", "import", "keeper", "mock", "dime"]
 # What a client may claim a pick's provenance is. `mock` is missing on purpose:
 # it asserts the autopicker made the pick, which the room's undo rules and the
-# recap both read, so it is written by the server or not at all.
+# recap both read, so it is written by the server or not at all. So is `dime`:
+# Dime made the pick in the user's mock seat (services/ai/draft.py).
 ClientPickSource = Literal["manual", "espn_sync", "import", "keeper"]
 MockUntil = Literal["my_turn", "end"]
 ScoringFormat = Literal["points", "categories"]
@@ -54,16 +55,21 @@ class DraftSessionCreate(BaseRequest):
     kind: DraftKind = Field(
         default="manual",
         description=(
-            "Where the picks come from. `live`: this team's own ESPN draft (needs a team in a synced "
-            "ESPN league; the room is linked to it at once). `mock`: an ESPN mock lobby, linked on "
-            "the first INIT it reconciles with. `manual`: the caller enters every pick."
+            "Where the picks come from. `live`: an ESPN draft. With a `team_id` it is that team's own "
+            "draft (the team needs a synced ESPN league) and the room is linked to it at once; without "
+            "one the room is `league_pending`: it links to the ESPN draft the Draft Tap connects to, "
+            "reads that league's settings and adds your team there on the first INIT. `mock`: an ESPN "
+            "mock lobby, linked on the first INIT it reconciles with. `manual`: the caller enters every pick."
         ),
     )
     name: Optional[str] = Field(default=None, max_length=80, description="A label of the caller's choosing")
     draft_type: Optional[DraftType] = Field(default=None, description="Defaults to the league's draft type, else snake")
     pick_order: Optional[List[int]] = Field(default=None, description="Provider team ids in first-round order; defaults to the league's")
     my_slot: Optional[int] = Field(default=None, ge=1, description="1-based slot the caller drafts from")
-    rounds: Optional[int] = Field(default=None, ge=1, le=40, description="Defaults to the league's draftable roster size")
+    rounds: Optional[int] = Field(
+        default=None, ge=1, le=40,
+        description="Defaults to the league's draftable roster spots (starters plus bench, IR excluded), else 13",
+    )
     keepers: List[DraftKeeper] = []
     scoring_format: Optional[ScoringFormat] = Field(
         default=None,
@@ -73,12 +79,6 @@ class DraftSessionCreate(BaseRequest):
             "league's format, and the team's `scoring_preview` is how that one is overridden."
         ),
     )
-
-    @model_validator(mode="after")
-    def _live_follows_a_team(self) -> "DraftSessionCreate":
-        if self.kind == "live" and self.team_id is None:
-            raise ValueError("a live room needs a team_id: it follows that team's own ESPN draft")
-        return self
 
     @model_validator(mode="after")
     def _format_only_without_a_team(self) -> "DraftSessionCreate":
@@ -194,7 +194,15 @@ class DraftSessionResp(ApiModel):
     name: Optional[str] = None
     espn_league_id: Optional[int] = Field(
         default=None,
-        description="The ESPN draft this room follows; null until a mock room links to one",
+        description="The ESPN draft this room follows; null until a mock or league-pending room links to one",
+    )
+    league_pending: bool = Field(
+        default=False,
+        description=(
+            "A live room started without a team: on the first INIT it adopts the ESPN league the "
+            "Draft Tap connected to (settings synced, your team added) and this turns false. Until "
+            "then its teams, scoring and rounds are the placeholders it was created with."
+        ),
     )
     draft_type: DraftType
     pick_order: List[int] = []
@@ -295,6 +303,18 @@ class DraftSyncConflict(ApiModel):
     message: str
 
 
+class DraftLeagueAdoption(ApiModel):
+    """What a league-pending room took from the ESPN draft it connected to."""
+
+    team_id: int = Field(description="Your team in that league, in `usr.teams` — created now unless it already existed")
+    league_id: Optional[int] = Field(default=None, description="The synced league row; null if ESPN's settings could not be read")
+    espn_league_id: int
+    espn_team_id: int
+    team_name: str
+    league_name: Optional[str] = None
+    team_created: bool = Field(description="False when the team was already on your account")
+
+
 class DraftInitSyncResp(ApiModel):
     session: DraftSessionResp
     espn_league_id: int = Field(description="The ESPN league id decoded from the INIT frame")
@@ -309,6 +329,18 @@ class DraftInitSyncResp(ApiModel):
     espn_front: int = Field(description="Next pick number to assign — one past the last made pick; what the live path numbers from")
     header_applied: bool = Field(description="Whether pick order / slot / rounds / type were written from INIT (only on an empty session)")
     position_limits: dict[str, int] = Field(default={}, description="Hard per-position caps decoded from the room (display; the league's own are authoritative)")
+    league_adopted: Optional[DraftLeagueAdoption] = Field(
+        default=None,
+        description="Set when this INIT turned a league-pending room into a room on a real league (see `session.league_pending`)",
+    )
+    league_adoption_error: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why a league-pending room could not adopt its league this time (ESPN unreachable, a "
+            "private league with no ESPN connection on the account, …). Picks still sync; the room "
+            "keeps its placeholder settings and tries again on the next connect."
+        ),
+    )
 
 
 class DraftInitSyncResponse(BaseResponse):
@@ -426,11 +458,17 @@ class DraftBoardRow(ApiModel):
             "neither a projection nor last season's baseline can value (a rookie, before projections)."
         ),
     )
-    value_source: Literal["projection", "baseline", "market"] = Field(
+    value_source: Literal["projection", "baseline", "season", "live", "market"] = Field(
         description=(
             "projection: a per-game projection for the coming season (`meta.projection_source` "
-            "says whose). baseline: last season's per-game averages. market: no stat line at all "
-            "— the row exists because ESPN drafts him."
+            "says whose). baseline: last season's per-game averages. In a draft held after "
+            "opening night (`meta.in_season`) both are blended with this season's games "
+            "(`season_gp`). season: nothing projects him and he had no qualifying last season, "
+            "so this season's games alone value him (in season only, and only with enough of "
+            "them). live: Court Vision's live projection, repriced every morning of the season "
+            "(`meta.in_season.live_as_of`): his line in a game he plays from here on, and the "
+            "games he is expected to play. market: no stat line at all — the row exists because "
+            "ESPN drafts him."
         ),
     )
     board_rank: Optional[int] = Field(
@@ -502,6 +540,21 @@ class DraftBoardRow(ApiModel):
     fpts_avg: Optional[float] = Field(
         default=None,
         description="Per-game fantasy points under the platform default formula (familiar scale, tiebreak); None for market-only rows",
+    )
+    season_gp: Optional[int] = Field(
+        default=None,
+        description=(
+            "In a draft held after opening night (`meta.in_season`): games he has played this "
+            "season, which is how much this season counts in his value. None before opening "
+            "night, and for a player who hasn't played."
+        ),
+    )
+    season_fpts_avg: Optional[float] = Field(
+        default=None,
+        description=(
+            "In a draft held after opening night: this season's fantasy points per game under "
+            "the platform default formula, unblended (compare `fpts_avg`, the blended line's)."
+        ),
     )
     market_rank: Optional[int] = Field(
         default=None,
@@ -591,7 +644,7 @@ class DraftRosterEntry(ApiModel):
     primary_position: Optional[str] = None
     positions: Optional[List[str]] = None
     value: Optional[float] = None
-    value_source: Literal["projection", "baseline", "market"] = "baseline"
+    value_source: Literal["projection", "baseline", "season", "live", "market"] = "baseline"
     injury_status: Optional[str] = None
 
 
@@ -690,6 +743,52 @@ class DraftPlayoffsResp(ApiModel):
     games_min: int = Field(description="Fewest playoff-week games any NBA team plays")
     games_max: int = Field(description="Most playoff-week games any NBA team plays")
     games_mean: float = Field(description="Average playoff-week games across the 30 teams")
+
+
+class DraftInSeasonResp(ApiModel):
+    """A draft held after opening night, and what the board valued differently for it."""
+
+    games_from: date = Field(
+        description="The first day counted: values and lineup congestion cover the games from here on"
+    )
+    season_as_of: Optional[date] = Field(
+        default=None, description="The newest of this season's stat rows the values were blended with"
+    )
+    model: str = Field(
+        default="season-blend-1",
+        description=(
+            "What built the values. three-part-1: the live projection, repriced every morning "
+            "(skill per minute with a weight per stat, minutes by who is out, a chance for each "
+            "game left); a game he misses is charged at the gap to a replacement, and no injury "
+            "term is added on top. season-blend-1: the projection blended with this season's "
+            "games by `prior_games`, his projected share of the games left; what a board shows "
+            "on a morning with no fresh live projection"
+        ),
+    )
+    live_as_of: Optional[date] = Field(
+        default=None,
+        description="The morning of the live projection the board read; null when it is built on the blend",
+    )
+    live: int = Field(default=0, description="Players valued by the live projection (`value_source` live)")
+    prior_games: int = Field(
+        description=(
+            "On the blend: how many of this season's games the projection (or last season's "
+            "line) counts as, so a player with this many games played is valued half on this "
+            "season. The live projection weighs each stat on its own instead"
+        ),
+    )
+    blended: int = Field(description="Players whose value took this season's games")
+    season_only: int = Field(description="Players valued off this season alone (`value_source` season)")
+    injured: int = Field(
+        description="Players with an injury flag on today's report, which replaces the market snapshot's flags"
+    )
+    injured_since_projection: int = Field(
+        description=(
+            "Of them, those the market snapshot listed healthy and the live projection does not "
+            "value: their injury term applies even where their games are projected, since an "
+            "October projection couldn't know"
+        ),
+    )
 
 
 class DraftBoardMeta(ApiModel):
@@ -814,6 +913,15 @@ class DraftBoardMeta(ApiModel):
         description=(
             "The fantasy-playoff weeks behind every row's `playoff_games`, and the weight the CV "
             "value gives them. None in roto leagues and when the season calendar is unavailable."
+        ),
+    )
+    in_season: Optional[DraftInSeasonResp] = Field(
+        default=None,
+        description=(
+            "Set for a draft held after opening night: values blend this season's games with the "
+            "projection, count only the games left, and injury flags are today's. ADP and ESPN's "
+            "ranks stay the last preseason snapshot (`market_as_of`). None for a draft before "
+            "opening night, an imported draft, and a room whose draft started before it."
         ),
     )
 

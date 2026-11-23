@@ -250,6 +250,24 @@ class Game(BaseModel):
         )
 
     @classmethod
+    def team_game_dates(cls, team_id: str, start_date: date, end_date: date) -> set[date]:
+        """Every date in [start_date, end_date] on which the team played, in one query.
+
+        Any season and any season type, like `is_back_to_back`: a schedule asks
+        it once for the whole range instead of one EXISTS per game.
+        """
+        return {
+            row.game_date
+            for row in cls.select(cls.game_date)
+            .where(
+                ((cls.home_team_id == team_id) | (cls.away_team_id == team_id))
+                & (cls.game_date >= start_date)
+                & (cls.game_date <= end_date)
+            )
+            .distinct()
+        }
+
+    @classmethod
     def get_remaining_games(cls, team_id: str, season: str) -> int:
         """
         Get count of remaining games for a team this season.

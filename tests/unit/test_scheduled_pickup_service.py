@@ -102,7 +102,7 @@ def h(monkeypatch):
     h = SimpleNamespace(boards={}, after_txn={}, after_lineup={}, reads=[], pool={}, pool_calls=[],
                         txn=[], txn_calls=[], lineup=[], lineup_calls=[], audits=[], updates=[],
                         settled=[], deferred=[], deferred_audit_ids=[], marked=[], team=(LEAGUE, dict(COUNTS)),
-                        claimed=[], released=[], held=True, settle_crashes=False, lane_holder=None,
+                        claimed=[], released=[], held=True, settle_crashes=False, lane_holders=set(),
                         lane_status="active", lane_runs=[], lane_notices=[], lanes_released=[])
 
     async def fake_read(team_id, league_info, *, fallback_slot_counts=None, now=None, scoring_period_id=None,
@@ -175,7 +175,7 @@ def h(monkeypatch):
     monkeypatch.setattr(svc, "_settle_row", settle_row)
     monkeypatch.setattr(svc, "_defer_row", defer_row)
     monkeypatch.setattr(svc, "_mark_in_flight", mark_in_flight)
-    monkeypatch.setattr(svc, "_lane_holder", lambda team_id: h.lane_holder)   # no lane unless a test sets one
+    monkeypatch.setattr(svc, "_lane_holders", lambda team_id: h.lane_holders)   # no lane unless a test sets one
     monkeypatch.setattr(svc, "_lane_status", lambda lane_id: h.lane_status)
 
     async def no_lanes_due(now, limit):
@@ -372,7 +372,7 @@ def test_a_locked_add_the_day_before_is_still_sent(h):
 
 @pytest.mark.unit
 def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h):
-    # 2:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
+    # 3:00 AM Thursday ET, the board still says day 2 and the drop's game ran last night.
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN",
                                                                        game=True, started=True)])
@@ -382,7 +382,7 @@ def test_at_the_rollover_with_espn_still_on_the_day_before_the_swap_still_goes(h
 
 @pytest.mark.unit
 def test_the_day_before_waits_for_tonights_first_tip_on_the_fresh_board(h):
-    # Scheduled while the schedule showed no games tonight (a 2:00 AM window); they have landed since.
+    # Scheduled while the schedule showed no games tonight (a 3:00 AM window); they have landed since.
     # Sent now it would be same-day business on ESPN, and Edwards would lose his game tonight.
     arrange_day_before(h, drop_game=True)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT, game=True),
@@ -556,54 +556,145 @@ def test_room_left_in_the_matchup_sends(h):
     assert execute(h).outcome == "executed"
 
 
+# ---- a pickup Dime scheduled itself ---------------------------------------------------
+
+
+@pytest.fixture
+def dime(h, monkeypatch):
+    """Dime acts on adds and drops on team 21, and may: every switch on, the team unpaused, daily actions at AI.
+    `committed_under` is the automation the pickup's chip was committed under (None: no action on record)."""
+    from services.ai import acting
+    d = SimpleNamespace(pilot=SimpleNamespace(team_id=21, user_id=11, ai_rows=["daily_actions"], autopilot=False,
+                                              restore=None, paused_at=None, paused_by=None, paused_reason=None),
+                        committed_under=None, asked=[])
+
+    async def autopilot_row(team_id):
+        return d.pilot
+
+    async def committed_under(pickup_id):
+        d.asked.append(pickup_id)
+        return d.committed_under
+
+    monkeypatch.setattr(acting, "_autopilot_row", autopilot_row)
+    monkeypatch.setattr(acting, "_pickup_committed_under", committed_under)
+    for name, value in (("ai_enabled", True), ("autopilot_enabled", True),
+                        ("ai_agent_user_ids", [11])):
+        monkeypatch.setattr(svc.settings, name, value)
+    return d
+
+
 @pytest.mark.unit
-def test_a_per_day_limit_reads_the_days_adds(h, monkeypatch):
-    calls = []
-
-    async def adds(league_info, espn_team_id, period):
-        calls.append((espn_team_id, period))
-        return used
-
-    monkeypatch.setattr(svc, "adds_for_day", adds)
-    used = 1
+def test_a_pickup_dime_scheduled_goes_while_dime_still_acts_and_is_audited_as_its(h, dime):
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    r = execute(h)
-    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit") and calls == [(1, 3)]
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+    assert h.audits[0]["source"] == "autopilot"
+
+
+@pytest.mark.unit
+def test_under_the_autopilot_switch_a_pickup_dime_scheduled_goes_too(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows, dime.pilot.autopilot = [], True
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("change, reason", [
+    (lambda d, s: setattr(d.pilot, "paused_at", NOW - timedelta(hours=1)), "dime_paused"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", ["lineup"]), "dime_not_acting"),
+    (lambda d, s: setattr(d.pilot, "ai_rows", []), "dime_not_acting"),
+    (lambda d, s: setattr(s, "autopilot_enabled", False), "dime_off"),
+    (lambda d, s: setattr(s, "ai_enabled", False), "dime_off"),
+    (lambda d, s: setattr(s, "ai_agent_user_ids", []), "dime_not_allowed"),
+])
+def test_a_pickup_dime_scheduled_is_skipped_unsent_once_dime_no_longer_acts_there(h, dime, monkeypatch, change, reason):
+    arrange_day_before(h)
+    change(dime, svc.settings)       # since it was scheduled: the owner paused Dime, moved daily actions below AI, or a switch went off
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason) == ("skipped", reason) and r.detail
+    assert h.txn_calls == [] and h.marked == [] and h.reads == []    # nothing read from ESPN, nothing sent
+
+
+@pytest.mark.unit
+def test_a_pickup_an_event_check_in_scheduled_goes_while_late_scratches_are_at_ai(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows, dime.committed_under = ["late_scratch"], "late_scratch"     # daily actions were never at AI here
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+    assert dime.asked == [1] and h.audits[0]["source"] == "autopilot"
+
+
+@pytest.mark.unit
+def test_a_pickup_an_event_check_in_scheduled_is_skipped_once_late_scratches_leave_ai(h, dime):
+    arrange_day_before(h)
+    dime.committed_under = "late_scratch"          # daily actions at AI don't carry a late scratch's pickup
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason) == ("skipped", "dime_not_acting")
+    assert r.detail == "Late scratches and news aren't at AI on this team any more"
+    assert h.txn_calls == [] and h.marked == [] and h.reads == []
+
+
+@pytest.mark.unit
+def test_a_pickup_with_no_action_on_record_is_asked_about_daily_actions(h, dime):
+    arrange_day_before(h)
+    dime.pilot.ai_rows = ["late_scratch"]
+    r = execute(h, row(made_by_autopilot=True))
+    assert (r.outcome, r.reason, r.detail) == ("skipped", "dime_not_acting",
+                                               "Daily actions aren't at AI on this team any more")
+
+
+@pytest.mark.unit
+def test_a_pickup_dime_scheduled_may_take_the_matchup_s_last_add(h, dime):
+    """No add is kept back for the user (James, 2026-11-15)."""
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))         # the user used adds since: 1 left
+    assert execute(h, row(made_by_autopilot=True)).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_a_pickup_the_user_scheduled_is_never_asked_about_dime(h, monkeypatch):
+    from services.ai import acting
+
+    async def never(*args):
+        raise AssertionError("asked about Dime")
+
+    monkeypatch.setattr(acting, "pickup_block", never)
+    arrange_day_before(h)
+    with_limits(h, limits(matchup_used=3))         # the last add is the user's to use
+    assert execute(h, row(made_by_autopilot=False)).outcome == "executed"
+
+
+@pytest.mark.unit
+def test_a_write_dime_already_sent_is_confirmed_from_the_board_even_after_a_pause(h, dime):
+    arrange_day_before(h)
+    dime.pilot.paused_at = NOW
+    r = execute(h, row(made_by_autopilot=True, audit_id=41))
+    assert (r.outcome, r.reason) == ("failed", "interrupted")      # read, never sent again, as for any pickup
     assert h.txn_calls == []
 
-    used = 0
+
+@pytest.mark.unit
+def test_a_per_game_day_limit_lets_several_adds_go_on_one_day_until_the_matchup_s_are_used(h):
+    """One add for each day with games is a matchup total (James's league, 2026-11-15): three adds
+    made on one day leave this one room, and it is skipped only once the week's seven are used."""
+    arrange_day_before(h)
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=3))
+    assert execute(h).outcome == "executed"
+
     h.settled.clear()
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    assert execute(h).outcome == "executed"
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=7))
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit")
 
 
 @pytest.mark.unit
-def test_an_unreadable_day_count_leaves_the_limit_to_espn(h, monkeypatch):
-    async def broken(league_info, espn_team_id, period):
-        raise RuntimeError("ESPN is down")
-
-    monkeypatch.setattr(svc, "adds_for_day", broken)
+def test_espn_refusing_a_per_game_day_limit_inside_the_matchup_is_skipped(h):
+    """Its adds are the matchup's: the rollover into the pickup's day brings none back."""
     arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    assert execute(h).outcome == "executed"
-
-
-@pytest.mark.unit
-def test_espn_refusing_a_per_day_limit_the_day_before_waits_for_the_rollover_and_may_send_again(h, monkeypatch):
-    async def none_yet(league_info, espn_team_id, period):
-        return 0
-
-    monkeypatch.setattr(svc, "adds_for_day", none_yet)
-    arrange_day_before(h)
-    with_limits(h, limits(per="day", limit=1))
-    h.txn = [FantasyWriterRejected("You have reached the acquisition limit for this scoring period.", espn_status=400,
+    with_limits(h, limits(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=6))
+    h.txn = [FantasyWriterRejected("You have reached the acquisition limit for this matchup.", espn_status=400,
                                    espn_error_code="TRAN_SOMETHING_NEW")]
     r = execute(h)
-    assert (r.outcome, r.reason, r.next_attempt_at) == ("deferred", "acquisition_limit", ROLLOVER)
-    # ESPN refused it, so nothing landed: the in-flight mark is cleared and the retry may send.
-    assert h.deferred_audit_ids == [None]
+    assert (r.outcome, r.reason) == ("skipped", "acquisition_limit")
 
 
 @pytest.mark.unit
@@ -929,7 +1020,7 @@ def test_schedule_stores_the_row_ignoring_todays_locks(scheduling):
 
 @pytest.mark.unit
 def test_schedule_refuses_to_drop_a_stream_lanes_holder(scheduling):
-    scheduling.lane_holder = EDWARDS
+    scheduling.lane_holders = {EDWARDS}
     with pytest.raises(svc.ScheduledPickupInvalid) as exc:
         schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
     assert exc.value.data["reason"] == "drop_is_lane_holder" and scheduling.inserted == []
@@ -998,6 +1089,38 @@ def test_schedule_refuses_a_player_on_another_team_or_unknown(scheduling):
 
 
 @pytest.mark.unit
+def test_schedule_checks_an_ai_chip_before_storing_and_marks_it_sent_after(scheduling, monkeypatch):
+    from core.errors import AppError
+    from services.ai import proposals
+    h = scheduling
+    seen = SimpleNamespace(for_send=[], sent=[], refuse=None)
+
+    async def for_send(proposal_id, user_id, team_id, *, kind, add, drop, scoring_period_id=None, now=None):
+        seen.for_send.append((proposal_id, user_id, team_id, kind, add, drop, scoring_period_id, len(h.inserted)))
+        if seen.refuse:
+            raise seen.refuse
+
+    async def mark_sent(proposal_id, *, audit_id=None, pickup_id=None, now=None):
+        seen.sent.append((proposal_id, audit_id, pickup_id))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+
+    resp = schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+
+    assert resp.data.id == 7
+    assert seen.for_send == [(31, 11, 21, "scheduled", KAWHI, EDWARDS, 3, 0)]     # checked before the row was stored
+    assert seen.sent == [(31, None, 7)]
+
+    seen.refuse = AppError("AI_PROPOSAL_MISMATCH", "The move being sent is not the one this chip proposes", status_code=422)
+    with pytest.raises(AppError):
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3, proposal_id=31))
+    assert len(h.inserted) == 1 and len(seen.sent) == 1
+
+    schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert len(seen.for_send) == 2 and len(seen.sent) == 1 and len(h.inserted) == 2
+
+
+@pytest.mark.unit
 def test_schedule_surfaces_a_duplicate_as_409(scheduling, monkeypatch):
     def dup(**fields):
         raise svc.ScheduledPickupDuplicate()
@@ -1063,11 +1186,46 @@ def test_cancel_outcomes(h, monkeypatch):
         run(svc.ScheduledPickupService.cancel(TEAM, 1))
 
 
+@pytest.mark.unit
+def test_dimes_cancel_chip_is_checked_as_this_pickup_first_and_marked_sent_once_cancelled(h, monkeypatch):
+    from core.errors import ConflictError
+    from services.ai import proposals, steering as ai_steering
+    asked, sent, refuse = [], [], []
+
+    async def for_apply(proposal_id, user_id, team_id, kind, **match):
+        asked.append((proposal_id, user_id, team_id, kind, match))
+        if refuse:
+            raise refuse[0]
+        return SimpleNamespace(id=proposal_id)
+
+    async def mark_sent(proposal_id, **kw):
+        sent.append((proposal_id, kw))
+    monkeypatch.setattr(ai_steering, "for_apply", for_apply)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: ("pending", row(status="cancelled")))
+    run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert asked == [(41, 11, 21, "cancel_pickup", {"pickup_id": 1})] and sent == [(41, {"pickup_id": 1})]
+
+    # Refused, nothing is cancelled; already made, the chip stays as it was
+    cancelled = []
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: cancelled.append(pickup_id))
+    refuse.append(ConflictError("AI_PROPOSAL_NOT_PENDING", "Already sent"))
+    with pytest.raises(ConflictError):
+        run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert cancelled == []
+    refuse.clear()
+    monkeypatch.setattr(svc, "_cancel_pickup", lambda team_id, pickup_id, now: ("executed", row(status="executed")))
+    with pytest.raises(svc.ScheduledPickupNotPending):
+        run(svc.ScheduledPickupService.cancel(TEAM, 1, 41))
+    assert len(sent) == 1
+
+
 # ---- the manual route is untouched ----------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
+def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h, monkeypatch):
+    monkeypatch.setattr(txn, "_now", lambda: datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc))   # Wed 11 AM, before the tip
     arrange_day_before(h)
     h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN", locked=True)])
     from schemas.roster_transaction import RosterTransactionReq
@@ -1079,3 +1237,113 @@ def test_the_manual_transaction_still_audits_as_manual_and_refuses_locks(h):
     run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
         add_player_id=KAWHI, expected_scoring_period_id=2, roster_version="v1")))
     assert h.audits[0]["source"] == "manual"
+
+
+@pytest.mark.unit
+def test_after_the_tip_the_manual_add_is_the_executors_next_day_swap(h, monkeypatch):
+    """The same swap made by hand after Wednesday's first tip: sent now, today's locks aside, and
+    checked on Thursday's board, as the executor's day-before attempt is."""
+    monkeypatch.setattr(txn, "_now", lambda: NOW)
+    monkeypatch.setattr(txn, "_lane_holders", lambda team_id: set())
+    monkeypatch.setattr(txn, "_scheduled_drop", lambda team_id, player_id: None)
+    arrange_day_before(h, drop_game=True, drop_started=True)
+    from schemas.roster_transaction import RosterTransactionReq
+    resp = run(txn.RosterTransactionService.apply(TEAM, LEAGUE, RosterTransactionReq(
+        add_player_id=KAWHI, drop_player_id=EDWARDS, expected_scoring_period_id=2, roster_version="v1")))
+    assert resp.data.verified is True and resp.data.counts_from == "2026-10-22"
+    assert resp.data.lineup.scoring_period_id == 2 and h.txn_calls[0]["scoring_period_id"] == 2
+    assert h.audits[0]["source"] == "manual" and h.updates[-1][1] == "applied"
+
+
+# ---- the roster lock -------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_drop_protected_since_scheduling_becomes_add_only_with_a_seat_free(h, protect):
+    """Protecting cancels the pickup; this is one an attempt had claimed at that moment."""
+    arrange_day_before(h)                                    # Jokic and Edwards: 2 of 4 seats
+    protect({21: [EDWARDS]})
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("executed", "drop_protected")
+    assert h.txn_calls[0]["drop_player_id"] is None and h.txn_calls[0]["add_player_id"] == KAWHI
+
+
+@pytest.mark.unit
+def test_a_protected_drop_without_a_seat_is_skipped_and_nothing_is_sent(h, protect):
+    arrange_day_before(h)
+    h.boards[None] = state([player(JOKIC, "Nikola Jokic", UT), player(EDWARDS, "Anthony Edwards", BE, team="MIN"),
+                            player(3, "Three", BE), player(4, "Four", BE)])             # 4 of 4 seats
+    protect({21: [EDWARDS]})
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected") and h.txn_calls == [] and h.audits == []
+
+
+@pytest.mark.unit
+def test_a_stream_lanes_switch_never_drops_a_protected_holder(h, protect, monkeypatch):
+    """An add alone would leave the lane's spot to no one: skipped, and the lane ends at its next decision."""
+    arrange_day_before(h)
+    protect({21: [EDWARDS]})
+    monkeypatch.setattr(StreamLaneService, "note_pickup_settled",
+                        staticmethod(lambda *a, **k: asyncio.sleep(0, result=None)))
+    r = execute(h, row(lane_id=7))
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected") and h.txn_calls == []
+    assert r.detail == "Anthony Edwards is protected: unprotect him in the Week desk to drop him"
+
+
+@pytest.mark.unit
+def test_a_drop_whose_protection_cant_be_read_waits(h, monkeypatch):
+    from services import roster_protection
+
+    async def down(team_id):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(roster_protection, "ids", down)
+    arrange_day_before(h)
+    assert execute(h).outcome == "deferred"
+    assert [d[2] for d in h.deferred] == ["protections_unread"] and h.txn_calls == []
+
+
+@pytest.mark.unit
+def test_a_drop_protected_under_the_attempt_is_refused_before_espn_and_never_marked_sent(h, monkeypatch):
+    """Protected between this attempt's own check and the write: the write chain's check refuses it
+    before the in-flight mark, so the row settles skipped instead of waiting on a write that never left."""
+    from services import roster_protection
+    reads = []
+
+    async def protected_on_the_second_read(team_id):
+        reads.append(team_id)
+        return frozenset() if len(reads) == 1 else frozenset({EDWARDS})
+    monkeypatch.setattr(roster_protection, "ids", protected_on_the_second_read)
+    arrange_day_before(h)
+    r = execute(h)
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected")
+    assert h.txn_calls == [] and h.marked == [] and h.updates[0][1] == "failed"
+
+
+@pytest.mark.unit
+def test_a_drop_protected_while_the_send_is_claimed_is_still_never_sent(h, monkeypatch):
+    """Protected after the write chain's first check, while the in-flight mark was being taken
+    (protecting finds the pickup held, so it can't cancel it): the check after the mark refuses
+    it, nothing reaches ESPN, and settling skipped clears the mark."""
+    from services import roster_protection
+    reads = []
+
+    async def protected_from_the_third_read(team_id):
+        reads.append(team_id)
+        return frozenset() if len(reads) <= 2 else frozenset({EDWARDS})
+    monkeypatch.setattr(roster_protection, "ids", protected_from_the_third_read)
+    arrange_day_before(h)
+    r = execute(h)
+    assert len(reads) == 3                       # the attempt's check, then one each side of the mark
+    assert (r.outcome, r.reason) == ("skipped", "drop_protected")
+    assert h.txn_calls == [] and len(h.marked) == 1
+    assert h.settled[0][1]["status"] == "skipped" and h.settled[0][1]["audit_id"] is None
+    assert h.updates[0][1] == "failed" and h.updates[0][3].startswith("not_sent: Anthony Edwards is protected")
+
+
+@pytest.mark.unit
+def test_schedule_refuses_to_drop_a_protected_player(scheduling, protect):
+    protect({21: [EDWARDS]})
+    with pytest.raises(svc.ScheduledPickupInvalid) as exc:
+        schedule(SchedulePickupReq(add_player_id=KAWHI, drop_player_id=EDWARDS, scoring_period_id=3))
+    assert exc.value.data["reason"] == "drop_protected" and scheduling.inserted == []
+    assert exc.value.message == "Anthony Edwards is protected: unprotect him in the Week desk to drop him"

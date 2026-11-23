@@ -1,7 +1,7 @@
 # Schema migrations
 
 This directory is the **single source of truth for the shared PostgreSQL schema** —
-`usr.*`, `nba.*`, and `stats_s2.*`. The backend and data-platform services share one
+`usr.*`, `nba.*`, `stats_s2.*`, and `ops.*` (the services' own operational data). The backend and data-platform services share one
 database; data-platform reads and writes these tables but never alters schema. Any
 schema change for either service lands here as a new migration.
 

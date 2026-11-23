@@ -23,6 +23,8 @@ from services.draft_service import (
     check_slot_in_range,
     draft_front,
     duplicate_pick_of,
+    DEFAULT_ROUNDS,
+    league_pending,
     league_prefill,
     next_pick_for_slot,
     matching_keeper,
@@ -149,15 +151,32 @@ def test_espns_other_draft_types_still_draft_in_pick_order():
 
 
 @pytest.mark.unit
-def test_no_league_means_no_prefill_rather_than_invented_defaults():
+def test_only_a_live_room_without_a_team_is_league_pending():
+    assert league_pending(SimpleNamespace(kind="live", team_id=None)) is True
+    assert league_pending(SimpleNamespace(kind="live", team_id=7)) is False
+    assert league_pending(SimpleNamespace(kind="mock", team_id=None)) is False
+
+
+@pytest.mark.unit
+def test_a_bigger_roster_drafts_more_rounds():
+    # A five-deep bench: the league's own shape wins over the standard count.
+    league = _league(roster_slots={**ESPN_ROSTER_SLOTS, "BE": 5})
+    assert league_prefill(league)["rounds"] == 15
+
+
+@pytest.mark.unit
+def test_no_league_means_the_standard_rounds_and_nothing_else_invented():
+    # Every format drafts a bench, so a room with no league to ask is the
+    # standard 13 rounds — not an empty count the user has to fill in.
     prefill = league_prefill(None)
-    assert prefill == {"draft_type": "snake", "pick_order": [], "rounds": None, "keeper_count": None}
+    assert DEFAULT_ROUNDS == 13
+    assert prefill == {"draft_type": "snake", "pick_order": [], "rounds": 13, "keeper_count": None}
 
 
 @pytest.mark.unit
 def test_an_unsynced_league_prefills_only_what_it_knows():
     prefill = league_prefill(_league(draft_settings={}, roster_slots={}))
-    assert prefill["pick_order"] == [] and prefill["rounds"] is None
+    assert prefill["pick_order"] == [] and prefill["rounds"] == DEFAULT_ROUNDS
     assert prefill["keeper_count"] is None and prefill["draft_type"] == "snake"
 
 

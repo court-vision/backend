@@ -121,6 +121,15 @@ class TestAbsentMeansKeep:
         merged = TeamService._merge_stored_credentials(10, 1, incoming)
         assert merged.espn_s2 == "NEW" and merged.swid == "{new}"
 
+    @pytest.mark.parametrize("league_id, year, kept", [(5, 2026, 4), (6, 2026, None), (5, 2027, None)])
+    def test_learned_espn_team_id_only_carries_within_its_league(self, monkeypatch, league_id, year, kept):
+        from db.models import teams as teams_module
+        team = _team({**ESPN, "espn_team_id": 4})
+        monkeypatch.setattr(teams_module.Team, "get_or_none", classmethod(lambda cls, *a: team))
+        monkeypatch.setattr(credential_service, "hydrate", lambda t, payload: {**payload})
+        incoming = LeagueInfo(provider=FantasyProvider.ESPN, league_id=league_id, team_name="T", year=year)
+        assert TeamService._merge_stored_credentials(10, 1, incoming).espn_team_id == kept
+
     def test_unknown_team_is_not_found(self, monkeypatch):
         from core.errors import NotFoundError
         from db.models import teams as teams_module

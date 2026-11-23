@@ -121,9 +121,10 @@ from datetime import date
 from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Sequence
 
 from core.compute import run_cpu
+from core.nba_calendar import nba_date_et
 from core.settings import settings
 from db import base as db_base
-from db.models.drafts import DraftPick
+from db.models.drafts import DraftPick, DraftSession
 from db.models.nba.draft_market import DraftMarket
 from db.models.nba.player_profiles import PlayerProfile
 from db.models.nba.player_projections import PlayerProjection
@@ -135,6 +136,7 @@ from schemas.draft import (
     DraftBoardResp,
     DraftBoardRow,
     DraftCongestionResp,
+    DraftInSeasonResp,
     DraftPlayoffsResp,
     DraftRecommendation,
     DraftRosterEntry,
@@ -154,6 +156,7 @@ from services.draft_congestion import (
     build_congestion_model,
     week_from_calendar,
 )
+from services import draft_in_season, live_projection
 from services.draft_fit import FitModel, build_fit_model, draftable_tier_size
 from services.draft_market import market_auction_of, market_rank_of, rank_basis_for, rank_type_for
 from services.draft_service import (
@@ -336,6 +339,36 @@ class BoardInputs:
     # playoff weeks fall and how each team's games split around them. Empty when
     # the calendar could not be read — the valuation then counts plain games.
     calendar: tuple[SampleWeek, ...] = ()
+    # A draft held after opening night (services.draft_in_season): what this
+    # season's games changed, None for the preseason valuation. With it the
+    # pool's lines carry this season's games, both calendars hold only the days
+    # still to come, `games_left` replaces the projection's games, and
+    # `live_injury` (today's report, every player not cleared to play) replaces
+    # the market snapshot's flags; `new_injury` are those hurt since it.
+    in_season: Optional[draft_in_season.InSeason] = None
+    games_left: dict[int, float] = field(default_factory=dict)
+    live_injury: Optional[dict[int, str]] = None
+    new_injury: frozenset[int] = frozenset()
+    # The live projection, when a fresh snapshot priced the board
+    # (services.live_projection): every player it values, with his expected
+    # games in each fantasy week still to come (empty for a team the calendar
+    # does not carry). His line and `games_left` are the snapshot's, his missed
+    # games are filled by a replacement (`LeagueModel.fill_missed`), and no
+    # injury term is charged on top: the games already carry it. Empty on the
+    # blend alone, and before opening night.
+    live_games: dict[int, dict[int, float]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SeasonReads:
+    """What `_season_reads` returns for a draft held in season."""
+
+    first_day: date                                     # the first day counted
+    rows: list[PoolRow]                                 # this season's per-game lines
+    as_of: Optional[date]                               # the newest of them
+    injuries: dict[int, str]                            # today's flags, board vocabulary
+    calendar: tuple[draft_in_season.DatedWeek, ...]     # the whole season, dated
+    live: Optional[live_projection.LiveSnapshot] = None  # the morning's projection, when fresh
 
 
 @dataclass
@@ -392,7 +425,43 @@ class DraftBoardService:
     # ---- one trip to the database ---------------------------------------------
 
     @staticmethod
-    def _fetch_inputs(my_ids: frozenset[int], session_id: Optional[int] = None) -> BoardInputs:
+    def _season_reads(session_id: Optional[int], season: str,
+                      live_source: str = live_projection.SOURCE) -> Optional["_SeasonReads"]:
+        """What a draft held in season reads on top of the preseason inputs, or None
+        when the room drafts on the preseason valuation (services.draft_in_season):
+        before opening night or after the regular season, an imported room, or a
+        room whose draft started before opening night. `live_source` is which
+        live projection: the shadow boards read the one with the analyst's notes."""
+        today = schedule_service.get_nba_today()
+        try:
+            bounds = schedule_service.get_season_bounds(season)
+        except (FileNotFoundError, ValueError):
+            return None
+        kind = drafted = None
+        if session_id is not None:
+            room = (DraftSession.select(DraftSession.kind, DraftSession.status, DraftSession.started_at,
+                                        DraftSession.created_at)
+                    .where(DraftSession.id == session_id).first())
+            if room is not None:
+                kind = room.kind
+                drafted = draft_in_season.drafted_on(room.started_at, room.created_at, room.status, today)
+        first_day = draft_in_season.games_from(
+            today, bounds.opening_night, bounds.regular_season_end, kind=kind, started=drafted
+        )
+        if first_day is None:
+            return None
+        as_of, rows = draft_in_season.load_season_rows(season)
+        calendar = DraftBoardService._dated_calendar()
+        return _SeasonReads(first_day=first_day, rows=rows, as_of=as_of,
+                            injuries=draft_in_season.load_live_injuries(nba_date_et()),
+                            calendar=calendar,
+                            # Priced on the calendar's game days: without one, the blend
+                            live=(live_projection.load(season, first_day, source=live_source)
+                                  if calendar else None))
+
+    @staticmethod
+    def _fetch_inputs(my_ids: frozenset[int], session_id: Optional[int] = None,
+                      live_source: str = live_projection.SOURCE) -> BoardInputs:
         season = settings.nba_season
 
         session_picked: set[int] = set()
@@ -482,6 +551,27 @@ class DraftBoardService:
                 value_season.pop(pid, None)
                 last_season_gp.pop(pid, None)
 
+        # A draft held in season: this season's games folded into every line,
+        # before the market-only rows are found, so a player valued off this
+        # season alone is no longer one of them.
+        reads = DraftBoardService._season_reads(session_id, season, live_source)
+        in_season = (
+            draft_in_season.apply(pool, source, reads.rows, reads.first_day, season_as_of=reads.as_of)
+            if reads is not None else None
+        )
+        # Then the morning's live projection over it, when there is a fresh one:
+        # its line and its games for every player it carries. The blend above
+        # stays for the rest, and is the whole board on a morning with none.
+        live = (
+            live_projection.apply(pool, source, reads.live, reads.first_day, reads.calendar)
+            if (reads is not None and reads.live is not None) else None
+        )
+        if live is not None:
+            in_season.live_as_of, in_season.live_version = live.as_of, live.version
+            in_season.live = len(live.games_left)
+            for pid in live.games_left:
+                value_season.pop(pid, None)     # the line is this season's, whatever the baseline was
+
         market: dict[int, dict] = {}
         market_as_of: Optional[date] = None
         for rec in DraftMarket.latest_for_season(season):
@@ -522,7 +612,33 @@ class DraftBoardService:
                 PlayerProfile.player.in_(list(wanted))
             ):
                 current_team[rec.player_id] = rec.team_id
-        calendar = DraftBoardService._calendar_weeks()
+
+        games_left: dict[int, float] = {}
+        live_injury: Optional[dict[int, str]] = None
+        new_injury: frozenset[int] = frozenset()
+        if reads is None:
+            calendar = DraftBoardService._calendar_weeks()
+        else:
+            # Only the days still to come: the games each team has left, and
+            # each player's share of a full season applied to them.
+            calendar = draft_in_season.trim_calendar(reads.calendar, reads.first_day)
+            full = draft_in_season.team_games(dw.week for dw in reads.calendar)
+            left = draft_in_season.team_games(calendar)
+            priced = live.games_left if live is not None else {}
+            for row in pool.values():
+                if row.id in priced:
+                    games_left[row.id] = priced[row.id]
+                    continue
+                team = current_team.get(row.id) or row.team
+                games_left[row.id] = draft_in_season.games_left(projected_gp.get(row.id), team, full, left)
+            live_injury = reads.injuries
+            # Hurt since the projection was made: only where the projection is
+            # October's. The live one read last night's box scores and this
+            # morning's availability, and his games already say so.
+            new_injury = frozenset(
+                pid for pid in live_injury
+                if pid not in priced and DraftBoardService._injury_of(market.get(pid, {})) is None
+            )
 
         market_only = [
             MarketOnlyRow(id=pid, name=names[pid][0], espn_id=names[pid][1], position=positions.get(pid))
@@ -545,7 +661,25 @@ class DraftBoardService:
             current_team=current_team,
             schedule_weeks=calendar, season_weeks=len(calendar),
             calendar=calendar,
+            in_season=in_season, games_left=games_left,
+            live_injury=live_injury, new_injury=new_injury,
+            live_games=live.week_games if live is not None else {},
         )
+
+    @staticmethod
+    def _dated_calendar() -> tuple[draft_in_season.DatedWeek, ...]:
+        """`_calendar_weeks` with the date of each week's first day: what an
+        in-season board trims to the days still to come. Empty with no calendar."""
+        try:
+            return tuple(
+                draft_in_season.DatedWeek(
+                    start=w["start_date"],
+                    week=week_from_calendar(w["matchup_number"], w["game_span"], w["games"]),
+                )
+                for w in schedule_service.iter_weeks()
+            )
+        except FileNotFoundError:
+            return ()
 
     @staticmethod
     def _calendar_weeks() -> tuple[SampleWeek, ...]:
@@ -645,19 +779,73 @@ class DraftBoardService:
         the room's, and a recap graded on another would grade a different draft.
         """
         model, _schedule = DraftBoardService.league_model(scoring, inputs, session or BoardSession(), cat_defs)
+        playoff_weeks = DraftBoardService._playoff_weeks(scoring, inputs)
         players = [
             ProjectedPlayer(
                 row=row,
                 # 0 is "ESPN projects nobody", not "he will not play" — the
-                # historical `gp or DEFAULT_PROJECTED_GP` rule.
-                games=inputs.projected_gp.get(row.id) or None,
-                team=inputs.current_team.get(row.id) or row.team,
+                # historical `gp or DEFAULT_PROJECTED_GP` rule. In season, the
+                # games he has left.
+                games=DraftBoardService._games_of(inputs, row.id),
+                team=DraftBoardService._valued_team(inputs, row),
                 dd_rate=inputs.game_rates.get(row.id, (None, None))[0],
                 td_rate=inputs.game_rates.get(row.id, (None, None))[1],
+                # On the live projection, when his games fall: a player out
+                # until January plays his in the weeks that are left then.
+                phase_games=DraftBoardService._phase_games(inputs.live_games.get(row.id), playoff_weeks),
             )
             for row in inputs.pool
         ]
         return value_pool(players, model)
+
+    @staticmethod
+    def _valued_team(inputs: BoardInputs, row: PoolRow) -> Optional[str]:
+        """The team whose schedule values his games. Where the live projection
+        placed them by week, the team it placed him on (`live_projection.apply`
+        stamps it on his row): his full games and his share are then counted on
+        the schedule his timeline was built for, so a trade since the snapshot
+        does not read as games missed. Everyone else plays where his profile
+        says; the board still shows that team either way."""
+        if inputs.live_games.get(row.id) and row.team:
+            return row.team
+        return inputs.current_team.get(row.id) or row.team
+
+    @staticmethod
+    def _playoff_weeks(scoring: "ResolvedScoring", inputs: BoardInputs) -> tuple[int, ...]:
+        """The league's fantasy-playoff weeks on the board's calendar; none for
+        roto, which has no playoffs, and with no calendar."""
+        cats = scoring.categories
+        if not inputs.calendar or (scoring.is_categories and cats is not None and cats.win_mode == "roto"):
+            return ()
+        return tuple(DraftBoardService._window(scoring, inputs).weeks)
+
+    @staticmethod
+    def _window(scoring: "ResolvedScoring", inputs: BoardInputs):
+        """Where the league's fantasy playoffs fall on the board's calendar
+        (ESPN's default weeks for a league-less room)."""
+        league = scoring.league
+        return playoff_window(
+            getattr(league, "matchup_periods", None) if league is not None else None,
+            getattr(league, "provider", None) if league is not None else None,
+            len(inputs.calendar),
+        )
+
+    @staticmethod
+    def _phase_games(
+        by_week: Optional[Mapping[int, float]], playoff_weeks: Sequence[int]
+    ) -> Optional[tuple[float, float, float]]:
+        """A live player's expected games before, inside and after the playoff
+        weeks: `_team_weeks`' buckets, for one player. None when the projection
+        did not place his games by week (the valuation then spreads them evenly)."""
+        if not by_week:
+            return None
+        first = min(playoff_weeks) if playoff_weeks else None
+        last = max(playoff_weeks) if playoff_weeks else None
+        phases = [0.0, 0.0, 0.0]
+        for week, games in by_week.items():
+            bucket = 0 if (first is None or week < first) else (1 if week <= last else 2)
+            phases[bucket] += games
+        return phases[0], phases[1], phases[2]
 
     @staticmethod
     def league_model(
@@ -676,13 +864,8 @@ class DraftBoardService:
         cats = scoring.categories
         roto = scoring.is_categories and cats is not None and cats.win_mode == "roto"
         fmt = "roto" if roto else ("categories" if scoring.is_categories else "points")
-        league = scoring.league
         calendar = inputs.calendar
-        window = playoff_window(
-            getattr(league, "matchup_periods", None) if league is not None else None,
-            getattr(league, "provider", None) if league is not None else None,
-            len(calendar),
-        )
+        window = DraftBoardService._window(scoring, inputs)
         schedule = playoff_schedule(window, calendar) if (calendar and window.weeks) else None
         team_weeks, counted_weeks = DraftBoardService._team_weeks(calendar, window.weeks, roto)
         roster_size = session.rounds or rounds_from_roster_slots(DraftBoardService._roster_slots(scoring))
@@ -695,6 +878,9 @@ class DraftBoardService:
             counted_weeks=counted_weeks,
             team_weeks=team_weeks,
             playoff_weight=session.playoff_weight,
+            # The live projection says which games he misses, so a replacement
+            # can be charged for exactly those.
+            fill_missed=bool(inputs.live_games),
         )
         return model, (None if roto else schedule)
 
@@ -788,7 +974,7 @@ class DraftBoardService:
                     position=inputs.positions.get(row.id),
                     primary_position=primary.get(row.id),
                     positions=eligible.get(row.id),
-                    injury_status=DraftBoardService._injury_of(market),
+                    injury_status=DraftBoardService._injury_for(inputs, row.id),
                     cv_rank=cv_rank,
                     board_rank=(market_rank if basis == "espn" else cv_rank if basis == "cv" else None),
                     value=value,
@@ -801,6 +987,8 @@ class DraftBoardService:
                     playoff_light_games=po.light if po else None,
                     playoff_games_by_week=list(po.per_week) if po else None,
                     fpts_avg=row.fpts_avg,
+                    season_gp=(inputs.in_season.season_gp.get(row.id) if inputs.in_season else None),
+                    season_fpts_avg=(inputs.in_season.season_fpts.get(row.id) if inputs.in_season else None),
                     market_rank=market_rank,
                     adp=market.get("adp"),
                     auction_value=market_auction_of(market, rank_type),
@@ -822,15 +1010,20 @@ class DraftBoardService:
                 "z": entry.z,
                 "z_sum": entry.z_sum,
                 # A projection that carries his games has priced his availability;
-                # 0 is "nobody projects him", as it is for the value itself.
-                "games_projected": bool(inputs.projected_gp.get(row.id)),
+                # 0 is "nobody projects him", as it is for the value itself. An
+                # injury since the projection was made is one it couldn't price.
+                "games_projected": row.id in inputs.live_games or (
+                    bool(inputs.projected_gp.get(row.id)) and row.id not in inputs.new_injury
+                ),
                 "expected_games": entry.expected_games,
                 "share": entry.share,
                 "fit_value": fit_values.get(row.id),
                 "position": primary.get(row.id),
                 "available": row.id not in removed,
                 "blocked": blocked,
-                "injury": DraftBoardService._injury_of(market),
+                "injury": DraftBoardService._injury_for(inputs, row.id),
+                "new_injury": row.id in inputs.new_injury,
+                "live": row.id in inputs.live_games,
                 "slots": eligible.get(row.id),
             })
 
@@ -852,7 +1045,7 @@ class DraftBoardService:
                 position=entry.position,
                 primary_position=primary.get(entry.id),
                 positions=eligible.get(entry.id),
-                injury_status=DraftBoardService._injury_of(market),
+                injury_status=DraftBoardService._injury_for(inputs, entry.id),
                 cv_rank=None,
                 board_rank=(market_rank if basis == "espn" else None),
                 value=None,
@@ -936,7 +1129,7 @@ class DraftBoardService:
                 player_id=entry.id, name=entry.name, team=inputs.current_team.get(entry.id),
                 primary_position=primary.get(entry.id), positions=eligible.get(entry.id),
                 value=None, value_source="market",
-                injury_status=DraftBoardService._injury_of(inputs.market.get(entry.id, {})),
+                injury_status=DraftBoardService._injury_for(inputs, entry.id),
             )
             for entry in inputs.market_only if entry.id in mine
         ]
@@ -954,7 +1147,7 @@ class DraftBoardService:
                 player_id=pid, name=name, team=inputs.current_team.get(pid),
                 primary_position=primary.get(pid), positions=eligible.get(pid),
                 value=None, value_source="baseline",
-                injury_status=DraftBoardService._injury_of(inputs.market.get(pid, {})),
+                injury_status=DraftBoardService._injury_for(inputs, pid),
             ))
 
         available = len(rows)
@@ -1007,6 +1200,7 @@ class DraftBoardService:
                 unsupported=([k for k in GAME_ONLY_KEYS if k in scoring.points.weights]
                              if not scoring.is_categories and not inputs.game_rates else []),
                 projection_source=inputs.projection_source,
+                in_season=DraftBoardService._in_season_meta(inputs),
             ),
         )
 
@@ -1161,6 +1355,41 @@ class DraftBoardService:
     def _rank_type(scoring: "ResolvedScoring") -> str:
         """Which of ESPN's two boards this league drafts off."""
         return rank_type_for(scoring.is_categories)
+
+    @staticmethod
+    def _in_season_meta(inputs: BoardInputs) -> Optional[DraftInSeasonResp]:
+        """What a draft held in season valued differently; None before opening night."""
+        found = inputs.in_season
+        if found is None:
+            return None
+        return DraftInSeasonResp(
+            games_from=found.games_from,
+            season_as_of=found.season_as_of,
+            model=found.model,
+            live_as_of=found.live_as_of,
+            live=found.live,
+            prior_games=draft_in_season.SEASON_PRIOR_GAMES,
+            blended=found.blended,
+            season_only=found.season_only,
+            injured=len(inputs.live_injury or {}),
+            injured_since_projection=len(inputs.new_injury),
+        )
+
+    @staticmethod
+    def _injury_for(inputs: BoardInputs, player_id: int) -> Optional[str]:
+        """His injury flag: today's report in season, the market snapshot's before."""
+        if inputs.live_injury is not None:
+            return inputs.live_injury.get(player_id)
+        return DraftBoardService._injury_of(inputs.market.get(player_id, {}))
+
+    @staticmethod
+    def _games_of(inputs: BoardInputs, player_id: int) -> Optional[float]:
+        """The games his value is built on: in season, the games he has left;
+        before it, his projected games (None, which the valuation reads as
+        `DEFAULT_GAMES`, when nothing projects him)."""
+        if inputs.in_season is not None and player_id in inputs.games_left:
+            return inputs.games_left[player_id]
+        return inputs.projected_gp.get(player_id) or None
 
     @staticmethod
     def _injury_of(market: Mapping) -> Optional[str]:
@@ -1680,6 +1909,13 @@ class DraftBoardService:
         """What the injury term did, and — when it did nothing — why not."""
         if not c["injury"]:
             return "no injury flag"
+        if c.get("new_injury"):
+            return f"listed {c['injury']} today, hurt since his projection was made"
+        if c.get("live"):
+            return (
+                f"listed {c['injury']} — already in the {c['expected_games']:.0f} games "
+                "the live projection expects him to play"
+            )
         if c.get("games_projected"):
             return f"listed {c['injury']} — already in his {c['expected_games']:.0f} projected games"
         return f"listed {c['injury']}"

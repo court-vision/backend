@@ -78,7 +78,7 @@ def harness(monkeypatch):
         h.read_periods.append(kwargs.get("scoring_period_id"))
         h.read_values.append(kwargs.get("with_values", True))
         nxt = h.reads.pop(0)
-        if isinstance(nxt, Exception):
+        if isinstance(nxt, BaseException):
             raise nxt
         return nxt
 
@@ -117,9 +117,9 @@ def harness(monkeypatch):
     return h
 
 
-def manual(moves, *, version="v1", period=12):
+def manual(moves, *, version="v1", period=12, proposal_id=None):
     return ApplyLineupMovesReq(moves=[LineupMoveReq(player_id=p, from_slot_id=a, to_slot_id=b) for p, a, b in moves],
-                               expected_scoring_period_id=period, roster_version=version)
+                               expected_scoring_period_id=period, roster_version=version, proposal_id=proposal_id)
 
 
 SWAP = [(11, BE, UT), (8, UT, BE)]
@@ -150,6 +150,48 @@ def test_manual_apply_writes_verifies_and_audits(harness):
 
 
 @pytest.mark.unit
+def test_an_ai_chip_s_moves_are_checked_before_the_write_and_marked_sent_after(harness, monkeypatch):
+    """A lineup chip from the AI desk sends through this route with `proposal_id`: the proposals
+    module checks they are every move the chip still needs on the board this route read (each player
+    and the slot he goes to; where he starts from is that board's, checked here) on the same day
+    before ESPN is asked, and records the send with the write's audit id after. A chip that isn't
+    this move stops the write."""
+    from core.errors import AppError
+    from services.ai import proposals
+    seen = {"for_send": [], "sent": []}
+
+    async def for_send(proposal_id, user_id, team_id, **kw):
+        assert kw.pop("board").roster_version == "v1"       # the board the route read, as the request named it
+        seen["for_send"].append((proposal_id, user_id, team_id, kw))
+        if proposal_id == 99:
+            raise AppError("AI_PROPOSAL_MISMATCH", "The move being sent is not the one this chip proposes", status_code=422)
+        return SimpleNamespace(id=proposal_id)
+
+    async def mark_sent(proposal_id, **kw):
+        seen["sent"].append((proposal_id, kw))
+    monkeypatch.setattr(proposals, "for_send", for_send)
+    monkeypatch.setattr(proposals, "mark_sent", mark_sent)
+
+    harness.reads = [state(board()), state(after_swap(), version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, proposal_id=40)))
+    assert resp.data.verified is True and resp.data.audit_id == 1
+    assert seen["for_send"] == [(40, 11, 21, {"kind": "lineup", "scoring_period_id": 12,
+                                              "moves": [(11, UT), (8, BE)]})]
+    assert seen["sent"] == [(40, {"audit_id": 1})]
+
+    harness.reads = [state(board())]
+    with pytest.raises(AppError) as err:
+        asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP, proposal_id=99)))
+    assert err.value.error_code == "AI_PROPOSAL_MISMATCH"
+    assert len(harness.writer_calls) == 1 and len(seen["sent"]) == 1      # nothing more went to ESPN
+
+    # The Week desk's own moves never touch the proposals module
+    harness.reads = [state(board()), state(after_swap(), version="v2")]
+    asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+    assert len(seen["for_send"]) == 2 and len(seen["sent"]) == 1
+
+
+@pytest.mark.unit
 def test_a_later_day_is_read_written_and_verified_as_that_day(harness):
     friday = state(board(), period=15, current=12, nba_date="2026-10-23")
     harness.reads = [friday, state(after_swap(), period=15, current=12, nba_date="2026-10-23", version="v2")]
@@ -177,6 +219,47 @@ def test_manual_apply_reports_unverified_when_the_reread_disagrees(harness):
     resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
     assert resp.data.verified is False and "not yet confirmed" in resp.message
     assert harness.updates[-1][1] == "applied_unverified"
+
+
+@pytest.mark.unit
+def test_a_read_back_that_trails_the_write_is_read_again_until_it_shows(harness, monkeypatch):
+    """ESPN's first read after the write can still show the old board; the next one shows the swap."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0, 0))
+    harness.reads = [state(board()), state(board(), version="v1"), state(after_swap(), version="v2")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+
+    assert resp.data.verified is True and resp.data.lineup.roster_version == "v2"
+    assert "not yet confirmed" not in resp.message
+    assert len(harness.read_periods) == 3 and harness.reads == []    # the gate's read, then two read-backs
+    assert harness.updates == [(1, "applied", 200, None)]
+
+
+@pytest.mark.unit
+def test_a_write_espn_never_shows_is_unverified_after_the_last_read_back(harness, monkeypatch):
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (0, 0))
+    harness.reads = [state(board()), state(board(), version="v1"), state(board(), version="v1"), state(board(), version="v1")]
+    resp = asyncio.run(svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP)))
+
+    assert resp.data.verified is False and "not yet confirmed" in resp.message
+    assert len(harness.read_periods) == 4 and harness.updates[-1][1] == "applied_unverified"
+
+
+@pytest.mark.unit
+def test_a_write_cancelled_while_waiting_to_show_still_settles_the_audit(harness, monkeypatch):
+    """Dime's turn can time out mid-wait. ESPN took the write, so the row leaves `in_flight` and the cancel goes on."""
+    from services import write_readback
+    monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", (30,))
+    harness.reads = [state(board()), state(board(), version="v1")]   # the read-back still shows the old board
+
+    async def turn():
+        async with asyncio.timeout(0.05):
+            await svc.LineupEditorService.apply_manual(TEAM, LEAGUE, manual(SWAP))
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(turn())
+    assert harness.updates == [(1, "applied_unverified", 200, "verify_read_cancelled")]
 
 
 @pytest.mark.unit

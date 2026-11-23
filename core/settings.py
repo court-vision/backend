@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     db_pool_max_connections: int = 20
     db_max_in_flight: int = 16
     db_queue_timeout_seconds: float = 2.0
+    # Peewee closes a pooled connection this long after it was opened (its age,
+    # not its idle time) and opens new ones one at a time under a process-wide
+    # lock. At 300 s every connection had aged out between two visits, so the
+    # next page open queued its parallel requests behind ~11 serial reconnects
+    # (TCP + TLS + SCRAM, 14-28 ms each in prod): 90-330 ms on every request of
+    # the burst (docs/PERF_AUDIT_2026-10.md, A2).
+    db_pool_stale_timeout_seconds: int = 3600
+    # Peewee's pool does not ping a connection at checkout, so run_db pings one
+    # that has sat idle at least this long before using it, and swaps a dead one
+    # (one whose server restarted) for a live one instead of failing a request
+    # with it. A connection used more recently than this is trusted: one round
+    # trip saved on each query of a burst. 0 pings at every checkout.
+    db_pool_ping_after_idle_seconds: float = 30.0
+    # Connections opened at startup, before the first request, so the first
+    # page open after a deploy does not queue behind those serial connects.
+    # 8 covers most of the Week desk's first wave (9-11 parallel requests);
+    # 0 turns the warm-up off. At most db_max_in_flight are opened.
+    db_pool_warm_connections: int = 8
 
     # CPU-bound request work (category z-scoring, response assembly) runs in its
     # own small pool -- see core/compute.py. GIL-bound, so this is a
@@ -38,6 +56,21 @@ class Settings(BaseSettings):
     # League-scored rankings are cached per league scoring configuration, not per
     # user, so this bounds distinct league setups rather than sign-ups.
     league_rankings_cache_max_entries: int = 64
+    # The same rendered-response cache for the public reads Scout and Week make
+    # (player and team sheets, games, schedule weeks); TTLs and memory budgets
+    # live with the caches in core/public_read_cache.py. False is the kill
+    # switch: every route answers exactly as it did before it was cached,
+    # percentiles included (their league pool is aggregated per call again).
+    public_read_cache_enabled: bool = True
+    # Category leagues value players against a z-scored pool of every player
+    # (services.player_value_service). The pool comes from the once-a-day
+    # rolling snapshot, so each process keeps it for this long instead of
+    # rebuilding it 10-13 times per Week open. 0 disables the cache (kill switch).
+    category_value_cache_ttl_seconds: float = 300.0
+    # Per cache: the loaded pools (~0.55 MB each, one per window) and the scored
+    # pools (~0.1 MB each, one per window per league category set), so the bound
+    # is on distinct league setups.
+    category_value_cache_max_entries: int = 64
 
     # Shared fixed-window counters for SlowAPI. Railway injects REDIS_URL when
     # a Redis service is linked; RATE_LIMIT_STORAGE_URI is the explicit alias.
@@ -70,6 +103,12 @@ class Settings(BaseSettings):
     espn_max_in_flight: int = 8
     yahoo_max_in_flight: int = 8
     nba_max_in_flight: int = 4
+    # Concurrent identical provider GETs share one upstream request (core/inflight.py):
+    # a Week open fired 11 ESPN reads at once, and 3 of them repeated one in flight.
+    # In flight only (nothing is cached), never across credentials, and never across
+    # a roster write. False sends every read on its own again (kill switch). The
+    # write fence is per process: read core/inflight.py before adding a replica.
+    provider_read_coalescing: bool = True
     features_max_in_flight: int = 4
     # SQLMate is reached only over Railway private networking in deployed
     # environments. The browser talks to the public/internal proxy routes on
@@ -92,6 +131,13 @@ class Settings(BaseSettings):
     fantasy_writer_token: Optional[SecretStr] = None
     fantasy_writer_timeout_seconds: float = 30.0  # > the writer's own 20 s ESPN timeout
     fantasy_writer_max_in_flight: int = 2
+    # The late-scratch swap (POST /jobs/lineup/react, services/late_scratch_service.py):
+    # a verdict change benches a ruled-out starter or starts a bench player now
+    # available, as source 'availability', on each team whose Late scratches level
+    # is act (notify only plans it, for the email). A team gets at most
+    # LATE_SCRATCH_SWAPS_PER_DAY a day, one per player, and ROSTER_WRITES_ENABLED
+    # off turns each into a plan.
+    late_scratch_swaps_per_day: int = 3
 
     # AI layer (docs/AI_LAYER_PLAN.md). AI_ENABLED is the kill switch: off, every
     # AI route answers 503 AI_DISABLED before any model call, so shipping the code
@@ -118,6 +164,110 @@ class Settings(BaseSettings):
     # Wall clock for a whole request, retries included (the SDK retries 429/5xx).
     ai_request_timeout_seconds: float = 90.0
 
+    # The AI agent (docs/AI_AGENT_PLAN.md): the AI desk's conversations. Also off
+    # unless AI_ENABLED, and then only for the users listed here (internal
+    # usr.users ids; env format is JSON: [12]). Opus 5.5 at medium effort is the
+    # user's choice (2026-10-13): its own model and effort, apart from the
+    # router's, because a turn reasons where a routed question only classifies.
+    ai_agent_user_ids: list[int] = []
+    ai_agent_model: str = "claude-opus-5-5"
+    ai_agent_effort: str = "medium"
+    # Every agent turn, priced from its token meters, counts against this in each
+    # calendar month (UTC). Each allowed user may spend the budget divided by the
+    # allowlist's size. The Console workspace spend limit stays the last line.
+    # This and the two monthly budgets below are defaults: a cap set on the data
+    # platform's AI spend page (usr.ai_caps, migration 0054) replaces any of them,
+    # and can give one user a cap of their own on the desk or autopilot line.
+    ai_monthly_budget_usd: float = 100.0
+    # One turn's bounds. Past the spend ceiling its next model call is its last,
+    # made without tools; and a turn is refused while less than the ceiling is
+    # left in the month, so no turn can carry spend far past a cap.
+    ai_agent_turn_max_usd: float = 1.0
+    ai_agent_max_model_calls: int = 8
+    ai_agent_max_tool_calls: int = 20
+    ai_agent_turn_timeout_seconds: float = 150.0
+    # A conversation past either limit is closed: start a new one. Every turn
+    # resends the whole history, so a long conversation costs more per turn.
+    ai_agent_max_turns: int = 20
+    ai_agent_max_context_tokens: int = 150_000
+
+    # Dime's check-ins (the Dime autopilot plan, step 3; services/ai/checkins.py):
+    # turns Dime starts itself on a schedule. They run on a team of an account with CV
+    # AI access (AI_AGENT_USER_IDS) that has a usr.autopilot row with check-ins on (set
+    # in the Account desk's AI and automation), and only while AUTOPILOT_ENABLED and
+    # AI_ENABLED are on. (AUTOPILOT_TEAM_IDS, the team allowlist, went on 2026-11-15:
+    # every team of such an account can be set to AI or autopilot; a leftover value is
+    # ignored.) They are priced like any turn
+    # (AI_AGENT_TURN_MAX_USD is the ceiling of each) but on their own monthly line,
+    # shared by every autopilot team, so they can't eat the AI desk's budget. A
+    # check-in reads more than a chat answer, so it gets more steps and more time.
+    autopilot_enabled: bool = True
+    autopilot_monthly_budget_usd: float = 60.0
+    autopilot_checkins_per_day: int = 6
+    autopilot_checkin_max_model_calls: int = 12
+    autopilot_checkin_max_tool_calls: int = 32
+    autopilot_checkin_timeout_seconds: float = 360.0
+    # Steering, acting, event check-ins and the draft (the plan's steps 4 to 7) have no
+    # switch of their own. Steering (services/ai/steering.py: the steer, set_lane and
+    # cancel_pickup tools, their chips, and the pins a sent lineup chip leaves) and Dime in
+    # the Draft desk (services/ai/draft.py) come with the AI desk: AI_ENABLED and the
+    # account's place on AI_AGENT_USER_IDS. Acting (services/ai/acting.py) and event
+    # check-ins (services/ai/events.py) happen only on a team of an account with CV AI
+    # access, and only for an automation its owner put at AI. AUTOPILOT_ENABLED, ROSTER_WRITES_ENABLED
+    # and the team's Pause stop them.
+    # The policy every move Dime sends itself is held to. The day's cap counts Dime's own adds
+    # (lanes keep their own budget); over the matchup and the season Dime keeps to the league's
+    # own add limits, ESPN's settings, which every add counts toward, and may use all of them
+    # (James, 2026-11-15). It never drops a player the user protected (the roster lock); a team
+    # Dime starts acting on gets its first this-many draft picks still on the roster protected,
+    # once (services/roster_protection.py `seed`). A player Dime added may be dropped the next
+    # day (streaming a spot).
+    autopilot_adds_per_day: int = 2
+    autopilot_seed_protected: int = 6
+    # Auto-pause: the team pauses (and the user gets an email) after this many refused writes
+    # in a day, this many blocks by the same rule in a day, or any ESPN credential error.
+    autopilot_pause_refused: int = 2
+    autopilot_pause_same_block: int = 2
+    # The live rankings' analyst (the Live rankings plan, step 4; services/ai/analyst.py):
+    # one short read per player the data platform's morning screen picks, answered as a
+    # note in the projection's own inputs (a return date, minutes, a share of the offense)
+    # with the stored items it rests on. It runs while AI_ENABLED and ANALYST_ENABLED are
+    # on, belongs to no user, and spends on a monthly line of its own, so a morning of
+    # reads can't use up the AI desk's budget or the check-ins'. Each read reserves
+    # ANALYST_READ_MAX_USD before its one model call and is settled to what it cost.
+    analyst_enabled: bool = True
+    analyst_model: str = "claude-opus-5-5"
+    analyst_effort: str = "medium"
+    analyst_monthly_budget_usd: float = 40.0
+    analyst_read_max_usd: float = 0.30
+    analyst_read_timeout_seconds: float = 75.0
+    # Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py): a plan before
+    # the draft (set as the room's punts), a note when the user's pick is near, a read of the recap,
+    # and the user's seat in a mock room (Dime makes the user's picks through the room's own pick
+    # path; a live ESPN draft stays advice, since nothing writes a pick to ESPN). Every note is a
+    # turn on the AI desk's spend line, started from the room, for an account on the AI desk's list
+    # with its Dime in draft rooms switch on. A note answers one question with the board already
+    # read, so it gets a short leash.
+    dime_draft_max_model_calls: int = 5
+    dime_draft_max_tool_calls: int = 10
+    dime_draft_timeout_seconds: float = 120.0
+    # Dime's event check-ins (the Dime autopilot plan, step 6; services/ai/events.py): when an
+    # availability verdict changes or a news item lands about a player on a team Dime runs with
+    # its Late scratches row at AI, the team gets a check-in about it, before his game locks.
+    # At most this many event check-ins a day per team, and never one that would take a
+    # scheduled check-in's place under AUTOPILOT_CHECKINS_PER_DAY; an event that comes in this
+    # close before a scheduled check-in opens waits for it. A team's roster is read from ESPN at
+    # most once per this many seconds.
+    autopilot_event_checkins_per_day: int = 3
+    autopilot_event_fold_minutes: int = 20
+    autopilot_event_roster_ttl_seconds: int = 600
+    # The connection the agent's query_stats tool reads on (services/ai/stats/
+    # reader.py; docs/QUERY_STATS_PLAN.md): the read-only ask_reader role from
+    # ops/roles.sql, as postgresql://ask_reader:<password>@<host>/<db> on the
+    # same database as DATABASE_URL. Unset, the tool runs on the main pool in a
+    # read-only transaction with the same 2 s timeout and says so in the log.
+    ask_reader_database_url: Optional[str] = None
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "console"
@@ -134,6 +284,20 @@ class Settings(BaseSettings):
     # Frontend origins allowed as the token's `azp` (authorized party).
     # Empty disables the check. Env format is JSON: ["http://localhost:3000"]
     clerk_authorized_parties: list[str] = []
+
+    # The app map's account (docs/APP_MAP_PLAN.md): the Clerk user the crawler
+    # signs in as to map the signed-in desks. The account writes like any other;
+    # the crawl's own requests carry core/clerk_auth.APP_MAP_CRAWL_HEADER and are
+    # refused anything but GET/HEAD/OPTIONS and the two searches in
+    # APP_MAP_READS (403 APP_MAP_READ_ONLY). APP_MAP_TOKEN is the bearer the crawl presents to
+    # POST /v1/internal/app-map/sign-in-token for a one-time sign-in as that
+    # user; CI never holds the Clerk secret or the account's password.
+    app_map_clerk_user_id: Optional[str] = None
+    app_map_token: Optional[SecretStr] = None
+    # The bearer the workflow's upload step presents to
+    # PUT /v1/internal/app-map/maps/{build}. A token of its own: it can replace
+    # the map CV AI reads, so only the upload step holds it, never the crawl.
+    app_map_upload_token: Optional[SecretStr] = None
 
     # Yahoo OAuth Configuration
     yahoo_client_id: Optional[str] = None
@@ -162,6 +326,17 @@ class Settings(BaseSettings):
     sentry_dsn: Optional[SecretStr] = None
     sentry_environment: Optional[str] = None  # defaults to the Railway environment name, else "development"
     sentry_traces_sample_rate: float = 0.0
+
+    # Request timing (core/tracing.py, services/request_timings.py): every
+    # request's time, split into ESPN, Postgres, our own code and the rest, is
+    # written to ops.request_timings for the data-platform dashboard's Latency
+    # page. Rows are inserted in batches every flush interval and kept for the
+    # retention period. Off: no spans, no rows (Railway tracing then sees only
+    # its own edge spans).
+    request_timings_enabled: bool = True
+    request_timings_flush_seconds: float = 10.0
+    request_timings_retention_days: int = 30
+    request_timings_queue_max: int = 5000
 
     # Event-loop watchdog: exit the process (Railway restarts it) when the loop has not
     # serviced a heartbeat for this many seconds. 0 disables (tests, local dev).
@@ -205,13 +380,13 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid_levels}")
         return upper_v
 
-    @field_validator("ai_effort")
+    @field_validator("ai_effort", "ai_agent_effort", "analyst_effort")
     @classmethod
     def validate_ai_effort(cls, v: str) -> str:
         allowed = {"low", "medium", "high", "xhigh", "max"}
         lower_v = v.lower()
         if lower_v not in allowed:
-            raise ValueError(f"ai_effort must be one of {sorted(allowed)}")
+            raise ValueError(f"effort must be one of {sorted(allowed)}")
         return lower_v
 
     @field_validator("log_format")
@@ -242,6 +417,14 @@ class Settings(BaseSettings):
             raise ValueError(f"concurrency limits must be positive: {', '.join(invalid)}")
         if self.db_max_in_flight >= self.db_pool_max_connections:
             raise ValueError("db_max_in_flight must be smaller than db_pool_max_connections")
+        if self.db_pool_stale_timeout_seconds <= 0:
+            # 0 would mean "never recycle" to Peewee, whose pool does not ping
+            # a connection on checkout; keep a finite lifetime.
+            raise ValueError("db_pool_stale_timeout_seconds must be positive")
+        if self.db_pool_warm_connections < 0:
+            raise ValueError("db_pool_warm_connections must not be negative")
+        if self.db_pool_ping_after_idle_seconds < 0:
+            raise ValueError("db_pool_ping_after_idle_seconds must not be negative")
         timeouts = (
             self.db_queue_timeout_seconds,
             self.provider_queue_timeout_seconds,
@@ -253,6 +436,8 @@ class Settings(BaseSettings):
             raise ValueError("concurrency queue timeouts must be positive")
         if self.rankings_cache_ttl_seconds < 0 or self.rankings_cache_max_entries < 0:
             raise ValueError("rankings cache settings must not be negative")
+        if self.category_value_cache_ttl_seconds < 0 or self.category_value_cache_max_entries < 0:
+            raise ValueError("category value cache settings must not be negative")
         return self
 
     @model_validator(mode="after")
@@ -297,10 +482,31 @@ class Settings(BaseSettings):
             "ai_max_tool_calls": self.ai_max_tool_calls,
             "ai_user_daily_limit": self.ai_user_daily_limit,
             "ai_global_daily_limit": self.ai_global_daily_limit,
+            "ai_request_timeout_seconds": self.ai_request_timeout_seconds,
+            "ai_monthly_budget_usd": self.ai_monthly_budget_usd,
+            "ai_agent_turn_max_usd": self.ai_agent_turn_max_usd,
+            "ai_agent_max_model_calls": self.ai_agent_max_model_calls,
+            "ai_agent_max_tool_calls": self.ai_agent_max_tool_calls,
+            "ai_agent_turn_timeout_seconds": self.ai_agent_turn_timeout_seconds,
+            "ai_agent_max_turns": self.ai_agent_max_turns,
+            "ai_agent_max_context_tokens": self.ai_agent_max_context_tokens,
+            "autopilot_monthly_budget_usd": self.autopilot_monthly_budget_usd,
+            "autopilot_checkins_per_day": self.autopilot_checkins_per_day,
+            "autopilot_checkin_max_model_calls": self.autopilot_checkin_max_model_calls,
+            "autopilot_checkin_max_tool_calls": self.autopilot_checkin_max_tool_calls,
+            "autopilot_checkin_timeout_seconds": self.autopilot_checkin_timeout_seconds,
+            "autopilot_event_checkins_per_day": self.autopilot_event_checkins_per_day,
+            "autopilot_event_roster_ttl_seconds": self.autopilot_event_roster_ttl_seconds,
+            "dime_draft_max_model_calls": self.dime_draft_max_model_calls,
+            "dime_draft_max_tool_calls": self.dime_draft_max_tool_calls,
+            "dime_draft_timeout_seconds": self.dime_draft_timeout_seconds,
+            "analyst_monthly_budget_usd": self.analyst_monthly_budget_usd,
+            "analyst_read_max_usd": self.analyst_read_max_usd,
+            "analyst_read_timeout_seconds": self.analyst_read_timeout_seconds,
         }
         invalid = [name for name, value in bounds.items() if value <= 0]
-        if invalid or self.ai_request_timeout_seconds <= 0:
-            raise ValueError(f"AI bounds must be positive: {', '.join(invalid) or 'ai_request_timeout_seconds'}")
+        if invalid:
+            raise ValueError(f"AI bounds must be positive: {', '.join(invalid)}")
         return self
 
     @model_validator(mode="after")

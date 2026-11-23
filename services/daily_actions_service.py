@@ -10,10 +10,22 @@ each carrying exactly what the client stages: the lineup moves, or the pickup an
 the player to drop. Every row is judged against the CURRENT board so each can be
 staged on its own; the client re-reads after any write. Never writes.
 
+The fill reads our availability verdicts for today (services/availability_service.py)
+in place of ESPN's status, so a starter we have ruled out or doubtful before ESPN says
+so is benched for a bench player with a game: that row is a `scratch` ("ruled out,
+swap available"), first in the list. IR stays on ESPN's injury flag, which is what
+ESPN lets onto IR.
+
+IR wins over a start (`lineup_planner.ir_first`): an injured player who sits today goes to IR
+while it has an open seat, and the fill doesn't also start him, since the roster spot that frees
+for a pickup is worth more than the slim chance he plays. With IR full there is no IR row, and the
+fill starts him over a player without a game (free, in case he is cleared late). A player the fill
+counts on today (a game, and healthy or questionable by our verdict or ESPN's) gets no IR row.
+
 The pickup row is a streaming move, not an upgrade engine: the player to drop is
 the lowest-value roster player with no game today, the pickup is the day's best
 free agent, and the value comparison only checks that the two are comparable.
-Two clocks say "today" — ESPN's scoring period for the board, the 2 AM ET rule
+Two clocks say "today" — ESPN's scoring period for the board, the 3 AM ET rule
 for the streamer pool — so the swap is offered only when both agree on the date.
 
 A drop candidate's value is the board's recent average only when that average
@@ -28,7 +40,7 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Mapping, NamedTuple, Optional, Sequence
+from typing import Collection, Mapping, NamedTuple, Optional, Sequence
 
 from core.logging import get_logger
 from db.base import run_db
@@ -40,9 +52,11 @@ from schemas.daily_actions import (
     DailyActionsData,
     DailyActionsResp,
 )
+from schemas.availability import Verdict
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
-from services import schedule_service
+from services import roster_protection, schedule_service, steering
+from services.availability_service import SITS, SOURCE_WORDS, AvailabilityService, planner_verdicts
 from services.espn_service import EspnService
 from services.lineup_editor_service import (
     _clock,
@@ -53,7 +67,7 @@ from services.lineup_editor_service import (
     slot_counts_of,
     unfilled_results,
 )
-from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, plan_fill, plan_ir
+from services.lineup_planner import IR_SLOT_ID, IrAction, Move, Plan, ir_first, plan_ir, plays_today
 from services.lineup_read_service import LineupReadService, _games_on  # noqa: F401  (tests stand in for its read here)
 from services.matchup_days import index_games
 from services.player_value_service import PlayerValueService
@@ -68,7 +82,7 @@ DEFAULT_FA_COUNT = 100
 MIN_SAMPLE_GAMES = 3
 # The rolling window the board's values come from (`PlayerValueService.avg_points_for`'s default).
 BOARD_WINDOW_DAYS = 14
-KIND_ORDER = {"ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3, "add": 3}
+KIND_ORDER = {"scratch": -1, "ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3, "add": 3}
 ROSTER_FULL_DETAIL = "Roster full — drop a player first"
 
 
@@ -117,15 +131,18 @@ def has_open_seat(state: LineupState) -> bool:
     return off_ir < seats
 
 
-def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool]) -> list[LineupPlayer]:
-    """Who the swap may drop: idle today, unlocked, off IR and not headed there."""
+def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool],
+                    protected: Collection[int] = ()) -> list[LineupPlayer]:
+    """Who the swap may drop: idle today, unlocked, off IR and not headed there, and not one the
+    user protected (`protected`, ESPN ids: the roster lock)."""
     return [p for p in state.players
-            if not p.locked and p.lineup_slot_id != IR_SLOT_ID
+            if not p.locked and p.lineup_slot_id != IR_SLOT_ID and p.player_id not in protected
             and not ir_eligible.get(p.player_id, False) and not p.has_game_today]
 
 
-def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[DropValue]:
-    """What the swap weighs a drop candidate at; None = unknown, so never the drop.
+def weigh_drop(player_id: int, avg_points: float, value_source: Optional[str],
+               evidence: Optional[DropEvidence]) -> Optional[DropValue]:
+    """What a drop candidate is weighed at; None = unknown, so never the drop.
 
     Last season's line (`baseline`) already rests on a real sample. A recent
     average on fewer than MIN_SAMPLE_GAMES games counts at the higher of itself
@@ -133,17 +150,25 @@ def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[Dr
     couple of quiet games never make a player look worse than projected. No value
     at all (0.0 on the board) is the projection, and without one a thin or empty
     sample is unknown. If the lookup failed (`evidence` None) the board's averages
-    stand, but an empty one still never makes a player the weakest."""
-    if p.value_source == "baseline":
-        return DropValue(p.avg_points, False)
-    if p.value_source is not None and (evidence is None or evidence.games.get(p.player_id, 0) >= MIN_SAMPLE_GAMES):
-        return DropValue(p.avg_points, False)
-    prior = evidence.projected.get(p.player_id) if evidence is not None else None
+    stand, but an empty one still never makes a player the weakest.
+
+    The rule the what-if projection's drop choice shares (`services.matchup_projection`);
+    `player_id` is the key `evidence` is read by (the ESPN id on a board)."""
+    if value_source == "baseline":
+        return DropValue(avg_points, False)
+    if value_source is not None and (evidence is None or evidence.games.get(player_id, 0) >= MIN_SAMPLE_GAMES):
+        return DropValue(avg_points, False)
+    prior = evidence.projected.get(player_id) if evidence is not None else None
     if prior is None:
         return None
-    if p.value_source is not None and p.avg_points >= prior:
-        return DropValue(p.avg_points, False)
+    if value_source is not None and avg_points >= prior:
+        return DropValue(avg_points, False)
     return DropValue(prior, True)
+
+
+def drop_value(p: LineupPlayer, evidence: Optional[DropEvidence]) -> Optional[DropValue]:
+    """What the swap weighs a drop candidate at (`weigh_drop` over a board player)."""
+    return weigh_drop(p.player_id, p.avg_points, p.value_source, evidence)
 
 
 def suggest_transaction(
@@ -153,6 +178,7 @@ def suggest_transaction(
     ir_eligible: Mapping[int, bool],
     ratio: float = STREAMABLE_RATIO,
     evidence: Optional[DropEvidence] = None,
+    protected: Collection[int] = (),
 ) -> Optional[TransactionSuggestion]:
     """The day's streamer swap, or None. `streamers` is the daily search in its own
     order (free agents with a game today, best first). The drop is the candidate
@@ -163,7 +189,7 @@ def suggest_transaction(
     drop: Optional[LineupPlayer] = None
     weighed: Optional[DropValue] = None
     if not has_open_seat(state):
-        valued = [(v, p) for p in drop_candidates(state, ir_eligible)
+        valued = [(v, p) for p in drop_candidates(state, ir_eligible, protected)
                   if (v := drop_value(p, evidence)) is not None]
         if not valued:
             return None
@@ -214,9 +240,12 @@ def build_actions(
     *,
     pickup_game: Optional[tuple[str, Optional[str]]] = None,   # ("vs LAL · 7:30 PM", "19:30")
     drop_next: Optional[str] = None,                           # "next plays Thu"
+    verdicts: Optional[Mapping[int, Verdict]] = None,          # today's, by NBA id
 ) -> list[DailyAction]:
-    """Rows, copy and order: IR housekeeping first, then starts by tip-off, the pickup last."""
+    """Rows, copy and order: a starter we ruled out first, then IR housekeeping, then starts by
+    tip-off, the pickup last."""
     by_id = {p.player_id: p for p in state.players}
+    ruled = verdicts or {}
     out: list[DailyAction] = []
 
     for action in ir:
@@ -247,6 +276,18 @@ def build_actions(
         bench = next((x for x in chain if x.role == "bench"), None)
         evicted = by_id.get(bench.player_id) if bench is not None else None
         detail = " · ".join(x for x in (start.note, _slot_name(start.to_slot_id)) if x)
+        verdict = ruled.get(evicted.nba_player_id) if evicted is not None and evicted.nba_player_id else None
+        if evicted is not None and verdict is not None and verdict.verdict in SITS:
+            why = ", ".join(x for x in (verdict.reason, f"per {SOURCE_WORDS.get(verdict.decided_by or '', 'our sources')}")
+                            if x)
+            out.append(DailyAction(
+                id=f"scratch:{filler.player_id}", kind="scratch",
+                title=f"{evicted.name} ruled {verdict.verdict}: start {filler.name}",
+                detail=" · ".join(x for x in (detail, why) if x) or None,
+                player=_of_roster(filler), counterpart=_of_roster(evicted),
+                moves=move_results(chain, state), game_time_et=filler.game_time_et,
+            ))
+            continue
         if evicted is not None and bench is not None:
             detail += f" over {evicted.name} ({bench.note})"
         out.append(DailyAction(
@@ -284,6 +325,21 @@ def build_actions(
 
 
 # ------------------------------- lookups (failure-tolerant) ------------------------------- #
+
+
+async def _verdicts_for(team_id: int, state: LineupState, today: Optional[date]) -> dict[int, Verdict]:
+    """Today's verdicts on the board's players, by NBA id; none when they can't be read (ESPN's
+    statuses stand)."""
+    ids = [p.nba_player_id for p in state.players if p.nba_player_id is not None]
+    if today is None or not ids:
+        return {}
+    try:
+        found = await AvailabilityService.today(ids, today)
+    except Exception as exc:  # the verdicts sharpen the rows; without them the rows are ESPN's
+        log.warning("daily_actions_verdicts_failed", team_id=team_id, error=f"{type(exc).__name__}: {exc}")
+        return {}
+    return {v.nba_player_id: v for v in found}
+
 
 
 def _drop_evidence(league_info: LeagueInfo, espn_ids: list[int]) -> DropEvidence:
@@ -372,8 +428,15 @@ class DailyActionsService:
 
         players = planner_players(state)
         counts = slot_counts_of(state)
-        fill = plan_fill(players, counts)
-        ir = plan_ir(players, counts)
+        today = date.fromisoformat(state.nba_date) if state.nba_date else None
+        verdicts = await _verdicts_for(team.team_id, state, today)
+        # The fill as auto-lineup will make it, with Dime's holds (services/steering.py), over our
+        # verdicts; IR on ESPN's own statuses, for the players who sit today. IR wins: the fill
+        # doesn't start a bench player headed there
+        holds = await steering.holds_for(team.team_id, today) if today else []
+        fill_players = planner_players(state, planner_verdicts(list(verdicts.values()), today)) if verdicts else players
+        ir = plan_ir(players, counts, playing=plays_today(fill_players))
+        fill = steering.fill_with(ir_first(fill_players, ir), counts, holds, today)
         value_kind = state.players[0].value_kind if state.players else "fpts"
 
         suggestion: Optional[TransactionSuggestion] = None
@@ -390,17 +453,21 @@ class DailyActionsService:
                 streamers_error = "value_kind_mismatch"
             else:
                 ir_eligible = {p.player_id: p.ir_eligible for p in players}
-                candidates = [] if has_open_seat(state) else drop_candidates(state, ir_eligible)
+                # Never a protected player as the drop (the write chain refuses one anyway)
+                protected = await roster_protection.ids_soft(team.team_id)
+                candidates = [] if has_open_seat(state) else drop_candidates(state, ir_eligible, protected)
                 evidence = await _drop_evidence_for(league_info, candidates) if candidates else None
                 suggestion = suggest_transaction(
                     state, pool_data.streamers, ir_eligible=ir_eligible, ratio=ratio, evidence=evidence,
+                    protected=protected,
                 )
             if suggestion is not None and board_day is not None:
                 pickup_game = await _pickup_game(suggestion.pickup, board_day)
                 if suggestion.drop is not None:
                     drop_next = _next_game_label(suggestion.drop.team, pool_data, streamer_day)
 
-        actions = build_actions(state, fill, ir, suggestion, pickup_game=pickup_game, drop_next=drop_next)
+        actions = build_actions(state, fill, ir, suggestion, pickup_game=pickup_game, drop_next=drop_next,
+                                verdicts=verdicts)
         message = f"{len(actions)} action(s) today" if actions else "All set for today"
         return DailyActionsResp(status=ApiStatus.SUCCESS, message=message, data=DailyActionsData(
             lineup=state, roster_version=state.roster_version, scoring_period_id=state.scoring_period_id,

@@ -45,6 +45,7 @@ from schemas.draft import (
 from services.draft_service import (
     espn_league_id_of,
     DraftService,
+    SIMULATED_PICK_SOURCES,
     check_length_holds_picks,
     check_slot_in_range,
     duplicate_pick_of,
@@ -184,9 +185,10 @@ def apply_header(session: DraftSession, header: RoomHeader, existing: list) -> t
 
     Only an empty session is rewritten: re-deriving the header underneath
     recorded picks would move every one of their rounds and slots. `rounds` is
-    the one field that merely fills a gap — a session created from league
-    settings already knows how long the draft is, and a count of rounds the room
-    happens to have reached does not overrule it.
+    the one field a league's room keeps — a session created from league
+    settings already knows how long the draft is, and the lobby does not
+    overrule it. A league-less room only assumed the standard count, so the
+    lobby it joins says how long its draft is.
     """
     if existing:
         return False, header_warnings(header, session)
@@ -198,7 +200,7 @@ def apply_header(session: DraftSession, header: RoomHeader, existing: list) -> t
     if header.my_slot is not None:
         session.my_slot = header.my_slot
         touched.append(DraftSession.my_slot)
-    if header.rounds is not None and session.rounds is None:
+    if header.rounds is not None and (session.rounds is None or session.league_id is None):
         session.rounds = header.rounds
         touched.append(DraftSession.rounds)
     if header.draft_type != session.draft_type:
@@ -366,7 +368,7 @@ class DraftSyncService:
             link = DraftSyncService._link_decision(session, header)
 
             if link is not None and DraftPick.select().where(
-                (DraftPick.session == session_id) & (DraftPick.source == "mock")
+                (DraftPick.session == session_id) & (DraftPick.source.in_(SIMULATED_PICK_SOURCES))
             ).exists():
                 # A room CV has simulated into cannot then start following an
                 # ESPN draft: the pick numbers are already spent, so every INIT

@@ -1,14 +1,15 @@
 """Daily/weekly matchup building blocks under points and category scoring."""
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from schemas.lineup_snapshots import LineupSnapshotPlayer
 from schemas.matchup import MatchupData, MatchupPlayerResp, MatchupTeamResp
+from services import matchup_days
 from services.matchup_days import (
-    DayRosters, RosterSide, build_day, build_past_roster, index_games, score_stat_row, team_day_totals,
+    DayRosters, RosterSide, build_day, build_past_roster, index_games, matchup_today, score_stat_row, team_day_totals,
 )
 from services.scoring import CategoryDef, CategoryScoring, DEFAULT_CATEGORIES, DEFAULT_POINT_WEIGHTS
 from services.scoring.resolver import ResolvedScoring
@@ -145,3 +146,30 @@ def test_build_day_labels_each_side_by_its_source():
     plain = build_day(md, date(2027, 1, 12), date(2027, 1, 14), date(2027, 1, 11), stats, [GAME],
                       lambda p: resolve(p.player_id), POINTS)
     assert plain.your_team.roster_source == "current" and plain.your_team.total_fpts == 70.0
+
+
+# ---- today ----------------------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_matchup_today_is_espns_day_when_espn_said_it(monkeypatch):
+    monkeypatch.setattr(matchup_days.schedule_service, "date_for_espn_scoring_period",
+                        lambda period, season=None: date(2026, 10, 19) + timedelta(days=period))
+    clock = lambda: date(2026, 10, 20)                       # noqa: E731 - the 2 AM clock rule, not turned yet
+    espn = SimpleNamespace(scoring_period_id=2, scoring_period_source="provider")
+    assert matchup_today(espn, clock) == date(2026, 10, 21)
+    # Yahoo's calendar day, an unknown one and ESPN's preseason 0 all go by the clock.
+    for md in (SimpleNamespace(scoring_period_id=2, scoring_period_source="calendar"),
+               SimpleNamespace(scoring_period_id=None, scoring_period_source="unknown"),
+               SimpleNamespace(scoring_period_id=0, scoring_period_source="provider")):
+        assert matchup_today(md, clock) == date(2026, 10, 20)
+
+
+@pytest.mark.unit
+def test_matchup_today_without_a_season_calendar_goes_by_the_clock(monkeypatch):
+    def no_calendar(period, season=None):
+        raise FileNotFoundError("no schedule for the season")
+
+    monkeypatch.setattr(matchup_days.schedule_service, "date_for_espn_scoring_period", no_calendar)
+    espn = SimpleNamespace(scoring_period_id=2, scoring_period_source="provider")
+    assert matchup_today(espn, lambda: date(2026, 10, 21)) == date(2026, 10, 21)

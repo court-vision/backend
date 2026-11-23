@@ -16,10 +16,11 @@ from schemas.espn import ValueKind
 from schemas.lineup_editor import LineupMoveResult, LineupState, LineupUnfilled, WriteBlockedReason
 from schemas.streamer import StreamerPlayerResp
 
-# start: bench player into an active slot (the fill plan); ir_in: injured player to IR;
-# ir_out: healthy player off IR; add / add_drop: a free agent playing today, with or
-# without a player to release.
-DailyActionKind = Literal["start", "ir_in", "ir_out", "add", "add_drop"]
+# start: bench player into an active slot (the fill plan); scratch: the same, over a starter
+# our availability verdict has ruled out or doubtful (services/availability_service.py);
+# ir_in: injured player to IR; ir_out: healthy player off IR; add / add_drop: a free agent
+# playing today, with or without a player to release.
+DailyActionKind = Literal["start", "scratch", "ir_in", "ir_out", "add", "add_drop"]
 # Row-level only. Whether anything can be written at all is data.can_write /
 # data.write_blocked_reason, so a row never repeats a WriteBlockedReason.
 DailyActionBlockedReason = Literal["roster_full"]

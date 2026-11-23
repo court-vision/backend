@@ -1,4 +1,6 @@
 import math
+import threading
+import time
 import unicodedata
 from typing import Optional
 from datetime import date, timedelta
@@ -181,11 +183,71 @@ def _season_scoped_logs(all_logs: list) -> tuple[list, Optional[str]]:
     return all_logs, None
 
 
+# The league pool behind percentiles: one GROUP BY over every fantasy box score
+# in the season scope (20.8-27.8 ms mean in production's pg_stat_statements,
+# 2026-10-13). It is the same for every player and only the post-game pipeline
+# changes it, so it is computed once per scope per ten-minute window and each
+# call looks its player up in memory. No single-flight: concurrent misses each
+# run the query, exactly as every call did before, and nobody holds a database
+# permit waiting on another thread's query.
+#
+# Windows are fixed slices of the monotonic clock rather than ten minutes from
+# each build, so anything derived from a pool knows when it expires without
+# being told which pool it came from: the percentile route keys its cached
+# bodies by the window and caps the client's max-age at the window's end
+# (api/v1/public/players.py), so a body never outlives its pool.
+PERCENTILE_POOL_WINDOW_SECONDS = 600.0
+_percentile_pools: dict[tuple, tuple[int, list[dict]]] = {}
+_percentile_pools_lock = threading.Lock()
+
+
+def reset_percentile_pool_cache() -> None:
+    """Drop the cached percentile pools: the cache kill switch does it on every request, and tests between cases."""
+    with _percentile_pools_lock:
+        _percentile_pools.clear()
+
+
 def scaled_min_games(requested: int, max_games: int) -> int:
     """A games-played floor that scales with the season: never more than half the max, at least 1."""
     if max_games <= 0:
         return 1
     return max(1, min(requested, math.ceil(0.5 * max_games)))
+
+
+def percentile_pool_window() -> tuple[int, int]:
+    """The percentile pool's current window, and whole seconds left in it (at least 1)."""
+    now = time.monotonic()
+    window = int(now // PERCENTILE_POOL_WINDOW_SECONDS)
+    left = (window + 1) * PERCENTILE_POOL_WINDOW_SECONDS - now
+    return window, max(1, int(left))
+
+
+def _cached_percentile_pool(compute) -> list[dict]:
+    """The scoped percentile pool, from the cache when it was built in this window.
+
+    Keyed by what picks the scope: the active season and its opening night.
+    The fallback to last season's pool turns on the data (no box scores yet),
+    so a fallback pool also lasts at most one window once the first ones land.
+    """
+    if not settings.public_read_cache_enabled:
+        # The kill switch (PUBLIC_READ_CACHE_ENABLED=false) restores the
+        # uncached route exactly: the aggregate on every call, so a pipeline
+        # write shows at once. Anything held from before is dropped, so it
+        # cannot answer later calls if caching comes back on.
+        reset_percentile_pool_cache()
+        return compute()
+    key = (settings.nba_season, _season_opening_night())
+    # Taken before the query: a pool whose query straddles a window's end is
+    # filed under the earlier window and rebuilt in the next, never the reverse.
+    window, _ = percentile_pool_window()
+    with _percentile_pools_lock:
+        hit = _percentile_pools.get(key)
+    if hit is not None and hit[0] == window:
+        return hit[1]
+    rows = compute()
+    with _percentile_pools_lock:
+        _percentile_pools[key] = (window, rows)
+    return rows
 
 
 class PlayerService:
@@ -644,20 +706,30 @@ class PlayerService:
                 q = q.where(PlayerGameStats.game_date >= start)
             if end is not None:
                 q = q.where(PlayerGameStats.game_date < end)
-            return list(q.group_by(PlayerGameStats.player_id).dicts())
+            # Converted once here, where the comparisons below used to convert
+            # every value on every call: same floats, same ints, same results.
+            return [
+                {"player": r["player"], "games": int(r["games"]),
+                 **{name: float(r[name]) for name in stat_fields}}
+                for r in q.group_by(PlayerGameStats.player_id).dicts()
+            ]
 
-        # Season-scoped pool (career-to-date otherwise); before opening night use last season.
-        opening = _season_opening_night()
-        all_players = _pool(opening, None)
-        if not all_players and opening is not None:
-            all_players = _pool(date(opening.year - 1, 8, 1), opening)
+        def _scoped_pool():
+            # Season-scoped pool (career-to-date otherwise); before opening night use last season.
+            opening = _season_opening_night()
+            rows = _pool(opening, None)
+            if not rows and opening is not None:
+                rows = _pool(date(opening.year - 1, 8, 1), opening)
+            return rows
+
+        all_players = _cached_percentile_pool(_scoped_pool)
         if not all_players:
             # An empty pool is an empty state (pre-season), not a failure
             return PlayerPercentilesResp(status=ApiStatus.SUCCESS, message="No qualifying players yet — percentiles start after opening night", data=None)
 
         # The floor scales with how far into the season we are (half the max GP, at most min_games)
-        min_games = scaled_min_games(min_games, max(int(r["games"]) for r in all_players))
-        all_players = [r for r in all_players if int(r["games"]) >= min_games]
+        min_games = scaled_min_games(min_games, max(r["games"] for r in all_players))
+        all_players = [r for r in all_players if r["games"] >= min_games]
         if not all_players:
             # An empty pool is an empty state (pre-season), not a failure
             return PlayerPercentilesResp(status=ApiStatus.SUCCESS, message="No qualifying players yet — percentiles start after opening night", data=None)
@@ -679,12 +751,12 @@ class PlayerService:
 
         percentiles = {}
         for stat_name in stat_fields:
-            target_val = float(target_row[stat_name])
+            target_val = target_row[stat_name]
             if stat_name in invert_stats:
                 # For turnovers, fewer is better, so count players with HIGHER avg
-                lower_count = sum(1 for r in all_players if float(r[stat_name]) > target_val)
+                lower_count = sum(1 for r in all_players if r[stat_name] > target_val)
             else:
-                lower_count = sum(1 for r in all_players if float(r[stat_name]) < target_val)
+                lower_count = sum(1 for r in all_players if r[stat_name] < target_val)
             percentiles[stat_name] = round((lower_count / total) * 100)
 
         return PlayerPercentilesResp(

@@ -7,10 +7,19 @@ game into slots that are empty or held by players who cannot score today.
 
 Tiers decide who may displace whom:
 
-    A  has a game and is not OUT      never displaced
-    B  has a game but is OUT          kept (the status may flip before tip), displaced
-                                      only by a tier-A bench player
-    C  no game today                  displaced by any A or B bench player
+    A  has a game, not OUT or DOUBTFUL   never displaced (an upgraded doubtful is A)
+    A2 has a game, DOUBTFUL              displaced only by a tier-A bench player
+    B  has a game but is OUT             kept (the status may flip before tip), displaced
+                                         only by a tier-A or A2 bench player
+    C  no game today                     displaced by any A, A2 or B bench player
+
+An "upgraded doubtful" is a DOUBTFUL player whose previous status was OUT (earlier
+the same day, or at his previous game): he is trending toward playing, so he stays
+tier A. Without a previous status (ESPN's string alone) DOUBTFUL is A2.
+
+Nobody is benched *because* he is out or doubtful: a player leaves an active slot
+only when a better-tier bench player with a game needs that slot, directly or
+through a chain of shifts. With no such bench player he stays.
 
 A bench player may take an active slot only when the slot is empty or its holder
 is in a strictly worse tier — never a lateral swap, so this is not an optimizer.
@@ -24,28 +33,35 @@ Every consumer of a plan (manual "Optimize today", the alert email, the auto
 write) reads the same `Plan`, so "an issue exists" means exactly "a move exists".
 
 `plan_ir` is the IR counterpart for the daily-actions view: it never runs inside
-`plan_fill`, so nothing auto-applied ever touches slot 13.
+`plan_fill`, so nothing auto-applied ever touches slot 13. Where both are offered
+(the Week desk's daily actions, Dime's get_lineup), IR wins over a start: an injured
+player who sits today goes to IR while it has an open seat, because the roster spot
+that frees for a pickup is worth more than the slim chance he plays, and the fill
+plans on `ir_first`'s board so it doesn't also start him. With IR full he gets no IR
+move, and the fill starts him over a player without a game, which costs nothing (he
+may be cleared late). A player expected to play (`plays_today`) never goes to IR.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Collection, Iterable, Mapping, Optional, Sequence
 
 ACTIVE_SLOT_IDS: frozenset[int] = frozenset(range(0, 12))
 BENCH_SLOT_ID = 12
 IR_SLOT_ID = 13
 UNTOUCHABLE_SLOT_IDS: frozenset[int] = frozenset({14, 15})
 # Mirrors services.team_insights_service._OUT_STATUSES; DTD / GTD / QUESTIONABLE
-# / DOUBTFUL count as healthy — ESPN still scores them if they play.
+# count as healthy — ESPN still scores them if they play. DOUBTFUL is its own tier.
 OUT_STATUSES: frozenset[str] = frozenset({"OUT", "O", "IL", "IL+", "SUSPENSION", "INJURY_RESERVE"})
 # ESPN's IR rule asks whether the player is *injured*, not whether he can play: a
 # suspension keeps him out of the lineup but the transaction is still refused with
 # TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED, so it must not open slot 13.
 IR_STATUSES: frozenset[str] = OUT_STATUSES - {"SUSPENSION"}
+DOUBTFUL_STATUSES: frozenset[str] = frozenset({"DOUBTFUL"})
 
-TIER_A, TIER_B, TIER_C = 0, 1, 2
+TIER_A, TIER_A2, TIER_B, TIER_C = 0, 1, 2, 3
 MAX_CHAIN_HOPS = 4  # filler + up to three shifts + the evicted player
 
 
@@ -61,10 +77,20 @@ class PlannerPlayer:
     value: float = 0.0
     game_note: Optional[str] = None  # "vs LAL · 7:30 PM", supplied by the caller for move notes
     injured: bool = False            # ESPN's `injured` flag — its IR rule ("player is not injured")
+    previous_status: Optional[str] = None  # the status before the current one; OUT -> DOUBTFUL is an upgrade
 
     @property
     def is_out(self) -> bool:
         return (self.injury_status or "ACTIVE").upper() in OUT_STATUSES
+
+    @property
+    def is_doubtful(self) -> bool:
+        return (self.injury_status or "ACTIVE").upper() in DOUBTFUL_STATUSES
+
+    @property
+    def upgraded_doubtful(self) -> bool:
+        """DOUBTFUL after being OUT: trending toward playing, so treated as healthy."""
+        return self.is_doubtful and (self.previous_status or "").upper() in OUT_STATUSES
 
     @property
     def ir_eligible(self) -> bool:
@@ -80,11 +106,15 @@ class PlannerPlayer:
     def tier(self) -> int:
         if not self.has_game:
             return TIER_C
-        return TIER_B if self.is_out else TIER_A
+        if self.is_out:
+            return TIER_B
+        if self.is_doubtful and not self.upgraded_doubtful:
+            return TIER_A2
+        return TIER_A
 
     @property
     def playable(self) -> bool:
-        """Has a game today and is not OUT (tier A)."""
+        """Has a game today and is neither OUT nor (un-upgraded) DOUBTFUL (tier A)."""
         return self.tier == TIER_A
 
     @property
@@ -166,15 +196,20 @@ class _Path:
     evicted: Optional[PlannerPlayer]
 
 
-def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: Mapping[int, int]) -> Optional[_Path]:
+def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: Mapping[int, int], *,
+               evictable: Optional[frozenset[int]] = None, allow_empty: bool = True) -> Optional[_Path]:
     """Shortest alternating path from the bench into an eligible slot.
 
     BFS over (slot, mover). A slot with spare capacity ends the path; a full slot
     ends it when one holder is unlocked and in a strictly worse tier than the
     filler (that holder sits); otherwise any unlocked holder may shift to another
     eligible active slot and the search continues. Among the shortest paths an
-    empty slot beats an eviction, then the worst holder (tier C before B, lowest
-    value) is the one who sits.
+    empty slot beats an eviction, then the worst holder (tier C before B before
+    A2, lowest value) is the one who sits.
+
+    `evictable` limits who may sit to those ids, and `allow_empty=False` refuses a
+    path that ends in a spare slot: `plan_reaction` uses both to find the chain
+    that benches one player and nothing else.
     """
     occupants = _occupants(board)
     start_slots = sorted(s for s in filler.eligible_slot_ids if s in ACTIVE_SLOT_IDS and capacity.get(s, 0) > 0)
@@ -197,16 +232,17 @@ def _find_path(filler: PlannerPlayer, board: Sequence[PlannerPlayer], capacity: 
         slot = slots[-1]
         holders = occupants.get(slot, [])
         if len(holders) < capacity.get(slot, 0):
-            candidate = ((0, 0, 0.0, slot), _Path(slots, shifters, None))
-            if best is None or candidate[0] < best[0]:
-                best, best_depth = candidate, depth
+            if allow_empty:
+                candidate = ((0, 0, 0.0, slot), _Path(slots, shifters, None))
+                if best is None or candidate[0] < best[0]:
+                    best, best_depth = candidate, depth
             continue
         # BFS is depth-monotone: any candidate found here is at `best_depth` or is the first.
         shifting = {s.player_id for s in shifters}
         for holder in holders:
             if holder.locked or holder.player_id in shifting:
                 continue
-            if holder.tier > filler.tier:
+            if holder.tier > filler.tier and (evictable is None or holder.player_id in evictable):
                 candidate = ((1, -holder.tier, holder.value, slot), _Path(slots, shifters, holder))
                 if best is None or candidate[0] < best[0]:
                     best, best_depth = candidate, depth
@@ -261,16 +297,21 @@ def _unfilled_reason(filler: PlannerPlayer, board: Sequence[PlannerPlayer],
 # ------------------------------- public API ------------------------------- #
 
 
+def _fillers(board: Iterable[PlannerPlayer]) -> list[PlannerPlayer]:
+    """Bench players who may start, best first: plan_fill's order."""
+    return sorted(
+        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_A2, TIER_B)),
+        key=lambda p: (p.tier, -p.value, p.name),
+    )
+
+
 def plan_fill(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> Plan:
     capacity = _active_capacity(slot_counts)
     board = list(players)
     moves: list[Move] = []
     unfilled: list[Unfilled] = []
 
-    fillers = sorted(
-        (p for p in board if p.slot_id == BENCH_SLOT_ID and not p.locked and p.tier in (TIER_A, TIER_B)),
-        key=lambda p: (p.tier, -p.value, p.name),
-    )
+    fillers = _fillers(board)
     for filler in fillers:
         current = _by_id(board)[filler.player_id]
         if current.slot_id != BENCH_SLOT_ID:
@@ -286,6 +327,42 @@ def plan_fill(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) 
         board = apply_moves(board, path_moves)
 
     return Plan(tuple(moves), tuple(unfilled), _summary(moves, unfilled, _by_id(players)))
+
+
+def plan_reaction(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int], trigger_player_id: int) -> Plan:
+    """The moves that answer one player's verdict change, and nothing else (the news
+    plan's late-scratch pass). `players` carry the new verdict already.
+
+    A starter now out or doubtful sits only when the whole board's fill would bench
+    him, and then only for the first bench player, in plan_fill's order, who can
+    take his slot directly or through shifts. A bench player now available starts
+    when the fill would start him, by his own chain. Whatever else the board wants
+    (an empty slot, an idle starter) belongs to the morning pass or the user, so a
+    hand-set lineup is not re-planned by a news event. Empty = no reaction.
+    """
+    capacity = _active_capacity(slot_counts)
+    board = list(players)
+    trigger = _by_id(board).get(trigger_player_id)
+    if trigger is None or trigger.locked:
+        return Plan((), (), _summary((), (), {}))
+    full = plan_fill(board, slot_counts).moves
+    moves: list[Move] = []
+    if trigger.slot_id in ACTIVE_SLOT_IDS:
+        if any(m.player_id == trigger_player_id and m.to_slot_id == BENCH_SLOT_ID for m in full):
+            only = frozenset({trigger_player_id})
+            for filler in _fillers(board):
+                if filler.tier >= trigger.tier:
+                    break
+                path = _find_path(filler, board, capacity, evictable=only, allow_empty=False)
+                if path is not None and path.evicted is not None:
+                    moves = _apply_path(filler, path)
+                    break
+    elif trigger.slot_id == BENCH_SLOT_ID:
+        if any(m.player_id == trigger_player_id and m.from_slot_id == BENCH_SLOT_ID for m in full):
+            path = _find_path(trigger, board, capacity)
+            if path is not None:
+                moves = _apply_path(trigger, path)
+    return Plan(tuple(moves), (), _summary(moves, (), _by_id(players)))
 
 
 def _summary(moves: Sequence[Move], unfilled: Sequence[Unfilled], names: Mapping[int, PlannerPlayer]) -> str:
@@ -309,14 +386,24 @@ class IrAction:
     blocked_reason: Optional[str] = None   # roster_full
 
 
-def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) -> tuple[IrAction, ...]:
+def plays_today(players: Iterable[PlannerPlayer]) -> frozenset[int]:
+    """Who the fill counts on today: a game and tier A (healthy, questionable or day-to-day, an
+    upgraded doubtful). Pass the board the fill reads (our verdicts in it) so a player we have
+    cleared before ESPN does counts."""
+    return frozenset(p.player_id for p in players if p.has_game and p.tier == TIER_A)
+
+
+def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int], *,
+            playing: Optional[Collection[int]] = None) -> tuple[IrAction, ...]:
     """IR housekeeping, every action judged against the CURRENT board so each one can be
     staged on its own: healthy players leave IR while the roster has a spot for them —
     into an eligible open active slot when there is one, else the (unbounded) bench —
-    otherwise they are reported as blocked; injured players on slots 0-12 take the open
-    IR seats, active-slot holders first, then the lowest value. Locked players never
-    move, and an ir_out here does not free a seat for an ir_in in the same pass — the
-    next read does."""
+    otherwise they are reported as blocked; injured players on slots 0-12 who sit today
+    take the open IR seats, active-slot holders first, then the lowest value. One expected
+    to play today (`playing`, by default `plays_today` of this board) stays off IR: the
+    fill starts him. Locked players never move, and an ir_out here does not free a seat
+    for an ir_in in the same pass — the next read does."""
+    plays = plays_today(players) if playing is None else frozenset(playing)
     occupants = _occupants(players)
     capacity = _active_capacity(slot_counts)
     room = roster_spots(slot_counts) - _off_ir(players)
@@ -338,13 +425,24 @@ def plan_ir(players: Sequence[PlannerPlayer], slot_counts: Mapping[int, int]) ->
 
     injured = sorted(
         (p for p in players
-         if (p.slot_id in ACTIVE_SLOT_IDS or p.slot_id == BENCH_SLOT_ID) and not p.locked and p.ir_eligible),
+         if (p.slot_id in ACTIVE_SLOT_IDS or p.slot_id == BENCH_SLOT_ID) and not p.locked and p.ir_eligible
+         and p.player_id not in plays),
         key=lambda p: (0 if p.slot_id in ACTIVE_SLOT_IDS else 1, p.value, p.name),
     )
     for p in injured[:max(ir_open, 0)]:
         out.append(IrAction("ir_in", p.player_id,
                             Move(p.player_id, p.slot_id, IR_SLOT_ID, role="shift", note=(p.injury_status or "OUT").upper())))
     return tuple(out)
+
+
+def ir_first(players: Sequence[PlannerPlayer], ir: Sequence[IrAction]) -> list[PlannerPlayer]:
+    """The board the fill plans on beside `plan_ir`'s actions: a bench player headed to IR is on
+    IR already, so the fill never starts him (IR wins while it has an open seat). A starter headed
+    there stays in his slot: a start that benches him and his IR move both take him out of it, and
+    each row still stages on its own against the current board."""
+    bound = {a.player_id for a in ir if a.kind == "ir_in" and a.move is not None}
+    return [replace(p, slot_id=IR_SLOT_ID) if p.player_id in bound and p.slot_id == BENCH_SLOT_ID else p
+            for p in players]
 
 
 def _slot_label(slot_id: int) -> str:

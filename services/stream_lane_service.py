@@ -1,13 +1,14 @@
 """
 Stream lanes: a standing order to keep one roster spot streaming for the rest of
-the matchup (docs/STREAM_LANE_PLAN.md).
+the matchup (docs/STREAM_LANE_PLAN.md). A team can stream up to `MAX_LANES` spots,
+one lane each.
 
     plan           POST   /teams/{id}/stream-lanes/plan       what a lane started now would do (a dry run)
     start          POST   /teams/{id}/stream-lanes            start one on a spot
-    list_for_team  GET    /teams/{id}/stream-lanes            the open lane, and the last week's ended ones
+    list_for_team  GET    /teams/{id}/stream-lanes            the open lanes, and the last week's ended ones
     update         PATCH  /teams/{id}/stream-lanes/{lane}     pause, resume, notify mode
     stop           DELETE /teams/{id}/stream-lanes/{lane}     end it
-    decide_due     the scheduled-pickups executor's tick      claim the due decisions and make each
+    decide_due     the scheduled-pickups executor's tick      claim the due decisions and make them, by team
 
 A lane is intent, not a list of pickups. What it shows is a projection: the best
 plan if nobody else touched the market. What it does is decide each day afresh,
@@ -16,11 +17,20 @@ timing rule (`scheduled_pickup_service.attempt_window`): the previous day's firs
 tip-off (the rollover into it when it has no games), after which ESPN takes the
 switch for the day and the player dropped plays the previous day out. A decision
 re-reads the board, the pool and the adds left, re-plans the rest of the matchup
-(`services.stream_planner`), and when the plan's first step is a switch inserts a
-scheduled pickup for the day carrying the lane's id; the pickup executor then
-makes it like any other (locks, waivers, the roster check, the seat, the email).
+(`services.multi_stream_planner`), and for each switch the plan makes that day
+inserts a scheduled pickup carrying its lane's id; the pickup executor then makes
+it like any other (locks, waivers, the roster check, the seat, the email).
 Otherwise it records a keep. A projected player who is gone
 is not a failure: the plan picks again.
+
+Together. A team's lanes deciding the same day are planned as one: they share the
+adds (the budget) and the lineup's seats, and a free agent goes to
+one of them. Their decisions fall due together (the same day's window), and a run
+claims all of a team's due lanes at once (none while another run is still deciding
+the team's). A lane that has already decided the day (started after the others
+decided it, or waiting on its pickup) is part of the roster as it stands for the
+others, with its pending pickup made on its day; from the next day it decides with
+them.
 
 Holder. An executed lane pickup makes the added player the lane's holder
 (`note_pickup_settled`, from the pickup executor's settle). If the holder leaves
@@ -28,15 +38,25 @@ the roster any other way the lane pauses and says so. Scheduled pickups and the
 desk's transactions refuse to drop an active lane's holder
 (`db.models.stream_lanes.active_lane_holder`).
 
-Budget. The planner gets the adds the league leaves (a per-matchup limit's room,
-a season cap's) less the pickups already scheduled, and the days a switch may
-take effect (a per-day limit's day is closed once its adds are used or
-scheduled). Nothing else: whether to replace a player who plays or wait for
+Budget. The planner gets the adds the league leaves (the matchup's room, a season
+cap's) less the pickups already scheduled; a per-game-day limit is a matchup total
+like any other, so any day may take several switches. Nothing else: whether to replace a player who plays or wait for
 their day off is the planner's to work out.
 
 Values. A player's value on a day is the board's `avg_points` (free agents: the
 pool's, the same measure) when their team plays and they aren't out; the planner
 turns that into what they add to the day's best lineup.
+
+Dime's holds (services/steering.py, the Dime autopilot plan, step 4) are inputs to
+the same plan: an override scales a player's value on its days, a block keeps a
+free agent out of the spots on its days, a keep holds a spot's player in it. Every
+plan reads the team's live holds, the dry run's and each decision's alike, so a
+hold shows in the next plan and in none after its last day.
+
+Dime's lane chips (start, pause, resume, stop) come through these routes with
+`proposal_id`: the chip is checked to be the same action on the same lane, the
+action is done as the user's own would be, its event carries Dime's reason
+(`DIME_REASON`, the reason in `detail`), and the chip is marked sent.
 
 Fencing. As for pickups: a claim bumps `attempts`, and a decision's writes (the
 pickup, the events, the lane's next step) land in one transaction, only while the
@@ -45,7 +65,7 @@ either one cancels the pickup the lane has scheduled (refused while it is being
 made); the executor makes a lane's pickup only while the lane is active.
 
 The rules (`first_open_period`, `rehold_after_for`, `lane_budget`, `active_slots`,
-`plan_lane`, `projection_of`, `compare_to_projection`) are pure and table-tested.
+`plan_lanes`, `projections_of`, `compare_to_projection`) are pure and table-tested.
 """
 
 from __future__ import annotations
@@ -75,13 +95,15 @@ from schemas.stream_lane import (
     StreamLaneListData,
     StreamLaneListResp,
     StreamLanePlan,
+    StreamLanePlanOther,
     StreamLanePlanReq,
     StreamLanePlanResp,
     StreamLaneResp,
     StreamLaneStartReq,
     StreamLaneUpdateReq,
 )
-from services.acquisitions import adds_for_day, in_current_matchup, matchup_room, season_room
+from services import roster_protection
+from services.acquisitions import in_current_matchup, matchup_room, season_room
 from services.lineup_editor_service import (
     RosterWriteBlocked,
     RosterWriteDisabled,
@@ -101,21 +123,15 @@ from services.scheduled_pickup_service import (
     et_at,
     rollover_at,
 )
-from services.stream_planner import (
-    EPS,
-    MAX_REHOLD_AFTER,
-    Candidate,
-    DayPlayer,
-    StreamPlan,
-    best_lineup_value,
-    plan_stream,
-    spot_values,
-)
+from services.multi_stream_planner import MultiStreamPlan, Streamer, plan_streams
+from services.steering import NO_STEER, LaneSteer, holds_for, lane_steer
+from services.stream_planner import DayPlayer
 from utils.espn_helpers import POSITION_MAP, normalize_nba_abbrev
 
 log = get_logger("stream_lane")
 
 ACTIVE, PAUSED, ENDED = "active", "paused", "ended"
+MAX_LANES = 4                        # open lanes per team: they are planned together
 FA_COUNT = 300                       # the pool read, as the Week desk's market reads it
 RETRY = timedelta(minutes=10)        # a decision that could not be made tries again after this
 PICKUP_WAIT = timedelta(minutes=5)   # while the lane's last pickup is still pending
@@ -129,8 +145,8 @@ EVENTS_SHOWN = 60
 
 class StreamLaneInvalid(AppError):
     """The board, the league or the calendar refuses the lane. `data.reason` is one of:
-    not_on_roster, on_ir, scheduled_out, no_matchup_end, matchup_over, waiver_period_unsupported,
-    no_scoring_period, holder_gone."""
+    not_on_roster, on_ir, scheduled_out, no_matchup_end, matchup_over, no_scoring_period,
+    holder_gone."""
 
     status_code = 422
     api_status = ApiStatus.VALIDATION_ERROR
@@ -141,7 +157,12 @@ class StreamLaneInvalid(AppError):
 
 class StreamLaneExists(ConflictError):
     error_code = "STREAM_LANE_EXISTS"
-    default_message = "This team already has a stream lane — stop it before starting another"
+    default_message = "A stream lane is already streaming that spot"
+
+
+class StreamLaneLimit(ConflictError):
+    error_code = "STREAM_LANE_LIMIT"
+    default_message = f"A team can stream up to {MAX_LANES} spots at once — stop one before starting another"
 
 
 class StreamLaneEnded(ConflictError):
@@ -195,15 +216,8 @@ class PendingPickup:
 
 @dataclass(frozen=True)
 class Budget:
-    adds: Optional[int]              # adds the lane may plan with; None = no limit
-    switchable: tuple[bool, ...]     # per day: may a switch take effect
-
-
-@dataclass(frozen=True)
-class LanePlan:
-    plan: StreamPlan
-    values: Mapping[int, tuple[float, ...]]   # each considered player's value to the spot, per day
-    considered: frozenset[int]                # the free agents the plan could take
+    adds: Optional[int]                       # adds the lanes may plan with, together; None = no limit
+    day_limits: tuple[Optional[int], ...]     # per day: the most switches that may take effect (None: any)
 
 
 def first_open_period(today: LaneDay, now: datetime) -> int:
@@ -212,25 +226,22 @@ def first_open_period(today: LaneDay, now: datetime) -> int:
     return today.period + 1 if today.first_tip is not None and now >= today.first_tip else today.period
 
 
-def rehold_after_for(acq: Optional[AcquisitionState]) -> Optional[int]:
+def rehold_after_for(acq: Optional[AcquisitionState]) -> int:
     """Days before a player the lane drops can hold the spot again, from the league's waiver
     period. A switch for day s is made at day s-1's first tip-off (or the rollover into s-1);
     the player dropped clears waivers about `waiver_hours` later, around day s+1's decision point
-    with 24 hours, so they can be taken back from day s+2. None when that is longer than the
-    planner handles; a league that sends no waiver period is taken as 24 hours."""
+    with 24 hours, so they can be taken back from day s+2. A league that sends no waiver period
+    is taken as 24 hours."""
     hours = 24 if acq is None or acq.waiver_hours is None else acq.waiver_hours
-    gap = 1 if hours <= 0 else 1 + math.ceil(hours / 24)
-    return gap if gap <= MAX_REHOLD_AFTER else None
+    return 1 if hours <= 0 else 1 + math.ceil(hours / 24)
 
 
-def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pending: Sequence[PendingPickup], *,
-                first_day_adds: Optional[int] = None) -> Budget:
-    """The adds the lane may plan with, and the days a switch may take effect. Pending pickups draw
-    on the same allowances; `first_day_adds` is what a per-day limit has already counted for the
-    first day (None when unread: ESPN refuses an over-limit add itself)."""
+def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pending: Sequence[PendingPickup]) -> Budget:
+    """The adds the lanes may plan with; pending pickups draw on the same allowances. ESPN sets
+    no daily limit (a per-game-day one is a matchup total), so no day caps its switches."""
     n = len(days)
     if acq is None:
-        return Budget(None, (True,) * n)
+        return Budget(None, (None,) * n)
     rooms: list[int] = []
     room = matchup_room(acq)
     if room is not None:
@@ -239,14 +250,7 @@ def lane_budget(acq: Optional[AcquisitionState], days: Sequence[LaneDay], pendin
     if room is not None:
         rooms.append(room - len(pending))
     adds = max(0, min(rooms)) if rooms else None
-    switchable = [True] * n
-    if acq.per == "day" and acq.limit is not None:
-        for i, day in enumerate(days):
-            used = sum(1 for p in pending if p.period == day.period)
-            if i == 0 and first_day_adds:
-                used += first_day_adds
-            switchable[i] = used < acq.limit
-    return Budget(adds, tuple(switchable))
+    return Budget(adds, (None,) * n)
 
 
 # ESPN's combo slots, from the base positions the pool keeps.
@@ -269,90 +273,112 @@ def _is_out(injury_status: Optional[str]) -> bool:
     return (injury_status or "ACTIVE").upper() in OUT_STATUSES
 
 
-def plan_lane(board: LineupState, holder_id: int, pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
-              pending: Sequence[PendingPickup], budget: Budget, rehold_after: int) -> LanePlan:
-    """The plan for the spot `holder_id` holds over `days`. The rest of the roster is the board's
-    (IR aside) with the pending pickups made on their days; a free agent on the roster or already
-    scheduled is not a candidate, nor one ESPN would refuse under its position limits. Those are
-    counted each day with the pending pickups made: a free agent may take the spot only from a
-    day from which his position has room through the last day."""
+def _value_of(values: Optional[Mapping[int, float]], player_id: int, default: float) -> float:
+    """A player's per-game value to the plan: the board's (`default`) unless `values` answers for the
+    plan (the stream value function, `services.stream_value`), in which case a player it leaves out
+    is worth nothing to it."""
+    return default if values is None else float(values.get(player_id, 0.0))
+
+
+def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
+               pending: Sequence[PendingPickup], budget: Budget, rehold_after: int,
+               values: Optional[Mapping[int, float]] = None, steer: LaneSteer = NO_STEER) -> MultiStreamPlan:
+    """The plan for the spots `holder_ids` hold over `days`, together: they share the adds and
+    the lineup's seats. The rest of the roster is the board's (IR aside) with the pending pickups
+    made on their days; a free agent on the roster or already scheduled is not a candidate. ESPN's
+    position limits are counted each day the same way (IR included): the spots' players at a
+    limited position fit the room the rest of the roster leaves.
+
+    `values` is the value function: each player's worth per game to this plan, in place of the
+    board's and the pool's (a player it leaves out is worth nothing). The lanes plan with the
+    board's values; the agent's planner asks for a category, or the matchup (`services.stream_value`).
+
+    `steer` is Dime's holds over `days` (services/steering.py): an override scales a player's value
+    on its days, roster and pool alike; a block keeps a free agent from being added on its days; a
+    keep holds a spot's player in it on its days. Without holds the plan is the same as before."""
     slots = slot_counts_of(board)
-    holder = next(p for p in board.players if p.player_id == holder_id)
+    spot_ids = set(holder_ids)
+    on_board = {p.player_id: p for p in board.players}
     by_id = {f.player_id: f for f in pool}
 
     def plays(team: Optional[str], day: LaneDay) -> bool:
         return bool(team) and normalize_nba_abbrev(team) in day.teams
 
-    def roster_day(p: LineupPlayer, day: LaneDay) -> DayPlayer:
-        value = p.avg_points if plays(p.team, day) and not _is_out(p.injury_status) else 0.0
-        return DayPlayer(p.player_id, value, frozenset(s for s in p.eligible_slot_ids if s in ACTIVE_SLOT_IDS))
+    def roster_value(p: LineupPlayer, i: int) -> float:
+        day = days[i]
+        if not plays(p.team, day) or _is_out(p.injury_status):
+            return 0.0
+        return _value_of(values, p.player_id, p.avg_points) * steer.share(p.player_id, i)
 
-    def pool_day(f: PoolPlayer, day: LaneDay) -> DayPlayer:
-        return DayPlayer(f.player_id, f.value if plays(f.team, day) else 0.0, f.eligible)
+    def roster_slots(p: LineupPlayer) -> frozenset[int]:
+        return frozenset(s for s in p.eligible_slot_ids if s in ACTIVE_SLOT_IDS)
+
+    def pool_value(f: PoolPlayer, i: int) -> float:
+        return _value_of(values, f.player_id, f.value) * steer.share(f.player_id, i) if plays(f.team, days[i]) else 0.0
 
     rest_by_day: list[list[DayPlayer]] = []
-    for day in days:
-        rest = [roster_day(p, day) for p in board.players
-                if p.player_id != holder_id and p.lineup_slot_id != IR_SLOT_ID]
+    for i, day in enumerate(days):
+        rest = [DayPlayer(p.player_id, roster_value(p, i), roster_slots(p)) for p in board.players
+                if p.player_id not in spot_ids and p.lineup_slot_id != IR_SLOT_ID]
         for pk in pending:
             if pk.period <= day.period:
                 rest = [r for r in rest if r.player_id != pk.drop_player_id]
                 if pk.add_player_id in by_id:
-                    rest.append(pool_day(by_id[pk.add_player_id], day))
+                    f = by_id[pk.add_player_id]
+                    rest.append(DayPlayer(f.player_id, pool_value(f, i), f.eligible))
         rest_by_day.append(rest)
-    bases = [best_lineup_value(rest, slots) for rest in rest_by_day]
 
-    def values_of(day_players: list[DayPlayer]) -> tuple[float, ...]:
-        return spot_values(rest_by_day, slots, day_players, bases=bases)
-
-    holder_values = values_of([roster_day(holder, d) for d in days])
+    span = range(len(days))
+    holders = [Streamer(pid, tuple(roster_value(on_board[pid], i) for i in span), roster_slots(on_board[pid]),
+                        position=on_board[pid].default_position_id, kept=steer.kept.get(pid, frozenset()))
+               for pid in holder_ids]
     taken = {p.player_id for p in board.players} | {pk.add_player_id for pk in pending}
+    candidates: list[Streamer] = []
+    for f in pool:
+        if f.player_id in taken:
+            continue
+        taken.add(f.player_id)        # the pool's first entry for a player
+        start = 0 if f.available_on is None else max(0, (f.available_on - days[0].nba_date).days)
+        blocked = steer.no_add.get(f.player_id, frozenset())
+        if start < len(days) and not all(i in blocked for i in range(start, len(days))):
+            candidates.append(Streamer(f.player_id, tuple(pool_value(f, i) for i in span), f.eligible, start,
+                                       f.default_position_id, no_add=blocked))
+
     limits = {int(k): int(v) for k, v in board.position_limits.items() if int(v) > 0}
-    # Each day's roster (IR included, the spot left out) by position, the pending pickups made on their days.
     position = {f.player_id: f.default_position_id for f in pool}
     position.update({p.player_id: p.default_position_id for p in board.players})
-    full: dict[int, list[bool]] = {pos: [] for pos in limits}
+    room: dict[int, list[int]] = {pos: [] for pos in limits}
     for day in days:
-        ids = {p.player_id for p in board.players if p.player_id != holder_id}
+        ids = {p.player_id for p in board.players if p.player_id not in spot_ids}
         for pk in sorted(pending, key=lambda pk: (pk.period, pk.pickup_id)):
             if pk.period <= day.period:
                 ids.discard(pk.drop_player_id)
                 ids.add(pk.add_player_id)
         held = Counter(position.get(pid) for pid in ids)
         for pos, limit in limits.items():
-            full[pos].append(held[pos] >= limit)
-    values: dict[int, tuple[float, ...]] = {holder_id: holder_values}
-    candidates: list[Candidate] = []
-    for f in pool:
-        if f.player_id in taken:
-            continue
-        start = 0 if f.available_on is None else max(0, (f.available_on - days[0].nba_date).days)
-        if f.default_position_id in limits:
-            # Only from a day from which his position has room through the last day: a switch holds the spot on.
-            start = max([start, *(i + 1 for i, closed in enumerate(full[f.default_position_id]) if closed)])
-        if start >= len(days):
-            continue
-        vals = values_of([pool_day(f, d) for d in days])
-        if all(v <= EPS for v in vals[start:]):
-            continue
-        values[f.player_id] = vals
-        candidates.append(Candidate(f.player_id, vals, start))
-    plan = plan_stream(Candidate(holder_id, holder_values), candidates, adds=budget.adds,
-                       switchable=budget.switchable, rehold_after=rehold_after)
-    return LanePlan(plan, values, frozenset(c.player_id for c in candidates))
+            room[pos].append(max(0, limit - held[pos]))
+    return plan_streams(holders, candidates, rest_by_day, slots, adds=budget.adds, day_limits=budget.day_limits,
+                        rehold_after=rehold_after, position_room=room)
 
 
-def projection_of(lane_plan: LanePlan, days: Sequence[LaneDay], players: Mapping[int, LanePlayer], *,
-                  adds_left: Optional[int], rehold_after: int, now: datetime) -> LaneProjection:
-    plan = lane_plan.plan
-    out: list[LaneProjectionDay] = []
-    prev = plan.holder_id
-    for i, (day, pid) in enumerate(zip(days, plan.holders)):
-        out.append(LaneProjectionDay(scoring_period_id=day.period, nba_date=day.nba_date, player=players[pid],
-                                     value=round(lane_plan.values[pid][i], 2), switch=pid != prev))
-        prev = pid
-    return LaneProjection(as_of=now, days=out, value=round(plan.value, 2), hold_value=round(plan.hold_value, 2),
-                          gain=round(plan.gain, 2), adds=plan.adds, adds_left=adds_left, rehold_after=rehold_after)
+def projections_of(plan: MultiStreamPlan, days: Sequence[LaneDay], players: Mapping[int, LanePlayer], *,
+                   adds_left: Optional[int], rehold_after: int, now: datetime) -> list[LaneProjection]:
+    """Each spot's projection, in the plan's holders' order. A day's value is what the spot's player
+    adds to its best lineup with the other spots' players in it; the hold value is the spot's player
+    now kept every day, the others as planned."""
+    out: list[LaneProjection] = []
+    for k, holder_id in enumerate(plan.holder_ids):
+        rows: list[LaneProjectionDay] = []
+        prev = holder_id
+        for i, (day, pid) in enumerate(zip(days, plan.spots[k], strict=True)):
+            rows.append(LaneProjectionDay(scoring_period_id=day.period, nba_date=day.nba_date, player=players[pid],
+                                          value=round(plan.marginals[k][i], 2), switch=pid != prev))
+            prev = pid
+        value, hold = sum(plan.marginals[k]), plan.hold_values[k]
+        out.append(LaneProjection(as_of=now, days=rows, value=round(value, 2), hold_value=round(hold, 2),
+                                  gain=round(value - hold, 2), adds=sum(1 for sw in plan.switches if sw.spot == k),
+                                  adds_left=adds_left, rehold_after=rehold_after, lanes=len(plan.holder_ids)))
+    return out
 
 
 def compare_to_projection(projection: Optional[Mapping[str, Any]], period: int, chosen: int, holder_id: int,
@@ -414,15 +440,25 @@ def _pending_pickups(team_id: int) -> list[PendingPickup]:
             for r in rows]
 
 
-def _open_lane(team_id: int):
+def _open_lanes(team_id: int) -> list:
     Lane, _ = _models()
-    return Lane.get_or_none((Lane.team == team_id) & (Lane.status.in_((ACTIVE, PAUSED))))
+    return list(Lane.select().where((Lane.team == team_id) & (Lane.status.in_((ACTIVE, PAUSED))))
+                .order_by(Lane.created_at, Lane.id))
 
 
 def _insert_lane(lane_fields: dict, event_fields: dict):
+    """The new lane and its first event; refused when its spot already has an open lane, or the
+    team has `MAX_LANES`."""
+    from db.models.teams import Team
     Lane, Event = _models()
     try:
         with db.atomic():
+            # Two starts for different spots at once would each count the others' lanes out: the team's
+            # row lock makes the count and the insert one step per team.
+            Team.select(Team.team_id).where(Team.team_id == lane_fields["team"]).for_update().first()
+            open_ = Lane.select().where((Lane.team == lane_fields["team"]) & (Lane.status.in_((ACTIVE, PAUSED))))
+            if open_.count() >= MAX_LANES:
+                raise StreamLaneLimit()
             lane = Lane.create(**lane_fields)
             Event.create(lane=lane.id, **event_fields)
             return lane
@@ -430,17 +466,32 @@ def _insert_lane(lane_fields: dict, event_fields: dict):
         raise StreamLaneExists() from exc
 
 
-def _claim_due_lanes(now: datetime, limit: int) -> list:
-    """Lease up to `limit` due decisions to this run (soonest first): bump attempts, push the due
-    time by the lease, mark the decision running. A concurrent run sees nothing until it ends."""
+def _set_projections(projections: Sequence[tuple[int, int, dict]], now: datetime) -> None:
+    """Other lanes' projections after a lane joined their plan: each only while it is active and
+    no decision has claimed it since it was read (a decision writes its own)."""
     Lane, _ = _models()
-    due = (Lane.status == ACTIVE) & Lane.next_decision_at.is_null(False) & (Lane.next_decision_at <= now)
-    ids = [r.id for r in Lane.select(Lane.id).where(due).order_by(Lane.next_decision_at, Lane.id).limit(limit)]
-    if not ids:
+    for lane_id, attempts, projection in projections:
+        Lane.update(projection=projection, updated_at=now).where(_held(Lane, lane_id, attempts)).execute()
+
+
+def _claim_due_lanes(now: datetime, limit: int) -> list:
+    """Lease the due decisions of up to `limit` lanes' teams to this run (soonest first), every due
+    lane of a team at once: bump attempts, push the due time by the lease, mark the decision
+    running. A concurrent run sees nothing until it ends, and leaves the team alone until then: a
+    lane started meanwhile would plan with the adds those decisions are about to spend."""
+    Lane, _ = _models()
+    Running = Lane.alias()
+    running = Running.select(Running.team).where((Running.status == ACTIVE) & (Running.reason == IN_PROGRESS)
+                                                 & (Running.next_decision_at > now))
+    due = ((Lane.status == ACTIVE) & Lane.next_decision_at.is_null(False) & (Lane.next_decision_at <= now)
+           & Lane.team.not_in(running))
+    first = list(Lane.select(Lane.id, Lane.team).where(due).order_by(Lane.next_decision_at, Lane.id).limit(limit))
+    if not first:
         return []
+    teams = {r.team_id for r in first}
     rows = list(Lane.update(next_decision_at=now + LEASE, attempts=Lane.attempts + 1, reason=IN_PROGRESS,
                             updated_at=now)
-                .where(due & Lane.id.in_(ids)).returning(Lane).execute())
+                .where(due & Lane.team.in_(teams)).returning(Lane).execute())
     return sorted(rows, key=lambda r: (r.next_decision_at, r.id))
 
 
@@ -632,9 +683,55 @@ def _notice(lane, action: str, reason: str, *, team_name: str = "", detail: Opti
 @dataclass
 class Prepared:
     days: list[LaneDay]
-    lane_plan: LanePlan
-    projection: LaneProjection
+    plan: MultiStreamPlan
+    projections: list[LaneProjection]               # one per spot, in the holders' order
     players: dict[int, LanePlayer] = field(default_factory=dict)
+
+
+@dataclass
+class Deciding:
+    """A claimed lane through its run: the day it decides, its holder, and what it has to record
+    whatever it decides (missed days)."""
+    lane: Any
+    period: int
+    holder: LineupPlayer
+    holder_fields: dict
+    events: list[dict]
+    notice: Optional[LaneNotice]
+
+
+# ------------------------------- Dime's lane chips ------------------------------- #
+
+
+async def _dime_chip(team, proposal_id: Optional[int], op: Optional[str], **match: Any):
+    """The lane chip (services/ai/steering.py) a request applies, checked to be this team's, still
+    proposed, and this very action; None for the user's own request."""
+    if proposal_id is None:
+        return None
+    from services.ai.steering import for_apply
+    return await for_apply(proposal_id, team.user_id, team.team_id, "lane", op=op, **match)
+
+
+def _chip_mismatch() -> AppError:
+    return AppError("AI_PROPOSAL_MISMATCH", "What is being applied is not what this chip proposes",
+                    status_code=422, log_level="warning")
+
+
+def _by_dime(chip, op: str, by: str = "user") -> dict[str, Any]:
+    """The reason and detail a chip-made step records: Dime's (`DIME_REASON`, or paused/stopped by
+    Dime), with the chip's own reason as the detail. Nothing for the user's own request. `by`
+    'dime' is Dime applying its own chip (the autopilot step), which records the autopilot reasons."""
+    if chip is None:
+        return {}
+    from services.ai.steering import AUTOPILOT_LANE_REASONS, LANE_REASONS
+    reasons = AUTOPILOT_LANE_REASONS if by == "dime" else LANE_REASONS
+    return dict(reason=reasons[op], detail=chip.reason)
+
+
+async def _chip_sent(chip) -> None:
+    if chip is not None:
+        from services.ai import proposals
+        await proposals.mark_sent(chip.id)
 
 
 class StreamLaneService:
@@ -643,13 +740,18 @@ class StreamLaneService:
 
     @staticmethod
     async def _pool(league_info: LeagueInfo, adapter, team_id: int) -> list[PoolPlayer]:
-        """The free agents the lane may take: the pool as the market reads it, out players left
-        out, a waiver claim available the day after its waivers clear."""
+        """The free agents the lane may take: the pool as the market reads it (`_pool_players`)."""
         resp = await adapter.get_free_agents(league_info, FA_COUNT, team_id=team_id)
         if resp.status != ApiStatus.SUCCESS:
             raise RuntimeError(resp.message or "could not read the free-agent pool")
+        return StreamLaneService._pool_players(resp.data or [])
+
+    @staticmethod
+    def _pool_players(free_agents: Sequence[Any]) -> list[PoolPlayer]:
+        """Pool players from a free-agent read: out players left out, a waiver claim available
+        the day after its waivers clear."""
         out: list[PoolPlayer] = []
-        for fa in resp.data or []:
+        for fa in free_agents:
             if _is_out(fa.injury_status):
                 continue
             available_on = None
@@ -677,32 +779,57 @@ class StreamLaneService:
         return period + (acq.matchup_end - today).days, acq.matchup_end
 
     @staticmethod
-    async def _prepare(team_id: int, league_info: LeagueInfo, adapter, board: LineupState, holder: LineupPlayer,
-                       start_period: int, end_period: int, rehold_after: int, now: datetime, *,
-                       lane_id: Optional[int] = None) -> Prepared:
+    async def _prepare(team_id: int, league_info: LeagueInfo, adapter, board: LineupState,
+                       holders: Sequence[LineupPlayer], start_period: int, end_period: int, rehold_after: int,
+                       now: datetime, *, lane_ids: Iterable[int] = ()) -> Prepared:
+        """The plan for the spots `holders` hold, together, from `start_period`: the lanes `lane_ids`
+        decide it, so their own pending pickups (if any) are not taken as given."""
         base_period, base_date = StreamLaneService._board_today(board)
         days = await run_db("lane.days", _days, start_period, end_period, base_period, base_date)
-        pending = [p for p in await run_db("lane.pending", _pending_pickups, team_id)
-                   if lane_id is None or p.lane_id != lane_id]
-        pool = await StreamLaneService._pool(league_info, adapter, team_id)
-        acq = board.acquisitions
-        first_day_adds = None
-        if acq is not None and acq.per == "day" and acq.limit is not None and board.espn_team_id is not None:
-            try:
-                first_day_adds = await adds_for_day(league_info, board.espn_team_id, start_period)
-            except Exception as exc:  # ESPN refuses an over-limit add itself
-                log.warning("stream_lane_day_adds_unavailable", team_id=team_id, error=str(exc))
-        budget = lane_budget(acq, days, pending, first_day_adds=first_day_adds)
-        lane_plan = await run_cpu("lane.plan", plan_lane, board, holder.player_id, pool, days, pending, budget,
-                                  rehold_after)
-        held = set(lane_plan.plan.holders) | {holder.player_id}
+        deciding = set(lane_ids)
+        pending = [p for p in await run_db("lane.pending", _pending_pickups, team_id) if p.lane_id not in deciding]
+        # An open lane's holder stays its own even off the roster (a paused lane's can be dropped): a
+        # lane taking him would collide with it on the spot index. One a pending pickup brings back
+        # stays in the pool, which is where the plan finds his values from that day.
+        reserved = {lane.holder_player_id for lane in await run_db("lane.open", _open_lanes, team_id)}
+        reserved -= {p.add_player_id for p in pending}
+        pool = [f for f in await StreamLaneService._pool(league_info, adapter, team_id) if f.player_id not in reserved]
+        budget = lane_budget(board.acquisitions, days, pending)
+        # Dime's holds on the team (keeps, blocks, overrides) enter the plan as inputs
+        steer = lane_steer(await holds_for(team_id, base_date), [d.nba_date for d in days])
+        plan = await run_cpu("lane.plan", plan_lanes, board, [h.player_id for h in holders], pool, days, pending,
+                             budget, rehold_after, None, steer)
+        held = {pid for spot in plan.spots for pid in spot} | set(plan.holder_ids)
         nba_ids = await run_db("lane.nba_ids", nba_ids_by_espn_id, sorted(held))
         players = {p.player_id: _lane_player(p.player_id, p.name, p.team, nba_ids) for p in board.players
                    if p.player_id in held}
         players.update({f.player_id: _lane_player(f.player_id, f.name, f.team, nba_ids) for f in pool
-                        if f.player_id in held})
-        projection = projection_of(lane_plan, days, players, adds_left=budget.adds, rehold_after=rehold_after, now=now)
-        return Prepared(days, lane_plan, projection, players)
+                        if f.player_id in held and f.player_id not in players})
+        projections = projections_of(plan, days, players, adds_left=budget.adds, rehold_after=rehold_after, now=now)
+        if not plan.optimal:
+            log.warning("stream_lanes_plan_unproven", team_id=team_id, lanes=len(holders), start=start_period)
+        return Prepared(days, plan, projections, players)
+
+    @staticmethod
+    def _check_room(open_lanes: Sequence, player_id: int) -> None:
+        """A new lane needs a spot no open lane streams, and room under `MAX_LANES`."""
+        if any(lane.holder_player_id == player_id for lane in open_lanes):
+            raise StreamLaneExists()
+        if len(open_lanes) >= MAX_LANES:
+            raise StreamLaneLimit()
+
+    @staticmethod
+    async def _together(team_id: int, board: LineupState, start_period: int, end_period: int,
+                        open_lanes: Sequence) -> list:
+        """The open lanes a lane started now decides its first day with: active, deciding that day
+        too, their holder on the board, and no pickup of theirs pending (such a lane decides once it
+        settles, and its pickup is part of the roster meanwhile). Nor one whose decision is running:
+        it writes its own projection, and the claim it runs under is the one a start would fence on."""
+        on_board = {p.player_id for p in board.players}
+        waiting = {p.lane_id for p in await run_db("lane.pending", _pending_pickups, team_id) if p.lane_id}
+        return [lane for lane in open_lanes
+                if lane.status == ACTIVE and lane.reason != IN_PROGRESS and lane.next_period <= start_period
+                and lane.end_period == end_period and lane.holder_player_id in on_board and lane.id not in waiting]
 
     @staticmethod
     async def _setup(team, league_info: LeagueInfo, player_id: int, now: datetime):
@@ -718,6 +845,10 @@ class StreamLaneService:
             raise _invalid("not_on_roster", "That player is not on your roster")
         if holder.lineup_slot_id == IR_SLOT_ID:
             raise _invalid("on_ir", f"{holder.name} is on IR — a lane streams an active spot")
+        if holder.player_id in await roster_protection.ids(team.team_id):
+            # A lane drops its spot's player at its first switch (Dime's lane chips come through here too)
+            raise _invalid("holder_protected", f"{holder.name} is protected, and a lane would drop him: "
+                                               "unprotect him in the Week desk to stream his spot")
         period, _ = StreamLaneService._board_today(board)
         end_period, end_date = StreamLaneService._end_period(board)
         today = (await run_db("lane.days", _days, period, period, period, date.fromisoformat(board.nba_date)))[0]
@@ -725,37 +856,51 @@ class StreamLaneService:
         if start_period > end_period:
             raise _invalid("matchup_over", "The matchup has no day left a pickup could count for")
         rehold_after = rehold_after_for(board.acquisitions)
-        if rehold_after is None:
-            raise _invalid("waiver_period_unsupported",
-                           f"This league keeps dropped players on waivers for {board.acquisitions.waiver_hours} "
-                           "hours; lanes support up to 24")
         return adapter, board, holder, start_period, end_period, end_date, rehold_after
 
     # ---- the user's routes ----
 
     @staticmethod
+    async def _plan_with(team, league_info: LeagueInfo, adapter, board: LineupState, holder: LineupPlayer,
+                         start: int, end: int, rehold: int, now: datetime, open_lanes: Sequence):
+        """A lane on `holder`'s spot planned with the lanes it would decide its first day with: the
+        plan, and those lanes."""
+        together = await StreamLaneService._together(team.team_id, board, start, end, open_lanes)
+        on_board = {p.player_id: p for p in board.players}
+        holders = [*(on_board[lane.holder_player_id] for lane in together), holder]
+        prepared = await StreamLaneService._prepare(team.team_id, league_info, adapter, board, holders, start, end,
+                                                    rehold, now, lane_ids=[lane.id for lane in together])
+        return prepared, together
+
+    @staticmethod
     async def plan(team, league_info: LeagueInfo, req: StreamLanePlanReq) -> StreamLanePlanResp:
         now = datetime.now(timezone.utc)
+        open_lanes = await run_db("lane.open", _open_lanes, team.team_id)
+        StreamLaneService._check_room(open_lanes, req.player_id)
         adapter, board, holder, start, end, end_date, rehold = await StreamLaneService._setup(
             team, league_info, req.player_id, now)
-        prepared = await StreamLaneService._prepare(team.team_id, league_info, adapter, board, holder, start, end,
-                                                    rehold, now)
+        prepared, together = await StreamLaneService._plan_with(team, league_info, adapter, board, holder, start, end,
+                                                                rehold, now, open_lanes)
+        projection = prepared.projections[-1]
         window = await run_db("lane.window", _window_for, prepared.days[0].nba_date)
+        others = [StreamLanePlanOther(lane_id=lane.id, holder=prepared.players[lane.holder_player_id], projection=p)
+                  for lane, p in zip(together, prepared.projections)]
         return StreamLanePlanResp(
             status=ApiStatus.SUCCESS,
-            message=f"Projected gain {prepared.projection.gain:+.1f} with {prepared.projection.adds} add(s)",
+            message=f"Projected gain {projection.gain:+.1f} with {projection.adds} add(s)",
             data=StreamLanePlan(holder=prepared.players[holder.player_id], start_period=start, end_period=end,
                                 end_date=end_date, first_decision_at=max(window.not_before_at, now),
-                                projection=prepared.projection),
+                                projection=projection, others=others),
         )
 
     @staticmethod
-    async def start(team, league_info: LeagueInfo, req: StreamLaneStartReq) -> StreamLaneResp:
+    async def start(team, league_info: LeagueInfo, req: StreamLaneStartReq, *, by: str = "user") -> StreamLaneResp:
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
+        chip = await _dime_chip(team, req.proposal_id, "start", **{"holder.espn_id": req.player_id})
         now = datetime.now(timezone.utc)
-        if await run_db("lane.open", _open_lane, team.team_id) is not None:
-            raise StreamLaneExists()
+        open_lanes = await run_db("lane.open", _open_lanes, team.team_id)
+        StreamLaneService._check_room(open_lanes, req.player_id)
         adapter, board, holder, start, end, end_date, rehold = await StreamLaneService._setup(
             team, league_info, req.player_id, now)
         if not board.can_write:
@@ -763,19 +908,27 @@ class StreamLaneService:
         pending = await run_db("lane.pending", _pending_pickups, team.team_id)
         if any(p.drop_player_id == holder.player_id for p in pending):
             raise _invalid("scheduled_out", f"A pickup already scheduled drops {holder.name} — cancel it first")
-        prepared = await StreamLaneService._prepare(team.team_id, league_info, adapter, board, holder, start, end,
-                                                    rehold, now)
+        prepared, together = await StreamLaneService._plan_with(team, league_info, adapter, board, holder, start, end,
+                                                                rehold, now, open_lanes)
+        projection = prepared.projections[-1]
         window = await run_db("lane.window", _window_for, prepared.days[0].nba_date)
         lane = await run_db("lane.insert", _insert_lane, dict(
             user=team.user_id, team=team.team_id, holder_player_id=holder.player_id, holder_name=holder.name,
             holder_team=holder.team, original_player_id=holder.player_id, original_name=holder.name,
             start_period=start, end_period=end, end_date=end_date, status=ACTIVE, notify=req.notify,
             next_period=start, next_decision_at=window.not_before_at, attempts=0,
-            projection=prepared.projection.model_dump(mode="json"), created_at=now, updated_at=now,
-        ), dict(scoring_period_id=start, nba_date=prepared.days[0].nba_date, action="started", created_at=now))
+            projection=projection.model_dump(mode="json"), created_at=now, updated_at=now,
+        ), dict(scoring_period_id=start, nba_date=prepared.days[0].nba_date, action="started", created_at=now,
+                **_by_dime(chip, "start", by)))
+        if together:
+            # The lanes it decides with share their adds and seats with it now: their projections change too.
+            await run_db("lane.projections", _set_projections,
+                         [(other.id, other.attempts, p.model_dump(mode="json"))
+                          for other, p in zip(together, prepared.projections)], now)
         log.info("stream_lane_started", team_id=team.team_id, lane_id=lane.id, holder=holder.player_id,
-                 start=start, end=end, gain=prepared.projection.gain, adds=prepared.projection.adds,
-                 first_decision_at=window.not_before_at.isoformat())
+                 start=start, end=end, gain=projection.gain, adds=projection.adds, together=len(together),
+                 first_decision_at=window.not_before_at.isoformat(), proposal_id=req.proposal_id)
+        await _chip_sent(chip)
         return StreamLaneResp(status=ApiStatus.SUCCESS,
                               message=f"Streaming {holder.name}'s spot through {end_date:%a %b %-d}",
                               data=lane_schema(lane))
@@ -789,18 +942,25 @@ class StreamLaneService:
                 for pid in (e.add_player_id, e.drop_player_id, e.projected_player_id) if pid}
         nba_ids = await run_db("lane.nba_ids", nba_ids_by_espn_id, sorted(ids)) if ids else {}
         shaped = [lane_schema(lane, events[lane.id], statuses, nba_ids) for lane in lanes]
-        open_ = [s for s in shaped if s.status in (ACTIVE, PAUSED)]
+        open_ = sorted((s for s in shaped if s.status in (ACTIVE, PAUSED)), key=lambda s: (s.created_at, s.id))
         recent = sorted((s for s in shaped if s.status == ENDED), key=lambda s: s.ended_at or s.created_at, reverse=True)
         return StreamLaneListResp(status=ApiStatus.SUCCESS, message=f"{len(open_)} open lane(s)",
                                   data=StreamLaneListData(open=open_, recent=recent))
 
     @staticmethod
-    async def update(team, league_info: LeagueInfo, lane_id: int, req: StreamLaneUpdateReq) -> StreamLaneResp:
+    async def update(team, league_info: LeagueInfo, lane_id: int, req: StreamLaneUpdateReq, *,
+                     by: str = "user") -> StreamLaneResp:
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         if lane is None:
             raise NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found")
         if lane.status == ENDED:
             raise StreamLaneEnded()
+        op = {PAUSED: "pause", ACTIVE: "resume"}.get(req.status) if req.proposal_id is not None else None
+        if req.proposal_id is not None and op is None:
+            raise _chip_mismatch()
+        chip = await _dime_chip(team, req.proposal_id, op, lane_id=lane.id)
+        if chip is not None and (lane.status == PAUSED) == (op == "pause"):
+            raise ConflictError("AI_PROPOSAL_STALE", f"That lane is already {'paused' if op == 'pause' else 'running'}")
         now = datetime.now(timezone.utc)
         changes: dict[str, Any] = {}
         event = None
@@ -812,8 +972,10 @@ class StreamLaneService:
             # is being made right now), and its day is decided again on resume.
             cancelled = await StreamLaneService._cancel_pickups(team, lane, now)
             nxt = min([lane.next_period, *cancelled])
-            changes.update(status=PAUSED, next_period=nxt, next_decision_at=None, reason="paused_by_user", detail=None)
-            event = dict(action="paused", reason="paused_by_user", scoring_period_id=nxt)
+            dime = _by_dime(chip, "pause", by)
+            changes.update(status=PAUSED, next_period=nxt, next_decision_at=None,
+                           **(dime or dict(reason="paused_by_user", detail=None)))
+            event = dict(action="paused", scoring_period_id=nxt, **(dime or dict(reason="paused_by_user")))
             message = "Stream lane paused"
         elif req.status == ACTIVE and lane.status == PAUSED:
             resumed = await StreamLaneService._resume_fields(team, league_info, lane, now)
@@ -823,7 +985,8 @@ class StreamLaneService:
                 message = "The matchup has no day left a pickup could count for — the lane has ended"
             else:
                 changes.update(resumed)
-                event = dict(action="resumed", scoring_period_id=resumed["next_period"])
+                event = dict(action="resumed", scoring_period_id=resumed["next_period"],
+                             **_by_dime(chip, "resume", by))
                 message = "Stream lane resumed"
         if changes:
             if not await run_db("lane.update", _lane_step, lane.id, None, now, changes, event):
@@ -831,7 +994,9 @@ class StreamLaneService:
             if changes.get("status") == PAUSED:
                 # As for a stop: a decision that landed after the loop above may have scheduled one since.
                 await StreamLaneService._cancel_pickups(team, lane, now, busy=False)
-            log.info("stream_lane_updated", team_id=team.team_id, lane_id=lane.id, changes=sorted(changes))
+            log.info("stream_lane_updated", team_id=team.team_id, lane_id=lane.id, changes=sorted(changes),
+                     proposal_id=req.proposal_id)
+        await _chip_sent(chip)
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         return StreamLaneResp(status=ApiStatus.SUCCESS, message=message, data=lane_schema(lane))
 
@@ -858,19 +1023,25 @@ class StreamLaneService:
         return dict(status=ACTIVE, next_period=nxt, next_decision_at=window.not_before_at, reason=None, detail=None)
 
     @staticmethod
-    async def stop(team, lane_id: int) -> StreamLaneResp:
+    async def stop(team, lane_id: int, proposal_id: Optional[int] = None, *, by: str = "user",
+                   why: Optional[dict[str, Any]] = None) -> StreamLaneResp:
+        """`why`: the reason the lane's end carries when it isn't the user's own stop or a chip's
+        (protecting the spot's player stops it with `stopped_for_protected`)."""
         lane = await run_db("lane.get", _team_lane, team.team_id, lane_id)
         if lane is None:
             raise NotFoundError("STREAM_LANE_NOT_FOUND", "Stream lane not found")
         if lane.status == ENDED:
             raise StreamLaneEnded()
+        chip = await _dime_chip(team, proposal_id, "stop", lane_id=lane.id)
+        why = _by_dime(chip, "stop", by) or why or dict(reason="stopped", detail=None)
         now = datetime.now(timezone.utc)
         # A pickup the lane scheduled goes with it — unless it is being made right now.
         await StreamLaneService._cancel_pickups(team, lane, now)
         if not await run_db("lane.stop", _lane_step, lane.id, None, now,
-                            dict(status=ENDED, next_decision_at=None, reason="stopped", detail=None, ended_at=now),
-                            dict(action="ended", reason="stopped")):
+                            dict(status=ENDED, next_decision_at=None, ended_at=now, **why),
+                            dict(action="ended", **why)):
             raise StreamLaneEnded()
+        await _chip_sent(chip)
         # A decision that was mid-flight is fenced out by the stop; one that landed first may have
         # scheduled a pickup since the loop above.
         await StreamLaneService._cancel_pickups(team, lane, now, busy=False)
@@ -899,146 +1070,238 @@ class StreamLaneService:
 
     @staticmethod
     async def decide_due(now: datetime, limit: int) -> list[LaneNotice]:
-        """Make every due decision, up to `limit` lanes. Returns what the users hear about: a lane
-        that paused, a day it missed. A switch is told by its pickup's result."""
+        """Make every due decision, for up to `limit` lanes' teams, each team's at once. Returns what
+        the users hear about: a lane that paused, a day it missed. A switch is told by its pickup's
+        result."""
         lanes = await run_db("lane.claim", _claim_due_lanes, now, limit)
-        notices: list[LaneNotice] = []
+        by_team: dict[int, list] = {}
         for lane in lanes:
+            by_team.setdefault(lane.team_id, []).append(lane)
+        notices: list[LaneNotice] = []
+        for team_lanes in by_team.values():
             try:
-                notice = await StreamLaneService._decide(lane, now)
-            except Exception as exc:  # one broken lane must not take the tick down
-                log.exception("stream_lane_error", lane_id=lane.id, team_id=lane.team_id, error=str(exc))
-                notice = await StreamLaneService._wait(lane, now, "error", detail=str(exc)[:300])
-            if notice is not None:
-                notices.append(notice)
+                notices.extend(await StreamLaneService._decide_team(team_lanes, now))
+            except Exception as exc:  # one broken team must not take the tick down
+                log.exception("stream_lane_error", lane_ids=[lane.id for lane in team_lanes],
+                              team_id=team_lanes[0].team_id, error=str(exc))
+                # Retry soon; a lane this run already paused or ended is fenced out of the write.
+                for lane in team_lanes:
+                    await StreamLaneService._wait(lane, now, "error", detail=str(exc)[:300])
         if lanes:
-            log.info("stream_lanes_run", due=len(lanes), notices=len(notices))
+            log.info("stream_lanes_run", due=len(lanes), teams=len(by_team), notices=len(notices))
         return notices
 
     @staticmethod
-    async def _decide(lane, now: datetime) -> Optional[LaneNotice]:
+    async def _decide_team(lanes: Sequence, now: datetime) -> list[LaneNotice]:
+        """One team's claimed lanes: what holds each back (its pickup pending, its holder gone, the
+        matchup over) is settled lane by lane; the rest decide their day together."""
+        notices: list[LaneNotice] = []
+
+        def tell(notice: Optional[LaneNotice]) -> None:
+            if notice is not None:
+                notices.append(notice)
+
+        team_id, user_id = lanes[0].team_id, lanes[0].user_id
         try:
-            league_info, slots = await run_db("lane.job_team", _load_team_for_job, lane.team_id, lane.user_id)
+            league_info, slots = await run_db("lane.job_team", _load_team_for_job, team_id, user_id)
         except NotFoundError:
-            return await StreamLaneService._end(lane, now, "team_not_found")
+            for lane in lanes:
+                tell(await StreamLaneService._end(lane, now, "team_not_found"))
+            return notices
         team_name = league_info.team_name or ""
         adapter = get_provider_adapter(league_info.provider)
         if not adapter.capabilities(league_info).transactions:
-            return await StreamLaneService._pause(lane, now, "provider_not_supported", team_name=team_name)
-        if await run_db("lane.has_pending", _lane_has_pending, lane.id):
-            # Its last pickup hasn't settled: who holds the spot is not known yet.
-            return await StreamLaneService._wait(lane, now, "pickup_pending", after=PICKUP_WAIT)
-        if lane.next_period > lane.end_period:
-            return await StreamLaneService._end(lane, now, "matchup_over")
+            for lane in lanes:
+                tell(await StreamLaneService._pause(lane, now, "provider_not_supported", team_name=team_name))
+            return notices
+        try:
+            protected = await roster_protection.ids(team_id)
+        except Exception as exc:
+            # A switch drops the spot's player: no decision without knowing whether he is protected
+            for lane in lanes:
+                await StreamLaneService._wait(lane, now, "protections_unread", detail=str(exc)[:300])
+            return notices
+        live = []
+        for lane in lanes:
+            if await run_db("lane.has_pending", _lane_has_pending, lane.id):
+                # Its last pickup hasn't settled: who holds the spot is not known yet.
+                await StreamLaneService._wait(lane, now, "pickup_pending", after=PICKUP_WAIT)
+            elif lane.holder_player_id in protected:
+                # Protecting him stops the lane (services/roster_protection.py); this ends one whose
+                # pickup was being made at that moment, once the check before ESPN has refused it.
+                tell(await StreamLaneService._end(lane, now, roster_protection.LANE_STOPPED))
+            elif lane.next_period > lane.end_period:
+                tell(await StreamLaneService._end(lane, now, "matchup_over"))
+            else:
+                live.append(lane)
+        if not live:
+            return notices
 
         try:
-            board = await adapter.read_lineup(lane.team_id, league_info, fallback_slot_counts=slots)
+            board = await adapter.read_lineup(team_id, league_info, fallback_slot_counts=slots)
         except ProviderAuthError:
-            return await StreamLaneService._pause(lane, now, "auth_expired", team_name=team_name)
+            for lane in live:
+                tell(await StreamLaneService._pause(lane, now, "auth_expired", team_name=team_name))
+            return notices
         except Exception as exc:
-            return await StreamLaneService._wait(lane, now, "provider_error", detail=str(exc)[:300])
+            for lane in live:
+                await StreamLaneService._wait(lane, now, "provider_error", detail=str(exc)[:300])
+            return notices
         if not board.can_write:
-            if board.write_blocked_reason in ("no_scoring_period", "writes_disabled"):
-                return await StreamLaneService._wait(lane, now, f"can_write:{board.write_blocked_reason}")
-            return await StreamLaneService._pause(lane, now, f"can_write:{board.write_blocked_reason}",
-                                                  team_name=team_name)
+            reason = f"can_write:{board.write_blocked_reason}"
+            for lane in live:
+                if board.write_blocked_reason in ("no_scoring_period", "writes_disabled"):
+                    await StreamLaneService._wait(lane, now, reason)
+                else:
+                    tell(await StreamLaneService._pause(lane, now, reason, team_name=team_name))
+            return notices
         if board.scoring_period_id is None or not board.nba_date:
-            return await StreamLaneService._wait(lane, now, "no_scoring_period")
+            for lane in live:
+                await StreamLaneService._wait(lane, now, "no_scoring_period")
+            return notices
         today_period, today_date = board.scoring_period_id, date.fromisoformat(board.nba_date)
-
-        events: list[dict] = []
-        notice: Optional[LaneNotice] = None
         today = (await run_db("lane.days", _days, today_period, today_period, today_period, today_date))[0]
-        period = lane.next_period
         open_period = first_open_period(today, now)
-        if period < open_period:
-            # The decision came too late for those days (the tick or ESPN was down): they pass.
-            last = min(open_period - 1, lane.end_period)
-            detail = f"No decision was made in time for ESPN day{'s' if last > period else ''} " \
-                     f"{period}{f'-{last}' if last > period else ''}"
-            missed_date = today_date + timedelta(days=period - today_period)
-            events.append(dict(action="blocked", reason="missed", detail=detail, scoring_period_id=period,
-                               nba_date=missed_date))
-            notice = _notice(lane, "blocked", "missed", team_name=team_name, detail=detail, period=period,
-                             nba_date=missed_date)
-            period = open_period
-        if period > lane.end_period:
-            return await StreamLaneService._end(lane, now, "matchup_over", events=events, notice=notice)
-
         on_board = {p.player_id: p for p in board.players}
-        holder = on_board.get(lane.holder_player_id)
-        holder_fields: dict[str, Any] = {}
-        if holder is None:
-            adopted = await run_db("lane.adopt", _adopt_executed, lane.id, lane.holder_player_id, set(on_board))
-            if adopted is None:
-                return await StreamLaneService._pause(lane, now, "holder_gone", team_name=team_name,
-                                                      detail=f"{lane.holder_name} is no longer on the roster",
-                                                      events=events)
-            holder = on_board[adopted.add_player_id]
-            holder_fields = dict(holder_player_id=holder.player_id, holder_name=holder.name, holder_team=holder.team)
-        rehold = rehold_after_for(board.acquisitions)
-        if rehold is None:
-            return await StreamLaneService._pause(lane, now, "waiver_period_unsupported", team_name=team_name,
-                                                  events=events)
 
+        deciding: list[Deciding] = []
+        for lane in live:
+            events: list[dict] = []
+            notice: Optional[LaneNotice] = None
+            period = lane.next_period
+            if period < open_period:
+                # The decision came too late for those days (the tick or ESPN was down): they pass.
+                last = min(open_period - 1, lane.end_period)
+                detail = f"No decision was made in time for ESPN day{'s' if last > period else ''} " \
+                         f"{period}{f'-{last}' if last > period else ''}"
+                missed_date = today_date + timedelta(days=period - today_period)
+                events.append(dict(action="blocked", reason="missed", detail=detail, scoring_period_id=period,
+                                   nba_date=missed_date))
+                notice = _notice(lane, "blocked", "missed", team_name=team_name, detail=detail, period=period,
+                                 nba_date=missed_date)
+                period = open_period
+            if period > lane.end_period:
+                tell(await StreamLaneService._end(lane, now, "matchup_over", events=events, notice=notice))
+                continue
+            holder = on_board.get(lane.holder_player_id)
+            holder_fields: dict[str, Any] = {}
+            if holder is None:
+                adopted = await run_db("lane.adopt", _adopt_executed, lane.id, lane.holder_player_id, set(on_board))
+                if adopted is None:
+                    tell(await StreamLaneService._pause(lane, now, "holder_gone", team_name=team_name,
+                                                        detail=f"{lane.holder_name} is no longer on the roster",
+                                                        events=events))
+                    continue
+                holder = on_board[adopted.add_player_id]
+                holder_fields = dict(holder_player_id=holder.player_id, holder_name=holder.name,
+                                     holder_team=holder.team)
+            deciding.append(Deciding(lane, period, holder, holder_fields, events, notice))
+
+        # Lanes deciding the same day (to the same matchup end) are planned together.
+        groups: dict[tuple[int, int], list[Deciding]] = {}
+        for d in deciding:
+            groups.setdefault((d.period, d.lane.end_period), []).append(d)
+        rehold = rehold_after_for(board.acquisitions)
+        for (period, end_period), group in sorted(groups.items()):
+            try:
+                notices.extend(await StreamLaneService._decide_together(
+                    group, period, end_period, board, league_info, adapter, rehold, today_period, today_date,
+                    team_name, now))
+            except Exception as exc:  # the other groups' decisions stand
+                log.exception("stream_lane_error", lane_ids=[d.lane.id for d in group], team_id=team_id,
+                              error=str(exc))
+                for d in group:
+                    await StreamLaneService._wait(d.lane, now, "error", detail=str(exc)[:300])
+        return notices
+
+    @staticmethod
+    async def _decide_together(group: Sequence[Deciding], period: int, end_period: int, board: LineupState,
+                               league_info: LeagueInfo, adapter, rehold: int, today_period: int, today_date: date,
+                               team_name: str, now: datetime) -> list[LaneNotice]:
+        """One plan for the lanes deciding `period`, and each lane's step from it: the switch its spot
+        makes that day (a scheduled pickup), or a keep."""
+        team_id = group[0].lane.team_id
+        notices: list[LaneNotice] = []
         day_date = today_date + timedelta(days=period - today_period)
         window = await run_db("lane.window", _window_for, day_date)
         if window.not_before_at > now:
             # Too early: a pickup for the day can't be made before its window opens (the day
             # before's first tip-off), so the decision waits to be made with the pool as it is then.
-            return await StreamLaneService._wait(lane, now, "window_not_open", at=window.not_before_at)
+            for d in group:
+                await StreamLaneService._wait(d.lane, now, "window_not_open", at=window.not_before_at)
+            return notices
         try:
-            prepared = await StreamLaneService._prepare(lane.team_id, league_info, adapter, board, holder, period,
-                                                        lane.end_period, rehold, now, lane_id=lane.id)
+            prepared = await StreamLaneService._prepare(team_id, league_info, adapter, board,
+                                                        [d.holder for d in group], period, end_period, rehold, now,
+                                                        lane_ids=[d.lane.id for d in group])
         except ProviderAuthError:
-            return await StreamLaneService._pause(lane, now, "auth_expired", team_name=team_name, events=events)
+            for d in group:
+                notice = await StreamLaneService._pause(d.lane, now, "auth_expired", team_name=team_name,
+                                                        events=d.events)
+                if notice is not None:
+                    notices.append(notice)
+            return notices
         except Exception as exc:
-            if events:   # the missed days are recorded either way
-                log.warning("stream_lane_missed_unrecorded", lane_id=lane.id, error=str(exc))
-            return await StreamLaneService._wait(lane, now, "provider_error", detail=str(exc)[:300])
-        plan = prepared.lane_plan.plan
-        move = plan.first_move
-        chosen = move.player_id if move is not None else holder.player_id
-        projected, why = compare_to_projection(lane.projection, period, chosen, holder.player_id,
-                                               prepared.lane_plan.considered)
+            for d in group:
+                if d.events:   # the missed days are recorded either way
+                    log.warning("stream_lane_missed_unrecorded", lane_id=d.lane.id, error=str(exc))
+                await StreamLaneService._wait(d.lane, now, "provider_error", detail=str(exc)[:300])
+            return notices
+        plan = prepared.plan
+        moves = {sw.spot: sw for sw in plan.first_moves}
         day = prepared.days[0]
-        base_event = dict(scoring_period_id=period, nba_date=day.nba_date,
-                          projected_player_id=projected.player_id if projected else None,
-                          projected_name=projected.name if projected else None, reason=why)
-        pickup = None
-        if move is not None:
-            incoming = prepared.players[move.player_id]
-            pickup = dict(user=lane.user_id, team=lane.team_id, add_player_id=incoming.player_id,
-                          add_name=incoming.name, add_team=incoming.team, drop_player_id=holder.player_id,
-                          drop_name=holder.name, drop_team=holder.team, scoring_period_id=period,
-                          nba_date=day.nba_date, not_before_at=window.not_before_at,
-                          deadline_at=window.deadline_at, status=PENDING, created_at=now, updated_at=now,
-                          lane_id=lane.id)
-            events.append(dict(action="switch", add_player_id=incoming.player_id, add_name=incoming.name,
-                               drop_player_id=holder.player_id, drop_name=holder.name, **base_event))
-        else:
-            events.append(dict(action="keep", **base_event))
-
         # The next decision: the next day's, when a pickup for it can first be made (this day's first
-        # tip-off). After the last day, the run at its first tip-off ends the lane (once the last
-        # pickup has settled).
-        if period < lane.end_period:
+        # tip-off). After the last day, the run at its first tip-off ends the lanes (once their last
+        # pickups have settled).
+        if period < end_period:
             next_window = await run_db("lane.window", _window_for, day.nba_date + timedelta(days=1))
             next_at = next_window.not_before_at
         else:
             next_at = window.deadline_at or rollover_at(day.nba_date + timedelta(days=1))
-        lane_fields = dict(next_period=period + 1, next_decision_at=next_at, reason=None, detail=None,
-                           projection=prepared.projection.model_dump(mode="json"), **holder_fields)
-        recorded = await run_db("lane.record", _record_decision, lane.id, lane.attempts, now, lane_fields, events,
-                                pickup)
-        if recorded is None:
-            log.warning("stream_lane_claim_lost", lane_id=lane.id, team_id=lane.team_id, step="decide")
-            return None
-        log.info("stream_lane_decided", lane_id=lane.id, team_id=lane.team_id, period=period,
-                 action="switch" if move is not None else "keep", add=move.player_id if move else None,
-                 drop=holder.player_id if move else None, why=why, gain=plan.gain, adds=plan.adds,
-                 pickup_id=recorded.pickup_id, duplicate=recorded.duplicate, next_decision_at=next_at.isoformat())
-        return notice
+        for k, d in enumerate(group):
+            lane, holder = d.lane, d.holder
+            move = moves.get(k)
+            chosen = move.add_id if move is not None else holder.player_id
+            projected, why = compare_to_projection(lane.projection, period, chosen, holder.player_id,
+                                                   plan.considered)
+            base_event = dict(scoring_period_id=period, nba_date=day.nba_date,
+                              projected_player_id=projected.player_id if projected else None,
+                              projected_name=projected.name if projected else None, reason=why)
+            events = list(d.events)
+            pickup = None
+            if move is not None:
+                incoming = prepared.players[move.add_id]
+                pickup = dict(user=lane.user_id, team=lane.team_id, add_player_id=incoming.player_id,
+                              add_name=incoming.name, add_team=incoming.team, drop_player_id=holder.player_id,
+                              drop_name=holder.name, drop_team=holder.team, scoring_period_id=period,
+                              nba_date=day.nba_date, not_before_at=window.not_before_at,
+                              deadline_at=window.deadline_at, status=PENDING, created_at=now, updated_at=now,
+                              lane_id=lane.id)
+                events.append(dict(action="switch", add_player_id=incoming.player_id, add_name=incoming.name,
+                                   drop_player_id=holder.player_id, drop_name=holder.name, **base_event))
+            else:
+                events.append(dict(action="keep", **base_event))
+            lane_fields = dict(next_period=period + 1, next_decision_at=next_at, reason=None, detail=None,
+                               projection=prepared.projections[k].model_dump(mode="json"), **d.holder_fields)
+            try:
+                recorded = await run_db("lane.record", _record_decision, lane.id, lane.attempts, now, lane_fields,
+                                        events, pickup)
+            except Exception as exc:  # the others' decisions stand
+                log.exception("stream_lane_record_failed", lane_id=lane.id, team_id=team_id, error=str(exc))
+                await StreamLaneService._wait(lane, now, "error", detail=str(exc)[:300])
+                continue
+            if recorded is None:
+                log.warning("stream_lane_claim_lost", lane_id=lane.id, team_id=team_id, step="decide")
+                continue
+            log.info("stream_lane_decided", lane_id=lane.id, team_id=team_id, period=period,
+                     action="switch" if move is not None else "keep", add=move.add_id if move else None,
+                     drop=holder.player_id if move else None, why=why, gain=prepared.projections[k].gain,
+                     adds=prepared.projections[k].adds, lanes=len(group), team_gain=plan.gain, team_adds=plan.adds,
+                     optimal=plan.optimal, pickup_id=recorded.pickup_id, duplicate=recorded.duplicate,
+                     next_decision_at=next_at.isoformat())
+            if d.notice is not None:
+                notices.append(d.notice)
+        return notices
 
     @staticmethod
     async def _wait(lane, now: datetime, reason: str, *, after: timedelta = RETRY, at: Optional[datetime] = None,

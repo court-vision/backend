@@ -47,7 +47,7 @@ def test_first_attempt_is_the_previous_days_first_tip():
 def test_no_games_the_day_before_means_the_rollover_into_that_day():
     w = window(tips={D: time(19, 30)})
     assert w.rule == "rollover_into_prev"
-    assert w.not_before_at == utc(2026, 11, 11, 7, 0)      # 2 AM EST Wed
+    assert w.not_before_at == utc(2026, 11, 11, 8, 0)      # 3 AM EST Wed
 
 
 @pytest.mark.unit
@@ -62,8 +62,8 @@ def test_rollover_crosses_both_dst_switches_without_raising():
     fall = svc.rollover_at(date(2026, 11, 1))
     spring = svc.rollover_at(date(2027, 3, 14))
     assert fall.tzinfo is timezone.utc and spring.tzinfo is timezone.utc
-    assert fall == utc(2026, 11, 1, 7, 0)                  # 2 AM EST (the clocks just fell back)
-    assert abs((spring - utc(2027, 3, 14, 7, 0)).total_seconds()) <= 3600
+    assert fall == utc(2026, 11, 1, 8, 0)                  # 3 AM EST (the clocks just fell back)
+    assert spring == utc(2027, 3, 14, 7, 0)                # 3 AM EDT (the clocks just sprang forward)
 
 
 @pytest.mark.unit
@@ -142,14 +142,25 @@ def over_limit(acq, *, period=2, day=3, nba_date=DAY_D):
 
 
 @pytest.mark.unit
-def test_a_per_day_limit_the_day_before_waits_for_the_days_own_allowance():
-    d = over_limit(limited(per="day", limit=1, matchup_used=1))
-    assert d.action == "defer" and d.at == svc.rollover_at(DAY_D)
+def test_a_per_game_day_limit_is_the_matchup_s_so_the_day_before_brings_none_back():
+    pool = limited(per="game_day", per_game_day=1, game_days=7, limit=7, matchup_used=7)
+    assert over_limit(pool) == svc.Decision("settle", "skipped", "acquisition_limit")
+    assert over_limit(pool, nba_date=date(2026, 10, 27)).action == "defer"     # next matchup's first day
+
+
+@pytest.mark.unit
+def test_a_per_game_day_limit_whose_total_is_unknown_still_waits_for_the_next_matchup():
+    """The rollover's allowance hangs on the matchup boundary, not on knowing the total."""
+    unknown = limited(per="game_day", per_game_day=1, limit=None)
+    assert over_limit(unknown, nba_date=date(2026, 10, 27)).action == "defer"
+    assert over_limit(unknown) == svc.Decision("settle", "skipped", "acquisition_limit")
+    no_limit = limited(limit=None)                       # nothing per matchup: a season cap refused it
+    assert over_limit(no_limit, nba_date=date(2026, 10, 27)) == svc.Decision("settle", "skipped", "acquisition_limit")
 
 
 @pytest.mark.unit
 def test_on_the_day_itself_nothing_frees_up():
-    assert over_limit(limited(per="day", limit=1), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
+    assert over_limit(limited(), period=3) == svc.Decision("settle", "skipped", "acquisition_limit")
 
 
 @pytest.mark.unit

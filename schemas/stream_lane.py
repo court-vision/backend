@@ -2,11 +2,14 @@
 A stream lane: a standing order to keep one roster spot streaming for the rest of
 the matchup (docs/STREAM_LANE_PLAN.md). The lane is the intent, not a list of
 pickups; before each day it re-plans the spot with the players available then.
+A team's lanes deciding the same day are planned together: they share the adds
+and the lineup's seats.
 
 `LaneProjection` is a plan as of one moment: who would hold the spot each day if
-nobody else touched the market, what each adds to that day's lineup, and the
-gain over keeping the spot's player. It can change; the desk says so, and the
-email for a move says when the move differs from the projection shown before it.
+nobody else touched the market, what each adds to that day's lineup (with the
+other lanes' players in it), and the gain over keeping the spot's player. It can
+change; the desk says so, and the email for a move says when the move differs
+from the projection shown before it.
 """
 
 from __future__ import annotations
@@ -42,11 +45,12 @@ class LaneProjection(ApiModel):
     as_of: datetime
     days: list[LaneProjectionDay] = []
     value: float                                 # the spot's projected points over the days
-    hold_value: float                            # the spot's player keeping it every day
+    hold_value: float                            # the spot's player keeping it every day (the others as planned)
     gain: float
-    adds: int                                    # adds the projection makes
-    adds_left: Optional[int] = None              # the budget it planned with; None = no limit
+    adds: int                                    # adds the projection makes for this spot
+    adds_left: Optional[int] = None              # the budget it planned with, shared; None = no limit
     rehold_after: int                            # days before a dropped player can be added back
+    lanes: int = 1                               # lanes planned together, sharing `adds_left`
 
 
 # ------------------------------- requests ------------------------------- #
@@ -58,14 +62,25 @@ class StreamLanePlanReq(ApiModel):
 
 class StreamLaneStartReq(StreamLanePlanReq):
     notify: LaneNotify = "email"                 # desk: the lane never emails
+    # Dime's lane chip being applied (usr.ai_proposals, kind lane, op start on this player): checked,
+    # its reason kept on the started event, and marked sent
+    proposal_id: Optional[int] = Field(None, gt=0)
 
 
 class StreamLaneUpdateReq(ApiModel):
     status: Optional[Literal["active", "paused"]] = None   # pause, or resume
     notify: Optional[LaneNotify] = None
+    proposal_id: Optional[int] = Field(None, gt=0)          # Dime's pause or resume chip on this lane
 
 
 # ------------------------------- responses ------------------------------- #
+
+
+class StreamLanePlanOther(ApiModel):
+    """An open lane the new one would be planned with, and its projection then."""
+    lane_id: int
+    holder: LanePlayer
+    projection: LaneProjection
 
 
 class StreamLanePlan(ApiModel):
@@ -76,6 +91,7 @@ class StreamLanePlan(ApiModel):
     end_date: date
     first_decision_at: datetime                  # when the first day's decision is made
     projection: LaneProjection
+    others: list[StreamLanePlanOther] = []       # the open lanes deciding its first day with it
 
 
 class StreamLanePlanResp(BaseResponse):
@@ -122,7 +138,7 @@ class StreamLaneResp(BaseResponse):
 
 
 class StreamLaneListData(ApiModel):
-    open: list[StreamLane] = []                  # active or paused (at most one per team)
+    open: list[StreamLane] = []                  # active or paused, oldest first (one per spot)
     recent: list[StreamLane] = []                # ended in the last week, newest first
 
 

@@ -184,6 +184,16 @@ database is the `Postgres-ZxBc` service (staging environment); the `Postgres` se
 is production. Local dev writes real rows and applies pending migrations on startup,
 so the two must not be confused.
 
+#### Database roles (`ops/roles.sql`)
+
+The backend connects as the database owner. One more role exists beside it:
+`ask_reader`, which the AI agent's `query_stats` tool reads on (SELECT on the two
+`nba.ask_*` views only, read-only transactions, a 2 s statement timeout). Create it
+once per database as a superuser with `psql "$DATABASE_URL" -f ops/roles.sql` (it
+prompts for the password and never stores it), then set `ASK_READER_DATABASE_URL`
+on the service. Migrations grant the views to the role when it exists, so a
+database without it still migrates, and the tool falls back to the main pool.
+
 ### 4. Start the server
 
 ```bash
@@ -217,6 +227,7 @@ refused.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection URL (`postgresql://user:pass@host/dbname`). Read from `.env` or the environment; use the **dev** database locally (Railway `Postgres-ZxBc`), never production |
+| `ASK_READER_DATABASE_URL` | No | — | Same database as `DATABASE_URL`, connected as the read-only `ask_reader` role (`ops/roles.sql`) for the AI agent's `query_stats` tool. Unset, the tool runs on the main pool in a read-only transaction with the same 2 s timeout and logs that once |
 | `CLERK_JWKS_URL` | Yes | — | Clerk JWKS endpoint (`https://<your-clerk-api>.clerk.accounts.dev/.well-known/jwks.json`) |
 | `CLERK_SECRET_KEY` | Yes | — | Clerk Backend API secret key (`sk_...`) |
 | `PIPELINE_API_TOKEN` | Yes | — | Shared bearer token for service-to-service calls (not used by user routes) |
@@ -262,12 +273,15 @@ No authentication required. Rate-limited to **100 requests/minute per endpoint p
 | `GET` | `/v1/players/{player_id}/status` | Injury/availability status |
 | `GET` | `/v1/players/{player_id}/ownership` | Fantasy ownership percentage + trend |
 | `GET` | `/v1/games/{game_date}` | NBA games on a specific date (with live overlay for today) |
+| `GET` | `/v1/games/{game_date}/{game_id}` | One game: score by period, score history and every line; a finished game as it stood at the final buzzer |
 | `GET` | `/v1/teams/{team_abbrev}/schedule` | NBA team schedule |
 | `GET` | `/v1/teams/{team_abbrev}/stats` | Latest NBA team statistics |
 | `GET` | `/v1/teams/{team_abbrev}/roster` | Last known season-stat roster, including inactive players |
 | `GET` | `/v1/teams/{team_abbrev}/live-game` | Live, upcoming, or most recent team game |
 | `GET` | `/v1/rankings/espn` | ESPN draft ranks, ADP, auction values, eligibility, injury snapshot; paginated and historical |
 | `GET` | `/v1/rankings/espn/movement` | ESPN rank, ADP, and auction movement between two resolved snapshots |
+| `GET` | `/v1/rankings/live` | Court Vision's rest-of-season boards as stored this morning (points and 9-cat): each player's rank, his move over a day and a week, and ESPN's rank beside him |
+| `GET` | `/v1/rankings/live/players/{player_id}` | One player's place on this morning's boards, how long ESPN has held its own rank, and his rank on every stored day of the season |
 | `GET` | `/v1/players/projections` | Paginated ESPN preseason projections from one resolved snapshot |
 | `GET` | `/v1/players/{player_id}/projection` | ESPN projected games and per-game stats, with source and snapshot date |
 | `GET` | `/v1/playoff/bracket` | Playoff bracket for the latest or requested season |

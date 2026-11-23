@@ -63,3 +63,24 @@ def test_points_matchup_response_has_defaults_only(authed_client, owned, monkeyp
     assert d["scoring_format"] == "points" and d["settings_synced"] is False
     assert d["category_comparison"] is None and d["your_team"]["categories"] is None
     assert d["your_team"]["current_score"] == 1200.5
+
+
+@pytest.mark.api
+def test_the_live_matchup_hands_the_callers_stamp_to_the_service(authed_client, owned, monkeypatch):
+    """`reuse_from` is the provider_read_ms of the answer a Week desk holds (services/matchup_hold.py);
+    left out, as on a first read or after a move, the service is told so."""
+    from schemas.matchup import LiveMatchupResp
+    from services import matchup_service
+    asked = []
+
+    async def fake(user_id, team_id, reuse_from=None):
+        asked.append((user_id, team_id, reuse_from))
+        return LiveMatchupResp(status=ApiStatus.SUCCESS, message="ok", data=None)
+
+    monkeypatch.setattr(matchup_service.MatchupService, "get_live_matchup_by_team_id", staticmethod(fake))
+    assert authed_client.get("/v1/internal/matchups/live/7").status_code == 200
+    assert authed_client.get("/v1/internal/matchups/live/7?reuse_from=1763256616000").status_code == 200
+    assert asked == [(42, 7, None), (42, 7, 1763256616000)]
+    assert authed_client.get("/v1/internal/matchups/live/7?reuse_from=soon").status_code == 422
+    assert authed_client.get("/v1/internal/matchups/live/7?reuse_from=-1").status_code == 422
+    assert len(asked) == 2

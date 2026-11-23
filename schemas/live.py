@@ -54,6 +54,9 @@ class LivePlayersData(ApiModel):
     game_date: str
     player_count: int
     players: list[LivePlayerItem]
+    # How old the newest of these lines was when this was answered (core/live_age.py);
+    # None when no line has been written for the date.
+    live_age_ms: Optional[int] = None
 
 
 class LivePlayersResp(BaseResponse):

@@ -9,17 +9,32 @@ readable `is_error` results rather than exceptions that would sink the answer.
 
 import asyncio
 import json
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
 from core.errors import NotFoundError
 from schemas.common import ApiStatus
+from schemas.market import (
+    ESPNMarketMovementData,
+    ESPNMarketMovementPlayer,
+    ESPNMarketMovementResp,
+    MarketChanges,
+    MarketMeasurements,
+)
 from schemas.player import PlayerStatusData, PlayerStatusResp
 from schemas.players_list import PlayerListItem, PlayersListData, PlayersListResp
 from services.ai import tools
 from services.player_service import PlayerService
 from services.players_list_service import PlayersListService
+from services.public_market_service import PublicMarketService
+
+# The tools are a cached prefix: each later step appends after the app map's find_in_app
+_APP = [t["name"] for t in tools.AGENT_TOOLS].index("find_in_app")
+_AFTER_APP = ["recall", "remember", "revise", "forget", "get_move_outcomes",
+              "get_league", "get_league_activity", "get_draft_board", "get_automations", "get_decisions",
+              "get_player_news", "get_news", "get_draft_recap", "get_add_limits"]
 
 
 def _run(name, raw):
@@ -38,18 +53,19 @@ def _stats_resp(message="Player stats fetched successfully"):
 @pytest.mark.unit
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
-        defined = {t["name"] for t in tools.TOOLS} | {t["name"] for t in tools.ROUTER_TOOLS}
+        defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
+                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS, *tools.DRAFT_ONLY_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
         assert [t["name"] for t in tools.ROUTER_TOOLS] == ["search_players", "get_my_teams"]
 
     def test_schemas_forbid_extra_properties(self):
-        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]:
             assert tool["input_schema"]["additionalProperties"] is False, tool["name"]
 
     def test_no_tool_takes_an_espn_id(self):
-        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS]:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]:
             assert not any("espn" in prop for prop in tool["input_schema"]["properties"]), tool["name"]
 
 
@@ -156,6 +172,15 @@ class TestGetPlayerStats:
 
 @pytest.mark.unit
 class TestGetPlayerStatus:
+    @pytest.fixture(autouse=True)
+    def no_news(self, monkeypatch):
+        from services import news_service
+
+        async def none(*args, **kwargs):
+            return None
+        monkeypatch.setattr(news_service, "verdict_for", none)
+        monkeypatch.setattr(news_service, "latest_item", none)
+
     def test_no_current_report_is_null_not_healthy(self, monkeypatch):
         """The service answers None for last April's report in September, as for no report at all."""
         async def fake(player_id):
@@ -164,7 +189,7 @@ class TestGetPlayerStatus:
 
         body = json.loads(_run("get_player_status", {"player_id": 1630578}).content)
 
-        assert body == {"player_id": 1630578, "injury": None}
+        assert body == {"player_id": 1630578, "injury": None, "availability": None, "latest_news": None}
 
     def test_a_current_report_keeps_its_date_and_age(self, monkeypatch):
         async def fake(player_id):
@@ -241,8 +266,26 @@ class TestGetMyTeams:
         assert seen == [42]
         teams = json.loads(outcome.content)["teams"]
         assert teams[0] == {"team_id": 7, "team_name": "Sengun Szn", "league_name": "Dorm League 26-27",
-                            "provider": "espn", "season": 2027, "scoring": "categories"}
+                            "provider": "espn", "season": 2027, "scoring": "categories", "points_scoring": None,
+                            "protected": []}
         assert (teams[1]["league_name"], teams[1]["scoring"]) == ("Work League", "points")
+        # No synced league, so whether it scores ESPN's default points isn't known
+        assert teams[1]["points_scoring"] is None
+
+    def test_each_team_lists_the_players_its_user_protected(self, monkeypatch, protect):
+        """The roster lock: Dime reads who is never a drop with the teams, by NBA id and name."""
+        from services.team_service import TeamService
+
+        async def fake(user_id):
+            return SimpleNamespace(data=[_team(7, "Sengun Szn"), _team(9, "Punt FT%")])
+        monkeypatch.setattr(TeamService, "get_teams", staticmethod(fake))
+        protect({7: [4277905]}, names={4277905: "Alperen Sengun"}, nba_ids={4277905: 1630578})
+
+        outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42)))
+
+        teams = {t["team_id"]: t for t in json.loads(outcome.content)["teams"]}
+        assert teams[7]["protected"] == [{"player_id": 1630578, "name": "Alperen Sengun"}]
+        assert teams[9]["protected"] == []
 
     def test_takes_no_arguments(self):
         outcome = asyncio.run(tools.run_tool("get_my_teams", {"user_id": 1}, ctx=tools.ToolContext(user_id=42)))
@@ -260,3 +303,507 @@ class TestToolsets:
         outcome = asyncio.run(tools.run_tool("get_my_teams", {}, ctx=tools.ToolContext(user_id=42),
                                              allowed=tools.ASK_TOOL_NAMES))
         assert outcome.is_error and "Unknown tool" in outcome.content
+
+
+# ---- the agent's team-scoped tools ----
+
+def _agent(name, raw, user_id=42):
+    return asyncio.run(tools.run_tool(name, raw, ctx=tools.ToolContext(user_id=user_id),
+                                      allowed=tools.AGENT_TOOL_NAMES))
+
+
+@pytest.fixture
+def owns_22(monkeypatch):
+    """User 42 owns team 22 and nothing else; returns the provider calls made."""
+    provider_calls = []
+
+    def owned(team_id, user_id):
+        return SimpleNamespace(team_id=team_id, user_id=user_id) if (team_id, user_id) == (22, 42) else None
+
+    async def league_info(team):
+        provider_calls.append(("credentials", team.team_id))
+        return SimpleNamespace(provider="espn")
+
+    async def run_db(name, fn, *args):
+        return fn(*args)
+    monkeypatch.setattr(tools, "run_db", run_db)
+    monkeypatch.setattr(tools, "ensure_team_owned", owned)
+    monkeypatch.setattr(tools, "load_owned_league_info", league_info)
+    return provider_calls
+
+
+def _player(espn_id, nba_id, name, **kw):
+    base = dict(player_id=espn_id, nba_player_id=nba_id, name=name, team="DET", position="C", lineup_slot="C",
+                avg_points=1.8, projected_points=0.0, games_remaining=3, injured=False, injury_status=None)
+    return SimpleNamespace(**{**base, **kw})
+
+
+def _cat(key, you, opp, winner):
+    return SimpleNamespace(key=key, label=key.upper(), you=you, opp=opp, winner=winner,
+                           higher_is_better=key != "tov", is_rate=False)
+
+
+@pytest.mark.unit
+class TestAgentTeamTools:
+    def test_someone_else_s_team_is_refused_before_any_provider_call(self, owns_22, monkeypatch):
+        from services.matchup_service import MatchupService
+        called = []
+
+        async def matchup(*a, **k):
+            called.append(a)
+        monkeypatch.setattr(MatchupService, "get_matchup_by_team_id", staticmethod(matchup))
+
+        outcome = _agent("get_matchup", {"team_id": 23})
+
+        assert outcome.is_error and "not one of the user's teams" in outcome.content
+        assert called == [] and owns_22 == []
+
+    def test_the_matchup_carries_nba_ids_and_merges_the_category_projection(self, owns_22, monkeypatch):
+        from services.matchup_service import MatchupService
+
+        md = SimpleNamespace(
+            matchup_period=1, matchup_period_start="2026-10-20", matchup_period_end="2026-10-26",
+            scoring_format="categories", projected_margin=2.0,
+            your_team=SimpleNamespace(team_name="Mine", current_score=0, projected_score=5,
+                                      roster=[_player(4396993, 1631105, "Jalen Duren")]),
+            opponent_team=SimpleNamespace(team_name="Theirs", current_score=0, projected_score=3,
+                                          roster=[_player(1, None, "Unmapped", injured=True)]),
+            category_comparison=SimpleNamespace(items=[_cat("blk", 0, 0, "tie")]),
+            projected_category_comparison=SimpleNamespace(items=[_cat("blk", 19, 23, "opp"), _cat("tov", 30, 35, "you")]),
+        )
+        seen = []
+
+        async def matchup(user_id, team_id, window):
+            seen.append((user_id, team_id, window))
+            return SimpleNamespace(data=md, message="ok")
+        monkeypatch.setattr(MatchupService, "get_matchup_by_team_id", staticmethod(matchup))
+
+        outcome = _agent("get_matchup", {"team_id": 22, "window": "last_14"})
+
+        assert seen == [(42, 22, "last_14")]
+        body = json.loads(outcome.content)
+        assert body["your_roster"][0]["player_id"] == 1631105
+        assert body["opponent_roster"][0] == {**body["opponent_roster"][0], "player_id": None, "injury": "injured"}
+        assert "4396993" not in outcome.content
+        blk, tov = body["categories"]
+        assert (blk["you"], blk["projected_you"], blk["projected_opponent"], blk["projected_leader"]) == (0, 19, 23, "opp")
+        assert (tov["you"], tov["projected_you"], tov["lower_is_better"]) == (None, 30, True)
+
+    def test_free_agents_are_cut_to_the_limit_with_nba_ids(self, owns_22, monkeypatch):
+        from services.streamer_service import StreamerService
+        seen = []
+
+        def fa(espn_id, nba_id):
+            return SimpleNamespace(player_id=espn_id, nba_player_id=nba_id, name=f"P{nba_id}", team="UTA",
+                                   valid_positions=["PF", "C", "F", "UT1", "UT2", "BE", "IR"], avg_points_last_n=2.0, avg_points_season=1.5,
+                                   games_remaining=4, game_days=[1, 2], b2b_game_count=1, streamer_score=9.0,
+                                   injured=False, injury_status=None, acquisition_status=None, waivers_until=None)
+
+        async def find(**kwargs):
+            seen.append(kwargs)
+            return SimpleNamespace(message="ok", data=SimpleNamespace(
+                matchup_number=1, start_date="2026-10-20", end_date="2026-10-26", current_day_index=0,
+                target_day=2, upcoming=True, value_kind="category_value",
+                streamers=[fa(100 + i, 1_600_000 + i) for i in range(5)]))
+        monkeypatch.setattr(StreamerService, "find_streamers", staticmethod(find))
+
+        outcome = _agent("get_free_agents", {"team_id": 22, "mode": "day", "day": 2, "limit": 2})
+
+        body = json.loads(outcome.content)
+        assert [p["player_id"] for p in body["players"]] == [1_600_000, 1_600_001]
+        assert body["pool_size"] == 5 and body["value_kind"] == "category_value"
+        assert body["players"][0]["positions"] == "PF/C/F"
+        assert seen[0]["target_day"] == 2 and seen[0]["mode"].value == "daily" and seen[0]["team_id"] == 22
+        assert "101" not in json.dumps([p["player_id"] for p in body["players"]])
+
+    def test_limits_are_validated(self, owns_22):
+        assert _agent("get_free_agents", {"team_id": 22, "limit": 500}).is_error
+        assert _agent("get_game_log", {"player_id": 1, "games": 50}).is_error
+
+
+def _movement_resp(metric):
+    player = ESPNMarketMovementPlayer(
+        player_id=1630578, espn_id=4397102, name="Alperen Sengun",
+        before=MarketMeasurements(overall_rank=20, adp=18.4, auction_value=41, auction_value_avg=38.5),
+        after=MarketMeasurements(overall_rank=12, adp=13.1, auction_value=49, auction_value_avg=44.0),
+        changes=MarketChanges(overall_rank=8, adp=5.3, auction_value=8, auction_value_avg=5.5),
+    )
+    data = ESPNMarketMovementData(
+        season="2026-27", from_as_of_date=date(2026, 10, 8), to_as_of_date=date(2026, 10, 15),
+        metric=metric, direction="both", players=[player], total=1, limit=20, offset=0,
+    )
+    return ESPNMarketMovementResp(status=ApiStatus.SUCCESS, message="Market movement", data=data)
+
+
+@pytest.mark.unit
+class TestMarketMovement:
+    def _rows(self, monkeypatch, raw):
+        seen = {}
+
+        async def fake(**kwargs):
+            seen.update(kwargs)
+            return _movement_resp(kwargs["metric"])
+
+        monkeypatch.setattr(PublicMarketService, "get_market_movement", staticmethod(fake))
+        out = _agent("get_market_movement", raw)
+        assert not out.is_error, out.content
+        return seen, json.loads(out.content)
+
+    def test_an_auction_metric_carries_its_own_before_after_and_change(self, monkeypatch):
+        seen, data = self._rows(monkeypatch, {"metric": "auction_value", "days": 7})
+        assert seen["metric"] == "auction_value"
+        assert data["metric"] == "auction_value"
+        row = data["players"][0]
+        # The numbers the ordering comes from are in the row, beside rank and ADP
+        assert (row["auction_value_before"], row["auction_value_after"], row["auction_value_change"]) == (41, 49, 8)
+        assert (row["adp_before"], row["adp_after"], row["adp_change"]) == (18.4, 13.1, 5.3)
+        assert (row["rank_before"], row["rank_after"], row["rank_change"]) == (20, 12, 8)
+        assert "auction_avg_before" not in row
+
+    def test_the_average_price_metric_uses_its_own_keys(self, monkeypatch):
+        _, data = self._rows(monkeypatch, {"metric": "auction_value_avg"})
+        row = data["players"][0]
+        assert (row["auction_avg_before"], row["auction_avg_after"], row["auction_avg_change"]) == (38.5, 44.0, 5.5)
+        assert "auction_value_before" not in row
+
+    def test_rank_and_adp_rows_stay_narrow(self, monkeypatch):
+        _, data = self._rows(monkeypatch, {})
+        row = data["players"][0]
+        assert not any(k.startswith("auction") for k in row), row
+        assert row["adp_change"] == 5.3 and row["rank_change"] == 8
+
+    def test_a_player_absent_from_a_snapshot_reads_as_null(self, monkeypatch):
+        async def fake(**kwargs):
+            resp = _movement_resp(kwargs["metric"])
+            resp.data.players[0].before = None
+            resp.data.players[0].changes = MarketChanges()
+            return resp
+
+        monkeypatch.setattr(PublicMarketService, "get_market_movement", staticmethod(fake))
+        row = json.loads(_agent("get_market_movement", {"metric": "auction_value"}).content)["players"][0]
+        assert row["auction_value_before"] is None and row["auction_value_change"] is None
+        assert row["auction_value_after"] == 49
+
+
+# ---- query_stats ----
+
+@pytest.mark.unit
+class TestQueryStats:
+    def test_it_follows_the_read_tools_and_mirrors_the_spec(self):
+        from services.ai.stats.catalog import METRIC_NAMES
+        from services.ai.stats.compiler import GAME_METRICS, StatsSpec
+
+        tool = next(t for t in tools.AGENT_TOOLS if t["name"] == "query_stats")
+        assert tool is tools.AGENT_STATS_TOOLS[0]
+        assert tools._REGISTRY["query_stats"].input_model is StatsSpec
+        assert "query_stats" not in tools.ASK_TOOL_NAMES and "query_stats" not in tools.ROUTER_TOOL_NAMES
+        props = tool["input_schema"]["properties"]
+        assert set(props) == set(StatsSpec.model_fields)
+        assert tool["input_schema"]["required"] == ["grain", "metrics"]
+        assert props["metrics"]["items"]["enum"] == list(METRIC_NAMES)
+        assert props["where"]["properties"]["stats"]["items"]["properties"]["metric"]["enum"] == list(GAME_METRICS)
+        for nested in ("window", "where", "transform", "rank"):
+            assert props[nested]["additionalProperties"] is False, nested
+        assert "fpts (CV fantasy points)" in tool["description"]
+
+    def test_an_invalid_spec_comes_back_with_the_fix(self):
+        out = _agent("query_stats", {"grain": "game", "metrics": ["pts"]})
+        assert out.is_error and out.content.startswith("Invalid input: ")
+        assert "grain game needs players" in out.content
+        out = _agent("query_stats", {"players": [1], "grain": "game", "metrics": ["ppg"]})
+        assert out.is_error and "unknown metric 'ppg'" in out.content
+
+    def test_a_valid_spec_runs_the_query_and_a_spec_error_is_readable(self, monkeypatch):
+        from services.ai.stats.query import SpecError
+
+        seen = {}
+
+        async def fake(spec):
+            seen["spec"] = spec
+            return {"grain": spec.grain, "rows": [{"player_id": 1, "pts": 30}], "total_rows": 1}
+
+        monkeypatch.setattr(tools, "run_query_stats", fake)
+        out = _agent("query_stats", {"players": [1], "grain": "total", "metrics": ["pts"], "window": {"last_games": 5}})
+        assert not out.is_error and json.loads(out.content)["rows"] == [{"player_id": 1, "pts": 30}]
+        assert seen["spec"].window.last_games == 5
+
+        async def refuse(spec):
+            raise SpecError(message="Court Vision's game history covers 2012-13 to 2025-26; 2001-02 is outside it")
+
+        monkeypatch.setattr(tools, "run_query_stats", refuse)
+        out = _agent("query_stats", {"players": [1], "grain": "game", "metrics": ["pts"], "seasons": ["2001-02"]})
+        assert out.is_error and out.content.startswith("Court Vision's game history covers")
+
+
+@pytest.mark.unit
+class TestFantasyTools:
+    """The step 4 tools (services/ai/fantasy.py): appended after the stats query, so the cached
+    prefix every earlier request built stays intact, and reached through the owned-team check."""
+
+    def test_they_follow_the_stats_query_and_take_nba_ids_only(self):
+        assert [t["name"] for t in tools.AGENT_TOOLS[_APP - 5:_APP]] == ["project_matchup", "plan_streams",
+                                                                      "propose_move", "get_lineup", "propose_lineup"]
+        assert [t["name"] for t in tools.AGENT_FANTASY_TOOLS] == ["project_matchup", "plan_streams"]
+        assert "project_matchup" not in tools.ASK_TOOL_NAMES and "plan_streams" not in tools.ROUTER_TOOL_NAMES
+        moves = tools.AGENT_FANTASY_TOOLS[0]["input_schema"]["properties"]["moves"]
+        assert moves["items"]["additionalProperties"] is False and set(moves["items"]["properties"]) == {"add", "drop", "day"}
+        value = tools.AGENT_FANTASY_TOOLS[1]["input_schema"]["properties"]["value"]
+        assert value["enum"][:2] == ["league", "matchup"] and "fg_pct" not in value["enum"]
+
+    def test_the_handlers_check_the_team_is_the_users_and_pass_the_validated_args(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def project(user_id, team, league_info, args):
+            seen["project"] = (user_id, team.team_id, args)
+            return {"before": {"you": 1.0}}
+
+        async def plan(user_id, team, league_info, args):
+            seen["plan"] = (user_id, team.team_id, args)
+            return {"plan": []}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "project_matchup", project)
+        monkeypatch.setattr(tools, "plan_streams", plan)
+        ctx = SimpleNamespace(user_id=42)
+
+        out = asyncio.run(tools.run_tool("project_matchup", {"team_id": 7, "moves": [{"add": 1, "day": 2}]}, ctx=ctx))
+        assert not out.is_error and seen["owned"] == (42, 7)
+        assert seen["project"][2].moves[0].add == 1 and seen["project"][2].moves[0].day == 2
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7, "value": "blk", "holders": [1, 2]}, ctx=ctx))
+        assert not out.is_error and seen["plan"][2].value == "blk" and seen["plan"][2].holders == [1, 2]
+
+    def test_a_move_needs_an_add_or_a_drop_and_the_tools_need_a_user(self):
+        out = asyncio.run(tools.run_tool("project_matchup", {"team_id": 7, "moves": [{"day": 2}]}, ctx=SimpleNamespace(user_id=1)))
+        assert out.is_error and "add, a drop, or both" in out.content
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7, "value": "fg_pct"}, ctx=SimpleNamespace(user_id=1)))
+        assert out.is_error and "Invalid input" in out.content
+        out = asyncio.run(tools.run_tool("plan_streams", {"team_id": 7}))
+        assert out.is_error and "signed-in user" in out.content
+
+
+@pytest.mark.unit
+class TestProposeMove:
+    """The step 5 tool (services/ai/proposals.py): appended after the fantasy tools, reached through the owned-team
+    check, and tied to the conversation the turn belongs to."""
+
+    def test_the_definition_takes_nba_ids_and_a_reason(self):
+        tool = tools.AGENT_TOOLS[_APP - 3]
+        assert tool["name"] == "propose_move" and tool["input_schema"]["additionalProperties"] is False
+        assert set(tool["input_schema"]["properties"]) == {"team_id", "add", "drop", "day", "reason"}
+        assert tool["input_schema"]["required"] == ["team_id", "reason"]
+        assert "propose_move" in tools.AGENT_TOOL_NAMES and "propose_move" not in tools.ASK_TOOL_NAMES
+
+    def test_the_handler_checks_the_team_and_passes_the_conversation(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def propose(user_id, conversation_id, team, league_info, args, *, shadow=False):
+            seen["propose"] = (user_id, conversation_id, team.team_id, args)
+            return {"proposal_id": 31, "chip": {"proposal_id": 31}}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "propose_move", propose)
+
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "drop": 2, "day": 3, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert not out.is_error and seen["owned"] == (42, 7)
+        user_id, conversation_id, team_id, args = seen["propose"]
+        assert (user_id, conversation_id, team_id) == (42, 9, 7)
+        assert (args.add, args.drop, args.day, args.reason) == (1, 2, 3, "4 games")
+        assert json.loads(out.content)["chip"] == {"proposal_id": 31}
+
+    def test_it_needs_a_conversation_a_user_and_a_move(self, monkeypatch):
+        async def owned(ctx, team_id):
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+        monkeypatch.setattr(tools, "_owned", owned)
+
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42)))
+        assert out.is_error and "inside a conversation" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "4 games"}))
+        assert out.is_error and "signed-in user" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "add, a drop, or both" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "drop": 1, "reason": "4 games"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "same player" in out.content
+        out = asyncio.run(tools.run_tool("propose_move", {"team_id": 7, "add": 1, "reason": "x" * 201},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "reason" in out.content
+
+
+@pytest.mark.unit
+class TestLineupTools:
+    """The lineup board read and the lineup chip (services/ai/proposals.py): appended after
+    propose_move, reached through the owned-team check; the proposal needs a conversation."""
+
+    def test_the_definitions_take_nba_ids_slot_names_and_a_reason(self):
+        read, propose = tools.AGENT_TOOLS[_APP - 2], tools.AGENT_TOOLS[_APP - 1]
+        assert read["name"] == "get_lineup" and set(read["input_schema"]["properties"]) == {"team_id", "day"}
+        assert propose["name"] == "propose_lineup" and propose["input_schema"]["additionalProperties"] is False
+        assert set(propose["input_schema"]["properties"]) == {"team_id", "day", "moves", "fill", "reason"}
+        assert propose["input_schema"]["required"] == ["team_id", "reason"]
+        move = propose["input_schema"]["properties"]["moves"]["items"]
+        assert move["additionalProperties"] is False and set(move["properties"]) == {"player_id", "to_slot"}
+        assert move["properties"]["to_slot"]["enum"][:3] == ["PG", "SG", "SF"] and "IR" in move["properties"]["to_slot"]["enum"]
+        assert {"get_lineup", "propose_lineup"} <= tools.AGENT_TOOL_NAMES
+        assert not {"get_lineup", "propose_lineup"} & tools.ASK_TOOL_NAMES
+
+    def test_the_handlers_check_the_team_and_the_proposal_needs_a_conversation(self, monkeypatch):
+        seen = {}
+
+        async def owned(ctx, team_id):
+            if ctx is None:
+                raise tools.AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+            seen["owned"] = (ctx.user_id, team_id)
+            return SimpleNamespace(team_id=team_id), SimpleNamespace(provider="espn")
+
+        async def read(team, league_info, args):
+            seen["read"] = (team.team_id, args.day)
+            return {"team_id": team.team_id, "players": []}
+
+        async def propose(user_id, conversation_id, team, league_info, args, *, shadow=False):
+            seen["propose"] = (user_id, conversation_id, team.team_id, args)
+            return {"proposal_id": 40, "chip": {"proposal_id": 40}}
+        monkeypatch.setattr(tools, "_owned", owned)
+        monkeypatch.setattr(tools, "get_lineup", read)
+        monkeypatch.setattr(tools, "propose_lineup", propose)
+
+        out = asyncio.run(tools.run_tool("get_lineup", {"team_id": 7, "day": 3}, ctx=tools.ToolContext(user_id=42)))
+        assert not out.is_error and seen["owned"] == (42, 7) and seen["read"] == (7, 3)
+
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "moves": [{"player_id": 1, "to_slot": "ut"}],
+                                                            "reason": "plays tonight"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert not out.is_error
+        user_id, conversation_id, team_id, args = seen["propose"]
+        assert (user_id, conversation_id, team_id, args.fill) == (42, 9, 7, False)
+        assert (args.moves[0].player_id, args.moves[0].to_slot) == (1, "UT")
+        assert json.loads(out.content)["chip"] == {"proposal_id": 40}
+
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "fill": True, "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42)))
+        assert out.is_error and "inside a conversation" in out.content
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "name the moves, or set fill" in out.content
+        out = asyncio.run(tools.run_tool("propose_lineup", {"team_id": 7, "moves": [{"player_id": 1, "to_slot": "QB"}],
+                                                            "reason": "set it"},
+                                         ctx=tools.ToolContext(user_id=42, conversation_id=9)))
+        assert out.is_error and "unknown slot" in out.content
+        out = asyncio.run(tools.run_tool("get_lineup", {"team_id": 7}))
+        assert out.is_error and "signed-in user" in out.content
+
+
+# ---- find_in_app: the app map ----
+
+APP_BUILD = "21a5238c0ffee21a5238c0ffee21a5238c0ffee2"
+
+
+def _app_map():
+    from datetime import datetime, timezone
+
+    from schemas.app_map import AppMapUpload
+    from services.ai.app_map import LoadedMap
+
+    def screen(id, desk, trail, tree, link=None):
+        return {"id": id, "desk": desk, "title": id, "trail": [{"role": "button", "name": n} for n in trail],
+                "url": f"/{desk}", "link": link, "tree": tree, "signedIn": False}
+
+    upload = AppMapUpload.model_validate({
+        "version": 1, "build": APP_BUILD, "crawledAt": "2026-10-20T07:00:00Z",
+        "desks": [
+            {"id": "week", "label": "Week", "href": "/week", "note": "Your team's matchup week",
+             "keywords": ["market", "streamers"], "needs": "account", "keys": "P market"},
+            {"id": "account", "label": "Account", "href": "/account", "note": "Teams, connections and alerts",
+             "keywords": ["settings"], "needs": "account", "keys": None},
+        ],
+        "screens": [
+            screen("week", "week", [], "- button \"Market P\"", link="/week"),
+            screen("week/market-p", "week", ["Market P"], "- radio \"ONE DAY\"\n- text: Free agents to pick up"),
+            screen("account/connect-espn", "account", ["Connect ESPN…"], "- dialog \"Connect ESPN\""),
+        ],
+        "copy": [{"file": "src/components/week/Market.tsx", "desk": "week",
+                  "seen": ["Market", "ONE DAY", "Free agents to pick up"], "unseen": []}],
+        "findings": [],
+    })
+    return LoadedMap(build=APP_BUILD, crawled_at=datetime(2026, 10, 20, 7, tzinfo=timezone.utc), map=upload)
+
+
+@pytest.mark.unit
+class TestFindInApp:
+    @pytest.fixture
+    def loads(self, monkeypatch):
+        asked = []
+        loaded = _app_map()
+
+        async def load(build):
+            asked.append(build)
+            return loaded
+        monkeypatch.setattr(tools.app_map, "load", load)
+        return asked
+
+    def _find(self, raw, build=APP_BUILD):
+        return asyncio.run(tools.run_tool("find_in_app", raw, ctx=tools.ToolContext(user_id=42, build=build),
+                                          allowed=tools.AGENT_TOOL_NAMES))
+
+    def test_it_is_the_agent_s_alone_and_only_the_later_tools_follow_it(self):
+        # Appended after the proposals; everything since is appended after it, never between
+        assert [t["name"] for t in tools.AGENT_TOOLS[_APP + 1:]] == _AFTER_APP
+        assert "find_in_app" not in tools.ASK_TOOL_NAMES | tools.ROUTER_TOOL_NAMES
+
+    def test_it_searches_the_map_of_the_build_the_user_has_open(self, loads):
+        out = self._find({"query": "free agents market"})
+        assert not out.is_error
+        data = json.loads(out.content)
+        assert loads == [APP_BUILD]
+        assert data["matches_build"] is True
+        assert data["screens"][0]["id"] == "week/market-p" and data["screens"][0]["steps"] == "Week › Market P"
+        assert [d["id"] for d in data["desks"]] == ["week", "account"]
+
+    @pytest.mark.parametrize("build", ["0" * 40, None])
+    def test_another_build_s_map_says_so(self, loads, build):
+        data = json.loads(self._find({"query": "market"}, build=build).content)
+        assert loads == [build] and data["matches_build"] is False
+
+    def test_a_desk_narrows_it_and_an_unknown_desk_names_the_real_ones(self, loads):
+        data = json.loads(self._find({"query": "connect market", "desk": "account"}).content)
+        assert [s["id"] for s in data["screens"]] == ["account/connect-espn"]
+        out = self._find({"query": "market", "desk": "draft"})
+        assert out.is_error and "No desk 'draft'" in out.content and "week, account" in out.content
+
+    def test_without_a_map_the_model_is_told_to_say_so(self, monkeypatch):
+        async def none(build):
+            return None
+        monkeypatch.setattr(tools.app_map, "load", none)
+        out = self._find({"query": "market"})
+        assert out.is_error and "isn't available yet" in out.content
+
+
+@pytest.mark.unit
+class TestInEastern:
+    """Tool results speak Eastern: an instant reaches the model in ET, everything else as it was."""
+
+    def test_instants_move_to_eastern_with_their_offset(self):
+        from datetime import datetime, timezone
+        out = tools.in_eastern({
+            "at": "2026-11-17T19:30:00+00:00", "z": "2026-11-17T19:30:00Z", "dt": datetime(2026, 7, 1, 23, 0, tzinfo=timezone.utc),
+            "items": [{"sent_at": "2026-11-17 03:05:00.123456+00:00"}], "pair": ("2026-11-17T19:30:00+00:00", 1),
+        })
+        assert out == {
+            "at": "2026-11-17T14:30:00-05:00", "z": "2026-11-17T14:30:00-05:00", "dt": "2026-07-01T19:00:00-04:00",
+            "items": [{"sent_at": "2026-11-16T22:05:00.123456-05:00"}], "pair": ["2026-11-17T14:30:00-05:00", 1],
+        }
+
+    def test_dates_wall_times_naive_times_and_other_text_stay(self):
+        from datetime import datetime
+        value = {"date": "2026-11-17", "tip": "19:30", "naive": "2026-11-17T19:30:00", "note": "vs LAL · 7:30 PM",
+                 "headline": "Out 2026-11-17T19:30:00+00:00 per report", "n": 3, "d": date(2026, 11, 17),
+                 "nd": datetime(2026, 11, 17, 19, 30), "bad": "2026-13-45T99:99:00+00:00", "none": None}
+        assert tools.in_eastern(value) == value

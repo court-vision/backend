@@ -214,3 +214,53 @@ def test_transaction_connection_failure_is_one_attempt(writer):
     with pytest.raises(fw.FantasyWriterUnavailable):
         asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
     assert len(writer.requests) == 1
+
+
+# ---- the read fence (core/inflight.py) ----------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", [
+    httpx.Response(200, json={"ok": True, "http_status": 200}),
+    httpx.Response(409, json={"ok": False, "error_code": "ESPN_REJECTED", "http_status": 400}),
+    httpx.Response(403, json={"ok": False, "error_code": "ESPN_AUTH_REJECTED", "http_status": 401}),
+    httpx.Response(503, json={"ok": False}),
+    httpx.ReadTimeout("writer slow"),
+], ids=["applied", "rejected", "auth", "unavailable", "timeout"])
+def test_every_write_fences_provider_reads_whatever_its_answer(monkeypatch, answer):
+    """The epoch moves as the write starts, so a read begun during it cannot join
+    one from before; and again once it has answered, failures included, so the
+    verify re-read cannot join one begun while it ran. A timeout is the case
+    that matters most: ESPN may have taken the write."""
+    from core.inflight import write_epoch
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(write_epoch())
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(fw, "client_factory",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://writer.test"))
+    before = write_epoch()
+    try:
+        asyncio.run(fw.apply_lineup(PAYLOAD))
+    except fw.FantasyWriterError:
+        pass
+    assert seen == [before + 1]
+    assert write_epoch() == before + 2
+
+
+@pytest.mark.unit
+def test_a_write_that_never_got_a_writer_slot_still_closes_the_fence(monkeypatch):
+    from core.inflight import write_epoch
+
+    monkeypatch.setattr(fw, "_client", object())
+    monkeypatch.setattr(fw, "_capacity", asyncio.Semaphore(0))
+    monkeypatch.setattr(fw.settings, "provider_queue_timeout_seconds", 0.01)
+    before = write_epoch()
+    with pytest.raises(fw.FantasyWriterUnavailable):
+        asyncio.run(fw.apply_transaction(TXN_PAYLOAD))
+    assert write_epoch() == before + 2

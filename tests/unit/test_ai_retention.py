@@ -24,6 +24,7 @@ _STARTUP = ("setup_logging", "init_db", "start_db_runtime", "start_cpu_runtime",
             "start_fantasy_writer_runtime", "assert_calendar_available")
 _SHUTDOWN = ("stop_features_runtime", "stop_sqlmate_runtime", "stop_fantasy_writer_runtime", "stop_provider_runtime",
              "stop_blocking_provider_runtime", "stop_cpu_runtime", "stop_db_runtime")
+_ASYNC_STARTUP = ("warm_request_path",)
 
 
 @pytest.fixture
@@ -35,6 +36,8 @@ def lifespan(monkeypatch):
         monkeypatch.setattr(main, name, lambda *args, **kwargs: None)
     for name in _SHUTDOWN:
         monkeypatch.setattr(main, name, stopped)
+    for name in _ASYNC_STARTUP:
+        monkeypatch.setattr(main, name, lambda *args, **kwargs: stopped())
     monkeypatch.setattr(main, "start_loop_watchdog", lambda loop, stall: SimpleNamespace(stop=lambda: None))
     return main.lifespan
 

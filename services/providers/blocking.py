@@ -12,12 +12,18 @@ import sentry_sdk
 
 from core.errors import ProviderTimeout
 from core.logging import get_logger
+from core.request_timing import OTHER_HTTP
 from core.settings import settings
+from core.tracing import timed, waiting
 
 T = TypeVar("T")
 
 _executors: dict[str, ThreadPoolExecutor] = {}
 _capacity: dict[str, asyncio.Semaphore] = {}
+
+
+# Request-timing bucket per provider (core/request_timing.py); email is Resend.
+_BUCKETS = {"nba": "nba"}
 
 
 def _limit(provider: str) -> int:
@@ -59,7 +65,8 @@ async def run_blocking_provider(provider: str, operation: str, fn: Callable[...,
     executor, capacity = _ensure_provider(provider)
     queued_at = time.perf_counter()
     try:
-        await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
+        with waiting(f"{provider} slot"):
+            await asyncio.wait_for(capacity.acquire(), settings.provider_queue_timeout_seconds)
     except asyncio.TimeoutError as exc:
         get_logger("provider").warning(
             "provider_capacity_timeout",
@@ -74,7 +81,8 @@ async def run_blocking_provider(provider: str, operation: str, fn: Callable[...,
 
     def _call() -> T:
         started = time.perf_counter()
-        with sentry_sdk.start_span(op="provider.blocking", name=operation) as span:
+        with sentry_sdk.start_span(op="provider.blocking", name=operation) as span, \
+                timed(_BUCKETS.get(provider, OTHER_HTTP), operation):
             span.set_data("provider", provider)
             span.set_data("queue_ms", queue_ms)
             try:

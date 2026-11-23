@@ -13,11 +13,11 @@ the browser is mid-redirect, so it sends the user back to the frontend (the
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from core.clerk_auth import get_current_user
+from core.clerk_auth import get_current_user, is_app_map_crawl
 from core.logging import get_logger
 from core.settings import settings
 from schemas.common import ApiStatus, BaseResponse
@@ -26,7 +26,7 @@ from services.yahoo.oauth import safe_return_path
 from services import credential_service
 from services.user_sync_service import UserSyncService
 from api.deps import UserContext, get_db_user
-from core.errors import BadRequestError, ProviderAuthError
+from core.errors import AuthorizationError, BadRequestError, ProviderAuthError
 from db.base import run_db
 
 router = APIRouter(prefix="/yahoo", tags=["Yahoo Fantasy"])
@@ -99,6 +99,7 @@ async def yahoo_authorize(
         ),
     ),
     current_user: dict = Depends(get_current_user),
+    request: Request = None,
 ):
     """
     Initiate Yahoo OAuth flow.
@@ -108,8 +109,14 @@ async def yahoo_authorize(
     callback lands on `return_to` with `?yahoo_connected=true&yahoo_connection=<id>`
     or `?yahoo_error=<code>` added.
     """
+    clerk_user_id = current_user.get("clerk_user_id", "")
+    # Connecting Yahoo is a write that starts with a GET, which the app map's
+    # crawl guard lets through: refuse the crawl here and at the callback
+    if is_app_map_crawl(request):
+        log.info("app_map_write_refused", method="GET", path="/v1/internal/yahoo/authorize")
+        raise AuthorizationError("APP_MAP_READ_ONLY", "The app map's crawl only reads")
     # Yahoo's OAuth state is keyed by the Clerk user id string, not usr.user_id
-    auth_url, _state = YahooService.get_auth_url(current_user.get("clerk_user_id", ""), return_to)
+    auth_url, _state = YahooService.get_auth_url(clerk_user_id, return_to)
     return YahooAuthUrlResponse(
         status=ApiStatus.SUCCESS,
         message="Authorization URL generated",
@@ -122,7 +129,8 @@ async def yahoo_callback(
     code: Optional[str] = Query(None, description="Authorization code from Yahoo"),
     state: Optional[str] = Query(None, description="State token for CSRF protection"),
     error: Optional[str] = Query(None, description="Error code if authorization failed"),
-    error_description: Optional[str] = Query(None, description="Error description")
+    error_description: Optional[str] = Query(None, description="Error description"),
+    request: Request = None,
 ):
     """
     Handle Yahoo OAuth callback.
@@ -144,6 +152,11 @@ async def yahoo_callback(
     if not state_data:
         log.warning("yahoo_oauth_invalid_state")
         return _frontend_redirect(None, yahoo_error="invalid_state")
+    if is_app_map_crawl(request):
+        # The crawl never gets this far (authorize refuses it), but a callback
+        # it lands on stores nothing either
+        log.info("app_map_write_refused", method="GET", path="/v1/internal/yahoo/callback")
+        return _frontend_redirect(return_to, yahoo_error="read_only")
     if not code:
         log.warning("yahoo_oauth_missing_code")
         return _frontend_redirect(return_to, yahoo_error="oauth_failed")

@@ -5,10 +5,15 @@ the private fantasy-writer, verify by re-reading, and audit in usr.roster_moves.
 Three entry points share one write chain:
 
     read_state    GET  /teams/{id}/lineup         the editor's board
-    plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes)
+    plan_today    GET  /teams/{id}/lineup/plan    fill-only suggestion (never writes), with Dime's holds
     apply_manual  POST /teams/{id}/lineup/moves   the user's own moves, for today or a later day
+                                                  (an AI desk lineup chip sends through it too,
+                                                  with `proposal_id`)
     evaluate      POST /jobs/lineup/evaluate      the alerts pipeline: plan, and
                                                   apply it for auto-lineup users
+
+Every fill reads the team's holds (services/steering.py): a player Dime pinned stays
+where he is, and one it expects to miss counts as out. The user's own moves never do.
 
 Business failures raise the `Roster*` errors below (rendered by the global
 handlers with real statuses — see core/responses.ERROR_CODE_STATUS); `evaluate`
@@ -18,10 +23,11 @@ row per team, not an exception.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional
 
 from core.errors import (
     AppError,
@@ -51,16 +57,17 @@ from schemas.lineup_editor import (
     LineupUnfilled,
     MoveErrorResp,
 )
-from services import fantasy_writer_client
+from services import fantasy_writer_client, steering
 from services.fantasy_writer_client import (
     FantasyWriterAuthRejected,
     FantasyWriterRejected,
     FantasyWriterUnavailable,
 )
-from services.lineup_planner import Move, Plan, PlannerPlayer, plan_fill, validate_moves
+from services.lineup_planner import Move, Plan, PlannerPlayer, validate_moves
 from services.lineup_read_service import LineupReadService  # noqa: F401  (tests stand in for its read here)
 from services.providers import get_provider_adapter, get_roster_writer, provider_name, unavailable_message
 from services.providers.writers import espn_lineup_payload
+from services.write_readback import read_until_shown
 from utils.constants import PROVIDER_AUTH_MESSAGES
 from utils.espn_helpers import POSITION_MAP
 
@@ -111,18 +118,32 @@ def _slot_name(slot_id: int) -> str:
     return name if isinstance(name, str) and name else str(slot_id)
 
 
-def planner_players(state: LineupState) -> list[PlannerPlayer]:
+# Our verdict (nba.player_availability) as the planner's status word; `unknown` keeps ESPN's
+VERDICT_STATUS: dict[str, str] = {
+    "out": "OUT", "doubtful": "DOUBTFUL", "questionable": "QUESTIONABLE", "probable": "PROBABLE",
+    "available": "ACTIVE",
+}
+
+
+def planner_players(state: LineupState,
+                    verdicts: Optional[dict[int, tuple[str, Optional[str]]]] = None) -> list[PlannerPlayer]:
+    """The board as planner players. `verdicts` (NBA id -> (verdict, previous verdict)) puts our
+    availability verdict in place of ESPN's status for the players it names."""
     out: list[PlannerPlayer] = []
     for p in state.players:
         note = None
         if p.has_game_today:
             when = _clock(p.game_time_et)
             note = f"{p.opponent or 'game'}{' · ' + when if when else ''}"
+        status, previous = p.injury_status, None
+        verdict = (verdicts or {}).get(p.nba_player_id) if p.nba_player_id is not None else None
+        if verdict is not None and verdict[0] in VERDICT_STATUS:
+            status, previous = VERDICT_STATUS[verdict[0]], VERDICT_STATUS.get(verdict[1] or "")
         out.append(PlannerPlayer(
             player_id=p.player_id, name=p.name, slot_id=p.lineup_slot_id,
             eligible_slot_ids=frozenset(p.eligible_slot_ids), has_game=p.has_game_today,
-            injury_status=p.injury_status, locked=p.locked, value=p.avg_points, game_note=note,
-            injured=p.injured,
+            injury_status=status, locked=p.locked, value=p.avg_points, game_note=note,
+            injured=p.injured, previous_status=previous,
         ))
     return out
 
@@ -173,13 +194,15 @@ writer_payload = espn_lineup_payload
 
 
 def _audit_insert(user_id: int, team_id: int, nba_date: date, period: Optional[int], source: str,
-                  moves: list[dict], key: Optional[str], kind: str = "lineup") -> int:
+                  moves: list[dict], key: Optional[str], kind: str = "lineup",
+                  trigger_player_id: Optional[int] = None) -> int:
     """Seed the audit row as an in-flight failure; the write chain settles it. `kind` is
-    'lineup' (slot moves) or 'transaction' (add/drop, see roster_transaction_service)."""
+    'lineup' (slot moves) or 'transaction' (add/drop, see roster_transaction_service);
+    `trigger_player_id` is the NBA id whose verdict an 'availability' row answers."""
     from db.models.roster_moves import RosterMove
     row = RosterMove.create(user=user_id, team=team_id, nba_date=nba_date, scoring_period_id=period,
                             source=source, kind=kind, status="failed", moves=moves, error="in_flight",
-                            idempotency_key=key)
+                            idempotency_key=key, trigger_player_id=trigger_player_id)
     return int(row.id)
 
 
@@ -234,7 +257,7 @@ class LineupEditorService:
             return LineupPlanResp(status=ApiStatus.SUCCESS,
                                   message=unavailable_message("lineup_editing", league_info.provider), data=None)
         state = await adapter.read_lineup(team.team_id, league_info, fallback_slot_counts=_roster_slots(team))
-        plan = plan_fill(planner_players(state), slot_counts_of(state))
+        plan = await steering.team_fill(team.team_id, state)   # the fill, with Dime's pins and overrides
         return LineupPlanResp(status=ApiStatus.SUCCESS, message=plan.summary, data=LineupPlanData(
             moves=move_results(list(plan.moves), state), unfilled=unfilled_results(plan), summary=plan.summary,
             scoring_period_id=state.scoring_period_id, nba_date=state.nba_date, roster_version=state.roster_version,
@@ -243,7 +266,10 @@ class LineupEditorService:
     # ---- manual write ----
 
     @staticmethod
-    async def apply_manual(team, league_info: LeagueInfo, req: ApplyLineupMovesReq) -> ApplyLineupMovesResp:
+    async def apply_manual(team, league_info: LeagueInfo, req: ApplyLineupMovesReq, *,
+                           source: str = "manual") -> ApplyLineupMovesResp:
+        """The Week desk's lineup write. `source` is the audit row's: 'manual', or 'autopilot' when
+        Dime sends its own lineup chip (services/ai/acting.py), through every check made here."""
         if not settings.roster_writes_enabled:
             raise RosterWriteDisabled()
         adapter = get_provider_adapter(league_info.provider)
@@ -266,14 +292,27 @@ class LineupEditorService:
             raise RosterMoveInvalid(data={"errors": [
                 MoveErrorResp(player_id=e.player_id, code=e.code, message=e.message).model_dump() for e in errors]})
 
+        if req.proposal_id is not None:
+            # An AI desk chip: every move it still needs on this board (each player to the slot it names,
+            # from wherever the board has him) and nothing else, still proposed, before ESPN is asked
+            from services.ai import proposals  # the proposals module checks moves with this one
+            await proposals.for_send(req.proposal_id, team.user_id, team.team_id, kind=proposals.LINEUP,
+                                     scoring_period_id=req.expected_scoring_period_id,
+                                     moves=[(m.player_id, m.to_slot_id) for m in moves], board=state)
+
         fresh, verified, audit_id = await LineupEditorService._write(
             user_id=team.user_id, team_id=team.team_id, league_info=league_info, state=state,
-            moves=moves, source="manual", fallback_slot_counts=slots,
+            moves=moves, source=source, fallback_slot_counts=slots,
         )
         if fresh is state:
             # The verify read failed, so the board handed back is the one read before the
             # write, without values; it goes out as a full read would have returned it.
             fresh = await adapter.add_lineup_values(team.team_id, league_info, state)
+        if req.proposal_id is not None:
+            from services.ai import proposals
+            await proposals.mark_sent(req.proposal_id, audit_id=audit_id)
+            # Dime benched them on purpose: auto-lineup's fill leaves them benched that day
+            await steering.pin_benched(req.proposal_id, by="dime" if source == "autopilot" else "user")
         applied = _describe(moves, state, fresh)
         return ApplyLineupMovesResp(
             status=ApiStatus.SUCCESS,
@@ -360,7 +399,8 @@ class LineupEditorService:
             return done("skipped", reason="provider_not_supported")
 
         state = await adapter.read_lineup(req.team_id, league_info, fallback_slot_counts=roster_slots)
-        plan = plan_fill(planner_players(state), slot_counts_of(state))
+        # Dime's holds steer the fill: a pinned player stays put, one it expects to miss counts as out
+        plan = await steering.team_fill(req.team_id, state)
         if plan.is_noop:
             if req.apply and state.can_write and state.nba_date:
                 # Recorded so the daily dedup sees today as handled
@@ -398,13 +438,15 @@ class LineupEditorService:
 
     @staticmethod
     async def _write(*, user_id: int, team_id: int, league_info: LeagueInfo, state: LineupState,
-                     moves: list[Move], source: str, fallback_slot_counts) -> tuple[LineupState, bool, int]:
+                     moves: list[Move], source: str, fallback_slot_counts,
+                     trigger_player_id: Optional[int] = None) -> tuple[LineupState, bool, int]:
         if not state.nba_date or not state.scoring_period_id:
             raise RosterWriteBlocked(data={"reason": "no_scoring_period"})
         key = idempotency_key(team_id, state, moves)
+        trigger = {"trigger_player_id": trigger_player_id} if trigger_player_id is not None else {}
         audit_id = await run_db("lineup.audit_insert", _audit_insert, user_id, team_id,
                                 date.fromisoformat(state.nba_date), state.scoring_period_id, source,
-                                _moves_json(moves), key)
+                                _moves_json(moves), key, **trigger)
         writer = get_roster_writer(league_info.provider)
         try:
             result = await writer.apply_lineup(league_info, state, moves, key)
@@ -422,11 +464,25 @@ class LineupEditorService:
                          provider_status=exc.espn_status, error=exc.message)
             raise RosterWriteUnavailable() from exc
 
-        try:
-            fresh = await get_provider_adapter(league_info.provider).read_lineup(
+        def read() -> Awaitable[LineupState]:
+            return get_provider_adapter(league_info.provider).read_lineup(
                 team_id, league_info, fallback_slot_counts=fallback_slot_counts,
                 scoring_period_id=state.scoring_period_id if state.future else None,
             )
+
+        def shows(board: LineupState) -> bool:
+            after = {p.player_id: p.lineup_slot_id for p in board.players}
+            return all(after.get(m.player_id) == m.to_slot_id for m in moves)
+
+        try:
+            # ESPN's reads can trail the write: read again a little later while it doesn't show yet.
+            fresh, verified, reads = await read_until_shown(read, shows)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the write to show (Dime's turn timing out, a shutdown).
+            # ESPN took it: settle the row the same way before the cancellation goes on.
+            await run_db("lineup.audit_update", _audit_update, audit_id, "applied_unverified",
+                         provider_status=result.espn_status, error="verify_read_cancelled")
+            raise
         except Exception as exc:
             # ESPN took the write and only the read-back failed. Leaving the row at its in_flight
             # `failed` seed would drop it out of the counted statuses, and the next auto run would
@@ -439,14 +495,13 @@ class LineupEditorService:
                         espn_status=result.espn_status, error=str(exc))
             return state, False, audit_id
 
-        after = {p.player_id: p.lineup_slot_id for p in fresh.players}
-        verified = all(after.get(m.player_id) == m.to_slot_id for m in moves)
         await run_db("lineup.audit_update", _audit_update, audit_id,
                      "applied" if verified else "applied_unverified", provider_status=result.espn_status)
         # Both days, so a write shows whether it went out as today's (ROSTER: the two are equal)
         # or a later day's (FUTURE_ROSTER); see _board_to_write on ESPN's two todays.
         log.info("lineup_write_applied", team_id=team_id, source=source, move_count=len(moves), verified=verified,
-                 scoring_period_id=state.scoring_period_id, current_scoring_period_id=state.current_scoring_period_id,
+                 reads=reads, scoring_period_id=state.scoring_period_id,
+                 current_scoring_period_id=state.current_scoring_period_id,
                  espn_status=result.espn_status, idempotent_replay=result.idempotent_replay)
         return fresh, verified, audit_id
 

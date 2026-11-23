@@ -1,12 +1,18 @@
 """
 A saved team's lineup: read today's (or a later day's), get the fill-only suggestion, list
-today's recommended actions, or send the user's own slot moves to ESPN. Clerk-authenticated; ownership via
-`get_owned_team`; credentials hydrated only here, at the provider boundary.
+today's recommended actions, read our availability verdicts on the matchup's players, or send
+the user's own slot moves to ESPN. Clerk-authenticated; ownership via `get_owned_team`;
+credentials hydrated only here, at the provider boundary.
 """
 
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+
+from core.errors import AppError
+from schemas.availability import TeamAvailabilityResp
+from services.availability_service import MAX_DAYS, MAX_PLAYERS, AvailabilityService
 
 from api.deps import OwnedTeamContext, get_owned_team, load_owned_league_info
 from core.responses import respond
@@ -59,3 +65,24 @@ async def get_daily_actions(team: OwnedTeamContext = Depends(get_owned_team)):
     """Today's recommended roster actions (start / IR / pickup), each ready to stage. Never writes."""
     league_info = await load_owned_league_info(team)
     return respond(await DailyActionsService.read(team, league_info))
+
+
+@router.get("/{team_id}/availability", response_model=TeamAvailabilityResp)
+async def get_team_availability(
+    start: date = Query(..., description="First game date (ISO)"),
+    end: date = Query(..., description=f"Last game date (ISO); start to end covers at most {MAX_DAYS} dates, both included"),
+    nba_ids: list[int] = Query(
+        default=[], description=f"NBA player ids, the matchup's two rosters (at most {MAX_PLAYERS})",
+    ),
+    team: OwnedTeamContext = Depends(get_owned_team),
+):
+    """Our verdict on each player for each game date in the range (out, doubtful, questionable,
+    probable, available), the source that decided it and when it changed. A player with no
+    verdict that day has no row: ESPN's own status stands for him. Never reads ESPN."""
+    if end < start or (end - start).days >= MAX_DAYS:
+        raise AppError("AVAILABILITY_RANGE_INVALID",
+                       f"end must be on or after start, and start to end may cover at most {MAX_DAYS} dates, both included",
+                       status_code=422)
+    if len(nba_ids) > MAX_PLAYERS:
+        raise AppError("AVAILABILITY_TOO_MANY_PLAYERS", f"At most {MAX_PLAYERS} players", status_code=422)
+    return respond(await AvailabilityService.for_team(nba_ids, start, end))

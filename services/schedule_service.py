@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterator, Literal, Optional
 
@@ -90,28 +90,48 @@ def _parse_date(date_str: str) -> date:
 # ---- today -----------------------------------------------------------------
 
 
+# ESPN's fantasy day turns at 3 AM ET (midnight Pacific): its
+# `latestScoringPeriod` advances then, and the matchup scores pipeline's 02:00
+# Central gate is the same moment.
+FANTASY_DAY_ROLLOVER_ET = time(3)
+
+
 def get_nba_today() -> date:
-    """The ET fantasy day: before 2 AM ET counts as yesterday."""
+    """The ET fantasy day: before 3 AM ET counts as yesterday."""
     return _get_nba_today()
 
 
 def _get_nba_today() -> date:
     """Return the current fantasy scheduling date in ET.
 
-    Before 2 AM ET counts as yesterday — aligns with when ESPN's batch update
-    runs (~2 AM ET), after which the new fantasy day becomes active.
+    Before 3 AM ET counts as yesterday — ESPN rolls its fantasy day at 3 AM
+    ET (midnight Pacific), after which the new day is active.
 
     DO NOT collapse this onto core.nba_calendar.nba_date_et. That is the NBA
-    *game*-date rule (6 AM ET); this is the ESPN *fantasy*-day rule (2 AM ET),
-    and they deliberately disagree for four hours a night. Conflating them is
+    *game*-date rule (6 AM ET); this is the ESPN *fantasy*-day rule (3 AM ET),
+    and they deliberately disagree for three hours a night. Conflating them is
     not hypothetical: it dropped a full day off live matchup scores whenever
     ESPN's batch ran late (see matchup_service's cutover notes).
     """
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)
-    if now_et.hour < 2:
+    if now_et.time() < FANTASY_DAY_ROLLOVER_ET:
         return (now_et - timedelta(days=1)).date()
     return now_et.date()
+
+
+def seconds_left_in_fantasy_day(day: date, now: Optional[datetime] = None) -> int:
+    """Seconds until fantasy day `day` ends at the next 3 AM ET rollover; at least 1.
+
+    For a response built from `get_nba_today()` (the current week, the season
+    day) that a client must not keep past that moment. Taking the day the
+    response was built from, rather than reading the clock twice, means a body
+    built a moment before the rollover is never handed out with a full day left.
+    """
+    eastern = pytz.timezone("US/Eastern")
+    now_et = datetime.now(eastern) if now is None else now.astimezone(eastern)
+    ends = eastern.localize(datetime.combine(day + timedelta(days=1), FANTASY_DAY_ROLLOVER_ET))
+    return max(1, int((ends - now_et).total_seconds()))
 
 
 # ---- weeks -----------------------------------------------------------------
@@ -145,7 +165,7 @@ def get_current_matchup(current_date: Optional[date] = None) -> Optional[dict]:
 
     Args:
         current_date: The date to check. Defaults to the ET fantasy day
-                      (before 2 AM ET counts as yesterday).
+                      (before 3 AM ET counts as yesterday).
 
     Returns:
         Dict with 'matchup_number', 'start_date', 'end_date', 'game_span',

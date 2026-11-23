@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS ops.request_timings;
+DROP SCHEMA IF EXISTS ops;
