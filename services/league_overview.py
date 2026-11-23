@@ -46,7 +46,8 @@ log = get_logger("league_overview")
 LEAGUE_VIEWS = ("mTeam", "mSettings", "mSchedule", "mStandings")
 ROSTER_VIEW = "mRoster"
 POSITIONS = ("PG", "SG", "SF", "PF", "C")
-SEEDING = {"H2H_RECORD": "record", "TOTAL_POINTS_SCORED": "points_for"}
+# ESPN's `playoffSeedingRule` breaks ties between equal records; the records do the seeding
+TIEBREAKERS = {"H2H_RECORD": "head_to_head", "TOTAL_POINTS_SCORED": "points_for"}
 
 PeriodDates = Callable[[int], Optional[tuple[date, date]]]
 
@@ -320,7 +321,7 @@ def parse_league(payload: Mapping[str, Any], mine: Optional[int], *, categories:
         season["current_start"], season["current_end"] = start, end
     rule = sched.get("playoffSeedingRule")
     if rule:
-        picture["seeded_by"] = SEEDING.get(str(rule), str(rule).lower())
+        picture["seed_tiebreaker"] = TIEBREAKERS.get(str(rule), str(rule).lower())
 
     return {
         "league_name": settings.get("name"),
