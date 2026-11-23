@@ -1,0 +1,328 @@
+"""League projections (services/league_projection.py and its service): every roster's days
+seated in the league's slots, the benchmark rows, the calendar's gaps, the bracket and the
+simulated odds, and the service's reads around them."""
+
+import asyncio
+from datetime import date, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from core.errors import BadRequestError
+from schemas.common import FantasyProvider
+from schemas.league_projection import LeagueProjectionData
+from services import league_projection as lp
+from services import league_projection_service as lps
+from services.live_projection import Run
+
+pytestmark = pytest.mark.unit
+
+MON = date(2026, 11, 23)
+ALL = frozenset({"ATL", "BOS", "CHI", "DEN"})
+
+
+def week(number, start, days):
+    return lp.DatedWeek(number=number, start=start, days=tuple(frozenset(d) for d in days))
+
+
+def full_week(number, start, teams=ALL):
+    return week(number, start, [teams] * 7)
+
+
+def player(name, team, value, slots=("UT",), chance=1.0, timeline=(), projected=True):
+    return lp.ProjPlayer(name=name, team=team, value=value, slots=frozenset(slots), chance=chance,
+                         timeline=tuple(timeline), projected=projected)
+
+
+# ------------------------------- the calendar ------------------------------- #
+
+
+def test_a_week_missing_games_is_incomplete_but_a_quiet_night_or_the_all_star_break_is_not():
+    thanksgiving = week(5, MON, [ALL, ALL, ALL, set(), ALL, ALL, ALL])
+    cup = week(7, MON + timedelta(7), [ALL, ALL, ALL, ALL, set(), set(), set()])
+    all_star = week(18, MON + timedelta(14), [ALL] * 4 + [set()] * 6 + [ALL] * 4)    # 14 days
+    assert lp.incomplete_weeks([thanksgiving, cup, all_star]) == {7}
+
+
+def test_a_matchup_without_a_period_map_is_its_own_week():
+    assert lp.matchup_weeks({20: (20, 21)}, 20) == (20, 21)
+    assert lp.matchup_weeks({}, 9) == (9,)
+
+
+# ------------------------------- a roster's day ------------------------------- #
+
+
+def test_a_day_seats_the_best_players_its_slots_can_hold():
+    big1 = player("Big One", "ATL", 40, slots=("C", "UT"))
+    big2 = player("Big Two", "BOS", 30, slots=("C", "UT"))
+    big3 = player("Big Three", "CHI", 20, slots=("C", "UT"))
+    guard = player("Guard", "DEN", 25, slots=("PG", "UT"))
+    # one C and one UT: the two best centres start, the guard's PG seat isn't in the league
+    assert lp.day_value([big1, big2, big3, guard], ALL, MON, ["C", "UT"]) == 70
+    # with a PG seat the guard starts too
+    assert lp.day_value([big1, big2, big3, guard], ALL, MON, ["C", "UT", "PG"]) == 95
+
+
+def test_a_player_counts_at_his_chance_to_play_and_only_on_his_team_s_nights():
+    healthy = player("Healthy", "ATL", 30)
+    back_wednesday = player("Back Wed", "BOS", 40, timeline=[Run(MON, MON + timedelta(1), 2, 0.0),
+                                                             Run(MON + timedelta(2), MON + timedelta(30), 10, 0.5)])
+    no_team = player("Free", None, 50)
+    assert lp.day_value([healthy, back_wednesday, no_team], ALL, MON, ["UT", "UT"]) == 30
+    assert lp.day_value([healthy, back_wednesday, no_team], ALL, MON + timedelta(2), ["UT", "UT"]) == 50
+    assert lp.day_value([healthy], frozenset({"BOS"}), MON, ["UT"]) == 0
+
+
+def test_a_roster_s_weeks_count_from_the_first_day():
+    roster = lp.Roster(1, "Atlas", (player("A", "ATL", 10),))
+    weeks = [full_week(6, MON), full_week(7, MON + timedelta(7))]
+    assert lp.week_values(roster, weeks, MON + timedelta(3), ["UT"]) == {6: 40, 7: 70}
+
+
+# ------------------------------- benchmarks ------------------------------- #
+
+
+def test_a_benchmark_reads_one_team_against_the_league():
+    values = {1: 100.0, 2: 120.0, 3: 90.0, 4: 110.0, 5: 80.0}
+    b = lp.benchmark(values, 1, 3)
+    assert (b["you"], b["rank"], b["median"], b["line"], b["best"], b["worst"], b["teams"]) == (
+        100.0, 3, 100.0, 100.0, 120.0, 80.0, 5)
+    assert lp.benchmark({}, 1, 3)["you"] is None
+    assert lp.benchmark(values, None, 0)["line"] is None and lp.benchmark(values, None, 0)["rank"] is None
+
+
+def test_tied_teams_share_the_better_rank():
+    assert lp.ranks({1: 10.0, 2: 12.0, 3: 12.0}) == {1: 3, 2: 1, 3: 1}
+
+
+def test_an_even_matchup_is_a_coin_flip_and_a_lead_already_scored_counts():
+    assert lp.win_chance(0, 1000, 0, 1000, 1000) == pytest.approx(0.5)
+    banked = lp.win_chance(300, 800, 0, 1000, 1000)      # 100 ahead, 300 of it already scored
+    to_play = lp.win_chance(0, 1100, 0, 1000, 1000)      # 100 ahead, all of it still to play
+    assert 0.5 < to_play < banked
+    assert lp.win_chance(0, 0, 0, 0, 1000) == 0.5
+
+
+# ------------------------------- the bracket and the odds ------------------------------- #
+
+
+def test_the_bracket_keeps_the_top_two_seeds_apart_until_the_final():
+    assert lp.bracket_order(8) == [1, 8, 4, 5, 2, 7, 3, 6]
+    assert lp.bracket_order(4) == [1, 4, 2, 3]
+    assert [lp.playoff_rounds(n) for n in (0, 1, 2, 4, 6, 8)] == [0, 0, 1, 2, 3, 3]
+
+
+def standing(tid, w, l, pf, rank=None):
+    return lp.Standing(tid, f"Team {tid}", rank or tid, w, l, 0, pf, 0.0)
+
+
+def four_team_sim(means, runs=4000, seeded_by="record", playoff_teams=2, standings=None):
+    ids = [1, 2, 3, 4]
+    st = standings or {t: standing(t, 2, 2, 400.0) for t in ids}
+    games = [(5, 1, 2), (5, 3, 4), (6, 1, 3), (6, 2, 4)]
+    mean = {(t, m): means[t] for t in ids for m in (5, 6, 7)}
+    return lp.simulate(ids, st, games, {}, mean, [7], playoff_teams, seeded_by, 100.0, runs=runs, seed=3)
+
+
+def test_the_simulation_s_odds_add_up_and_favour_the_stronger_roster():
+    odds = four_team_sim({1: 140.0, 2: 100.0, 3: 100.0, 4: 60.0})
+    assert sum(odds.playoffs.values()) == pytest.approx(2.0)
+    assert sum(odds.title.values()) == pytest.approx(1.0)
+    for t in (1, 2, 3, 4):
+        assert sum(odds.seeds[t]) == pytest.approx(1.0)
+    assert odds.playoffs[1] > 0.95 and odds.playoffs[4] < 0.05
+    assert odds.title[1] > odds.title[2] > odds.title[4]
+    assert odds.wins[1] > odds.wins[4]
+
+
+def test_the_same_seed_plays_the_same_seasons():
+    a = four_team_sim({1: 110.0, 2: 100.0, 3: 100.0, 4: 90.0}, runs=500)
+    b = four_team_sim({1: 110.0, 2: 100.0, 3: 100.0, 4: 90.0}, runs=500)
+    assert a.playoffs == b.playoffs and a.title == b.title
+
+
+def test_a_record_already_out_of_reach_decides_the_seed_whatever_the_roster():
+    st = {1: standing(1, 9, 0, 900.0), 2: standing(2, 0, 9, 900.0), 3: standing(3, 5, 4, 800.0),
+          4: standing(4, 4, 5, 800.0)}
+    odds = four_team_sim({1: 50.0, 2: 200.0, 3: 100.0, 4: 100.0}, standings=st)
+    assert odds.playoffs[1] == 1.0 and odds.seeds[1][0] == 1.0
+    assert odds.playoffs[2] == 0.0
+
+
+def test_seeding_by_points_for_ignores_the_record():
+    st = {1: standing(1, 9, 0, 100.0), 2: standing(2, 0, 9, 5000.0), 3: standing(3, 5, 4, 800.0),
+          4: standing(4, 4, 5, 700.0)}
+    odds = four_team_sim({1: 100.0, 2: 100.0, 3: 100.0, 4: 100.0}, standings=st, seeded_by="points_for")
+    assert odds.seeds[2][0] == 1.0 and odds.playoffs[1] == 0.0
+
+
+def test_a_six_team_field_gives_the_top_two_seeds_a_bye():
+    ids = [1, 2, 3, 4, 5, 6]
+    st = {t: standing(t, 20 - t, t, 1000.0) for t in ids}          # seeds 1..6 locked in
+    mean = {(t, m): 100.0 for t in ids for m in (20, 21, 22)}
+    odds = lp.simulate(ids, st, [], {}, mean, [20, 21, 22], 6, "record", 100.0, runs=6000, seed=1)
+    assert all(odds.playoffs[t] == 1.0 for t in ids)
+    # a bye is one game fewer to win: 1/4 against 1/8 for even rosters
+    assert odds.title[1] == pytest.approx(0.25, abs=0.03)
+    assert odds.title[3] == pytest.approx(0.125, abs=0.03)
+
+
+# ------------------------------- the whole projection ------------------------------- #
+
+
+def small_league(**over):
+    """Four teams, three regular-season matchups, two make it, one one-week final.
+    Matchup 1 is final, 2 is under way (Monday of week 2), 3 and the final are to come;
+    week 3 is missing games."""
+    rosters = (
+        lp.Roster(1, "Atlas", (player("A1", "ATL", 20), player("A2", "BOS", 10))),
+        lp.Roster(2, "Bricks", (player("B1", "CHI", 25), player("B2", "DEN", 10))),
+        lp.Roster(3, "Cookers", (player("C1", "ATL", 15), player("C2", "BOS", 5, projected=False))),
+        lp.Roster(4, "Dunkers", (player("D1", "CHI", 10),)),
+    )
+    standings = (standing(1, 1, 0, 300.0, 1), standing(3, 1, 0, 250.0, 2), standing(2, 0, 1, 280.0, 3),
+                 standing(4, 0, 1, 100.0, 4))
+    schedule = (
+        lp.Pairing(1, 1, 2, 300.0, 280.0, "home"), lp.Pairing(1, 3, 4, 250.0, 100.0, "home"),
+        lp.Pairing(2, 1, 3, 40.0, 20.0), lp.Pairing(2, 2, 4, 30.0, 10.0),
+        lp.Pairing(3, 4, 1), lp.Pairing(3, 2, 3),
+    )
+    data = dict(rosters=rosters, standings=standings, schedule=schedule, periods={4: (4,)},
+                current_matchup=2, regular_season_matchups=3, playoff_teams=2,
+                roster_slots={"UT": 2, "BE": 1}, mine=1)
+    data.update(over)
+    return lp.League(**data)
+
+
+WEEK1 = MON - timedelta(7)
+WEEKS = [full_week(1, WEEK1), full_week(2, MON),
+         week(3, MON + timedelta(7), [ALL, ALL, set(), set(), set(), ALL, ALL]),
+         full_week(4, MON + timedelta(14))]
+
+
+def test_the_projection_reads_finals_as_scored_and_the_rest_as_projected():
+    out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=2000, seed=5)
+    rows = {m["matchup"]: m for m in out["matchups"]}
+    assert [m["status"] for m in out["matchups"]] == ["final", "current", "upcoming", "upcoming"]
+    # final: the scores as played, my result and opponent
+    assert rows[1]["you"] == 300.0 and rows[1]["best"] == 300.0 and rows[1]["result"] == "W"
+    assert rows[1]["opponent"] == "Bricks" and rows[1]["opponent_score"] == 280.0
+    # current: 40 so far plus six days of 30
+    assert rows[2]["you"] == 40.0 + 6 * 30 and rows[2]["opponent"] == "Cookers"
+    assert rows[2]["win_chance"] > 0.95                          # 220 against 20 + 6 x 20
+    # week 3 is flagged, the final is in the playoffs
+    assert rows[3]["schedule_incomplete"] and not rows[4]["schedule_incomplete"]
+    assert rows[4]["playoffs"] and out["playoff_matchups"] == [4] and out["playoff_weeks"] == [4]
+    assert out["incomplete_weeks"] == [3]
+
+
+def test_the_per_week_averages_leave_out_the_calendar_s_gaps_and_the_week_under_way():
+    out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=200, seed=5)
+    atlas = next(t for t in out["teams"] if t["league_team_id"] == 1)
+    # week 3 is incomplete and week 2 began before today: no whole regular-season week is left
+    assert atlas["regular_season_week"] is None
+    assert atlas["playoff_week"] == 7 * 30 and atlas["playoff_rank"] == 2
+    assert out["benchmarks"]["playoffs"]["you"] == 210.0
+    assert out["benchmarks"]["playoffs"]["best"] == 7 * 35
+
+
+def test_the_projection_names_the_unprojected_and_sorts_by_the_standings():
+    out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=200, seed=5)
+    assert [t["league_team_id"] for t in out["teams"]] == [1, 3, 2, 4]
+    cookers = next(t for t in out["teams"] if t["league_team_id"] == 3)
+    assert cookers["players_unprojected"] == ["C2"] and cookers["players_projected"] == 1
+    assert sum(t["playoff_odds"] for t in out["teams"]) == pytest.approx(2.0)
+    assert sum(t["title_odds"] for t in out["teams"]) == pytest.approx(1.0)
+
+
+def test_no_odds_once_the_playoffs_have_started():
+    out = lp.project(small_league(current_matchup=4), WEEKS, MON + timedelta(15), runs=200)
+    assert out["in_playoffs"] and out["simulations"] == 0
+    assert all(t["playoff_odds"] is None for t in out["teams"])
+
+
+def test_the_result_fits_the_response_schema():
+    out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=200, seed=5)
+    LeagueProjectionData(league_name="L", format="points", today="2026-11-24", teams_count=4, playoff_teams=2,
+                         seeded_by="record", lineup_slots={"UT": 2}, notes=[], **out)
+
+
+# ------------------------------- the service ------------------------------- #
+
+
+def test_the_league_s_slots_and_periods_are_read_off_its_settings():
+    payload = {"settings": {"rosterSettings": {"lineupSlotCounts": {"0": 1, "4": 1, "5": 1, "11": 3, "12": 3, "13": 1,
+                                                                    "14": 0}},
+                            "scheduleSettings": {"matchupPeriods": {"1": [1], "20": [20, 21], "x": [3], "5": []}}}}
+    assert lps.roster_slots(payload) == {"PG": 1, "C": 1, "G": 1, "UT": 3, "BE": 3, "IR": 1}
+    assert lps.matchup_periods(payload) == {1: (1,), 20: (20, 21)}
+
+
+def _league_info(provider=FantasyProvider.ESPN):
+    return SimpleNamespace(provider=provider, league_id=7, year=2027)
+
+
+def test_a_yahoo_team_is_told_projections_are_espn_only():
+    with pytest.raises(BadRequestError) as err:
+        asyncio.run(lps.league_projection(_league_info(FantasyProvider.YAHOO)))
+    assert err.value.error_code == "LEAGUE_PROJECTION_ESPN_ONLY" and err.value.status_code == 400
+
+
+def test_a_category_league_is_told_projections_are_points_only(monkeypatch):
+    from services.espn_service import EspnService
+
+    async def fetch(league_info, views):
+        return {"settings": {"scoringSettings": {"scoringType": "H2H_CATEGORY"}}, "teams": []}
+
+    monkeypatch.setattr(EspnService, "fetch_league", staticmethod(fetch))
+    with pytest.raises(BadRequestError) as err:
+        asyncio.run(lps.league_projection(_league_info(), today=MON))
+    assert err.value.error_code == "LEAGUE_PROJECTION_POINTS_ONLY"
+
+
+def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(monkeypatch):
+    from services import live_projection
+    from services.espn_service import EspnService
+    from services.lineup_read_service import ParsedEntry
+    from services.player_value_service import PlayerValueService, ValueResult
+    from services.providers import identity
+    from services.scoring.models import StatLine
+
+    weights = SimpleNamespace(points=SimpleNamespace(score=lambda line: line.pts * 1.0))
+    monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda info: weights))
+    monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {101: 1, 102: 2})
+    timeline = (Run(MON, MON + timedelta(60), 30, 0.9),)
+    snapshot = live_projection.LiveSnapshot(as_of=MON, version="v", players={
+        1: live_projection.LivePlayer(player_id=1, name="Live", espn_id=101, name_normalized="live", team="DEN",
+                                      line=StatLine(pts=30.0), games=27.0, timeline=timeline)})
+    monkeypatch.setattr(live_projection, "load", lambda season, day: snapshot)
+    asked = []
+
+    def stored(scoring, ids):
+        asked.extend(ids)
+        return {102: ValueResult(value=22.0, source="rolling"), 103: ValueResult(value=18.0, source="rolling")}
+
+    monkeypatch.setattr(EspnService, "_values_for", staticmethod(stored))
+    entries = (
+        ParsedEntry(101, "Live", "DEN", 0, (0, 5, 11, 12), False, None, False),
+        ParsedEntry(102, "Stored", "BOS", 0, (4, 11, 12), False, None, False),
+        ParsedEntry(103, "Hurt", "FA", 13, (2, 6, 11), True, "OUT", False),
+    )
+    rosters, snap = lps.value_players([(1, "Atlas", entries)], _league_info(), MON)
+    live, kept, hurt = rosters[0].players
+    assert snap is snapshot and sorted(asked) == [102, 103]
+    assert (live.value, live.team, live.timeline, live.projected) == (30.0, "DEN", timeline, True)
+    assert live.slots == {"PG", "G", "UT", "BE"}
+    assert (kept.value, kept.chance, kept.projected, kept.team) == (22.0, 1.0, False, "BOS")
+    assert (hurt.chance, hurt.team) == (0.0, None)
+
+
+def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
+    result = {"incomplete_weeks": [7, 8], "in_playoffs": False,
+              "matchups": [{"weeks": [7], "status": "upcoming"}, {"weeks": [8], "status": "upcoming"}],
+              "teams": [{"players_unprojected": ["X"]}, {"players_unprojected": []}]}
+    notes = lps.notes_for(result, MON, mine=1)
+    assert notes[0].startswith("The calendar is missing games in weeks 7 and 8")
+    assert notes[1] == "1 rostered player had no live projection and is valued off stored stats."
+    assert lps.notes_for(result, None, mine=None)[1].startswith("No live projection this morning")
+    assert lps.notes_for(result, None, mine=None)[-1].startswith("Court Vision could not tell")

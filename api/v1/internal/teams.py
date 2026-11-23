@@ -7,7 +7,9 @@ from schemas.espn import TeamDataResp
 from schemas.team_insights import TeamInsightsResp
 from schemas.common import ApiStatus, FantasyProvider
 from schemas.league import LeagueGetResp, LeagueSyncResp
+from schemas.league_projection import LeagueProjectionResp
 from services.league_service import LeagueService
+from services.league_projection_service import league_projection
 from api.deps import UserContext, OwnedTeamContext, get_db_user, get_owned_team, load_owned_league_info
 from core.responses import respond
 
@@ -53,6 +55,15 @@ async def get_team_league(team: OwnedTeamContext = Depends(get_owned_team)):
         status=ApiStatus.SUCCESS, message="League fetched",
         data=team.league,
     )
+
+
+@router.get('/{team_id}/league/projections', response_model=LeagueProjectionResp)
+async def get_team_league_projections(team: OwnedTeamContext = Depends(get_owned_team)):
+    """Every roster in the team's league projected under the league's scoring, the league's
+    projections as the team's benchmark, and playoff odds (ESPN points leagues)."""
+    league_info = await load_owned_league_info(team)
+    data = await league_projection(league_info)
+    return respond(LeagueProjectionResp(status=ApiStatus.SUCCESS, message="League projected", data=data))
 
 
 @router.post('/{team_id}/league/sync', response_model=LeagueSyncResp)
