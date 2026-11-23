@@ -503,7 +503,7 @@ def test_the_current_matchup_takes_the_live_score_only_when_every_side_has_one()
 @pytest.mark.parametrize("tonight, scored, scores, left", [
     ({"ATL": 0.0}, {1: 50.0, 2: 11.0}, (450.0, 391.0), {"ATL": 0.0}),   # settled plus tonight, what's left
     (None, {1: 50.0, 2: 11.0}, (400.0, 380.0), None),                   # no word on tonight's games
-    ({"ATL": 0.0}, None, (400.0, 380.0), None),                         # no box scores for them
+    ({}, {1: 0.0, 2: 0.0}, (400.0, 380.0), {}),                         # nothing has tipped yet
 ])
 def test_the_projection_starts_from_the_live_score_beside_tonight_s_games(monkeypatch, tonight, scored, scores,
                                                                           left):
@@ -570,7 +570,53 @@ def test_tonight_counts_the_starters_whose_game_has_started_off_our_box_scores(m
         (2, "Bricks", (entry(4, "CHI", 5), entry(9, "DEN", 11))),          # still to tip; no row
     ]
     assert lps.tonight_scored(rosters, info, MON, frozenset({"ATL", "BOS"})) == {1: 55.0, 2: 0.0}
-    # games under way and no box scores for anyone: the live pipeline isn't writing
-    monkeypatch.setattr(LivePlayerStats, "get_live_stats_by_espn_ids", staticmethod(lambda ids, day: []))
-    assert lps.tonight_scored(rosters, info, MON, frozenset({"ATL"})) is None
-    assert lps.tonight_scored(rosters, info, MON, frozenset()) == {1: 0.0, 2: 0.0}
+    # a game not read live (its box scores behind) counts none of its points: it's projected whole
+    assert lps.tonight_scored(rosters, info, MON, frozenset({"ATL"})) == {1: 40.0, 2: 0.0}
+
+
+def test_a_started_game_is_read_live_only_while_its_box_scores_keep_up():
+    from datetime import datetime as dt
+    now = dt(2026, 11, 23, 3, 0)                                      # UTC
+    rows = [SimpleNamespace(game_id="g1", status=3, updated=now - timedelta(hours=2)),     # final
+            SimpleNamespace(game_id="g2", status=2, updated=now - timedelta(minutes=2)),   # under way
+            SimpleNamespace(game_id="g3", status=2, updated=now - timedelta(minutes=40))]  # pipeline stopped
+    assert lps.fresh_game_ids(rows, now) == {"g1", "g2"}
+    games = [SimpleNamespace(game_id="g1", home_team="ATL", away_team="BOS"),
+             SimpleNamespace(game_id="g2", home_team="CHI", away_team="DEN"),
+             SimpleNamespace(game_id="g3", home_team="MIA", away_team="NYK"),
+             SimpleNamespace(game_id="g4", home_team="LAL", away_team="PHX")]               # no box scores yet
+    left = {"ATL": 0.0, "BOS": 0.0, "CHI": 0.4, "DEN": 0.4, "MIA": 0.1, "NYK": 0.1, "LAL": 0.95, "PHX": 0.95}
+    # the stopped and the unwritten games read whole, as if not started
+    assert lps.read_live(left, games, {"g1", "g2"}) == {"ATL": 0.0, "BOS": 0.0, "CHI": 0.4, "DEN": 0.4}
+
+
+def test_tonight_s_games_are_kept_to_those_with_fresh_box_scores(monkeypatch):
+    from schemas.common import ApiStatus
+    from services.games_service import GamesService
+
+    game = lambda gid, home, away, status, start, period=None, clock=None: SimpleNamespace(
+        game_id=gid, game_date="2026-11-22", home_team=home, away_team=away, status=status, period=period,
+        game_clock=clock, start_time_et=start)
+    games = [game("g1", "ATL", "BOS", "final", "19:00", 4, "PT00M00.00S"),
+             game("g2", "MIA", "NYK", "in_progress", "20:00", 3, "PT06M00.00S"),
+             game("g3", "CHI", "DEN", "scheduled", "22:00")]
+
+    async def on_date(day):
+        return SimpleNamespace(status=ApiStatus.SUCCESS, data=SimpleNamespace(games=games))
+
+    async def direct(name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    seen = {}
+
+    def fresh(day, now_utc):
+        seen["now_utc"] = now_utc
+        return {"g1"}
+
+    monkeypatch.setattr(GamesService, "get_games_on_date", staticmethod(on_date))
+    monkeypatch.setattr(lps, "run_db", direct)
+    monkeypatch.setattr(lps, "fresh_games", fresh)
+    now = lps.EASTERN.localize(datetime(2026, 11, 22, 21, 0))
+    # g2's box scores are behind, so it reads whole; g3 hasn't tipped
+    assert asyncio.run(lps.games_left_today(MON, now)) == {"ATL": 0.0, "BOS": 0.0}
+    assert seen["now_utc"] == datetime(2026, 11, 23, 2, 0)          # the box scores' clock: naive UTC

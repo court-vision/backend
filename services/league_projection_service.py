@@ -15,9 +15,9 @@ The current matchup starts from the live score when today's games can be read
 under the league's weights, the players in a starting slot whose game has started
 (`tonight_scored`, as the Week desk's live score counts them). Each NBA team whose game
 has started goes to the projection with the share of it still to play (`today_left`),
-so tonight counts once. ESPN's own `totalPointsLive` isn't in this read. Without
-today's games, or without box scores for games under way, it starts from the settled
-score and projects today whole.
+so tonight counts once. ESPN's own `totalPointsLive` isn't in this read. A started game
+whose box scores are missing or behind (`read_live`) reads whole, as if not started.
+Without today's games it starts from the settled score and projects today whole.
 
 ESPN points leagues only for now: a category league needs per-category projections
 (the plan's step 6), and Yahoo has no standings read yet. Neither is an error of the
@@ -54,6 +54,8 @@ REGULATION_SECONDS = 48 * 60
 QUARTER_SECONDS = 12 * 60
 # a game under way with no clock to read is guessed from its tip at this length
 GAME_LENGTH = timedelta(hours=2, minutes=15)
+# box scores of a game under way older than this are behind (the live pipeline writes every few seconds)
+BOX_SCORE_FRESH = timedelta(minutes=10)
 _CLOCK = re.compile(r"^PT(\d+)M(\d+(?:\.\d+)?)S$")
 
 
@@ -121,13 +123,11 @@ def settled_scores(payload: Mapping[str, Any]) -> dict[int, float]:
 
 
 def tonight_scored(rosters: list, league_info: LeagueInfo, today: date,
-                   started: frozenset[str]) -> Optional[dict[int, float]]:
+                   started: frozenset[str]) -> dict[int, float]:
     """Each league team's points tonight so far, off our live box scores under the
-    league's weights: its players in a starting slot whose game has started, as the Week
-    desk's live score counts them (`MatchupService.get_live_matchup_by_team_id`). None
-    when a rostered player's game has started (`started`, NBA teams) and the box scores
-    hold nobody on any roster: the live pipeline isn't writing, and tonight would read
-    as nothing scored. Sync: runs through run_db."""
+    league's weights: its players in a starting slot whose game is read live (`started`,
+    NBA teams with fresh box scores, `games_left_today`), as the Week desk's live score
+    counts them (`MatchupService.get_live_matchup_by_team_id`). Sync: runs through run_db."""
     from db.models.nba.live_player_stats import LivePlayerStats
     from services.matchup_days import score_stat_row
     from services.player_value_service import PlayerValueService
@@ -136,15 +136,13 @@ def tonight_scored(rosters: list, league_info: LeagueInfo, today: date,
     if not espn_ids:
         return {tid: 0.0 for tid, _, _ in rosters}
     rows = {r.player.espn_id: r for r in LivePlayerStats.get_live_stats_by_espn_ids(espn_ids, today)}
-    if not rows and any(e.pro_team in started for _, _, entries in rosters for e in entries):
-        return None
     scoring = PlayerValueService.scoring_for(league_info.model_copy(update={"scoring_preview": None}))
     out: dict[int, float] = {}
     for tid, _name, entries in rosters:
         total = 0.0
         for e in entries:
             row = rows.get(e.player_id)
-            if row is None or (row.game_status or 1) < 2:
+            if e.pro_team not in started or row is None or (row.game_status or 1) < 2:
                 continue
             if POSITION_MAP.get(e.lineup_slot_id) in NON_STARTING_SLOTS:
                 continue
@@ -216,8 +214,34 @@ def today_left(games: Iterable[Any], now: datetime) -> Optional[dict[str, float]
     return out
 
 
+def fresh_game_ids(rows: Iterable[Any], now_utc: datetime) -> set[str]:
+    """The games whose box scores can be read live: final, or under way and written in the
+    last `BOX_SCORE_FRESH` (rows: game_id, its highest status, its newest write, UTC)."""
+    return {r.game_id for r in rows
+            if (r.status or 1) >= 3 or (r.updated is not None and now_utc - r.updated <= BOX_SCORE_FRESH)}
+
+
+def fresh_games(today: date, now_utc: datetime) -> set[str]:
+    """`fresh_game_ids` off the live pipeline's box scores for the day. Sync: runs through run_db."""
+    from peewee import fn
+    from db.models.nba.live_player_stats import LivePlayerStats as L
+
+    rows = (L.select(L.game_id, fn.MAX(L.game_status).alias("status"), fn.MAX(L.last_updated).alias("updated"))
+            .where(L.game_date == today).group_by(L.game_id))
+    return fresh_game_ids(rows, now_utc)
+
+
+def read_live(left: Mapping[str, float], games: Iterable[Any], fresh: set[str]) -> dict[str, float]:
+    """`left` kept to the teams whose game has fresh box scores. A started game without
+    them (the live pipeline stopped, or hasn't reached it) reads whole, as if not started:
+    its points aren't counted and its players are projected for all of it."""
+    live_teams = {t for g in games if g.game_id in fresh for t in (g.home_team, g.away_team) if t}
+    return {t: v for t, v in left.items() if t in live_teams}
+
+
 async def games_left_today(today: date, now: Optional[datetime] = None) -> Optional[dict[str, float]]:
-    """`today_left` for the fantasy day; None when the day's games can't be read."""
+    """`today_left` for the fantasy day, kept to the games with fresh box scores
+    (`read_live`); None when the day's games can't be read."""
     from schemas.common import ApiStatus
     from services.games_service import GamesService
 
@@ -225,10 +249,20 @@ async def games_left_today(today: date, now: Optional[datetime] = None) -> Optio
     if resp.status != ApiStatus.SUCCESS or resp.data is None:
         log.warning("league_projection_no_games_today", day=today.isoformat())
         return None
-    left = today_left(resp.data.games, (now or datetime.now(EASTERN)).astimezone(EASTERN))
+    now = now or datetime.now(EASTERN)
+    left = today_left(resp.data.games, now.astimezone(EASTERN))
     if left is None:
         log.warning("league_projection_games_state_unknown", day=today.isoformat())
-    return left
+        return None
+    if not left:
+        return left
+    fresh = await run_db("league_projection.box_scores", fresh_games, today,
+                         now.astimezone(pytz.utc).replace(tzinfo=None))
+    kept = read_live(left, resp.data.games, fresh)
+    if len(kept) < len(left):
+        log.warning("league_projection_box_scores_behind", day=today.isoformat(),
+                    teams=sorted(set(left) - set(kept)))
+    return kept
 
 
 def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list, list, list]:
@@ -377,7 +411,7 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     tonight = None
     if left is not None:
         tonight = await run_db("league_projection.tonight", tonight_scored, entries, league_info, today,
-                               frozenset(left))
+                               frozenset(left)) if left else {}
     live = None
     if tonight is not None:
         settled = {s: v for p in pairings if p.matchup == current
