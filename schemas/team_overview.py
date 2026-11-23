@@ -17,8 +17,9 @@ The items behind the state are the Week desk's daily actions, each judged
 against the team's automation levels: `covered` names the automation set to
 make the move, so the desk can say what will happen and when.
 
-A block that could not be read this time is None and named in `missing`; only
-the board decides `cant_read`. Never writes.
+A block that could not be read this time is None and named in `missing` (`week` is
+None too when it is the matchup that couldn't be read); only the board decides
+`cant_read`. Never writes.
 """
 
 from __future__ import annotations
@@ -162,7 +163,8 @@ class TeamOverview(ApiModel):
     automation: Optional[OverviewAutomation] = None
     tonight: Optional[OverviewTonight] = None
     matchup: Optional[OverviewMatchup] = None
-    week: list[OverviewDay] = []                 # the matchup's days, in order
+    # The matchup's days, in order. [] without a matchup now; None when they could not be read
+    week: Optional[list[OverviewDay]] = []
     season: Optional[OverviewSeason] = None
     season_state: SeasonState = "unavailable"
     next: Optional[OverviewNext] = None          # the next thing scheduled to happen on the team

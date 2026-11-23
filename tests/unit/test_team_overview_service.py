@@ -10,7 +10,7 @@ kept and for how long, and that a league projection is never waited on for long.
 """
 
 import asyncio
-from datetime import date, time, timedelta
+from datetime import date, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -122,34 +122,69 @@ def test_auto_lineup_is_not_counted_on_once_it_ran_failed_or_cannot_write(change
     assert svc.judge(START, TIP, rules, NOW) == ("needs_you", None)
 
 
+JUST_RULED = {80: NOW - timedelta(minutes=1)}      # our verdict on the benched starter changed a minute ago
+
+
 def test_a_late_scratch_is_covered_at_act_and_needs_the_user_at_notify():
-    ran = {"can_write": True, "fill_applies": True, "fill_ran": True, "fill_closes_at": et(18, 45)}
+    ran = {"can_write": True, "fill_applies": True, "fill_ran": True, "fill_closes_at": et(18, 45),
+           "ruled_at": JUST_RULED}
     act = svc.Rules(**ran, late_scratch=autonomy.ACT)
     assert svc.judge(SCRATCH, TIP, act, NOW) == ("covered", "late_scratch")
     assert svc.judge(SCRATCH, TIP, svc.Rules(**ran, late_scratch=autonomy.NOTIFY), NOW) == ("needs_you", None)
     assert svc.judge(START, TIP, act, NOW) == ("needs_you", None)       # the swap answers a ruling, not an open seat
 
 
-def test_a_swap_that_already_failed_for_that_player_needs_the_user():
-    rules = svc.Rules(can_write=True, late_scratch=autonomy.ACT, scratch_failed=frozenset({80}))
+def test_the_swap_answers_a_ruling_once_so_a_scratch_it_left_on_the_board_needs_the_user():
+    act = dict(can_write=True, late_scratch=autonomy.ACT)
+    on_its_way = svc.Rules(**act, ruled_at={80: NOW - svc.SWAP_ANSWERS_WITHIN + timedelta(seconds=1)})
+    assert svc.judge(SCRATCH, TIP, on_its_way, NOW) == ("covered", "late_scratch")
+    # the change was posted and the scratch is still here: it found no swap, skipped him or was never posted
+    left = svc.Rules(**act, ruled_at={80: NOW - svc.SWAP_ANSWERS_WITHIN})
+    assert svc.judge(SCRATCH, TIP, left, NOW) == ("needs_you", None)
+    # out since his last game: no change of ours today, so nothing was posted (or the verdicts weren't read)
+    assert svc.judge(SCRATCH, TIP, svc.Rules(**act), NOW) == ("needs_you", None)
+    assert svc.judge(SCRATCH, TIP, svc.Rules(**act, ruled_at={999: NOW}), NOW) == ("needs_you", None)
+
+
+@pytest.mark.parametrize("spent", [{"scratch_failed": frozenset({80})}, {"scratch_answered": frozenset({80})},
+                                   {"scratch_spent": True}])
+def test_a_swap_that_failed_was_made_once_for_him_or_is_past_the_days_limit_needs_the_user(spent):
+    rules = svc.Rules(can_write=True, late_scratch=autonomy.ACT, ruled_at=JUST_RULED, **spent)
     assert svc.judge(SCRATCH, TIP, rules, NOW) == ("needs_you", None)
-    other = svc.Rules(can_write=True, late_scratch=autonomy.ACT, scratch_failed=frozenset({999}))
+
+
+def test_another_players_failed_or_answered_swap_is_not_this_ones():
+    other = svc.Rules(can_write=True, late_scratch=autonomy.ACT, ruled_at=JUST_RULED,
+                      scratch_failed=frozenset({999}), scratch_answered=frozenset({998}))
     assert svc.judge(SCRATCH, TIP, other, NOW) == ("covered", "late_scratch")
 
 
 def test_ten_minutes_from_the_lock_no_automation_is_counted_on():
-    rules = svc.Rules(can_write=True, late_scratch=autonomy.ACT)
+    rules = svc.Rules(can_write=True, late_scratch=autonomy.ACT, ruled_at={80: TIP - timedelta(minutes=12)})
     assert svc.judge(SCRATCH, TIP, rules, TIP - timedelta(minutes=11)) == ("covered", "late_scratch")
     assert svc.judge(SCRATCH, TIP, rules, TIP - timedelta(minutes=10)) == ("needs_you", None)
 
 
-def test_dime_covers_a_scratch_at_ai_and_a_start_only_with_a_check_in_before_the_lock():
+def test_dime_covers_a_ruling_while_its_event_check_in_answers_it():
+    dime = frozenset({autonomy.LATE_SCRATCH})
+    fresh = svc.Rules(can_write=True, dime_acts=dime, ruled_at={80: NOW - timedelta(minutes=24)})
+    assert svc.judge(SCRATCH, TIP, fresh, NOW) == ("covered", "dime")
+    stale = svc.Rules(can_write=True, dime_acts=dime, ruled_at={80: NOW - svc.DIME_ANSWERS_WITHIN})
+    assert svc.judge(SCRATCH, TIP, stale, NOW) == ("needs_you", None)
+    assert svc.judge(SCRATCH, TIP, svc.Rules(can_write=True, dime_acts=dime), NOW) == ("needs_you", None)
+    # a check-in before the lock doesn't help where Dime doesn't set the lineup
+    waiting = svc.Rules(can_write=True, dime_acts=dime, next_checkin_at=et(18, 15))
+    assert svc.judge(SCRATCH, TIP, waiting, NOW) == ("needs_you", None)
+
+
+def test_dime_covers_a_lineup_move_only_with_a_check_in_before_the_lock():
     dime = frozenset({autonomy.LINEUP, autonomy.LATE_SCRATCH})
-    assert svc.judge(SCRATCH, TIP, svc.Rules(can_write=True, dime_acts=dime), NOW) == ("covered", "dime")
     before = svc.Rules(can_write=True, dime_acts=dime, next_checkin_at=et(18, 15))
     assert svc.judge(START, TIP, before, NOW) == ("covered", "dime")
+    assert svc.judge(SCRATCH, TIP, before, NOW) == ("covered", "dime")       # a ruling it didn't answer, too
     after = svc.Rules(can_write=True, dime_acts=dime, next_checkin_at=et(6, 0, DAY + timedelta(days=1)))
     assert svc.judge(START, TIP, after, NOW) == ("needs_you", None)
+    assert svc.judge(SCRATCH, TIP, after, NOW) == ("needs_you", None)
     assert svc.judge(START, TIP, svc.Rules(can_write=True, dime_acts=dime), NOW) == ("needs_you", None)
 
 
@@ -161,8 +196,9 @@ def test_optional_moves_are_the_users_call_unless_an_automation_makes_them():
     act = svc.Rules(can_write=True, daily_actions=autonomy.ACT)
     assert svc.judge(TO_IR, None, act, NOW) == ("covered", "daily_actions")
     assert svc.judge(STREAM, None, act, NOW) == ("your_call", None)         # act never drops a player
-    stuck = action("ir_out", 14, blocked="roster_full")
+    stuck = action("ir_out", 14, blocked="roster_full")             # a row nobody can send as it is
     assert svc.judge(stuck, None, act, NOW) == ("your_call", None)
+    assert svc.judge(stuck, None, dime, NOW) == ("your_call", None)
     assert svc.judge(TO_IR, None, svc.Rules(can_write=False, daily_actions=autonomy.ACT), NOW) == ("your_call", None)
 
 
@@ -248,7 +284,7 @@ def _mp(pid, slot, team="DEN", status=None, live=None):
     return SimpleNamespace(player_id=pid, lineup_slot=slot, team=team, injury_status=status, live=live)
 
 
-def _live(fmt="points", cats=None):
+def _live(fmt="points", cats=None, game_date=DAY.isoformat()):
     yours = [_mp(1, "PG", live=_row(2, 20.0)), _mp(2, "SG", live=_row(3, 15.5)), _mp(3, "BE", live=_row(2, 40.0)),
              _mp(4, "IR", status="OUT"), _mp(5, "UT", live=_row(1, 0.0))]
     theirs = [_mp(21, "PG", live=_row(2, 11.0)), _mp(22, "BE")]
@@ -257,7 +293,7 @@ def _live(fmt="points", cats=None):
     return SimpleNamespace(matchup_period=5, matchup_period_start="2026-11-16", matchup_period_end="2026-11-22",
                            your_team=side("Goblins", 412.5, 980.0, yours),
                            opponent_team=side("Rival", 399.0, 955.0, theirs),
-                           scoring_format=fmt, category_comparison=cats)
+                           scoring_format=fmt, category_comparison=cats, game_date=game_date)
 
 
 def _past(pid, had_game, slot_id=None):
@@ -306,6 +342,15 @@ def test_the_week_counts_who_started_who_starts_and_who_could():
     ]
 
 
+def test_box_scores_from_an_earlier_day_are_not_todays_points():
+    """While the matchup's baseline lags ESPN's day, the live matchup overlays the day before."""
+    days = [_day("2026-11-18", "past", [_past(1, True, PG)], [_past(21, True, PG)], totals=(150.0, 90.0)),
+            _day("2026-11-19", "today", [_past(1, True), _past(2, True)], [_past(21, True)])]
+    week = svc.week_of(days, _live(game_date="2026-11-18"), seats=5)
+    assert [(d.kind, d.your_points, d.opponent_points, d.your_games) for d in week] == [
+        ("past", 150.0, 90.0, 1), ("today", None, None, 2)]
+
+
 def test_a_categories_week_has_games_and_no_points():
     days = [_day("2026-11-17", "past", [_past(1, True, PG)], [_past(21, True, PG)], totals=(141.0, 120.0)),
             _day("2026-11-19", "today", [_past(1, True)], [_past(21, True)])]
@@ -323,15 +368,20 @@ PROJECTION = {
     "teams_count": 10, "playoff_teams": 6,
     "teams": [{"mine": False, "wins": 5, "losses": 0, "ties": 0, "standing": 1, "playoff_odds": 0.99},
               {"mine": True, "wins": 3, "losses": 2, "ties": 0, "standing": 4, "playoff_odds": 0.81}],
-    "matchups": [{"status": "final", "win_chance": None}, {"status": "current", "win_chance": 0.64},
-                 {"status": "upcoming", "win_chance": 0.5}],
+    "matchups": [{"matchup": 4, "status": "final", "win_chance": None},
+                 {"matchup": 5, "status": "current", "win_chance": 0.64},
+                 {"matchup": 6, "status": "upcoming", "win_chance": 0.5}],
 }
 
 
 def test_the_season_line_is_the_users_own_team_and_this_matchups_win_chance():
-    season, win = svc.season_of(PROJECTION, NOW)
+    season, win = svc.season_of(PROJECTION, NOW, 5)
     assert (season.wins, season.losses, season.standing, season.teams, season.playoff_teams) == (3, 2, 4, 10, 6)
     assert season.playoff_odds == 0.81 and win == 0.64 and season.as_of == NOW
+    # a projection kept across the turn of a matchup period: its odds are the last matchup's, not this one's
+    season, win = svc.season_of(PROJECTION, NOW, 6)
+    assert season.wins == 3 and win is None
+    assert svc.season_of(PROJECTION, NOW)[1] is None                     # and no matchup now has none
     assert svc.season_of({"teams": [{"mine": False}], "matchups": []}, NOW) == (None, None)
 
 
@@ -417,7 +467,51 @@ def test_the_fill_counts_only_on_a_day_it_can_still_run():
 def test_a_swap_that_failed_is_remembered_by_player_until_one_lands():
     plan = svc._Plan(writes=[_write("availability", "failed", 80), _write("availability", "rejected", 90),
                              _write("availability", "applied", 90)])
-    assert _rules(account(prefs=_prefs()), plan).scratch_failed == frozenset({80})
+    rules = _rules(account(prefs=_prefs()), plan)
+    assert rules.scratch_failed == frozenset({80}) and rules.scratch_answered == frozenset({90})
+    assert not rules.scratch_spent
+
+
+def test_the_days_swaps_are_spent_at_the_late_scratch_services_own_limit(monkeypatch):
+    monkeypatch.setattr(svc.settings, "late_scratch_swaps_per_day", 2)
+    one = [_write("availability", "applied", 90), _write("availability", "failed", 80), _write("auto", "applied")]
+    assert not _rules(account(prefs=_prefs()), svc._Plan(writes=one)).scratch_spent
+    two = [*one, _write("availability", "applied_unverified", 70)]
+    rules = _rules(account(prefs=_prefs()), svc._Plan(writes=two))
+    assert rules.scratch_spent and rules.scratch_answered == frozenset({90, 70})
+
+
+def _ruling(nba_id, changed_at):
+    return SimpleNamespace(nba_player_id=nba_id, changed_at=changed_at)
+
+
+def test_rulings_are_read_only_where_an_automation_answers_them(monkeypatch):
+    asked = []
+
+    async def today(ids, day):
+        asked.append((list(ids), day))
+        return [_ruling(80, NOW.replace(tzinfo=None)), _ruling(81, None)]
+
+    monkeypatch.setattr(svc.AvailabilityService, "today", staticmethod(today))
+    data = _actions(SCRATCH, START).data
+    act = svc.Rules(can_write=True, late_scratch=autonomy.ACT)
+    assert asyncio.run(svc._ruled_at(23, data, act)) == {80: NOW.replace(tzinfo=timezone.utc)}
+    assert asked == [([80], DAY)]                    # the starter the scratch benches, on the board's day
+    dime = svc.Rules(can_write=True, dime_acts=frozenset({autonomy.LATE_SCRATCH}))
+    assert 80 in asyncio.run(svc._ruled_at(23, data, dime))
+    # nobody answers rulings at notify, and a day without a scratch has none to look up
+    assert asyncio.run(svc._ruled_at(23, data, svc.Rules(late_scratch=autonomy.NOTIFY))) == {}
+    assert asyncio.run(svc._ruled_at(23, _actions(START).data, act)) == {}
+    assert len(asked) == 2
+
+
+def test_rulings_that_cannot_be_read_leave_nothing_counted_on(monkeypatch):
+    async def today(ids, day):
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(svc.AvailabilityService, "today", staticmethod(today))
+    act = svc.Rules(can_write=True, late_scratch=autonomy.ACT)
+    assert asyncio.run(svc._ruled_at(23, _actions(SCRATCH).data, act)) == {}
 
 
 def test_dime_acts_only_with_access_and_its_check_ins_on(monkeypatch):
@@ -438,6 +532,8 @@ def test_the_auto_lineup_is_next_only_while_it_is_still_to_run():
     assert svc._fill_at(acct, _rules(acct, svc._Plan(writes=[_write("auto", "applied")])), 23) is None
     late = account(prefs=_prefs(), now=et(18, 50))
     assert svc._fill_at(late, _rules(late, svc._Plan()), 23) is None
+    # a fill that failed today is retried, but it isn't counted on for the items, so it isn't promised as next
+    assert svc._fill_at(acct, _rules(acct, svc._Plan(writes=[_write("auto", "failed")])), 23) is None
     assert svc._fill_at(acct, _rules(acct, svc._Plan(), can_write=False), 23) is None
 
 
@@ -462,6 +558,7 @@ class Harness:
 
     def __init__(self, monkeypatch, teams, acct):
         self.boards, self.matchups, self.plans, self.seasons = {}, {}, {}, {}
+        self.rulings = []
         self.builds = 0
 
         async def direct(_name, fn, *a, **kw):
@@ -495,6 +592,9 @@ class Harness:
         async def season(team, league_info):
             return self.seasons.get(team.team_id, ("unavailable", None))
 
+        async def rulings(ids, day):
+            return [r for r in self.rulings if r.nba_player_id in ids]
+
         monkeypatch.setattr(svc, "run_db", direct)
         monkeypatch.setattr(svc, "_owned_teams", lambda user_id: list(teams))
         monkeypatch.setattr(svc, "_account", the_account)
@@ -503,6 +603,7 @@ class Harness:
         monkeypatch.setattr(svc, "_matchup", matchup)
         monkeypatch.setattr(svc, "_plan", plan)
         monkeypatch.setattr(svc, "_season", season)
+        monkeypatch.setattr(svc.AvailabilityService, "today", staticmethod(rulings))
 
     def overview(self, now=NOW):
         return asyncio.run(svc.overview(11, now))
@@ -537,7 +638,7 @@ def test_a_team_carries_its_board_for_staging_and_names_what_could_not_be_read(m
     team = h.overview().teams[0]
     # whether the fill ran is unknown without the plan rows, so the start is the user's
     assert team.state == "needs_you" and [i.standing for i in team.items] == ["needs_you", "your_call"]
-    assert team.missing == ["matchup", "next"] and team.matchup is None and team.week == [] and team.next is None
+    assert team.missing == ["matchup", "next"] and team.matchup is None and team.week is None and team.next is None
     assert (team.nba_date, team.roster_version, team.scoring_period_id) == (DAY.isoformat(), "v1", 31)
     assert team.can_write is True
     assert team.automation.lineup == "act" and team.automation.dime is False
@@ -552,8 +653,35 @@ def test_a_team_whose_automations_cover_the_day_is_set_and_says_what_is_next(mon
     team = h.overview().teams[0]
     assert team.state == "set" and team.items[0].covered_by == "auto_lineup"
     assert (team.next.kind, team.next.at) == ("auto_lineup", et(18, 0))
-    assert team.missing == ["week"] and team.matchup.win_chance == 0.64
+    assert team.missing == ["week"] and team.week is None and team.matchup.win_chance == 0.64
     assert team.season_state == "ready" and (team.season.wins, team.season.standing) == (3, 4)
+
+
+def test_a_ruling_is_covered_while_the_swap_is_on_its_way_and_the_users_once_it_is_not(monkeypatch):
+    h = Harness(monkeypatch, [team_ctx(23)], account(prefs=_prefs()))
+    h.boards = {23: _actions(SCRATCH, state=board([player(8, "Out", UT), player(11, "Filler", BE)]))}
+    h.plans = {23: svc._Plan(writes=[_write("auto", "applied")])}         # the day's fill has run
+    h.rulings = [_ruling(80, NOW - timedelta(minutes=1))]
+    team = h.overview().teams[0]
+    assert team.state == "set" and team.items[0].covered_by == "late_scratch"
+    # the same scratch, ruled before the fill ran: the swap answered then, and didn't make it
+    svc.clear()
+    h.rulings = [_ruling(80, NOW - timedelta(hours=2))]
+    team = h.overview().teams[0]
+    assert team.state == "needs_you" and team.items[0].covered_by is None and team.items[0].deadline_et == "19:30"
+
+
+def test_box_scores_from_an_earlier_day_do_not_mark_tonights_seats(monkeypatch):
+    """The live matchup overlays the day before while its baseline lags: tonight is read off the board."""
+    h = Harness(monkeypatch, [team_ctx(23)], account())
+    h.boards = {23: _actions(state=board([player(1, "Guard", PG, tip="19:00")]))}
+    h.matchups = {23: svc._MatchupRead(live=_live(game_date="2026-11-18"), days=[])}
+    tonight = h.overview().teams[0].tonight
+    assert (tonight.seats[0].mark, tonight.seats[0].points, tonight.points) == ("later", None, None)
+    svc.clear()
+    h.matchups = {23: svc._MatchupRead(live=_live(), days=[])}             # the same box scores, on the board's day
+    tonight = h.overview().teams[0].tonight
+    assert (tonight.seats[0].mark, tonight.seats[0].points, tonight.points) == ("live", 20.0, 20.0)
 
 
 def test_autopilot_is_the_state_of_a_team_dime_runs(monkeypatch):
@@ -576,6 +704,14 @@ def test_a_provider_without_lineups_shows_its_score_and_says_why_it_has_no_state
     assert team.state == "cant_read" and team.error.code == "LINEUP_NOT_SUPPORTED"
     assert "Yahoo" in team.error.message and team.provider == FantasyProvider.YAHOO
     assert team.matchup.opponent_name == "Rival" and team.tonight is None
+
+
+def test_a_stored_row_that_is_not_an_object_still_names_the_team():
+    team = team_ctx(23)
+    team.league_info_json = "null"              # free text in the column: valid JSON, no fields
+    assert svc._names(team)["team_id"] == 23 and svc._names(team)["provider"] == FantasyProvider.ESPN
+    team.league_info_json = "not json"
+    assert svc._names(team)["team_name"] == "Team 23"
 
 
 def test_a_team_whose_credentials_cannot_be_read_still_has_its_name(monkeypatch):
@@ -651,6 +787,32 @@ def test_the_matchup_is_read_from_the_provider_once_and_its_week_is_kept(monkeyp
     inflight._bump_write_epoch()
     asyncio.run(svc._matchup(team))
     assert calls["weekly"] == 2
+    # ESPN's day turns inside the same matchup period: the kept week still calls yesterday today
+    monkeypatch.setattr(svc, "matchup_today", lambda matchup: DAY + timedelta(days=1))
+    asyncio.run(svc._matchup(team))
+    asyncio.run(svc._matchup(team))
+    assert calls["weekly"] == 3
+
+
+def test_a_week_is_not_laid_beside_another_matchup_periods_score(monkeypatch):
+    """A write between the two reads sends the live score back to the provider, which may have moved on."""
+    built = []
+
+    async def provider(user_id, team_id, avg_window="season"):
+        return SimpleNamespace(status=ApiStatus.SUCCESS, data=SimpleNamespace(matchup_period=4))
+
+    async def live(user_id, team_id, reuse_from=None):
+        return SimpleNamespace(status=ApiStatus.SUCCESS, data=_live())           # matchup period 5
+
+    async def weekly(team_id, matchup):
+        built.append(matchup.matchup_period)
+        return SimpleNamespace(data=SimpleNamespace(days=["mon"]))
+
+    monkeypatch.setattr(svc.MatchupService, "get_matchup_by_team_id", staticmethod(provider))
+    monkeypatch.setattr(svc.MatchupService, "get_live_matchup_by_team_id", staticmethod(live))
+    monkeypatch.setattr(svc.MatchupService, "weekly_of", staticmethod(weekly))
+    read = asyncio.run(svc._matchup(team_ctx(23)))
+    assert read.live.matchup_period == 5 and read.days is None and built == []
 
 
 def test_no_matchup_is_no_block_and_a_week_that_fails_leaves_the_score(monkeypatch):
@@ -680,13 +842,17 @@ def test_no_matchup_is_no_block_and_a_week_that_fails_leaves_the_score(monkeypat
 
 
 def test_a_league_without_projections_is_never_asked(monkeypatch):
+    asked = []
+
     async def never(league_info):
-        raise AssertionError("not asked")
+        asked.append(league_info)        # recorded, since a raise here would only read as unavailable too
+        raise LeagueProjectionUnavailable("NOT_ASKED", "not asked")
 
     monkeypatch.setattr(svc, "league_projection", never)
     assert asyncio.run(svc._season(team_ctx(21, scoring="categories"), ESPN)) == ("unavailable", None)
     yahoo = ESPN.model_copy(update={"provider": FantasyProvider.YAHOO})
     assert asyncio.run(svc._season(team_ctx(40), yahoo)) == ("unavailable", None)
+    assert asked == []
 
 
 def test_a_projection_is_kept_and_one_that_cannot_be_made_is_not_asked_again(monkeypatch):

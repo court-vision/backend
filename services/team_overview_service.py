@@ -21,9 +21,17 @@ What keeps it honest and cheap:
 - **One team never fails the others.** A team whose board can't be read is `cant_read`
   with its own error; any other block that fails is None and named in `missing`.
 - **Covered means an automation is set to make the move, and can.** A lineup move is
-  covered by auto-lineup only before its window closes on a day it hasn't run, by the
-  late-scratch swap or Dime only while they run, and by nothing once the lock is
-  ESCALATE_BEFORE_LOCK away or the team can't be written. Otherwise it needs the user.
+  covered by auto-lineup only before its window closes on a day it hasn't run. A ruling is
+  answered once, when our verdict changes: the late-scratch swap covers it for
+  SWAP_ANSWERS_WITHIN of that change (and not once the team's swaps for the day are spent,
+  or it already answered or failed for that player), Dime's event check-in for
+  DIME_ANSWERS_WITHIN. After that only a scheduled check-in of Dime's before the lock
+  does. Nothing covers a move once the lock is ESCALATE_BEFORE_LOCK away or the team
+  can't be written. Otherwise it needs the user.
+- **Tonight's box scores are tonight's.** The live matchup lays one day of box scores over
+  its stored baseline, and while that baseline lags ESPN's day it is an earlier day's
+  (`LiveMatchupData.game_date`). They mark the seats and score today only when that day is
+  the board's.
 - **Bounded.** TEAMS_AT_ONCE teams are read at a time, so an account with many teams
   can't take every ESPN slot; league projections run one at a time (the CPU pool has two
   workers) and a read waits SEASON_BUDGET for one before answering without it
@@ -42,7 +50,7 @@ import asyncio
 import json
 import time as clock
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -75,10 +83,11 @@ from schemas.team_overview import (
 from services import matchup_hold
 from services.ai import autonomy, checkins, levels
 from services.ai.automations import FILL_WINDOW_CLOSES, _pending_pickups, _todays_writes, fill_setting
+from services.availability_service import AvailabilityService
 from services.daily_actions_service import DailyActionsService
 from services.league_projection_service import LeagueProjectionUnavailable, league_projection
 from services.lineup_planner import IR_SLOT_ID, OUT_STATUSES
-from services.matchup_days import BENCH_SLOT_ID, counts_for_the_day
+from services.matchup_days import BENCH_SLOT_ID, counts_for_the_day, matchup_today
 from services.matchup_service import MatchupService
 from services.providers import unavailable_message
 from services.scheduled_pickup_service import et_at
@@ -92,6 +101,15 @@ log = get_logger("team_overview")
 TEAMS_AT_ONCE = 3
 # An automation that hasn't made its lineup move this close to the lock isn't counted on
 ESCALATE_BEFORE_LOCK = timedelta(minutes=10)
+# A ruling is answered once, when our verdict changes (data-platform posts the change in the tick
+# that stored it, one change at a time, each read against every team that reacts). The swap is a
+# board read and a write after that, so even behind an injury report's worth of changes it lands in
+# minutes; a scratch still on the board this long after the change is one it did not make, and
+# nothing posts the change again
+SWAP_ANSWERS_WITHIN = timedelta(minutes=5)
+# Dime's event check-in starts at the change, after a check-in already running, or is folded into a
+# scheduled one opening within AUTOPILOT_EVENT_FOLD_MINUTES (20), and then has to run
+DIME_ANSWERS_WITHIN = timedelta(minutes=25)
 # With no box score to say so, a game that tipped this long ago is over
 GAME_SURELY_OVER = timedelta(hours=3)
 OVERVIEW_TTL = 20.0
@@ -132,6 +150,10 @@ class Rules:
     next_checkin_at: Optional[datetime] = None        # Dime's next scheduled check-in
     fill_failed: bool = False                         # the fill's write today was refused or failed
     scratch_failed: frozenset[int] = frozenset()      # NBA ids whose late-scratch swap today was, too
+    scratch_answered: frozenset[int] = frozenset()    # NBA ids it already swapped for today (once a player)
+    scratch_spent: bool = False                       # the team's swaps for the day are used up
+    # NBA id -> when our verdict on him last changed: what the swap and Dime's event check-in answer
+    ruled_at: Mapping[int, datetime] = field(default_factory=dict)
 
 
 def tip_at(nba_date: Optional[str], hhmm: Optional[str]) -> Optional[datetime]:
@@ -165,25 +187,30 @@ def judge(action: DailyAction, deadline: Optional[datetime], rules: Rules, now: 
     if kind in LINEUP_KINDS:
         cover: Optional[str] = None
         ruled = action.counterpart.nba_player_id if action.counterpart is not None else None
+        changed = rules.ruled_at.get(ruled) if ruled is not None else None
+        since = now - changed if changed is not None else None       # None: no change of ours to answer
         if (rules.fill_applies and not rules.fill_ran and not rules.fill_failed
                 and rules.fill_closes_at is not None and now < rules.fill_closes_at):
             cover = "auto_lineup"                  # the fill benches a starter we ruled out, too
-        elif kind == SCRATCH and autonomy.LATE_SCRATCH in rules.dime_acts:
-            cover = "dime"                         # an event check-in before his game locks
-        elif kind == SCRATCH and rules.late_scratch == autonomy.ACT and ruled not in rules.scratch_failed:
-            cover = "late_scratch"
-        elif (kind == START and autonomy.LINEUP in rules.dime_acts and rules.next_checkin_at is not None
+        elif (kind == SCRATCH and autonomy.LATE_SCRATCH in rules.dime_acts
+              and since is not None and since < DIME_ANSWERS_WITHIN):
+            cover = "dime"                         # the event check-in his ruling started
+        elif (kind == SCRATCH and rules.late_scratch == autonomy.ACT and not rules.scratch_spent
+              and ruled not in rules.scratch_failed and ruled not in rules.scratch_answered
+              and since is not None and since < SWAP_ANSWERS_WITHIN):
+            cover = "late_scratch"                 # the swap his ruling started, still on its way
+        elif (autonomy.LINEUP in rules.dime_acts and rules.next_checkin_at is not None
               and deadline is not None and rules.next_checkin_at < deadline):
-            cover = "dime"
+            cover = "dime"                         # a scheduled check-in sets the lineup before the lock
         if cover is not None and deadline is not None and now >= deadline - ESCALATE_BEFORE_LOCK:
             cover = None
         if cover is not None and rules.can_write:
             return "covered", cover
         return "needs_you", None
-    if rules.can_write:
+    if rules.can_write and action.blocked_reason is None:     # a blocked row is a move nobody can send as it is
         if autonomy.DAILY_ACTIONS in rules.dime_acts:
             return "covered", "dime"
-        if rules.daily_actions == autonomy.ACT and kind in ACT_KINDS and action.blocked_reason is None:
+        if rules.daily_actions == autonomy.ACT and kind in ACT_KINDS:
             return "covered", "daily_actions"
     return "your_call", None
 
@@ -328,8 +355,8 @@ def _could_play(roster: Iterable[Any], on_ir: set[int], seats: Optional[int]) ->
 def week_of(days: Sequence[Any], live: Any, seats: Optional[int]) -> list[OverviewDay]:
     """The matchup's days for the row's strip: each side's points on the days played, and its
     games on every day. `days` are the weekly matchup's (`WeeklyMatchupData.days`); `live` is
-    the live matchup, for today's points and who starts tonight; `seats` caps a count taken
-    off a whole roster at the league's starting seats."""
+    the live matchup, for today's points (when its box scores are today's) and who starts tonight;
+    `seats` caps a count taken off a whole roster at the league's starting seats."""
     points_league = live.scoring_format == "points"
     sides = (live.your_team.roster, live.opponent_team.roster)
     starters = [{p.player_id for p in roster if _starts(p)} for roster in sides]
@@ -344,7 +371,9 @@ def week_of(days: Sequence[Any], live: Any, seats: Optional[int]) -> list[Overvi
         if d.day_type == "today":
             games = [sum(1 for p in t.roster if p.had_game and p.player_id in starters[i])
                      for i, t in enumerate(teams)]
-            scored = [points_today(roster) for roster in sides] if points_league else [None, None]
+            # the box scores are one day's, and not this one while the matchup's baseline lags
+            tonights = getattr(live, "game_date", None) == d.date
+            scored = [points_today(roster) for roster in sides] if points_league and tonights else [None, None]
             out.append(OverviewDay(date=d.date, kind="today", your_points=scored[0], opponent_points=scored[1],
                                    your_games=games[0], opponent_games=games[1]))
             continue
@@ -378,12 +407,17 @@ def _field(row: Any, key: str) -> Any:
     return row.get(key) if isinstance(row, Mapping) else getattr(row, key, None)
 
 
-def season_of(projection: Mapping[str, Any], as_of: datetime) -> tuple[Optional[OverviewSeason], Optional[float]]:
-    """The user's own line of a league projection, and this matchup's win chance."""
+def season_of(projection: Mapping[str, Any], as_of: datetime, matchup_period: Optional[int] = None
+              ) -> tuple[Optional[OverviewSeason], Optional[float]]:
+    """The user's own line of a league projection, and the win chance of matchup `matchup_period`
+    (the live one): None when the projection's current matchup is another, as one kept across the
+    turn of a matchup period still is."""
     mine = next((t for t in projection.get("teams") or [] if _field(t, "mine")), None)
     if mine is None:
         return None, None
     current = next((m for m in projection.get("matchups") or [] if _field(m, "status") == "current"), None)
+    if current is not None and _field(current, "matchup") != matchup_period:
+        current = None
     season = OverviewSeason(
         wins=_field(mine, "wins") or 0, losses=_field(mine, "losses") or 0, ties=_field(mine, "ties") or 0,
         standing=_field(mine, "standing"), teams=projection.get("teams_count") or 0,
@@ -569,9 +603,13 @@ def rules_of(team_id: int, acct: Account, plan: Optional[_Plan], view: Mapping[s
     writes = list(plan.writes) if plan is not None else []
     fill_ran = any(w.source == "auto" and w.status in COUNTED_AUTO_STATUSES for w in writes)
     fill_failed = not fill_ran and any(w.source == "auto" and w.status in FAILED_STATUSES for w in writes)
-    swaps = [w for w in writes if w.source == "availability" and w.trigger_player_id is not None]
-    swapped = {w.trigger_player_id for w in swaps if w.status in COUNTED_AUTO_STATUSES}
-    scratch_failed = {w.trigger_player_id for w in swaps if w.status in FAILED_STATUSES} - swapped
+    # the late-scratch swap's own count (services/late_scratch_service.py): once a player, and
+    # LATE_SCRATCH_SWAPS_PER_DAY a team
+    swaps = [w for w in writes if w.source == "availability"]
+    counted = [w for w in swaps if w.status in COUNTED_AUTO_STATUSES]
+    swapped = {w.trigger_player_id for w in counted if w.trigger_player_id is not None}
+    scratch_failed = {w.trigger_player_id for w in swaps
+                      if w.status in FAILED_STATUSES and w.trigger_player_id is not None} - swapped
     # the fill's clock is today's; a board on another day (ESPN's own, around 3 AM ET) isn't its
     on_today = board_date == acct.today.isoformat()
     return Rules(
@@ -585,7 +623,27 @@ def rules_of(team_id: int, acct: Account, plan: Optional[_Plan], view: Mapping[s
         next_checkin_at=_aware(plan.checkin.due_at) if plan is not None and plan.checkin is not None else None,
         fill_failed=fill_failed,
         scratch_failed=frozenset(scratch_failed),
+        scratch_answered=frozenset(swapped),
+        scratch_spent=len(counted) >= settings.late_scratch_swaps_per_day,
     )
+
+
+async def _ruled_at(team_id: int, actions: DailyActionsData, rules: Rules) -> dict[int, datetime]:
+    """When our verdict last changed on each starter a scratch row benches: NBA id -> the moment.
+    Read only where an automation answers rulings; a read that fails leaves none, so nothing is
+    counted on to answer one."""
+    if rules.late_scratch != autonomy.ACT and autonomy.LATE_SCRATCH not in rules.dime_acts:
+        return {}
+    ids = sorted({a.counterpart.nba_player_id for a in actions.actions
+                  if a.kind == SCRATCH and a.counterpart is not None and a.counterpart.nba_player_id})
+    if not ids or not actions.nba_date:
+        return {}
+    try:
+        found = await AvailabilityService.today(ids, date.fromisoformat(actions.nba_date))
+    except Exception as exc:
+        log.warning("teams_overview_rulings_failed", team_id=team_id, error=f"{type(exc).__name__}: {exc}")
+        return {}
+    return {v.nba_player_id: at for v in found if (at := _aware(v.changed_at)) is not None}
 
 
 def levels_of(team_id: int, acct: Account) -> dict[str, str]:
@@ -598,6 +656,8 @@ def levels_of(team_id: int, acct: Account) -> dict[str, str]:
 def _fill_at(acct: Account, rules: Rules, team_id: int) -> Optional[datetime]:
     """When today's auto-lineup is due on the team; None when it won't run (or already has)."""
     if not rules.fill_applies or rules.fill_ran or not rules.can_write or acct.tip_at is None:
+        return None
+    if rules.fill_failed:      # its retry isn't counted on for the items, so it isn't promised here either
         return None
     if rules.fill_closes_at is None or acct.now >= rules.fill_closes_at:
         return None
@@ -624,15 +684,21 @@ async def _matchup(team: OwnedTeamContext) -> Optional[_MatchupRead]:
     if live.status != ApiStatus.SUCCESS or live.data is None:
         return None
     days = None
+    if matchup.data.matchup_period != live.data.matchup_period:
+        # a write dropped the read just kept and the live score read the provider again, into the
+        # next matchup period: the days of the one before aren't this score's
+        return _MatchupRead(live=live.data, days=None)
+    # kept for the matchup period and the day the week calls today, so ESPN's day turning ends it
+    key = (live.data.matchup_period, matchup_today(matchup.data))
     held = _weeks.get(team_id)
-    if held is not None and held.value[0] == live.data.matchup_period:
+    if held is not None and held.value[0] == key:
         days = held.value[1]
     else:
         try:
             weekly = await MatchupService.weekly_of(team_id, matchup.data)
             if weekly.data is not None:
                 days = weekly.data.days
-                _weeks.put(team_id, (live.data.matchup_period, days), WEEK_TTL, epoch)
+                _weeks.put(team_id, (key, days), WEEK_TTL, epoch)
         except Exception as exc:       # the score still shows; the strip is what's missing
             log.warning("teams_overview_week_failed", team_id=team_id, error=f"{type(exc).__name__}: {exc}")
     return _MatchupRead(live=live.data, days=days)
@@ -703,6 +769,8 @@ def _names(team: OwnedTeamContext) -> dict[str, Any]:
         stored = json.loads(team.league_info_json or "{}")
     except ValueError:
         stored = {}
+    if not isinstance(stored, dict):       # the column is free text: valid JSON that isn't an object
+        stored = {}
     league = team.league
     scoring = (league.scoring_preview or league.scoring_type) if league is not None else stored.get("scoring_preview")
     try:
@@ -761,24 +829,26 @@ async def team_overview(team: OwnedTeamContext, acct: Account) -> TeamOverview:
             late_scratch=view.get(autonomy.LATE_SCRATCH, autonomy.OFF),
         )
 
+    live = matchup.live if matchup is not None else None
     season_state, season_row, win_chance = "unavailable", None, None
     if season is not None:
         season_state, held = season
         if held is not None:
-            season_row, win_chance = season_of(held.projection, held.as_of)
+            season_row, win_chance = season_of(held.projection, held.as_of,
+                                               live.matchup_period if live is not None else None)
             if season_row is None:
                 season_state = "unavailable"
 
-    live = matchup.live if matchup is not None else None
     if not matchup_ok:
         missing.append("matchup")
     unread = actions is None or isinstance(actions, Exception)
     lineup: Optional[LineupState] = None if unread else actions.lineup
-    week: list[OverviewDay] = []
+    week: Optional[list[OverviewDay]] = [] if matchup_ok else None      # unread with the matchup
     if live is not None:
         if matchup.days is not None:
             week = week_of(matchup.days, live, starting_seats(lineup))
         else:
+            week = None
             missing.append("week")
     if not plan_ok:
         missing.append("next")
@@ -802,8 +872,11 @@ async def team_overview(team: OwnedTeamContext, acct: Account) -> TeamOverview:
         return TeamOverview(**out, state="cant_read", error=error)
 
     rules = rules_of(team_id, acct, plan, view or {}, can_write=actions.can_write, board_date=actions.nba_date)
+    rules = replace(rules, ruled_at=await _ruled_at(team_id, actions, rules))
     items = items_of(actions, rules, now)
-    rows, teams = game_states([*live.your_team.roster, *live.opponent_team.roster]) if live is not None else ({}, {})
+    # the live matchup's box scores are one day's: the board's day, unless its baseline lags
+    tonights = live is not None and live.game_date == actions.nba_date
+    rows, teams = game_states([*live.your_team.roster, *live.opponent_team.roster]) if tonights else ({}, {})
     points_league = (live.scoring_format if live is not None else out["scoring_format"]) != "categories"
     upcoming = None
     if plan is not None:
@@ -839,13 +912,12 @@ def summarize(teams: list[TeamOverview], now: datetime) -> TeamsOverviewData:
 
 
 async def _build(user_id: int, now: datetime) -> TeamsOverviewData:
+    started = clock.perf_counter()         # the account's own reads count toward the build's time
     teams = await run_db("teams_overview.teams", _owned_teams, user_id)
     if not teams:
         return summarize([], now)
     acct = await _account(user_id, [t.team_id for t in teams], now)
     room = asyncio.Semaphore(TEAMS_AT_ONCE)
-
-    started = clock.perf_counter()
     took: dict[int, int] = {}
 
     async def one(team: OwnedTeamContext) -> TeamOverview:
