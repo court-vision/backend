@@ -137,6 +137,21 @@ class TestSaving:
         assert out.is_error and "10 asks waiting" in out.content
         assert AiAsk.select().count() == asks.PER_TEAM
 
+    def test_two_turns_at_once_cannot_both_take_the_last_place(self, mine):
+        me, team, chat = mine
+        other = run(conversations.create(me.user_id, team.team_id, title="Also tonight"))
+        for n in range(asks.PER_TEAM - 1):
+            _ask(me, team, chat, _now() + timedelta(hours=n + 1))
+        at = _now() + timedelta(hours=20)
+
+        async def both():
+            return await asyncio.gather(asks._admit(me.user_id, team.team_id, chat.id, "One", at, _now()),
+                                        asks._admit(me.user_id, team.team_id, other.id, "Two", at, _now()))
+
+        saved = [r for r in run(both()) if r is not None]
+        assert len(saved) == 1
+        assert AiAsk.select().where(AiAsk.state == "pending").count() == asks.PER_TEAM
+
     def test_only_for_the_user_s_own_team(self, mine):
         me, _, chat = mine
         them = _user(2)

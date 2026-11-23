@@ -37,8 +37,9 @@ from core.errors import AppError, ConflictError, NotFoundError
 from core.logging import get_logger
 from core.nba_calendar import EASTERN
 from core.settings import settings
-from db.base import db_operation
+from db.base import db, db_operation
 from db.models.autopilot import AiAsk, AiCheckin
+from db.models.teams import Team
 
 log = get_logger("ai.asks")
 
@@ -59,8 +60,6 @@ AHEAD = timedelta(days=14)
 GRACE = timedelta(hours=1)
 # How often this process looks for due asks
 EVERY_SECONDS = 60
-# Due asks started in one look, oldest first: the next look takes the rest
-BATCH = 50
 
 
 def _now() -> datetime:
@@ -174,16 +173,17 @@ def _checkin_of(row: AiAsk) -> Optional[AiCheckin]:
     return ci if ci is not None and getattr(ci, "id", None) is not None else None
 
 
-@db_operation("ai.ask_insert")
-def _insert(user_id: int, team_id: int, conversation_id: Optional[int], what: str, due_at: datetime,
-            now: datetime) -> AiAsk:
-    return AiAsk.create(user_id=user_id, team_id=team_id, conversation_id=conversation_id, what=what, due_at=due_at,
-                        state=PENDING, created_at=now, updated_at=now)
-
-
-@db_operation("ai.asks_waiting")
-def _waiting(team_id: int) -> int:
-    return AiAsk.select().where(AiAsk.team_id == team_id, AiAsk.state == PENDING).count()
+@db_operation("ai.ask_admit")
+def _admit(user_id: int, team_id: int, conversation_id: Optional[int], what: str, due_at: datetime,
+           now: datetime) -> Optional[AiAsk]:
+    """Save the ask, or None when the team already has `PER_TEAM` waiting. Two turns at once (two chats)
+    would each count the other's out: the team row's lock makes the count and the insert one step a team."""
+    with db.atomic():
+        Team.select(Team.team_id).where(Team.team_id == team_id).for_update().first()
+        if AiAsk.select().where(AiAsk.team_id == team_id, AiAsk.state == PENDING).count() >= PER_TEAM:
+            return None
+        return AiAsk.create(user_id=user_id, team_id=team_id, conversation_id=conversation_id, what=what,
+                            due_at=due_at, state=PENDING, created_at=now, updated_at=now)
 
 
 @db_operation("ai.ask_get")
@@ -212,8 +212,10 @@ def take(ask_id: int, checkin_id: int, now: datetime) -> bool:
 
 @db_operation("ai.asks_due")
 def _due(now: datetime) -> list[AiAsk]:
+    """Every waiting ask that fell due, oldest first. No batch: a few busy teams' asks would hold the rest
+    back, and the rows are few (at most `PER_TEAM` a team, each due within its hour of grace)."""
     return list(AiAsk.select().where(AiAsk.state == PENDING, AiAsk.due_at <= now)
-                .order_by(AiAsk.due_at, AiAsk.id).limit(BATCH))
+                .order_by(AiAsk.due_at, AiAsk.id))
 
 
 @db_operation("ai.asks_of_team")
@@ -318,10 +320,10 @@ async def schedule(user_id: int, conversation_id: Optional[int], checkin_id: Opt
                                          "or pick a later time")
     if at > now + AHEAD:
         raise AppError("AI_ASK_INVALID", "An ask can be at most two weeks ahead")
-    if await _waiting(team_id) >= PER_TEAM:
+    row = await _admit(user_id, team_id, conversation_id, args.what, at, now)
+    if row is None:
         raise AppError("AI_ASK_LIMIT", f"This team already has {PER_TEAM} asks waiting: the user can cancel one "
                                        "on the AI desk, or you can with cancel_ask")
-    row = await _insert(user_id, team_id, conversation_id, args.what, at, now)
     v = view(row)
     log.info("ai_ask_saved", ask_id=row.id, team_id=team_id, due_at=at.isoformat())
     return {**_for_model(v), "saved": True, "now_et": et_words(now), ASK_KEY: block_of(v)}
