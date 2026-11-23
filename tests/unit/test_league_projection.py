@@ -77,18 +77,20 @@ def test_once_a_game_starts_its_player_holds_his_slot_and_adds_only_the_rest_of_
     started = lp.ProjPlayer(name="Started", team="ATL", value=40, slots=frozenset({"C", "UT"}), slot="C")
     sat = lp.ProjPlayer(name="Sat", team="BOS", value=30, slots=frozenset({"C", "UT"}), slot="BE")
     later = lp.ProjPlayer(name="Later", team="CHI", value=20, slots=frozenset({"C", "UT"}), slot="BE")
-    left = {"ATL": 0.25, "BOS": 0.0, "CHI": 1.0}
+    left = {"ATL": 0.25, "BOS": 0.0}
     # ATL is three quarters played: the centre keeps the C seat and adds a quarter of his 40;
-    # BOS is over and its player sat; CHI is still to play and takes the UT seat
+    # BOS is over and its player sat; CHI hasn't tipped, so its player takes the UT seat
     assert lp.day_value([started, sat, later], ALL, MON, ["C", "UT"], left) == 10 + 20
     # read whole, with no word on tonight, the best two are seated as before
     assert lp.day_value([started, sat, later], ALL, MON, ["C", "UT"]) == 70
     # a centre locked in the C seat leaves none for a centre still to play
     late_big = lp.ProjPlayer(name="Late Big", team="CHI", value=50, slots=frozenset({"C"}), slot="BE")
-    assert lp.day_value([started, late_big], ALL, MON, ["C", "UT"], {"ATL": 0.0, "CHI": 1.0}) == 0
+    assert lp.day_value([started, late_big], ALL, MON, ["C", "UT"], {"ATL": 0.0}) == 0
+    # from the opening tip, with all of the game still to play
+    assert lp.day_value([started, late_big], ALL, MON, ["C"], {"ATL": 1.0}) == 40
     # and so does one valued at nothing: the seat is his once his game starts
     worthless = lp.ProjPlayer(name="Worthless", team="ATL", value=0, slots=frozenset({"C"}), slot="C")
-    assert lp.day_value([worthless, late_big], ALL, MON, ["C"], {"ATL": 0.5, "CHI": 1.0}) == 0
+    assert lp.day_value([worthless, late_big], ALL, MON, ["C"], {"ATL": 0.5}) == 0
 
 
 def test_a_roster_s_weeks_count_from_the_first_day():
@@ -366,9 +368,8 @@ def test_the_current_matchup_starts_from_espn_s_settled_score_not_the_live_one()
         {"matchupPeriodId": 6, "home": {"teamId": 1, "totalPoints": 412.34, "totalPointsLive": 470.0},
          "away": {"teamId": 2, "totalPoints": 380.0, "totalPointsLive": 391.0}},
     ]}
-    # the live total already counts today's games, so it's read apart, beside them
+    # ESPN's live total already counts today's games: tonight comes from our box scores instead
     assert lps.settled_scores(payload) == {1: 412.3, 2: 380.0}
-    assert lps.live_scores(payload) == {1: 470.0, 2: 391.0}
     # no settled score is no score, never the live one
     del payload["schedule"][1]["away"]["totalPoints"]
     assert lps.settled_scores(payload) == {1: 412.3}
@@ -483,8 +484,10 @@ def test_today_s_games_give_each_team_its_share_still_to_play():
     game = lambda home, away, status, start, period=None, clock=None: SimpleNamespace(
         game_date="2026-11-22", home_team=home, away_team=away, status=status, period=period,
         game_clock=clock, start_time_et=start)
-    games = [game("ATL", "BOS", "final", "19:00", 4, "PT00M00.00S"), game("CHI", "DEN", "scheduled", "22:00")]
-    assert lps.today_left(games, now) == {"ATL": 0.0, "BOS": 0.0, "CHI": 1.0, "DEN": 1.0}
+    games = [game("ATL", "BOS", "final", "19:00", 4, "PT00M00.00S"), game("CHI", "DEN", "scheduled", "22:00"),
+             game("MIA", "NYK", "in_progress", "20:55", 1, "PT12M00.00S")]
+    # a team still to tip is left out, so its players stay movable; one at the opening tip is in
+    assert lps.today_left(games, now) == {"ATL": 0.0, "BOS": 0.0, "MIA": 1.0, "NYK": 1.0}
     # the schedule file's games carry no tip time and no state: no read, so no live score
     assert lps.today_left([*games, game("MIA", "NYK", "scheduled", None)], now) is None
 
@@ -497,11 +500,13 @@ def test_the_current_matchup_takes_the_live_score_only_when_every_side_has_one()
     assert lps.with_live_scores(pairings, {1: 470.0, 3: 120.0}, 6) is None
 
 
-@pytest.mark.parametrize("tonight, scores, left", [
-    ({"ATL": 0.0}, (450.0, 391.0), {"ATL": 0.0}),       # tonight read: the live score, what's left
-    (None, (400.0, 380.0), None),                        # no word on tonight: settled, today whole
+@pytest.mark.parametrize("tonight, scored, scores, left", [
+    ({"ATL": 0.0}, {1: 50.0, 2: 11.0}, (450.0, 391.0), {"ATL": 0.0}),   # settled plus tonight, what's left
+    (None, {1: 50.0, 2: 11.0}, (400.0, 380.0), None),                   # no word on tonight's games
+    ({"ATL": 0.0}, None, (400.0, 380.0), None),                         # no box scores for them
 ])
-def test_the_projection_starts_from_the_live_score_beside_tonight_s_games(monkeypatch, tonight, scores, left):
+def test_the_projection_starts_from_the_live_score_beside_tonight_s_games(monkeypatch, tonight, scored, scores,
+                                                                          left):
     from services import league_overview, lineup_read_service
     from services.espn_service import EspnService
 
@@ -536,7 +541,36 @@ def test_the_projection_starts_from_the_live_score_beside_tonight_s_games(monkey
     monkeypatch.setattr(lps, "value_players", lambda rosters, info, today: ((), None))
     monkeypatch.setattr(lps, "dated_calendar", lambda: tuple(WEEKS))
     monkeypatch.setattr(lps, "games_left_today", games)
+    monkeypatch.setattr(lps, "tonight_scored", lambda rosters, info, today, started: scored)
     asyncio.run(lps.league_projection(_league_info(), today=MON))
     current = next(p for p in seen["league"].schedule if p.matchup == 6)
     assert (current.home_score, current.away_score) == scores
     assert seen["league"].today_left == left
+
+
+def test_tonight_counts_the_starters_whose_game_has_started_off_our_box_scores(monkeypatch):
+    from db.models.nba.live_player_stats import LivePlayerStats
+    from services import matchup_days
+    from services.player_value_service import PlayerValueService
+
+    def entry(espn_id, team, slot_id):
+        return SimpleNamespace(player_id=espn_id, pro_team=team, lineup_slot_id=slot_id)
+
+    def row(espn_id, status, fpts):
+        return SimpleNamespace(player=SimpleNamespace(espn_id=espn_id), game_status=status, fpts=fpts)
+
+    rows = [row(1, 3, 40), row(2, 2, 15), row(3, 3, 30), row(4, 1, 0), row(5, 3, 22)]
+    monkeypatch.setattr(LivePlayerStats, "get_live_stats_by_espn_ids", staticmethod(lambda ids, day: rows))
+    monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda info: None))
+    monkeypatch.setattr(matchup_days, "score_stat_row", lambda r, scoring: float(r.fpts))
+    info = LeagueInfo(provider=FantasyProvider.ESPN, league_id=7, team_name="T", year=2027)
+    rosters = [
+        # C (5) final, PG (0) under way, a benched player (12) and one on IR (13) final
+        (1, "Atlas", (entry(1, "ATL", 5), entry(2, "BOS", 0), entry(3, "ATL", 12), entry(5, "BOS", 13))),
+        (2, "Bricks", (entry(4, "CHI", 5), entry(9, "DEN", 11))),          # still to tip; no row
+    ]
+    assert lps.tonight_scored(rosters, info, MON, frozenset({"ATL", "BOS"})) == {1: 55.0, 2: 0.0}
+    # games under way and no box scores for anyone: the live pipeline isn't writing
+    monkeypatch.setattr(LivePlayerStats, "get_live_stats_by_espn_ids", staticmethod(lambda ids, day: []))
+    assert lps.tonight_scored(rosters, info, MON, frozenset({"ATL"})) is None
+    assert lps.tonight_scored(rosters, info, MON, frozenset()) == {1: 0.0, 2: 0.0}
