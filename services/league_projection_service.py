@@ -366,23 +366,35 @@ def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: O
     return notes
 
 
+def ensure_espn(league_info: LeagueInfo) -> None:
+    if league_info.provider != FantasyProvider.ESPN:
+        raise LeagueProjectionUnavailable(
+            "LEAGUE_PROJECTION_ESPN_ONLY", "League projections are for ESPN leagues for now")
+
+
+async def read_points_league(league_info: LeagueInfo) -> dict[str, Any]:
+    """The league read with every roster, for an ESPN points league; any other league is
+    refused with the code the desk shows."""
+    from services.espn_service import EspnService
+
+    ensure_espn(league_info)
+    payload = await EspnService.fetch_league(
+        league_info, [*league_overview.LEAGUE_VIEWS, league_overview.ROSTER_VIEW])
+    if league_overview.league_format(payload) != "points":
+        raise LeagueProjectionUnavailable(
+            "LEAGUE_PROJECTION_POINTS_ONLY", "League projections are for points leagues for now; "
+                                             "category leagues come later")
+    return payload
+
+
 async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = None,
                             runs: int = lp.SIMULATIONS) -> dict[str, Any]:
     """The league projected for one of the user's ESPN teams (see the module docstring)."""
     from services.espn_service import EspnService
     from services.matchup_days import fantasy_today
 
-    if league_info.provider != FantasyProvider.ESPN:
-        raise LeagueProjectionUnavailable(
-            "LEAGUE_PROJECTION_ESPN_ONLY", "League projections are for ESPN leagues for now")
+    payload = await read_points_league(league_info)
     today = today or fantasy_today()
-    payload = await EspnService.fetch_league(
-        league_info, [*league_overview.LEAGUE_VIEWS, league_overview.ROSTER_VIEW])
-    fmt = league_overview.league_format(payload)
-    if fmt != "points":
-        raise LeagueProjectionUnavailable(
-            "LEAGUE_PROJECTION_POINTS_ONLY", "League projections are for points leagues for now; "
-                                             "category leagues come later")
 
     me = EspnService.resolve_team(league_info, payload.get("teams") or [])
     mine = _int(me.get("id")) if me else None

@@ -187,6 +187,49 @@ def matchup_weeks(periods: Mapping[int, Sequence[int]], matchup: int) -> tuple[i
 # ------------------------------- a roster's days ------------------------------- #
 
 
+def _seat(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, slots: Sequence[str],
+          left: Optional[Mapping[str, float]]) -> tuple[list[float], float]:
+    """Each player's points in the day's lineup, in `players` order (0 for one benched,
+    idle or out), and the day's total (see `day_value`)."""
+    out = [0.0] * len(players)
+    playing: list[CongestionPlayer] = []
+    worth: list[float] = []
+    index: list[int] = []                   # playing[k] is players[index[k]]
+    free = list(slots)
+    held = 0.0
+    for i, p in enumerate(players):
+        if p.team is None or p.team not in teams:
+            continue
+        if left is not None and p.team in left:     # his game has started: his slot is locked
+            share = min(max(left[p.team], 0.0), 1.0)
+            if p.slot in NON_STARTING_SLOTS:
+                continue
+            if p.slot in free:              # held whatever he's worth: nobody else can take it
+                free.remove(p.slot)
+            out[i] = max(p.value, 0.0) * p.chance_on(day) * share
+            held += out[i]
+            continue
+        if p.value <= 0:
+            continue
+        ev = p.value * p.chance_on(day)
+        if ev <= 0:
+            continue
+        playing.append(CongestionPlayer(id=len(playing), value=ev, team=p.team, slots=p.slots))
+        worth.append(ev)
+        index.append(i)
+    if not playing:
+        return out, held
+    if not slots:                           # no lineup known: everyone counts
+        for k, i in enumerate(index):
+            out[i] = worth[k]
+        return out, held + sum(worth)
+    _seats, owner = lineup(playing, free)
+    for k in owner:
+        if k is not None:
+            out[index[k]] = worth[k]
+    return out, held + sum(worth[k] for k in owner if k is not None)
+
+
 def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, slots: Sequence[str],
               left: Optional[Mapping[str, float]] = None) -> float:
     """A roster's expected points on one day: the players whose team plays, seated in
@@ -196,34 +239,15 @@ def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, s
     of it still to play), a player whose game has started is locked where ESPN has him:
     in a starting slot he holds it and adds the rest of his game, on the bench or IR he
     adds nothing. The players still to play are seated in the slots the locked ones leave."""
-    playing: list[CongestionPlayer] = []
-    worth: list[float] = []
-    free = list(slots)
-    held = 0.0
-    for p in players:
-        if p.team is None or p.team not in teams:
-            continue
-        if left is not None and p.team in left:     # his game has started: his slot is locked
-            share = min(max(left[p.team], 0.0), 1.0)
-            if p.slot in NON_STARTING_SLOTS:
-                continue
-            if p.slot in free:              # held whatever he's worth: nobody else can take it
-                free.remove(p.slot)
-            held += max(p.value, 0.0) * p.chance_on(day) * share
-            continue
-        if p.value <= 0:
-            continue
-        ev = p.value * p.chance_on(day)
-        if ev <= 0:
-            continue
-        playing.append(CongestionPlayer(id=len(playing), value=ev, team=p.team, slots=p.slots))
-        worth.append(ev)
-    if not playing:
-        return held
-    if not slots:                           # no lineup known: everyone counts
-        return held + sum(worth)
-    _seats, owner = lineup(playing, free)
-    return held + sum(worth[i] for i in owner if i is not None)
+    return _seat(players, teams, day, slots, left)[1]
+
+
+def day_seats(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, slots: Sequence[str],
+              left: Optional[Mapping[str, float]] = None) -> list[float]:
+    """What each player adds to that day's lineup (`day_value`'s seating), in `players`
+    order: his expected points when seated, 0 when benched, idle or out. They sum to
+    `day_value`."""
+    return _seat(players, teams, day, slots, left)[0]
 
 
 def week_values(roster: Roster, weeks: Sequence[DatedWeek], first_day: date,
