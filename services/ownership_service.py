@@ -22,6 +22,35 @@ from schemas.ownership import (
 from schemas.player import PlayerOwnershipData, PlayerOwnershipResp
 
 
+# How far before the baseline snapshot a player's own reading may come from
+# when that snapshot is missing him.
+BASELINE_FILL_DAYS = 7
+
+
+def _baseline_fill(player_ids: list[int], baseline_date) -> dict[int, float]:
+    """Each player's newest reading in the week before `baseline_date`.
+
+    A snapshot can be partial: the run for 2026-11-14 matched 594 of the usual
+    ~620 players, and the 7-day lists then compared Donovan Mitchell's 99.9%
+    against nothing. Those players have readings the day before, which is the
+    same stand-in the snapshot lookup already uses when a whole night is missing.
+    A player with no reading in that week stays out of the result (unknown).
+    """
+    if not player_ids:
+        return {}
+    rows = (
+        PlayerOwnership.select(PlayerOwnership.player, PlayerOwnership.rost_pct)
+        .where(
+            PlayerOwnership.player.in_(player_ids)
+            & (PlayerOwnership.snapshot_date < baseline_date)
+            & (PlayerOwnership.snapshot_date >= baseline_date - timedelta(days=BASELINE_FILL_DAYS))
+        )
+        .distinct([PlayerOwnership.player])
+        .order_by(PlayerOwnership.player, PlayerOwnership.snapshot_date.desc())
+    )
+    return {row.player_id: float(row.rost_pct) for row in rows}
+
+
 class OwnershipService:
     """Service for retrieving ownership trends."""
 
@@ -110,12 +139,23 @@ class OwnershipService:
                         PlayerOwnership.snapshot_date == actual_past_date
                     )
                 }
+                past_data.update(
+                    _baseline_fill(
+                        [pid for pid in current_data if pid not in past_data],
+                        actual_past_date,
+                    )
+                )
 
             # Calculate changes with velocity
             changes = []
             for player_id in current_data:
                 current = current_data[player_id]
-                past = past_data.get(player_id, 0)
+                past = past_data.get(player_id)
+                if past is None:
+                    # No reading to compare against. That is unknown, not 0%:
+                    # reading it as 0 ranked a 99.9%-owned star as the week's
+                    # top add. A list ranked by change has no place for him.
+                    continue
                 change = current - past
 
                 # Apply minimum ownership filter to reduce noise from deep roster players
