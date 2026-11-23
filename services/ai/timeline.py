@@ -11,7 +11,10 @@ chat. This reads that day, and nothing in it writes or spends:
   follow-up about Thursday sits on Friday, when Dime was thinking it;
 - the day's scheduled check-ins still to come, while the team's check-ins are on;
 - the day's first tip;
-- the notes Dime (or the user) set to recheck that day.
+- the notes Dime (or the user) set to recheck that day;
+- the user's asks due that day that haven't run (services/ai/asks.py; the redesign's step 2): waiting,
+  whether or not check-ins are on, or closed without running. One that ran is its check-in (kind ask),
+  with the ask beside it.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from db.models.ai_conversations import AiMemory
 from db.models.autopilot import AiCheckin, AiDecision, Autopilot, AutopilotAction
 from db.models.move_outcomes import MoveOutcome
 from services import move_ledger, schedule_service
-from services.ai import acting, checkins, decisions, memory
+from services.ai import acting, asks, checkins, decisions, memory
 from services.scheduled_pickup_service import et_at, rollover_at
 
 def _now() -> datetime:
@@ -154,11 +157,13 @@ async def day(user_id: int, team_id: int, day: Optional[date] = None, now: Optio
     rows = await _read(user_id, team_id, day, now)
     upcoming, first_tip = await _upcoming(team_id, day, today, rows.autopilot, now)
     start, end = bounds(day)
+    ran = await asks.of_checkins([r.id for r in rows.checkins if r.kind == checkins.ASK])
     items = []
     for r in rows.checkins:
         view = checkins.summary_of(r, rows.tallies.get(r.id))
         view["calls"] = [_call_view(d, rows, team_id) for d in rows.calls.get(r.id, [])]
         view["notes"] = [memory.note_view(n) for n in rows.notes.get(r.id, [])]
+        view["ask"] = ran.get(r.id)
         items.append(view)
     return {
         "team_id": team_id,
@@ -171,4 +176,5 @@ async def day(user_id: int, team_id: int, day: Optional[date] = None, now: Optio
         "checkins": items,
         "upcoming": upcoming,
         "notes_due": [memory.note_view(n) for n in rows.notes_due],
+        "asks": await asks.of_day(user_id, team_id, start, end),
     }

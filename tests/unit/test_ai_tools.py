@@ -54,14 +54,15 @@ def _stats_resp(message="Player stats fetched successfully"):
 class TestDefinitions:
     def test_every_definition_has_a_handler_and_every_handler_a_definition(self):
         defined = {t["name"] for t in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS,
-                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS, *tools.DRAFT_ONLY_TOOLS]}
+                                       *tools.CHECKIN_ONLY_TOOLS, *tools.STEERING_TOOLS, *tools.DRAFT_ONLY_TOOLS,
+                                       *tools.DIME_ASK_TOOLS]}
         assert defined == set(tools._REGISTRY)
 
     def test_the_router_resolves_names_and_never_loads_stats(self):
         assert [t["name"] for t in tools.ROUTER_TOOLS] == ["search_players", "get_my_teams"]
 
     def test_schemas_forbid_extra_properties(self):
-        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS]:
+        for tool in [*tools.TOOLS, *tools.ROUTER_TOOLS, *tools.AGENT_TOOLS, *tools.DIME_ASK_TOOLS]:
             assert tool["input_schema"]["additionalProperties"] is False, tool["name"]
 
     def test_no_tool_takes_an_espn_id(self):

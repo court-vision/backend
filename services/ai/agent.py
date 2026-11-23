@@ -41,7 +41,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import anthropic
@@ -53,6 +53,7 @@ from core.settings import settings
 from core.tracing import timed
 from schemas.ai import AiToolCall
 from services.ai import conversations, memory, proposals, spend
+from services.ai.asks import ASK_KEY, ASK_TOOL_NAMES, ASK_TOOLS
 from services.ai.client import get_client
 from services.ai.decisions import DECISION_KEY, LOG_DECISION_NAME
 from services.ai.display import (
@@ -79,15 +80,18 @@ BUDGET_SPENT = "Not run: this turn's lookup budget is used up. Answer with what 
 # Dime's steering tools (steer, set_lane, cancel_pickup) come after the display tools
 _STEERING: list[dict[str, Any]] = STEERING_TOOLS
 _STEERING_NAMES = frozenset(t["name"] for t in _STEERING)
-TOOLS: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE, *_STEERING]
-ALLOWED = AGENT_TOOL_NAMES | _STEERING_NAMES
+_BASE: list[dict[str, Any]] = [*AGENT_TOOLS, SHOW_TABLE, SHOW_CHART, SHOW_PLACE, *_STEERING]
+# The user's asks (schedule_ask, cancel_ask; services/ai/asks.py) come last in the AI desk's list and a
+# check-in conversation's, so every list keeps the prefix it had before them
+TOOLS: list[dict[str, Any]] = [*_BASE, *ASK_TOOLS]
+ALLOWED = AGENT_TOOL_NAMES | _STEERING_NAMES | ASK_TOOL_NAMES
 # A check-in's conversation: the same tools, then the check-in's own, appended so the
 # rest of the prefix is the AI desk's
-CHECKIN_TOOLS: list[dict[str, Any]] = [*TOOLS, *CHECKIN_ONLY_TOOLS]
-CHECKIN_ALLOWED = CHECKIN_TOOL_NAMES | _STEERING_NAMES
+CHECKIN_TOOLS: list[dict[str, Any]] = [*_BASE, *CHECKIN_ONLY_TOOLS, *ASK_TOOLS]
+CHECKIN_ALLOWED = CHECKIN_TOOL_NAMES | _STEERING_NAMES | ASK_TOOL_NAMES
 # A draft note's conversation (services/ai/draft.py): the same tools, then the room's plan and the
-# mock seat's pick, appended the same way
-DRAFT_TOOLS: list[dict[str, Any]] = [*TOOLS, *DRAFT_ONLY_TOOLS]
+# mock seat's pick, appended the same way (no asks: a draft note answers at the pick)
+DRAFT_TOOLS: list[dict[str, Any]] = [*_BASE, *DRAFT_ONLY_TOOLS]
 DRAFT_ALLOWED = DRAFT_TOOL_NAMES | _STEERING_NAMES
 
 # What the user sees while a tool runs
@@ -135,6 +139,8 @@ STATUS: dict[str, str] = {
     "show_table": "Building a table",
     "show_chart": "Drawing a chart",
     "show_place": "Pointing out where",
+    "schedule_ask": "Saving it for later",
+    "cancel_ask": "Cancelling the ask",
 }
 
 
@@ -193,6 +199,8 @@ class Turn:
     allowed: frozenset[str] = ALLOWED
     # The check-in this turn is (usr.ai_checkins): its proposals are shadow, and it logs decisions
     checkin_id: Optional[int] = None
+    # A check-in whose proposals are live chips the user can send (one running the user's ask)
+    live_chips: bool = False
     # The draft note this turn writes (usr.ai_draft_notes): only it may set the room's plan or pick
     draft_note_id: Optional[int] = None
     limits: Limits = field(default_factory=Limits.chat)
@@ -209,6 +217,7 @@ class Turn:
     chips: int = 0
     places: int = 0
     decisions: int = 0
+    asks: int = 0
 
     def all_results(self) -> dict[str, Any]:
         return {**self.history.results, **self.results}
@@ -274,7 +283,8 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
     the agent's notes (its plans and the notes due for a recheck; services/ai/memory.py).
     In a conversation, what became of its earlier proposals (sent, dismissed, expired)
     comes last."""
-    today = nba_date_et() if now is None else now.astimezone(EASTERN).date()
+    clock = (now or datetime.now(timezone.utc)).astimezone(EASTERN)
+    today = nba_date_et() if now is None else clock.date()
     try:
         teams = await list_my_teams(user_id)
     except Exception:
@@ -292,7 +302,10 @@ async def header(user_id: int, pinned: Optional[int], now: Optional[datetime] = 
             chips = await proposals.header_line(conversation_id, user_id, now)
         except Exception:
             get_logger().warning("ai_turn_header_proposals_failed", conversation_id=conversation_id)
-    line = f"Today is {today.strftime('%A')} {today.isoformat()} (US Eastern). {season} {_team_facts(teams, pinned)}"
+    # The clock too, so "in an hour" or "at 6:30 tonight" can be placed (schedule_ask)
+    time_of_day = clock.strftime("%I:%M %p").lstrip("0")
+    line = (f"Today is {today.strftime('%A')} {today.isoformat()} (US Eastern), {time_of_day} now. {season} "
+            f"{_team_facts(teams, pinned)}")
     return "[" + " ".join(part for part in (line, notes, chips) if part) + "]"
 
 
@@ -361,7 +374,8 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
 
     outcome = await run_tool(name, raw, ctx=ToolContext(user_id=turn.user_id, conversation_id=turn.conversation_id,
                                                         build=turn.build, checkin_id=turn.checkin_id,
-                                                        draft_note_id=turn.draft_note_id),
+                                                        draft_note_id=turn.draft_note_id,
+                                                        live_chips=turn.live_chips),
                              allowed=turn.allowed)
     if outcome.is_error:
         return {"type": "tool_result", "tool_use_id": block.id, "content": outcome.content, "is_error": True}
@@ -380,6 +394,13 @@ async def _run_one(turn: Turn, block: Any, emit: Emitter) -> dict[str, Any]:
         # A check-in's call: shown in its conversation for the user to agree or disagree with
         turn.decisions += 1
         shown = {"type": "decision", "id": f"d{turn.decisions}", **decision}
+        turn.parts.append({"kind": "block", "block": shown})
+        emit("block", shown)
+    ask = data.pop(ASK_KEY, None)
+    if ask is not None:
+        # An ask saved (or cancelled): shown in the chat with its time and a Cancel
+        turn.asks += 1
+        shown = {"type": "ask", "id": f"a{turn.asks}", **conversations.storable(ask)}
         turn.parts.append({"kind": "block", "block": shown})
         emit("block", shown)
     # What the model reads speaks Eastern, as the prompt says (the chip and the call above keep

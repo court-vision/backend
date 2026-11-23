@@ -1,5 +1,5 @@
 """
-/v1/internal/jobs/lineup/evaluate, /jobs/lineup/react and /jobs/pickups/execute: the pipeline-token
+/v1/internal/jobs/lineup/evaluate, /jobs/lineup/react, /jobs/pickups/execute and /jobs/asks/run: the pipeline-token
 routes. No Clerk user — a missing or wrong bearer is refused, the right one reaches
 the (stubbed) service.
 """
@@ -16,6 +16,7 @@ from schemas.scheduled_pickup import PickupExecuteData, PickupExecuteResp
 from services import late_scratch_service as late
 from services import lineup_editor_service as svc
 from services import scheduled_pickup_service as pickups
+from services.ai import asks
 
 BODY = {"team_id": 21, "user_id": 11, "nba_date": "2026-10-20", "apply": False}
 
@@ -90,6 +91,34 @@ def test_react_reaches_the_service(client, token, monkeypatch):
 def test_react_refuses_a_verdict_it_does_not_answer(client, token):
     r = client.post(REACT, json={**CHANGE, "verdict": "questionable"}, headers={"Authorization": "Bearer pipe-token"})
     assert r.status_code == 422
+
+
+# ---- /v1/internal/jobs/asks/run --------------------------------------------------
+
+ASKS = "/v1/internal/jobs/asks/run"
+
+
+@pytest.mark.api
+def test_asks_missing_or_wrong_bearer_is_refused(client, token):
+    assert client.post(ASKS).status_code in (401, 403)
+    assert client.post(ASKS, headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+@pytest.mark.api
+def test_asks_right_bearer_runs_one_look_and_says_what_started(client, token, monkeypatch):
+    looks = []
+
+    async def fake(now=None):
+        looks.append(now)
+        return {"off": False, "started": [{"ask_id": 5, "team_id": 21, "checkin_id": 9}], "waiting": 1,
+                "closed": 2, "stale": 0}
+
+    monkeypatch.setattr(asks, "run_due", fake)
+    r = client.post(ASKS, headers={"Authorization": "Bearer pipe-token"})
+    assert r.status_code == 200 and looks == [None]
+    assert r.json()["data"] == {"off": False, "started": [{"ask_id": 5, "team_id": 21, "checkin_id": 9}],
+                                "waiting": 1, "closed": 2, "stale": 0}
+    assert r.json()["message"] == "Started 1 ask(s)"
 
 
 # ---- /v1/internal/jobs/pickups/execute ------------------------------------------

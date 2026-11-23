@@ -316,6 +316,40 @@ class TestTurn:
         assert row["parts"][0]["block"]["proposal_id"] == 31
         assert row["results"]["r1"]["data"] == eastern
 
+    def test_an_ask_dime_saves_is_the_chat_s_block_with_its_time(self, agent_on, recorded, monkeypatch):
+        block = {"ask_id": 4, "team_id": 22, "what": "Start Herb Jones if Embiid sits",
+                 "due_at": "2026-10-22T23:30:00+00:00", "state": "pending", "reason": None, "checkin_id": None,
+                 "conversation_id": None}
+        _tools(monkeypatch, {"schedule_ask": {"ask_id": 4, "team_id": 22, "at_et": "Thu Oct 22, 7:30 PM",
+                                              "what": block["what"], "state": "pending", "ask_block": block}})
+        fake = _client(monkeypatch, [
+            msg("tool_use", tool_use("tu1", "schedule_ask", {"team_id": 22, "at": "2026-10-22T19:30",
+                                                             "what": block["what"]})),
+            msg("end_turn", text("Saved for 7:30 PM ET.")),
+        ])
+
+        events = _run(_turn())
+
+        shown = next(e[1] for e in events if e[0] == "block")
+        assert shown == {"type": "ask", "id": "a1", **block}
+        result = json.loads(fake.calls[1]["messages"][-1]["content"][0]["content"])
+        assert "ask_block" not in result and result["at_et"] == "Thu Oct 22, 7:30 PM"
+        assert ("status", {"text": "Saving it for later", "kind": "tool", "tool": "schedule_ask"}) in events
+        assert recorded.rows[0]["parts"][0]["block"]["type"] == "ask"
+
+    def test_a_turn_s_live_chips_reach_its_tools(self, agent_on, recorded, monkeypatch):
+        seen = []
+
+        async def fake(name, raw, *, ctx=None, allowed=None):
+            seen.append(ctx)
+            return ToolOutcome(json.dumps({"ok": True}), is_error=False)
+        monkeypatch.setattr(agent, "run_tool", fake)
+        _client(monkeypatch, [msg("tool_use", tool_use("tu1", "get_lineup", {"team_id": 22})), msg("end_turn")])
+        turn = _turn()
+        turn.checkin_id, turn.live_chips = 9, True
+        _run(turn)
+        assert seen[0].checkin_id == 9 and seen[0].live_chips is True and seen[0].shadow is False
+
     def test_a_chip_alone_is_an_answer(self, agent_on, recorded, monkeypatch):
         chip = {"proposal_id": 5, "state": "proposed"}
         _tools(monkeypatch, {"propose_move": {"proposal_id": 5, "state": "proposed", "chip": chip}})
@@ -1096,8 +1130,11 @@ class TestStartTurn:
         # the user's own turn: no check-in id, so it logs no decisions and its chips are ordinary
         assert follow_up.tools is agent.CHECKIN_TOOLS and follow_up.allowed == agent.CHECKIN_ALLOWED
         assert follow_up.checkin_id is None and follow_up.limits == agent.Limits.chat()
-        assert [t["name"] for t in agent.CHECKIN_TOOLS[:len(agent.TOOLS)]] == [t["name"] for t in agent.TOOLS]
-        assert agent.CHECKIN_TOOLS[-1]["name"] == "log_decision" and "log_decision" not in agent.ALLOWED
+        # Every list keeps the prefix it had: the desk's and the check-in's add the asks at their end
+        base = [t["name"] for t in agent._BASE]
+        assert [t["name"] for t in agent.TOOLS] == [*base, "schedule_ask", "cancel_ask"]
+        assert [t["name"] for t in agent.CHECKIN_TOOLS] == [*base, "log_decision", "schedule_ask", "cancel_ask"]
+        assert "log_decision" not in agent.ALLOWED and {"schedule_ask", "cancel_ask"} <= agent.CHECKIN_ALLOWED
 
     def test_off_and_invite_only_come_first(self, service_stubs, monkeypatch):
         monkeypatch.setattr(settings, "ai_agent_user_ids", [])

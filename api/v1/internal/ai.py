@@ -13,6 +13,8 @@ from fastapi.responses import StreamingResponse
 from api.deps import UserContext, get_db_user
 from core.errors import NotFoundError
 from schemas.ai import (
+    AiAskResp,
+    AiAsksResp,
     AiAutopilotActionsResp,
     AiAutopilotReq,
     AiAutopilotResp,
@@ -222,9 +224,9 @@ async def _events(emit: Emitter) -> AsyncIterator[str]:
         "`note` for the agent's own progress note, `step` for the start of each step after the "
         "first, when whatever the last status said is done);\n"
         "- `text` `{delta}`: the answer's prose, as it is written;\n"
-        "- `block` (an `AiTable`, `AiChart`, `AiProposal`, `AiPlace` or, in a check-in, `AiDecisionBlock`): a "
-        "table, chart, proposed move, place in the app or logged call the server built from the agent's "
-        "lookups;\n"
+        "- `block` (an `AiTable`, `AiChart`, `AiProposal`, `AiPlace`, `AiAskBlock` or, in a check-in, "
+        "`AiDecisionBlock`): a table, chart, proposed move, place in the app, ask saved for later or logged "
+        "call the server built from the agent's lookups;\n"
         "- `error` `{code, message}`: the turn failed (AI_DECLINED, AI_TIMEOUT, AI_INCOMPLETE, AI_BUSY, ...);\n"
         "- `done` `{turn_id, outcome, cost_usd, model_calls, duration_ms, spend}`: always last.\n\n"
         "Text and blocks arrive in the order the user should see them. Lines starting with `:` are "
@@ -488,7 +490,8 @@ async def set_autopilot(
         "check-ins that ran in it, oldest first, each with its calls, what Dime did about each on its own, how "
         "each move it sent went (the move ledger's row for its proposal) and the notes its own turn wrote; "
         "the day's scheduled check-ins still to come while the team's check-ins are on; the day's first tip; "
-        "and the notes set to recheck that day."
+        "the notes set to recheck that day; and the user's asks due that day that haven't run (one that ran "
+        "is its check-in, kind ask, with `ask` set)."
     ),
     responses={**_AGENT_ERRORS, 404: _CHECKIN_ERRORS[404]},
 )
@@ -499,6 +502,43 @@ async def get_timeline(
 ) -> AiTimelineResp:
     data = await AgentService.timeline(user.user_id, team_id, date)
     return AiTimelineResp(status=ApiStatus.SUCCESS, message="Timeline", data=data)
+
+
+@router.get(
+    "/asks",
+    response_model=AiAsksResp,
+    summary="What the user asked Dime to do at a time, on one team",
+    description=(
+        "The team's asks (saved by Dime's schedule_ask in a chat): the ones still to run, soonest first, and the "
+        "others due in the last day, latest first. Each runs at its time as a check-in of kind ask, one Dime "
+        "turn on the check-ins budget; its state is then that check-in's (running, done, failed)."
+    ),
+    responses={**_AGENT_ERRORS, 404: _CHECKIN_ERRORS[404]},
+)
+async def list_asks(
+    team_id: int = Query(..., gt=0, le=2_147_483_647),
+    user: UserContext = Depends(get_db_user),
+) -> AiAsksResp:
+    data = await AgentService.asks(user.user_id, team_id)
+    return AiAsksResp(status=ApiStatus.SUCCESS, message="Asks", data=data)
+
+
+@router.delete(
+    "/asks/{ask_id}",
+    response_model=AiAskResp,
+    summary="Cancel an ask that hasn't run",
+    responses={
+        **_AGENT_ERRORS,
+        404: {"description": "No such ask for this caller (AI_ASK_NOT_FOUND)"},
+        409: {"description": "It ran or closed already (AI_ASK_CLOSED)"},
+    },
+)
+async def cancel_ask(
+    ask_id: int = Path(..., gt=0),
+    user: UserContext = Depends(get_db_user),
+) -> AiAskResp:
+    data = await AgentService.cancel_ask(user.user_id, ask_id)
+    return AiAskResp(status=ApiStatus.SUCCESS, message="Ask cancelled", data=data)
 
 
 @router.get(
