@@ -9,6 +9,12 @@ game and his chance to play each game when the morning's snapshot carries him, e
 his stored-stats value with a full chance (none when ESPN lists him OUT), and he is
 counted in `players_unprojected`.
 
+The current matchup starts from ESPN's live score (`totalPointsLive`) when today's
+games can be read (`GamesService`, the same live overlay the schedule shows): each NBA
+team's share of its game still to play goes to the projection as `today_left`, so the
+points scored tonight count as scored. Without it, it starts from the settled score
+(`totalPoints`, through yesterday) and projects today whole.
+
 ESPN points leagues only for now: a category league needs per-category projections
 (the plan's step 6), and Yahoo has no standings read yet. Neither is an error of the
 server, so both answer 400 with a code the desk can show.
@@ -16,9 +22,12 @@ server, so both answer 400 with a code the desk can show.
 
 from __future__ import annotations
 
+import re
 import zlib
-from datetime import date
-from typing import Any, Mapping, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Iterable, Mapping, Optional
+
+import pytz
 
 from core.compute import run_cpu
 from core.errors import BadRequestError, ProviderError, ServiceUnavailableError
@@ -35,6 +44,13 @@ log = get_logger("league_projection")
 
 # ESPN's `playoffSeedingRule` is the tiebreaker between equal records, not the seeding
 TIEBREAKERS = {"H2H_RECORD": "head_to_head", "TOTAL_POINTS_SCORED": "points_for"}
+
+EASTERN = pytz.timezone("US/Eastern")
+REGULATION_SECONDS = 48 * 60
+QUARTER_SECONDS = 12 * 60
+# a game under way with no clock to read is guessed from its tip at this length
+GAME_LENGTH = timedelta(hours=2, minutes=15)
+_CLOCK = re.compile(r"^PT(\d+)M(\d+(?:\.\d+)?)S$")
 
 
 class LeagueProjectionUnavailable(BadRequestError):
@@ -85,20 +101,100 @@ def dated_calendar() -> Optional[tuple[lp.DatedWeek, ...]]:
         return None
 
 
-def settled_scores(payload: Mapping[str, Any]) -> dict[int, float]:
+def settled_scores(payload: Mapping[str, Any], key: str = "totalPoints") -> dict[int, float]:
     """Each team's current-matchup score as ESPN settled it overnight (`totalPoints`,
-    through yesterday). `totalPointsLive` also counts today's games, which the
-    projection already counts from today on."""
+    through yesterday). `totalPointsLive` also counts today's games, so it is read
+    (`live_scores`) only beside today's games, which then count just what's left."""
     current = _int((payload.get("status") or {}).get("currentMatchupPeriod"))
     out: dict[int, float] = {}
     for m in payload.get("schedule") or []:
         if current is None or _int(m.get("matchupPeriodId")) != current:
             continue
         for side in (m.get("home") or {}, m.get("away") or {}):
-            tid, points = _int(side.get("teamId")), side.get("totalPoints")
+            tid, points = _int(side.get("teamId")), side.get(key)
             if tid is not None and isinstance(points, (int, float)):
                 out[tid] = round(float(points), 1)
     return out
+
+
+def live_scores(payload: Mapping[str, Any]) -> dict[int, float]:
+    """Each team's current-matchup score with today's games so far (`totalPointsLive`)."""
+    return settled_scores(payload, "totalPointsLive")
+
+
+def with_live_scores(pairings: list, live: Mapping[int, float], current: int) -> Optional[list]:
+    """The pairings with the current matchup's live scores; None unless every side has one,
+    so no team is read live while another is read settled."""
+    out = []
+    for p in pairings:
+        if p.matchup == current:
+            home, away = live.get(p.home), live.get(p.away) if p.away is not None else None
+            if home is None or (p.away is not None and away is None):
+                return None
+            p = lp.Pairing(matchup=p.matchup, home=p.home, away=p.away, home_score=home,
+                           away_score=away, winner=p.winner)
+        out.append(p)
+    return out
+
+
+def game_left(status: Optional[str], period: Optional[int], clock: Optional[str],
+              tip: Optional[datetime], now: datetime) -> Optional[float]:
+    """The share of a game still to play: 1 before the tip, 0 once final, and under way
+    the regulation time left on its period and clock (overtime counts as almost none).
+    A game the live read hasn't caught up with is guessed from its tip time, so one long
+    over never counts again. None when nothing tells: not final, not under way, and no
+    tip time (the schedule file's games, which a live score can't be read beside)."""
+    if status == "final":
+        return 0.0
+    if status == "in_progress":
+        match = _CLOCK.match(clock) if isinstance(clock, str) else None
+        if period and match:
+            seconds = max(0, 4 - int(period)) * QUARTER_SECONDS + int(match[1]) * 60 + float(match[2])
+            return min(max(seconds / REGULATION_SECONDS, 0.0), 1.0)
+    if tip is None:
+        return 0.5 if status == "in_progress" else None
+    if tip > now:
+        return 1.0 if status != "in_progress" else 0.5
+    return min(max(1.0 - (now - tip) / GAME_LENGTH, 0.0), 1.0)
+
+
+def today_left(games: Iterable[Any], now: datetime) -> Optional[dict[str, float]]:
+    """Each NBA team playing today -> the share of its game still to play (`game_left`),
+    off the day's games as `GamesService.get_games_on_date` reads them (ET tip times);
+    None when any game's state can't be told, so the live score is never read beside a
+    guess that could count tonight twice."""
+    out: dict[str, float] = {}
+    for g in games:
+        tip = None
+        if g.start_time_et:
+            try:
+                day = date.fromisoformat(g.game_date)
+                hour, minute = (int(x) for x in g.start_time_et.split(":")[:2])
+                tip = EASTERN.localize(datetime(day.year, day.month, day.day, hour, minute))
+            except ValueError:
+                tip = None
+        share = game_left(g.status, g.period, g.game_clock, tip, now)
+        if share is None:
+            return None
+        for team in (g.home_team, g.away_team):
+            if team:
+                out[team] = min(out.get(team, 1.0), share)
+    return out
+
+
+async def games_left_today(today: date, now: Optional[datetime] = None) -> Optional[dict[str, float]]:
+    """`today_left` for the fantasy day; None when the day's games can't be read."""
+    from schemas.common import ApiStatus
+    from services.games_service import GamesService
+
+    resp = await GamesService.get_games_on_date(today)
+    if resp.status != ApiStatus.SUCCESS or resp.data is None:
+        log.warning("league_projection_no_games_today", day=today.isoformat())
+        return None
+    left = today_left(resp.data.games, (now or datetime.now(EASTERN)).astimezone(EASTERN))
+    if left is None:
+        log.warning("league_projection_games_state_unknown", day=today.isoformat())
+    return left
 
 
 def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list, list, list]:
@@ -119,7 +215,7 @@ def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list,
             continue
         home, away = g.home_score, g.away_score
         if g.matchup == current:
-            # never the live score: it counts today's games, which the projection counts too
+            # the settled score: `with_live_scores` swaps in the live one beside today's games
             home, away = settled.get(g.home), settled.get(g.away) if g.away is not None else None
         pairings.append(lp.Pairing(matchup=g.matchup, home=g.home, away=g.away, home_score=home,
                                    away_score=away, winner=g.winner))
@@ -154,10 +250,11 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
             nba = nba_ids.get(e.player_id)
             row = live.get(nba) if nba is not None else None
             espn_team = e.pro_team if e.pro_team and e.pro_team != "FA" else None
+            slot = POSITION_MAP.get(e.lineup_slot_id)
             if row is not None:
                 players.append(lp.ProjPlayer(
                     name=e.name, team=row.team or espn_team, value=max(scoring.points.score(row.line), 0.0),
-                    slots=slots, timeline=row.timeline, player_id=nba, projected=True,
+                    slots=slots, timeline=row.timeline, player_id=nba, projected=True, slot=slot,
                 ))
             else:
                 valued = stored.get(e.player_id)
@@ -165,7 +262,7 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
                 out_now = (e.injury_status or "").upper() == "OUT"
                 players.append(lp.ProjPlayer(
                     name=e.name, team=espn_team, value=max(value, 0.0), slots=slots,
-                    chance=0.0 if out_now else 1.0, player_id=nba, projected=False,
+                    chance=0.0 if out_now else 1.0, player_id=nba, projected=False, slot=slot,
                 ))
         out.append(lp.Roster(league_team_id=tid, team_name=name, players=tuple(players)))
     return tuple(out), snapshot
@@ -240,18 +337,27 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     if weeks is None:
         raise ServiceUnavailableError("LEAGUE_PROJECTION_NO_CALENDAR",
                                       "The season calendar isn't loaded, so the league can't be projected")
+    # tonight's points as scored, and today only what's left of each game; else the settled
+    # score with today whole
+    left = await games_left_today(today)
+    live = with_live_scores(pairings, live_scores(payload), current) if left is not None else None
+    if live is not None:
+        pairings = live
+    else:
+        left = None
     league = lp.League(
         rosters=rosters, standings=tuple(standings), schedule=tuple(pairings),
         periods=matchup_periods(payload), current_matchup=current, regular_season_matchups=regular,
         playoff_teams=playoff_teams, roster_slots=roster_slots(payload),
-        mine=mine, reseed=bool(sched.get("playoffReseed")),
+        mine=mine, reseed=bool(sched.get("playoffReseed")), today_left=left,
     )
     # the same runs for the same league on the same day, so a reload doesn't move the odds
     seed = zlib.crc32(f"{league_info.league_id}:{league_info.year}:{today.isoformat()}".encode())
     result = await run_cpu("league_projection.project", lp.project, league, weeks, today, runs=runs, seed=seed)
 
     log.info("league_projection_built", league_id=league_info.league_id, teams=len(rosters),
-             runs=result["simulations"], live_as_of=str(snapshot.as_of) if snapshot else None)
+             runs=result["simulations"], live_as_of=str(snapshot.as_of) if snapshot else None,
+             live_score=left is not None)
     return {
         "league_name": (payload.get("settings") or {}).get("name"),
         "format": "points",
