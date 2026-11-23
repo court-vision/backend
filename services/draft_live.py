@@ -202,12 +202,20 @@ def _note_reason(note: Mapping, names: Mapping[int, str], today: date) -> Option
         what = "a bigger share of the offense" if usage > 1.0 else "a smaller share of the offense"
     else:
         return None
+    # A projection is read for up to two days after it was written, so a note
+    # it recorded as in force can have ended by the day the board counts from:
+    # its own last day (`until`), or the last of his team's games it was still
+    # likely to hold in (`through`), is behind `today`. Ended, it is no reason,
+    # whoever it depended on.
+    until, through = _day(note.get("until")), _day(note.get("through"))
+    if any(end is not None and end < today for end in (until, through)):
+        return None
     teammate = names.get(note.get("depends_on")) if note.get("depends_on") is not None else None
-    until = _day(note.get("until")) or _day(note.get("through"))
     if teammate:
         return f"Note: {what} while {teammate} is out"
-    if until is not None and until >= today:
-        return f"Note: {what} through {short_day(until)}"
+    end = until or through
+    if end is not None:
+        return f"Note: {what} through {short_day(end)}"
     return f"Note: {what}"
 
 

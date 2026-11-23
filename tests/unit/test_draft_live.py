@@ -78,6 +78,35 @@ def test_a_note_in_force_says_what_it_sets_and_how_long_it_holds():
     assert reason_of({"note": {"id": 3}}, TODAY) is None
 
 
+def test_a_note_that_ended_before_the_day_read_is_no_reason():
+    """The projection is read for up to two days after it was written, so a
+    note it recorded can have run out by the day the board counts from."""
+    names = {7: "Big Man"}
+
+    # Its own last day is behind today, or the last game it was likely to hold in is
+    assert reason_of({"note": {"id": 3, "minutes": 32.0, "until": "2026-11-22"}}, TODAY) is None
+    assert reason_of({"note": {"id": 3, "usage": 1.15, "through": "2026-11-21"}}, TODAY) is None
+    # Whoever it depended on: the teammate was likely back by yesterday
+    assert reason_of({"note": {"id": 3, "minutes": 32.0, "depends_on": 7, "through": "2026-11-22"}},
+                     TODAY, names=names) is None
+    # Dated to a later day but with no game left it holds in after yesterday's
+    assert reason_of({"note": {"id": 3, "minutes": 32.0, "until": "2026-11-25", "through": "2026-11-22"}},
+                     TODAY) is None
+    # Its last day is today: still in force
+    assert reason_of({"note": {"id": 3, "minutes": 32.0, "until": "2026-11-23"}}, TODAY) == (
+        "Note: 32 minutes a game through Nov 23")
+    assert reason_of({"note": {"id": 3, "minutes": 32.0, "depends_on": 7, "through": "2026-11-23"}},
+                     TODAY, names=names) == "Note: 32 minutes a game while Big Man is out"
+
+
+def test_what_else_is_known_is_the_reason_once_a_note_has_ended():
+    ended = {"id": 3, "minutes": 32.0, "until": "2026-11-22"}
+
+    assert reason_of({"note": ended, "known": {"out_next": True}}, TODAY) == "Out of his team's next game"
+    assert reason_of({"note": ended, "recent_minutes": 34.2, "season_minutes": 29.5}, TODAY, moved=8) == (
+        "Minutes up: 34.2 lately, 29.5 on the season")
+
+
 def test_minutes_are_the_reason_only_for_a_plain_move_the_same_way():
     up = {"recent_minutes": 34.2, "season_minutes": 29.5}
 
