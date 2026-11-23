@@ -3,7 +3,7 @@ seated in the league's slots, the benchmark rows, the calendar's gaps, the brack
 simulated odds, and the service's reads around them."""
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +71,21 @@ def test_a_player_counts_at_his_chance_to_play_and_only_on_his_team_s_nights():
     assert lp.day_value([healthy, back_wednesday, no_team], ALL, MON, ["UT", "UT"]) == 30
     assert lp.day_value([healthy, back_wednesday, no_team], ALL, MON + timedelta(2), ["UT", "UT"]) == 50
     assert lp.day_value([healthy], frozenset({"BOS"}), MON, ["UT"]) == 0
+
+
+def test_once_a_game_starts_its_player_holds_his_slot_and_adds_only_the_rest_of_it():
+    started = lp.ProjPlayer(name="Started", team="ATL", value=40, slots=frozenset({"C", "UT"}), slot="C")
+    sat = lp.ProjPlayer(name="Sat", team="BOS", value=30, slots=frozenset({"C", "UT"}), slot="BE")
+    later = lp.ProjPlayer(name="Later", team="CHI", value=20, slots=frozenset({"C", "UT"}), slot="BE")
+    left = {"ATL": 0.25, "BOS": 0.0, "CHI": 1.0}
+    # ATL is three quarters played: the centre keeps the C seat and adds a quarter of his 40;
+    # BOS is over and its player sat; CHI is still to play and takes the UT seat
+    assert lp.day_value([started, sat, later], ALL, MON, ["C", "UT"], left) == 10 + 20
+    # read whole, with no word on tonight, the best two are seated as before
+    assert lp.day_value([started, sat, later], ALL, MON, ["C", "UT"]) == 70
+    # a centre locked in the C seat leaves none for a centre still to play
+    late_big = lp.ProjPlayer(name="Late Big", team="CHI", value=50, slots=frozenset({"C"}), slot="BE")
+    assert lp.day_value([started, late_big], ALL, MON, ["C", "UT"], {"ATL": 0.0, "CHI": 1.0}) == 0
 
 
 def test_a_roster_s_weeks_count_from_the_first_day():
@@ -238,6 +253,19 @@ def test_the_projection_reads_finals_as_scored_and_the_rest_as_projected():
     assert out["incomplete_weeks"] == [3]
 
 
+def test_with_tonight_read_live_the_current_matchup_adds_only_what_s_left_of_it():
+    last_day = MON + timedelta(6)
+    # every game tonight is over: the live score already holds them, so it stands
+    over = lp.project(small_league(today_left={t: 0.0 for t in ALL}), WEEKS, last_day, runs=200, seed=1)
+    assert {m["matchup"]: m for m in over["matchups"]}[2]["you"] == 40.0
+    # half of tonight still to play: half of Atlas's 30
+    half = lp.project(small_league(today_left={t: 0.5 for t in ALL}), WEEKS, last_day, runs=200, seed=1)
+    assert {m["matchup"]: m for m in half["matchups"]}[2]["you"] == 40.0 + 15
+    # with the settled score, today counts whole
+    whole = lp.project(small_league(), WEEKS, last_day, runs=200, seed=1)
+    assert {m["matchup"]: m for m in whole["matchups"]}[2]["you"] == 40.0 + 30
+
+
 def test_the_per_week_averages_leave_out_the_calendar_s_gaps_and_the_week_under_way():
     out = lp.project(small_league(), WEEKS, MON + timedelta(1), runs=200, seed=5)
     atlas = next(t for t in out["teams"] if t["league_team_id"] == 1)
@@ -335,8 +363,9 @@ def test_the_current_matchup_starts_from_espn_s_settled_score_not_the_live_one()
         {"matchupPeriodId": 6, "home": {"teamId": 1, "totalPoints": 412.34, "totalPointsLive": 470.0},
          "away": {"teamId": 2, "totalPoints": 380.0, "totalPointsLive": 391.0}},
     ]}
-    # the live total already counts today's games, which the projection counts from today on
+    # the live total already counts today's games, so it's read apart, beside them
     assert lps.settled_scores(payload) == {1: 412.3, 2: 380.0}
+    assert lps.live_scores(payload) == {1: 470.0, 2: 391.0}
     # no settled score is no score, never the live one
     del payload["schedule"][1]["away"]["totalPoints"]
     assert lps.settled_scores(payload) == {1: 412.3}
@@ -426,3 +455,81 @@ def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
     assert lps.notes_for(result, MON, mine=1, divisions=2)[-1].startswith("This league has 2 divisions")
     assert not any("division" in n for n in lps.notes_for(result, MON, mine=1))
     assert lps.notes_for(result, MON, mine=1, tiebreaker="head_to_head")[-1].endswith("break them by points for.")
+
+
+# ------------------------------- tonight, read live ------------------------------- #
+
+
+def test_a_game_s_share_still_to_play_reads_its_status_and_clock():
+    at = lambda h, m=0: lps.EASTERN.localize(datetime(2026, 11, 22, h, m))
+    tip, now = at(19, 30), at(21)
+    assert lps.game_left("final", 4, "PT00M00.00S", tip, now) == 0.0
+    assert lps.game_left("scheduled", None, None, at(22), now) == 1.0
+    assert lps.game_left("in_progress", 3, "PT06M00.00S", tip, now) == pytest.approx((720 + 360) / 2880)
+    assert lps.game_left("in_progress", 2, "PT00M00.00S", tip, now) == 0.5          # halftime
+    assert lps.game_left("in_progress", 5, "PT02M30.00S", tip, now) == pytest.approx(150 / 2880)
+    # a live read that hasn't caught up is guessed from the tip, and a game long over never counts again
+    assert lps.game_left("scheduled", None, None, tip, now) == pytest.approx(1 - 90 / 135)
+    assert lps.game_left("in_progress", None, None, at(16), now) == 0.0
+
+
+def test_today_s_games_give_each_team_its_share_still_to_play():
+    now = lps.EASTERN.localize(datetime(2026, 11, 22, 21, 0))
+    game = lambda home, away, status, start, period=None, clock=None: SimpleNamespace(
+        game_date="2026-11-22", home_team=home, away_team=away, status=status, period=period,
+        game_clock=clock, start_time_et=start)
+    games = [game("ATL", "BOS", "final", "19:00", 4, "PT00M00.00S"), game("CHI", "DEN", "scheduled", "22:00")]
+    assert lps.today_left(games, now) == {"ATL": 0.0, "BOS": 0.0, "CHI": 1.0, "DEN": 1.0}
+
+
+def test_the_current_matchup_takes_the_live_score_only_when_every_side_has_one():
+    pairings = [lp.Pairing(5, 1, 2, 900.0, 800.0, "home"), lp.Pairing(6, 1, 2, 412.3, 380.0),
+                lp.Pairing(6, 3, None, 100.0)]
+    out = lps.with_live_scores(pairings, {1: 470.0, 2: 391.0, 3: 120.0}, 6)
+    assert [(p.home_score, p.away_score) for p in out] == [(900.0, 800.0), (470.0, 391.0), (120.0, None)]
+    assert lps.with_live_scores(pairings, {1: 470.0, 3: 120.0}, 6) is None
+
+
+@pytest.mark.parametrize("tonight, scores, left", [
+    ({"ATL": 0.0}, (450.0, 391.0), {"ATL": 0.0}),       # tonight read: the live score, what's left
+    (None, (400.0, 380.0), None),                        # no word on tonight: settled, today whole
+])
+def test_the_projection_starts_from_the_live_score_beside_tonight_s_games(monkeypatch, tonight, scores, left):
+    from services import league_overview, lineup_read_service
+    from services.espn_service import EspnService
+
+    payload = {"status": {"currentMatchupPeriod": 6}, "teams": [],
+               "settings": {"scoringSettings": {"scoringType": "H2H_POINTS"}},
+               "schedule": [{"matchupPeriodId": 6, "home": {"teamId": 1, "totalPoints": 400.0, "totalPointsLive": 450.0},
+                             "away": {"teamId": 2, "totalPoints": 380.0, "totalPointsLive": 391.0}}]}
+
+    async def fetch(league_info, views):
+        return payload
+
+    async def direct(name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    async def games(today):
+        return tonight
+
+    seen = {}
+
+    async def capture(name, fn, league, weeks, today, **kwargs):
+        seen["league"] = league
+        return {"simulations": 0, "incomplete_weeks": [], "matchups": [], "teams": [], "in_playoffs": False}
+
+    monkeypatch.setattr(league_overview, "standings", lambda payload, mine, categories: [
+        {"league_team_id": t, "team_name": f"T{t}", "rank": t, "wins": 0, "losses": 0, "ties": 0} for t in (1, 2)])
+    monkeypatch.setattr(lineup_read_service, "parse_espn_lineup",
+                        lambda payload, team_name, espn_team_id: SimpleNamespace(entries=()))
+    monkeypatch.setattr(EspnService, "fetch_league", staticmethod(fetch))
+    monkeypatch.setattr(EspnService, "resolve_team", staticmethod(lambda info, teams: None))
+    monkeypatch.setattr(lps, "run_db", direct)
+    monkeypatch.setattr(lps, "run_cpu", capture)
+    monkeypatch.setattr(lps, "value_players", lambda rosters, info, today: ((), None))
+    monkeypatch.setattr(lps, "dated_calendar", lambda: tuple(WEEKS))
+    monkeypatch.setattr(lps, "games_left_today", games)
+    asyncio.run(lps.league_projection(_league_info(), today=MON))
+    current = next(p for p in seen["league"].schedule if p.matchup == 6)
+    assert (current.home_score, current.away_score) == scores
+    assert seen["league"].today_left == left

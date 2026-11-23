@@ -19,8 +19,13 @@ the rest: the timeline already has them out until their return.
 
 **A week, a matchup.** Calendar weeks are the calendar's (`schedule_service`); a
 matchup period is the weeks ESPN maps it to (a two-week playoff round is two).
-The current matchup is ESPN's settled score (through yesterday) plus the days left,
-today included, so a game played today is counted once, as projected.
+The current matchup starts from ESPN's live score when today's games can be read
+(`League.today_left`): what's been played counts as played, and today adds only the
+rest of each game, the share of it still to play. A player whose game has started is
+held in the slot ESPN has him in (a lineup locks at each game's tip), so the players
+still to play are seated in the slots left. Without today's games it starts from
+ESPN's settled score (through yesterday) and counts today whole, as projected; either
+way a game played today is counted once.
 
 **Weeks the calendar can't count.** The NBA sets some games late (the NBA Cup's
 knockout window in December). A week with more empty days than its span explains
@@ -53,7 +58,7 @@ from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
-from services.draft_congestion import CongestionPlayer, SampleWeek, active_slots, lineup
+from services.draft_congestion import NON_STARTING_SLOTS, CongestionPlayer, SampleWeek, active_slots, lineup
 from services.live_projection import Run, chance_on
 
 # A full week's score varies by this share of a typical week (sd), the matchup's noise.
@@ -79,6 +84,7 @@ class ProjPlayer:
     chance: float = 1.0                     # chance per game when there is no timeline
     player_id: Optional[int] = None         # NBA id
     projected: bool = True                  # False: valued off stored stats, no live projection
+    slot: Optional[str] = None              # the ESPN lineup slot he's in now; None when not known
 
     def chance_on(self, day: date) -> float:
         return chance_on(self.timeline, day) if self.timeline else self.chance
@@ -151,6 +157,9 @@ class League:
     roster_slots: Mapping[str, int]         # ESPN slot name -> count, bench and IR included
     mine: Optional[int] = None
     reseed: bool = False                    # survivors re-paired by seed after each round
+    # NBA team -> share of its game today still to play (1 before the tip, 0 once final), read
+    # with the live score the current matchup starts from; None: the settled score, today whole
+    today_left: Optional[Mapping[str, float]] = None
 
 
 # ------------------------------- the calendar ------------------------------- #
@@ -177,13 +186,29 @@ def matchup_weeks(periods: Mapping[int, Sequence[int]], matchup: int) -> tuple[i
 # ------------------------------- a roster's days ------------------------------- #
 
 
-def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, slots: Sequence[str]) -> float:
+def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, slots: Sequence[str],
+              left: Optional[Mapping[str, float]] = None) -> float:
     """A roster's expected points on one day: the players whose team plays, seated in
-    the lineup slots best first, each worth his points times his chance to play."""
+    the lineup slots best first, each worth his points times his chance to play.
+
+    With `left` (today, read live: each team's share of its game still to play), a
+    player whose game has started is locked where ESPN has him: in a starting slot he
+    holds it and adds the rest of his game, on the bench or IR he adds nothing. The
+    players still to play are seated in the slots the locked ones leave."""
     playing: list[CongestionPlayer] = []
     worth: list[float] = []
+    free = list(slots)
+    held = 0.0
     for p in players:
         if p.team is None or p.team not in teams or p.value <= 0:
+            continue
+        share = 1.0 if left is None else min(max(left.get(p.team, 1.0), 0.0), 1.0)
+        if share < 1.0:                     # his game has started: his lineup slot is locked
+            if p.slot in NON_STARTING_SLOTS:
+                continue
+            if p.slot in free:
+                free.remove(p.slot)
+            held += p.value * p.chance_on(day) * share
             continue
         ev = p.value * p.chance_on(day)
         if ev <= 0:
@@ -191,22 +216,24 @@ def day_value(players: Sequence[ProjPlayer], teams: frozenset[str], day: date, s
         playing.append(CongestionPlayer(id=len(playing), value=ev, team=p.team, slots=p.slots))
         worth.append(ev)
     if not playing:
-        return 0.0
+        return held
     if not slots:                           # no lineup known: everyone counts
-        return sum(worth)
-    _seats, owner = lineup(playing, slots)
-    return sum(worth[i] for i in owner if i is not None)
+        return held + sum(worth)
+    _seats, owner = lineup(playing, free)
+    return held + sum(worth[i] for i in owner if i is not None)
 
 
 def week_values(roster: Roster, weeks: Sequence[DatedWeek], first_day: date,
-                slots: Sequence[str]) -> dict[int, float]:
-    """A roster's expected points in each calendar week, counting days from `first_day`."""
+                slots: Sequence[str], today_left: Optional[Mapping[str, float]] = None) -> dict[int, float]:
+    """A roster's expected points in each calendar week, counting days from `first_day`
+    (that day read with `today_left`, when given)."""
     out: dict[int, float] = {}
     for w in weeks:
         total = 0.0
         for day, teams in zip(w.dates(), w.days):
             if day >= first_day and teams:
-                total += day_value(roster.players, teams, day, slots)
+                total += day_value(roster.players, teams, day, slots,
+                                   today_left if day == first_day else None)
         out[w.number] = total
     return out
 
@@ -399,7 +426,8 @@ def project(league: League, weeks: Sequence[DatedWeek], today: date, *, runs: in
     line_rank = max(1, min(league.playoff_teams, len(team_ids))) if league.playoff_teams else 0
 
     # every roster's weeks from today
-    week_points = {r.league_team_id: week_values(r, weeks, today, slots) for r in league.rosters}
+    week_points = {r.league_team_id: week_values(r, weeks, today, slots, league.today_left)
+                   for r in league.rosters}
 
     current, regular = league.current_matchup, league.regular_season_matchups
     rounds = playoff_rounds(min(league.playoff_teams, len(team_ids)))
