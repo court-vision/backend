@@ -857,8 +857,7 @@ async def set_autopilot(user_id: int, team_id: int, change: levels.Change) -> Au
     (or resumes) them, off pauses them; a pause Dime made itself is lifted the same way."""
     await _ensure_owned(team_id, user_id)
     _ensure_allowed(team_id, user_id)
-    prefs, _ = await levels.prefs_of(user_id, [])
-    checked = levels.check(change, email=levels.lineup_email(prefs))
+    checked = levels.check(change)
     return await levels.apply(team_id, user_id, checked, _now())
 
 
@@ -910,7 +909,6 @@ def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot], 
                                                "due_at": upcoming.due_at},
         "autopilot": autonomy.switch_on(row),
         "rows": autonomy.table(row, lineup_below_ai=levels.lineup_below_ai(prefs, team_pref),
-                               lineup_email=levels.lineup_email(prefs),
                                late_scratch_below_ai=levels.late_scratch_below_ai(prefs, team_pref)),
     }
 

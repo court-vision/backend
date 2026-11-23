@@ -460,7 +460,8 @@ class TestTeamView:
             "lineup": "act", "daily_actions": "ai", "lanes": "act", "late_scratch": "off", "checkins": "ai"}
         never = checkins.team_view(23, None, None, None, None)
         assert never["on"] is False and never["rows"][0]["level"] == "off"
-        assert not next(o for o in never["rows"][0]["options"] if o["level"] == "ai")["available"]
+        # No preferences saved: lineup is off, and every level is still the team's to pick
+        assert all(o["available"] for o in never["rows"][0]["options"])
 
 
 # ------------------------------- decisions ------------------------------- #
@@ -609,12 +610,16 @@ class TestShadowProposals:
 
 
 class TestFillSetting:
-    def test_without_account_alerts_the_fill_never_runs(self):
-        assert automations.fill_setting(None, None) == automations.FillSetting(False, False, 0)
+    def test_a_team_s_own_email_runs_while_the_account_s_is_off(self):
+        # Nothing saved anywhere: nothing runs (the window is the row's default)
+        assert automations.fill_setting(None, None) == automations.FillSetting(False, False, 90)
         prefs = SimpleNamespace(lineup_alerts_enabled=False, auto_lineup_enabled=True, alert_minutes_before=90)
+        assert automations.fill_setting(prefs, None).runs is False
         team = SimpleNamespace(lineup_alerts_enabled=True, auto_lineup_enabled=True, alert_minutes_before=60)
-        # The pipeline skips the user before it reads the team override
-        assert automations.fill_setting(prefs, team).runs is False
+        assert automations.fill_setting(prefs, team) == automations.FillSetting(True, True, 60)
+        # No account row: only the team's own setting runs, with the row's defaults for the rest
+        own = SimpleNamespace(lineup_alerts_enabled=True, auto_lineup_enabled=None, alert_minutes_before=None)
+        assert automations.fill_setting(None, own) == automations.FillSetting(True, False, 90)
 
     def test_a_team_override_wins_where_it_is_set(self):
         prefs = SimpleNamespace(lineup_alerts_enabled=True, auto_lineup_enabled=False, alert_minutes_before=90)

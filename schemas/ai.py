@@ -554,8 +554,7 @@ class AiLevelOption(ApiModel):
 
     level: AiLevel
     available: bool
-    reason: Optional[str] = Field(None, description="Why it can't be picked (not built yet, the account's "
-                                                    "lineup email is off, ...)")
+    reason: Optional[str] = Field(None, description="Why it can't be picked (not built yet, Dime's own, ...)")
 
 
 class AiAutomationRow(ApiModel):
@@ -567,7 +566,7 @@ class AiAutomationRow(ApiModel):
     level: AiLevel = Field(..., description="Its level now (at AI while the autopilot switch is on)")
     options: list[AiLevelOption] = Field(..., description="Every level, in order off, notify, act, ai")
     note: Optional[str] = Field(None, description="When the row does less than its level says (paused, "
-                                                  "acting off on the server, the lineup email off)")
+                                                  "acting off on the server)")
 
 
 class AiAutopilotTeam(ApiModel):

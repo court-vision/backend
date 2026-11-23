@@ -151,7 +151,7 @@ def offered(row):
 class TestTheTable:
     def test_every_row_says_which_levels_it_offers_and_why_not(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
-        t = by_row(autonomy.table(None, lineup_below_ai="notify", lineup_email=True))
+        t = by_row(autonomy.table(None, lineup_below_ai="notify"))
         assert list(t) == ["lineup", "daily_actions", "lanes", "late_scratch", "checkins"]
         assert [o["level"] for o in t["lineup"]["options"]] == ["off", "notify", "act", "ai"]
         assert offered(t["lineup"]) == {}
@@ -162,19 +162,19 @@ class TestTheTable:
         # Never set up: lineup and late scratches from the preferences, lanes run as set, the rest off
         assert {r: t[r]["level"] for r in t} == {"lineup": "notify", "daily_actions": "off", "lanes": "act",
                                                  "late_scratch": "off", "checkins": "off"}
-        t = by_row(autonomy.table(None, lineup_below_ai="act", lineup_email=False, late_scratch_below_ai="act"))
+        t = by_row(autonomy.table(None, lineup_below_ai="act", late_scratch_below_ai="act"))
         assert t["late_scratch"]["level"] == "act"
-        assert offered(t["late_scratch"]) == {}     # its own email: the account's lineup email doesn't gate it
-        at_ai = by_row(autonomy.table(pilot(ai_rows=["late_scratch"]), lineup_below_ai="act", lineup_email=True,
+        assert offered(t["late_scratch"]) == {}     # its own email
+        at_ai = by_row(autonomy.table(pilot(ai_rows=["late_scratch"]), lineup_below_ai="act",
                                       late_scratch_below_ai="notify"))
         assert at_ai["late_scratch"]["level"] == "ai"
 
     def test_the_levels_and_notes_of_a_team_at_ai(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
-        t = by_row(autonomy.table(pilot(ai_rows=["daily_actions"]), lineup_below_ai="act", lineup_email=True))
+        t = by_row(autonomy.table(pilot(ai_rows=["daily_actions"]), lineup_below_ai="act"))
         assert (t["daily_actions"]["level"], t["daily_actions"]["note"]) == ("ai", None)
         assert (t["lineup"]["level"], t["checkins"]["level"]) == ("act", "ai")
-        on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act", lineup_email=True))
+        on = by_row(autonomy.table(pilot(autopilot=True), lineup_below_ai="act"))
         assert [on[r]["level"] for r in on] == ["ai", "ai", "ai", "ai", "ai"]
         assert on["lineup"]["note"] == "Autopilot sets these"
         # Late scratches follow the team like every other row: event check-ins have no switch of their own
@@ -182,8 +182,7 @@ class TestTheTable:
         # A kill switch off on the server, a row at AI says nothing runs
         for switch in ("autopilot_enabled", "ai_enabled"):
             monkeypatch.setattr(settings, switch, False)
-            off = by_row(autonomy.table(pilot(ai_rows=["lanes", "late_scratch"]), lineup_below_ai="act",
-                                        lineup_email=True))
+            off = by_row(autonomy.table(pilot(ai_rows=["lanes", "late_scratch"]), lineup_below_ai="act"))
             assert off["lanes"]["note"] == off["late_scratch"]["note"] == \
                 "Nothing runs: autopilot is switched off on the server"
             assert off["daily_actions"]["note"] is None                     # not at AI: nothing to say
@@ -192,25 +191,28 @@ class TestTheTable:
     def test_paused_and_a_pause_dime_made_itself(self, monkeypatch):
         monkeypatch.setattr(settings, "ai_enabled", True)
         mine = by_row(autonomy.table(pilot(ai_rows=["lanes"], paused_at=NOW, paused_by="user"),
-                                     lineup_below_ai="off", lineup_email=True))
+                                     lineup_below_ai="off"))
         assert mine["lanes"]["note"].startswith("Paused") and mine["checkins"]["level"] == "off"
         assert mine["checkins"]["note"] is None
         its = by_row(autonomy.table(pilot(paused_at=NOW, paused_by="system", paused_reason="2 refused today"),
-                                    lineup_below_ai="off", lineup_email=True))
+                                    lineup_below_ai="off"))
         assert its["checkins"]["note"] == "Dime paused itself: 2 refused today"
 
-    def test_the_account_s_lineup_email_off_closes_every_lineup_level_but_off(self, monkeypatch):
+    def test_the_account_s_lineup_email_off_leaves_a_team_s_own_levels_open(self, monkeypatch):
+        # A team's own lineup level runs whatever the account's email says, so nothing is closed or noted
         monkeypatch.setattr(settings, "ai_enabled", True)
-        t = by_row(autonomy.table(pilot(ai_rows=["lineup"]), lineup_below_ai="off", lineup_email=False))
-        assert set(offered(t["lineup"])) == {"notify", "act", "ai"}
-        assert "lineup email is off" in offered(t["lineup"])["ai"]
-        assert t["lineup"]["note"] == "Auto-lineup doesn't run: your account's lineup email is off"
+        t = by_row(autonomy.table(pilot(ai_rows=["lineup"]), lineup_below_ai="off"))
+        assert offered(t["lineup"]) == {}
+        assert (t["lineup"]["level"], t["lineup"]["note"]) == ("ai", None)
 
 
 class TestLineupBelowAi:
     def test_lineup_s_level_is_the_tip_off_email_and_auto_lineup(self):
         assert levels.lineup_below_ai(None, None) == "off"                       # no preferences row: nothing runs
-        assert levels.lineup_below_ai(prefs(alerts=False, auto=True), team_pref(alerts=True)) == "off"
+        # The team's own email runs while the account's is off, and its auto-lineup falls back to the account's
+        assert levels.lineup_below_ai(prefs(alerts=False, auto=True), team_pref(alerts=True)) == "act"
+        assert levels.lineup_below_ai(prefs(alerts=False), None) == "off"
+        assert levels.lineup_below_ai(None, team_pref(alerts=True)) == "notify"           # no account row
         assert levels.lineup_below_ai(prefs(), None) == "notify"
         assert levels.lineup_below_ai(prefs(auto=True), None) == "act"
         assert levels.lineup_below_ai(prefs(auto=True), team_pref(auto=False)) == "notify"   # the team's wins
@@ -228,11 +230,11 @@ class TestLineupBelowAi:
 
 class TestTheCheck:
     def test_check_ins_in_levels_is_the_check_ins_switch(self):
-        assert levels.check(levels.Change(levels={"checkins": "ai", "lanes": "ai"}), email=True) == \
+        assert levels.check(levels.Change(levels={"checkins": "ai", "lanes": "ai"})) == \
             levels.Change(checkins=True, levels={"lanes": "ai"})
-        assert levels.check(levels.Change(levels={"checkins": "off"}), email=True).checkins is False
-        assert levels.check(levels.Change(checkins=True), email=True) == levels.Change(checkins=True)
-        assert levels.check(levels.Change(autopilot=True), email=False).autopilot is True
+        assert levels.check(levels.Change(levels={"checkins": "off"})).checkins is False
+        assert levels.check(levels.Change(checkins=True)) == levels.Change(checkins=True)
+        assert levels.check(levels.Change(autopilot=True)).autopilot is True
 
     @pytest.mark.parametrize("change, words", [
         (levels.Change(), "Nothing to change"),
@@ -243,17 +245,17 @@ class TestTheCheck:
     ])
     def test_a_change_that_makes_no_sense_is_refused(self, change, words):
         with pytest.raises(AppError, match=words) as e:
-            levels.check(change, email=True)
+            levels.check(change)
         assert e.value.status_code == 422
 
     def test_a_level_a_row_doesn_t_offer_is_refused_with_why(self):
-        assert levels.check(levels.Change(levels={"late_scratch": "act"}), email=False).levels == {"late_scratch": "act"}
-        assert levels.check(levels.Change(levels={"late_scratch": "ai"}), email=True).levels == {"late_scratch": "ai"}
+        assert levels.check(levels.Change(levels={"late_scratch": "act"})).levels == {"late_scratch": "act"}
+        assert levels.check(levels.Change(levels={"late_scratch": "ai"})).levels == {"late_scratch": "ai"}
         with pytest.raises(levels.LevelUnavailable, match="Daily actions can't be notify: Not built yet"):
-            levels.check(levels.Change(levels={"daily_actions": "notify"}), email=True)
-        with pytest.raises(levels.LevelUnavailable, match="lineup email is off"):
-            levels.check(levels.Change(levels={"lineup": "act"}), email=False)
-        assert levels.check(levels.Change(levels={"lineup": "off"}), email=False).levels == {"lineup": "off"}
+            levels.check(levels.Change(levels={"daily_actions": "notify"}))
+        # Lineup's levels are the team's own: none waits for the account's email
+        for level in ("off", "notify", "act", "ai"):
+            assert levels.check(levels.Change(levels={"lineup": level})).levels == {"lineup": level}
         assert levels.LevelUnavailable().status_code == 409
 
 
