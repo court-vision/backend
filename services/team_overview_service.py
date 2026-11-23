@@ -151,7 +151,7 @@ class Rules:
     fill_failed: bool = False                         # the fill's write today was refused or failed
     scratch_failed: frozenset[int] = frozenset()      # NBA ids whose late-scratch swap today was, too
     scratch_answered: frozenset[int] = frozenset()    # NBA ids it already swapped for today (once a player)
-    scratch_spent: bool = False                       # the team's swaps for the day are used up
+    scratch_spent: bool = False                       # the team's swaps for the day are used up, or unread
     # NBA id -> when our verdict on him last changed: what the swap and Dime's event check-in answer
     ruled_at: Mapping[int, datetime] = field(default_factory=dict)
 
@@ -596,8 +596,8 @@ async def _plan(team: OwnedTeamContext, acct: Account) -> _Plan:
 
 def rules_of(team_id: int, acct: Account, plan: Optional[_Plan], view: Mapping[str, str], *,
              can_write: bool, board_date: Optional[str]) -> Rules:
-    """The team's rules today. Without its plan (the read failed) nothing is counted as covered
-    by the fill, since whether it ran is unknown."""
+    """The team's rules today. Without its plan (the read failed) neither the fill nor the swap is
+    counted on, since what they wrote today is unknown."""
     prefs, team_pref, row = acct.prefs, acct.team_prefs.get(team_id), acct.autopilot.get(team_id)
     fill = fill_setting(prefs, team_pref)
     writes = list(plan.writes) if plan is not None else []
@@ -624,7 +624,8 @@ def rules_of(team_id: int, acct: Account, plan: Optional[_Plan], view: Mapping[s
         fill_failed=fill_failed,
         scratch_failed=frozenset(scratch_failed),
         scratch_answered=frozenset(swapped),
-        scratch_spent=len(counted) >= settings.late_scratch_swaps_per_day,
+        # unread writes count as spent: a swap made, failed or at its limit can't be told apart from none
+        scratch_spent=plan is None or len(counted) >= settings.late_scratch_swaps_per_day,
     )
 
 

@@ -10,6 +10,7 @@ kept and for how long, and that a league projection is never waited on for long.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import date, time, timedelta, timezone
 from types import SimpleNamespace
 
@@ -479,6 +480,16 @@ def test_the_days_swaps_are_spent_at_the_late_scratch_services_own_limit(monkeyp
     two = [*one, _write("availability", "applied_unverified", 70)]
     rules = _rules(account(prefs=_prefs()), svc._Plan(writes=two))
     assert rules.scratch_spent and rules.scratch_answered == frozenset({90, 70})
+
+
+def test_without_todays_writes_the_swap_is_not_counted_on():
+    """Whether it already swapped for him, failed or is at its limit is unknown: a fresh ruling is the user's."""
+    acct = account(prefs=_prefs(auto_lineup_enabled=False))
+    read = replace(_rules(acct, svc._Plan()), ruled_at=JUST_RULED)
+    assert svc.judge(SCRATCH, TIP, read, NOW) == ("covered", "late_scratch")
+    unread = replace(_rules(acct, None), ruled_at=JUST_RULED)
+    assert unread.late_scratch == "act" and unread.scratch_spent
+    assert svc.judge(SCRATCH, TIP, unread, NOW) == ("needs_you", None)
 
 
 def _ruling(nba_id, changed_at):
