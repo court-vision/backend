@@ -301,6 +301,13 @@ def _sweep(before: datetime, now: datetime) -> int:
             .execute())
 
 
+async def sweep_stale(now: datetime) -> int:
+    """Fail the check-ins still running well past a turn's timeout: their process died (a restart). Both
+    clocks call it, the schedule's tick and the asks' (asks.run_due), so a team whose check-ins are off
+    isn't left with one running for good, blocking its asks."""
+    return await _sweep(now - timedelta(seconds=settings.autopilot_checkin_timeout_seconds) - _STALE_MARGIN, now)
+
+
 @db_operation("ai.checkin_get")
 def _get(checkin_id: int) -> Optional[AiCheckin]:
     return AiCheckin.get_or_none(AiCheckin.id == checkin_id)
@@ -772,8 +779,7 @@ async def run_due(now: Optional[datetime] = None) -> dict[str, Any]:
     if not settings.ai_enabled or not settings.autopilot_enabled:
         out["off"] = True
         return out
-    out["stale"] = await _sweep(now - timedelta(seconds=settings.autopilot_checkin_timeout_seconds) - _STALE_MARGIN,
-                                now)
+    out["stale"] = await sweep_stale(now)
     rows = [r for r in await _live() if allowed(r.team_id_id, r.user_id_id)]
     out["teams"] = len(rows)
     if not rows:

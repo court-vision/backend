@@ -232,6 +232,24 @@ class TestRunning:
         run(checkins._settle(busy, "done", None, None, 0, _now()))
         assert run(go())["started"] == 1 and len(calls) == 1
 
+    def test_a_check_in_that_died_with_its_process_is_failed_and_the_ask_runs(self, mine, monkeypatch):
+        # A restart mid-turn leaves a check-in running; with check-ins off nothing else sweeps it
+        me, team, chat = mine
+        ask = _ask(me, team, chat, _now() - timedelta(minutes=1))
+        long_ago = _now() - timedelta(seconds=settings.autopilot_checkin_timeout_seconds) - timedelta(minutes=11)
+        dead = run(checkins._claim(team.team_id, me.user_id, "morning", date.today(), long_ago, manual=False,
+                                   now=long_ago))
+        calls = _fake_turn(monkeypatch)
+
+        async def go():
+            out = await asks.run_due()
+            await _drain()
+            return out
+
+        assert run(go()) == {"started": 1, "waiting": 0, "closed": 0}
+        assert (AiCheckin.get_by_id(dead).state, AiCheckin.get_by_id(dead).reason) == ("failed", "stale")
+        assert AiAsk.get_by_id(ask.id).state == "started" and len(calls) == 1
+
     def test_two_due_on_one_team_run_one_a_look(self, mine, monkeypatch):
         me, team, chat = mine
         _ask(me, team, chat, _now() - timedelta(minutes=3))

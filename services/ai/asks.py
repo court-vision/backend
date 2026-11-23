@@ -433,12 +433,17 @@ async def run_one(row: AiAsk, now: datetime) -> Optional[int]:
 
 
 async def run_due(now: Optional[datetime] = None) -> dict[str, int]:
-    """One look: start each due ask (one per team a look: a second would find the first running), close the
-    ones past their grace as missed."""
+    """One look: fail the check-ins that died with their process (the schedule's tick does too, but it only
+    comes while some team has check-ins on), then start each due ask (one per team a look: a second would
+    find the first running), and close the ones past their grace as missed."""
+    from services.ai import checkins
     out = {"started": 0, "waiting": 0, "closed": 0}
     if not (settings.ai_enabled and settings.autopilot_enabled):
         return out
     now = now or _now()
+    stale = await checkins.sweep_stale(now)
+    if stale:
+        log.info("ai_asks_stale_checkins_failed", stale=stale)
     started_teams: set[int] = set()
     for row in await _due(now):
         if row.team_id_id in started_teams and _aware(row.due_at) >= now - GRACE:
