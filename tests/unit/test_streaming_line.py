@@ -89,6 +89,8 @@ def test_every_lane_count_up_to_the_adds_is_tried_and_the_fewest_at_the_best_tot
     assert out.lanes[1].total == 69.0 and out.lanes[2].gain == 0.0
     assert out.worth_running == 2 and out.line == 14.0           # the second lane: F8's 14
     assert sorted(p for p, w in out.worth.items() if w < out.line) == [2, 3]
+    # the band: one add and F9 gone, F8 takes one lane and P2 keeps the other (14 and 12)
+    assert out.line_low == 12.0
 
 
 def test_a_protected_player_never_holds_a_lane_and_no_adds_means_no_line():

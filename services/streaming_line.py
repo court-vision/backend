@@ -24,8 +24,8 @@ a window, as each player's worth is.
 
 What it can't see: it assumes today's free agents stay free and play as projected,
 while other managers pick some up and some adds go to injuries. So the line runs a
-little high, and `line_low` is the line with one add fewer and the free agent the plan
-gains most from gone: the bottom of its band.
+little high, and `line_low` is the weakest lane of the plan re-made with one add fewer and
+the free agent the plan gains most from gone: the bottom of its band.
 
 Values are expected points: a player's points per game under the league's scoring at
 his chance to play each game (the live projection's timeline, `league_projection`).
@@ -217,6 +217,8 @@ def matchup_line(players: Sequence[LinePlayer], free_agents: Sequence[LineFreeAg
         low = plan_streams(_streamers(order[:at], days, first_day, holders=True), thinner,
                            [[DayPlayer(p.espn_id, day_value(p.proj, d, t), p.slots) for p in rest] for d, t in days],
                            slots, adds=max(plan.adds - 1, 0), rehold_after=rehold_after, **kw)
-        line_low = max(line - (plan.value - low.value), 0.0)
+        # the low plan's own weakest lane: charging the whole plan's loss to the weakest lane would
+        # count a stronger lane's loss against it
+        line_low = min(line, _weakest_lane(low, rest, streamers, days, slots))
     return MatchupLine(len(days), adds, _r(base), tuple(lanes), running, _r(line), _r(line_low),
                        {k: _r(v) for k, v in worth.items()})
