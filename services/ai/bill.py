@@ -262,8 +262,11 @@ async def _read(now: datetime) -> AiBill:
          for k_id, m in month_keys.items()),
         key=lambda k: -k.billed_micros)
 
+    # The newest refresh any read reports: a read of a past range (last month) answers when that
+    # range last refreshed, which can be weeks old, while the latest range's read says how far
+    # Anthropic's data is complete now
     parsed = [p for p in (_parse(at) for at in refreshed) if p is not None]
-    bill = AiBill(state="ok", read_at=now, refreshed_at=min(parsed) if parsed else None,
+    bill = AiBill(state="ok", read_at=now, refreshed_at=max(parsed) if parsed else None,
                   months=months, days=days, keys=key_rows)
     get_logger().info("ai_bill_read", month_billed_micros=months[-1].billed_micros,
                       month_ours_micros=months[-1].ours_micros, month_ledger_micros=months[-1].ledger_micros,
