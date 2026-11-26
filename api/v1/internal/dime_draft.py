@@ -45,10 +45,10 @@ _ERRORS = {
     response_model=DimeDraftRoomResp,
     summary="Dime in a draft room: its notes, the notes switch and the mock seat",
     description=(
-        "What Dime has written in the room, newest first (a plan, a note at each of the user's picks, a "
-        "recap; each with the board's numbers the server read for it in `facts`), whether a note is being "
-        "written now, the switch for a note whenever the user's pick is `lead` picks away or nearer, and "
-        "whether Dime holds the user's seat in a mock. Never refuses for a switched-off server or a user "
+        "What Dime has written in the room, newest first (its pick for each of the user's picks, with the "
+        "player in `pick`; a recap; older rooms' plans; each with the board's numbers the server read for it "
+        "in `facts`), whether a note is being written now, how near the user's pick is when the room asks "
+        "for Dime's pick (`lead`), and whether Dime holds the user's seat in a mock. Never refuses for a switched-off server or a user "
         "off the AI desk's list: `available` says whether the room shows Dime at all, and `switched_off` "
         "that the account turned Dime in draft rooms off (Account, AI and automation)."
     ),
@@ -84,9 +84,11 @@ async def set_dime(
     description=(
         "Starts the note and returns it `running`; it is written after the response (poll the GET, or open "
         "its conversation). `plan` sets the plan the draft is played to: its concessions become the room's "
-        "punts, and in a real draft on a team the plan is saved to the team's notes. `pick` is about the "
-        "user's coming pick, read off the room's board; one per pick, so asking again returns the one "
-        "already written. `recap` reads the room's recap and, in a real draft, saves what the season starts "
+        "punts, and in a real draft on a team the plan is saved to the team's notes (the Draft lab no longer "
+        "asks for one). `pick` is Dime's pick for the user's next pick, the one on the clock included, read "
+        "off the room's board: one player and one line on why (`pick`). One per pick, so asking again "
+        "returns the one already chosen, unless another seat drafted that player first: then Dime picks "
+        "again, once. `recap` reads the room's recap and, in a real draft, saves what the season starts "
         "from and league-mates' habits to Dime's notes."
     ),
     responses={

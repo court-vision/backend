@@ -123,15 +123,17 @@ def test_the_availability_bands_sit_half_a_round_either_side_of_that_turn(replay
     assert DraftBoardService._availability_of({}, horizon, 4) is None
 
 
-def test_on_the_clock_the_horizon_moves_to_the_turn_after_this_one(replay):
-    """With five picks made seat 3 is on the clock at 6. Asking whether a
-    player survives to 6 is asking whether he survives to now."""
+def test_on_the_clock_the_horizon_is_the_pick_being_made(replay):
+    """With five picks made seat 3 is on the clock at 6: the next pick is the
+    one on the clock (James, 2026-11-26), and everyone left is there for it.
+    The turn after it is still known, for Dime's own reasoning."""
     from services.draft_board_service import DraftBoardService
 
     session = _geometry(replay, made=[1, 2, 3, 4, 5])
 
     assert session.draft_front == 6 and session.my_next_pick == 6
-    assert DraftBoardService._availability_horizon(session) == 11
+    assert DraftBoardService._availability_horizon(session) == 6
+    assert DraftBoardService._on_the_clock(session) and session.my_following_pick == 11
 
 
 def test_a_keeper_is_not_a_turn_on_the_clock(replay):

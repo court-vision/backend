@@ -1384,9 +1384,10 @@ def test_availability_is_asked_about_my_next_pick(monkeypatch):
 
 
 @pytest.mark.unit
-def test_on_the_clock_the_question_becomes_whether_waiting_is_safe(monkeypatch):
-    """While I am picking, everything on the board is available *now* — the
-    only useful horizon is the turn after this one."""
+def test_on_the_clock_everyone_left_is_available(monkeypatch):
+    """While I am picking, everything on the board is available *now*: the
+    pick on the clock is my next pick (James, 2026-11-26), so nobody is at
+    risk, whatever his ADP."""
     market = _espn_market(**{"6": {"adp": 12.0}})
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
         lambda my_ids, session_id=None: _inputs(used_picks=(1, 2, 3, 4, 5), market=market)))
@@ -1395,10 +1396,12 @@ def test_on_the_clock_the_question_becomes_whether_waiting_is_safe(monkeypatch):
         session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13),
     ))
 
-    # Front is 6 and so is my turn; the next one after it is 11.
+    # Front is 6 and so is my turn: everyone the market knows is there for it
     by_id = {r.player_id: r for r in resp.data}
-    assert by_id[6].availability == "tossup"      # adp 12 against pick 11
-    assert by_id[2].availability == "gone"        # adp 5.5, long gone by 11
+    assert by_id[6].availability == "likely"      # adp 12, after this pick
+    assert by_id[2].availability == "likely"      # adp 5.5, still on the board at 6
+    assert by_id[5].availability is None          # no market row at all
+    assert not any(r.availability == "gone" for r in resp.data)
 
 
 @pytest.mark.unit
