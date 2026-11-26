@@ -102,7 +102,8 @@ class AiSpend(BaseModel):
 
 class AiCap(BaseModel):
     """A monthly cap set from the dashboard (migration 0054): a line's when `user_id` is
-    NULL, one user's on that line otherwise. With no row the environment's number applies."""
+    NULL, one user's on that line otherwise; line `app` is the whole app's cap, over every
+    line (migration 0056). With no row the environment's number applies."""
 
     id = BigAutoField(primary_key=True)
     line = TextField()
