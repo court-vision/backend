@@ -148,3 +148,56 @@ class AiCapData(AiCapView):
 class AiCapResp(BaseResponse):
     data: Optional[AiCapData] = None
 
+
+
+# ---- The bill check (services/ai/bill.py) ----
+
+# ok           Anthropic answered
+# no_key       ANTHROPIC_ADMIN_KEY isn't set on this service
+# refused      Anthropic refused the key (401 or 403): not an Admin key, or revoked
+# unavailable  The organization has no Usage and Cost Analytics API (404)
+# unreachable  Anthropic didn't answer, or answered with an error of its own
+BillState = Literal["ok", "no_key", "refused", "unavailable", "unreachable"]
+
+
+class AiBillMonth(ApiModel):
+    """One calendar month (UTC): what Anthropic bills against what the ledger priced."""
+
+    month: date = Field(..., description="Its first day")
+    billed_micros: int = Field(..., description="Anthropic's cost for the whole organization, before credits")
+    ours_micros: Optional[int] = Field(None, description="Of it, on this app's API key; null: the key wasn't found")
+    ledger_micros: int = Field(..., description="The ledger's settled spend")
+    open_micros: int = Field(0, description="The ledger's reservations still open (turns running)")
+
+
+class AiBillDay(ApiModel):
+    day: date
+    billed_micros: int
+    ours_micros: Optional[int] = None
+    ledger_micros: int
+    open_micros: int = 0
+
+
+class AiBillKey(ApiModel):
+    """An API key Anthropic billed this month, as its key list names it."""
+
+    api_key_id: Optional[str] = Field(None, description="Null: usage made without a key (the Console)")
+    name: Optional[str] = None
+    hint: Optional[str] = Field(None, description="Anthropic's partial hint, like sk-ant-api03-R2D...igAA")
+    ours: bool = Field(False, description="The key this app sends its model calls with")
+    billed_micros: int
+
+
+class AiBill(ApiModel):
+    state: BillState
+    message: Optional[str] = Field(None, description="Why the check couldn't run, in Anthropic's words when it said")
+    read_at: datetime = Field(..., description="When Anthropic was read (answers are kept a few minutes)")
+    refreshed_at: Optional[datetime] = Field(
+        None, description="Anthropic's data_refreshed_at: its numbers are complete up to here, short after it")
+    months: list[AiBillMonth] = Field(default_factory=list, description="Last month, then this month")
+    days: list[AiBillDay] = Field(default_factory=list, description="Every UTC day of both months to today")
+    keys: list[AiBillKey] = Field(default_factory=list, description="This month, largest first")
+
+
+class AiBillResp(BaseResponse):
+    data: Optional[AiBill] = None

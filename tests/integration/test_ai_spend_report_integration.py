@@ -320,3 +320,21 @@ class TestReport:
         assert (r.app.spent_micros, r.app.open_micros, r.app.cap_micros, r.app.cap_set) == (0, 0, 100_000_000, False)
         assert r.rows == [] and r.usage == [] and r.teams == []
         assert r.month_start == date(NOW.year, NOW.month, 1)
+
+
+class TestBillLedger:
+    def test_the_bill_check_reads_the_ledger_by_utc_day_settled_and_open_apart(self, integration_db):
+        from services.ai import bill
+
+        me = _user(1)
+        day = datetime(2026, 11, 25, tzinfo=timezone.utc)
+        AiSpend.create(user_id=me.user_id, cost_micros=11_000, settled=True, created_at=day + timedelta(hours=1))
+        AiSpend.create(user_id=me.user_id, cost_micros=4_000, settled=True, created_at=day + timedelta(hours=23))
+        AiSpend.create(user_id=me.user_id, cost_micros=1_000_000, settled=False, created_at=day + timedelta(hours=23))
+        # The analyst's line has no user
+        AiSpend.create(user_id=None, line="analyst", cost_micros=300, settled=True,
+                       created_at=day + timedelta(days=1, minutes=5))
+        AiSpend.create(user_id=me.user_id, cost_micros=99, settled=True, created_at=day - timedelta(days=60))
+
+        assert run(bill._ledger(day - timedelta(days=30))) == {
+            date(2026, 11, 25): (15_000, 1_000_000), date(2026, 11, 26): (300, 0)}

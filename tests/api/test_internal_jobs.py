@@ -556,3 +556,30 @@ def test_a_null_cap_clears_it(client, token, spend_stub):
 def test_a_cap_out_of_bounds_is_refused_before_the_service(client, token, spend_stub, body):
     assert client.put(AI_CAPS, json=body, headers=PIPE).status_code == 422
     assert spend_stub["set"] == []
+
+
+AI_BILL = "/v1/internal/jobs/ai/bill"
+
+
+@pytest.mark.api
+def test_the_bill_check_takes_the_pipeline_token_and_answers_its_state(client, token, monkeypatch):
+    from datetime import datetime, timezone
+
+    from schemas.ai_spend import AiBill
+    from services.ai import bill
+
+    reads = []
+
+    async def read(now=None):
+        reads.append(now)
+        return AiBill(state="refused", message="Anthropic answered 401: invalid x-api-key",
+                      read_at=datetime(2026, 11, 26, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(bill, "read", read)
+
+    assert client.get(AI_BILL, headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert reads == []
+    r = client.get(AI_BILL, headers=PIPE)
+    assert r.status_code == 200
+    assert r.json()["message"] == "Bill check: refused"
+    assert r.json()["data"]["state"] == "refused" and r.json()["data"]["months"] == []
+    assert len(reads) == 1
