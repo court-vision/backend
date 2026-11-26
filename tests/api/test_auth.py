@@ -31,6 +31,7 @@ def unauthed_client(unauthed_app):
 @pytest.mark.api
 @pytest.mark.parametrize("path", [
     "/v1/internal/teams/",
+    "/v1/internal/teams/overview",
     "/v1/internal/api-keys/",
     "/v1/internal/sqlmate/users/get_tables",
 ])

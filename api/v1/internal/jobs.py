@@ -18,6 +18,7 @@ from schemas.autopilot import (
     CheckinRunResp, CheckinStarted,
 )
 from schemas.common import ApiStatus
+from schemas.daily_actions import DailyActionsRunReq, DailyActionsRunResp
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, LineupReactReq, LineupReactResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
@@ -30,6 +31,7 @@ from schemas.valuation import (
     StandardValuationResp,
 )
 from services.ai import analyst, asks, checkins, events, spend_report
+from services.daily_actions_job import DailyActionsJob
 from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
@@ -68,6 +70,19 @@ async def react_to_verdict(req: LineupReactReq):
     outcome is reported in `data.teams`, never raised.
     """
     return respond(await LateScratchService.react(req))
+
+
+@router.post("/daily-actions/run", response_model=DailyActionsRunResp)
+async def run_daily_actions(req: DailyActionsRunReq):
+    """Make one team's daily actions at Act: the Week desk's IR moves and a free agent for each
+    open roster spot, never a drop.
+
+    Called by data-platform's daily_actions pipeline once a day per team at Act, before the
+    first tip. The outcome is reported in `data.outcome`, never raised: applied (with the IR
+    moves and pickups made, and `held` when something was left), noop, skipped (why), rejected
+    or failed (nothing went).
+    """
+    return respond(await DailyActionsJob.run(req))
 
 
 @router.post("/pickups/execute", response_model=PickupExecuteResp)

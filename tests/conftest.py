@@ -109,6 +109,24 @@ def no_kept_matchups():
     clear()
 
 
+# ---- The teams overview's kept answers ----
+
+@pytest.fixture(autouse=True)
+def no_kept_overviews():
+    """The teams overview keeps its answer, each team's week and each league's projection per
+    process (services/team_overview_service.py); one test's must never answer for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.team_overview_service")
+        if module is not None:
+            module.clear()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- ESPN's pro schedule (a per-game-day add limit's matchup total) ----
 
 @pytest.fixture(autouse=True)
@@ -200,6 +218,27 @@ def one_readback(monkeypatch):
 
     monkeypatch.setattr(write_readback, "READBACK_DELAYS_S", ())
     yield
+
+
+# ---- Check-ins waiting on the cached prefix ----
+
+@pytest.fixture(autouse=True)
+def no_checkin_stagger(monkeypatch):
+    """A check-in started soon after another waits for the prompt cache (services/ai/checkins.py
+    `_stagger`). No test waits: the stagger is 0 unless a test sets its own, and no leader carries
+    over from the test before."""
+    import sys
+
+    from core.settings import settings
+
+    monkeypatch.setattr(settings, "autopilot_checkin_stagger_seconds", 0.0)
+    module = sys.modules.get("services.ai.checkins")
+    if module is not None:
+        module.reset_stagger()
+    yield
+    module = sys.modules.get("services.ai.checkins")
+    if module is not None:
+        module.reset_stagger()
 
 
 # ---- The captured draft ----

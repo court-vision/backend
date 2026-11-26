@@ -8,8 +8,10 @@ league read with every roster, the morning's live projection, the season calenda
 today's games so far. Beside them, ESPN's free agents and waiver claims for the league,
 most-owned first (the Week desk market's read), valued the same way: off the live
 projection when the morning's snapshot carries them, else off stored stats with a full
-chance (none when ESPN lists them OUT). Every player is valued under the league's own
-point weights, never the team's display preview.
+chance (none when ESPN lists them OUT, or when they haven't played this season:
+`league_projection_service.unplayed`; ESPN's list still prices such a player off last
+season). Every player is valued under the league's own point weights, never the team's
+display preview.
 
 A free agent list that doesn't load prices the rosters alone, and says so. ESPN points
 leagues only, as the league projection: the same 400 codes for anything else.
@@ -19,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from core.compute import run_cpu
 from core.errors import BadRequestError, ProviderError, ServiceUnavailableError
@@ -74,9 +76,10 @@ def value_free_agents(free_agents: list, league_info: LeagueInfo, snapshot, rost
             p = lp.ProjPlayer(name=f.name, team=row.team or team, value=max(scoring.points.score(row.line), 0.0),
                               slots=slots, timeline=row.timeline, player_id=nba, projected=True)
         else:
-            out_now = (f.injury_status or "").upper() == "OUT"
+            idle = lps.unplayed(nba, snapshot, f.value_source)
+            out_now = idle or (f.injury_status or "").upper() == "OUT"
             p = lp.ProjPlayer(name=f.name, team=team, value=max(f.avg_points or 0.0, 0.0), slots=slots,
-                              chance=0.0 if out_now else 1.0, player_id=nba, projected=False)
+                              chance=0.0 if out_now else 1.0, player_id=nba, projected=False, unplayed=idle)
         out.append((f, p))
     return out
 
@@ -91,8 +94,16 @@ def _row(p: lp.ProjPlayer, price: lv.Price, **meta: Any) -> dict[str, Any]:
     }
 
 
+def _named(names: Sequence[str], shown: int = 3) -> str:
+    if len(names) > shown:
+        return ", ".join(names[:shown]) + f" and {len(names) - shown} more"
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def notes_for(result: dict[str, Any], snapshot_as_of: Optional[date], unprojected: int,
-              free_agents_read: Optional[int], mine: Optional[int]) -> list[str]:
+              free_agents_read: Optional[int], mine: Optional[int], unplayed: Sequence[str] = ()) -> list[str]:
+    """`unprojected` counts the players valued off stored stats; `unplayed` names those
+    who haven't played this season, counted for no games."""
     notes = []
     gaps = result["window"]["incomplete_weeks"]
     if gaps:
@@ -106,6 +117,10 @@ def notes_for(result: dict[str, Any], snapshot_as_of: Optional[date], unprojecte
         one = unprojected == 1
         notes.append(f"{unprojected} player{'' if one else 's'} had no live projection and "
                      f"{'is' if one else 'are'} valued off stored stats.")
+    if unplayed:
+        one = len(unplayed) == 1
+        notes.append(f"{_named(unplayed)} {'hasn' if one else 'haven'}'t played this season, so "
+                     f"{'he counts' if one else 'they count'} for no games.")
     if free_agents_read is None:
         notes.append("ESPN's free agent list didn't load, so only rostered players are priced and ranked.")
     if mine is None:
@@ -169,8 +184,9 @@ async def league_values(league_info: LeagueInfo, *, window: Optional[str] = None
     players.extend(free[:max(free_agents, 0)])
     players.sort(key=lambda r: (r["window_rank"], r["season_rank"], r["name"]))
 
-    unprojected = sum(1 for r in rosters for p in r.players if not p.projected) + sum(
-        1 for _, p in pool if not p.projected)
+    priced = [p for r in rosters for p in r.players] + [p for _, p in pool]
+    unplayed = [p.name for p in priced if p.unplayed]
+    unprojected = sum(1 for p in priced if not p.projected and not p.unplayed)
     log.info("league_values_built", league_id=league_info.league_id, window=f"{first}-{last}",
              rostered=sum(len(r.players) for r in rosters), free_agents=len(pool),
              live_as_of=str(snapshot.as_of) if snapshot else None,
@@ -190,5 +206,5 @@ async def league_values(league_info: LeagueInfo, *, window: Optional[str] = None
         "ranked_players": len(result["free_agents"]) + sum(len(r.players) for r in rosters),
         "tiers": result["tiers"],
         "notes": notes_for(result, snapshot.as_of if snapshot else None, unprojected,
-                           len(pool) if listed is not None else None, mine),
+                           len(pool) if listed is not None else None, mine, unplayed),
     }

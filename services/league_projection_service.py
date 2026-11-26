@@ -6,8 +6,8 @@ then `services.league_projection.project` on the CPU pool.
 The read is the same one Dime's get_league makes with all rosters. Each rostered
 player is valued under the league's own point weights: his live-projection line per
 game and his chance to play each game when the morning's snapshot carries him, else
-his stored-stats value with a full chance (none when ESPN lists him OUT), and he is
-counted in `players_unprojected`.
+his stored-stats value with a full chance (none when ESPN lists him OUT, or when he
+hasn't played this season: `unplayed`), and he is counted in `players_unprojected`.
 
 The current matchup starts from the live score when today's games can be read
 (`GamesService`, the same live overlay the schedule shows): ESPN's settled score
@@ -294,6 +294,21 @@ def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list,
     return standings, pairings, rosters
 
 
+# PlayerValueService's sources off this season's games (the rolling window, or its recent
+# average); "baseline" is last season's per game, "provider" is ESPN's own number
+THIS_SEASON_SOURCES = frozenset({"rolling", "recent"})
+
+
+def unplayed(nba: Optional[int], snapshot, source: Optional[str]) -> bool:
+    """Whether a player the morning's live projection leaves out hasn't played this season.
+    It carries every player who has played (and those its preseason priors expect to), so
+    one it would know by his NBA id and leaves out hasn't, unless our stored games have him
+    playing lately (a debut since an older snapshot). His stored value is then last
+    season's, or ESPN's, so he counts for no games until he plays."""
+    return (snapshot is not None and nba is not None and nba not in snapshot.players
+            and source not in THIS_SEASON_SOURCES)
+
+
 def value_players(rosters: list, league_info: LeagueInfo, today: date):
     """Every rostered player as a ProjPlayer. Sync: runs through run_db."""
     from services.espn_service import EspnService
@@ -327,10 +342,12 @@ def value_players(rosters: list, league_info: LeagueInfo, today: date):
             else:
                 valued = stored.get(e.player_id)
                 value = valued.value if valued is not None and valued.value is not None else 0.0
-                out_now = (e.injury_status or "").upper() == "OUT"
+                idle = unplayed(nba, snapshot, valued.source if valued is not None else None)
+                out_now = idle or (e.injury_status or "").upper() == "OUT"
                 players.append(lp.ProjPlayer(
                     name=e.name, team=espn_team, value=max(value, 0.0), slots=slots,
                     chance=0.0 if out_now else 1.0, player_id=nba, projected=False, slot=slot,
+                    unplayed=idle,
                 ))
         out.append(lp.Roster(league_team_id=tid, team_name=name, players=tuple(players)))
     return tuple(out), snapshot
