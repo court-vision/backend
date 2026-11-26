@@ -428,13 +428,18 @@ def round_of_pick(pick: Optional[int], league_size: Optional[int]) -> Optional[i
     return (pick - 1) // league_size + 1
 
 
+# What an in-season board adds to a player, where known (league._live_of): carried only when present
+LIVE_KEYS = ("move_7d", "move_1d", "rank_reason", "espn_rank_since", "espn_rank_since_or_earlier")
+
+
 def facts_of(board: dict[str, Any], *, following: Optional[int]) -> dict[str, Any]:
     """The numbers a pick note shows beside Dime's words, read off get_draft_board's result: the top
     three recommendations, who the market says won't last, the punts, and the weakest categories."""
     on_clock = board.get("picks_until_my_turn") == 0
     top = [
-        {k: r.get(k) for k in ("player_id", "name", "position", "team", "score", "availability", "injury",
-                               "adp", "cv_rank", "market_rank", "reason")}
+        {**{k: r.get(k) for k in ("player_id", "name", "position", "team", "score", "availability", "injury",
+                                  "adp", "cv_rank", "market_rank", "reason")},
+         **{k: r[k] for k in LIVE_KEYS if k in r}}
         for r in (board.get("recommendations") or [])[:3]
     ]
     gone = [
@@ -469,6 +474,7 @@ def _board_block(board: dict[str, Any]) -> str:
         "punts": board.get("punts"),
         "recommendations": [
             {**{k: r.get(k) for k in keep_rec},
+             **{k: r[k] for k in LIVE_KEYS if k in r},
              "components": [{"label": c.get("label"), "value": c.get("value"), "in_score": c.get("in_score")}
                             for c in (r.get("components") or [])]}
             for r in (board.get("recommendations") or [])
@@ -495,14 +501,33 @@ def _season_words(board: Optional[dict[str, Any]]) -> str:
             "his minutes for who is out on his team, and the games he is expected to play from "
             f"{found.get('games_from')} on), a game he misses costs the gap to a replacement, and its injury "
             "flags are today's. season_gp and season_fpts_avg are what he has done so far. ADP is the "
-            "preseason crowd's. Weigh a hot or cold start by your playbook's draft rules.\n\n"
+            "preseason crowd's." + _live_words(found) + " Weigh a hot or cold start by your playbook's draft "
+            "rules.\n\n"
         )
     return (
         "This draft is held during the season: the board's values blend this season's games (season_gp, "
         f"season_fpts_avg) with the projection, count only the games from {found.get('games_from')} on, and "
-        "its injury flags are today's. ADP is the preseason crowd's. Weigh a hot or cold start by your "
-        "playbook's draft rules.\n\n"
+        "its injury flags are today's. ADP is the preseason crowd's." + _live_words(found) + " Weigh a hot or "
+        "cold start by your playbook's draft rules.\n\n"
     )
+
+
+def _live_words(found: dict[str, Any]) -> str:
+    """What the stored daily boards add to an in-season board, when they are there."""
+    words = ""
+    moves = found.get("moves")
+    if moves:
+        words += (
+            f" move_7d and move_1d are the places a player gained on Court Vision's standard {moves.get('board')} "
+            "board (negative is a fall), and rank_reason is what the projection read about him: say it when it "
+            "explains a pick."
+        )
+    if found.get("espn_ranks_as_of"):
+        words += (
+            f" market_rank is ESPN's rank of {found.get('espn_ranks_as_of')}, and espn_rank_since the day ESPN "
+            "last changed it: a rank ESPN has left alone through a player's rise or fall is a stale one."
+        )
+    return words
 
 
 def _room_words(room: OwnedDraftSessionContext, detail: Any) -> str:

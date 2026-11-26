@@ -21,6 +21,11 @@ reads it: notify emails the swap a ruling calls for, act makes it. A late-scratc
 below AI writes the team's override; at AI it writes nothing there (Dime's event check-ins
 answer instead), so dropping back from AI finds the level the user had.
 
+Daily actions' are `daily_actions_level` (migration 0057), read and written the same way:
+off, or act (services/daily_actions_job.py makes the Week desk's IR moves and fills open
+roster spots); at AI Dime's own adds and drops answer instead, and the job leaves the team
+alone.
+
 The switch, coming on, puts every row that offers AI at AI, turns check-ins and both AI
 features on, and turns the team's lineup email and auto-lineup on (the fill is Dime's
 tool), keeping what it changed in `restore`; going off, it puts the lineup preferences
@@ -80,6 +85,18 @@ def late_scratch_below_ai(prefs: Any, team_pref: Any) -> str:
     return autonomy.OFF
 
 
+DAILY_ACTIONS_LEVELS = (autonomy.OFF, autonomy.ACT)
+
+
+def daily_actions_below_ai(prefs: Any, team_pref: Any) -> str:
+    """off or act: the team's override, else the account's level, else off."""
+    for source in (team_pref, prefs):
+        level = getattr(source, "daily_actions_level", None) if source is not None else None
+        if level in DAILY_ACTIONS_LEVELS:
+            return level
+    return autonomy.OFF
+
+
 def lineup_prefs_for(level: str) -> dict[str, bool]:
     """What a lineup level writes to the team's override."""
     if level == autonomy.OFF:
@@ -106,7 +123,7 @@ def _team_pref(user_id: int, team_id: int) -> Any:
 
 
 def _write_lineup(user_id: int, team_id: int, values: Mapping[str, Any]) -> None:
-    """The team's override (lineup's fields, or late scratches' level), in one upsert on (user, team_id):
+    """The team's override (lineup's fields, or late scratches' or daily actions' level), in one upsert on (user, team_id):
     two first writes at once (a double click) both land, as apply's own insert does."""
     now = datetime.utcnow()                 # the model's own clock (naive UTC)
     update: dict[Any, Any] = {getattr(NotificationTeamPreference, k): v for k, v in values.items()}
@@ -214,6 +231,8 @@ def apply(team_id: int, user_id: int, change: Change, now: datetime) -> Autopilo
                     _write_lineup(user_id, team_id, lineup_prefs_for(level))
                 elif r == autonomy.LATE_SCRATCH and level != autonomy.AI:
                     _write_lineup(user_id, team_id, {"late_scratch_level": level})
+                elif r == autonomy.DAILY_ACTIONS and level != autonomy.AI:
+                    _write_lineup(user_id, team_id, {"daily_actions_level": level})
 
         (Autopilot.update(ai_rows=[r for r in autonomy.AI_ROWS if r in rows], autopilot=switch, restore=restore,
                           updated_at=now)

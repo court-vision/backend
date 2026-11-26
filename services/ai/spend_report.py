@@ -16,9 +16,10 @@ written (the turn is running, or died) has no feature beyond its line.
 Not in the ledger, so not here: the evals run from a laptop, and the old
 `/ai/ask` and `/ai/route` routes, which keep their own daily quota.
 
-The caps editor writes usr.ai_caps (migration 0054). A line's cap, or one user's
-cap on the desk or autopilot line, set there replaces the environment's number
-from the next reservation on; deleting it hands the number back.
+The caps editor writes usr.ai_caps (migration 0054). A line's cap, the whole
+app's (line `app`, migration 0056), or one user's cap on the desk or autopilot
+line, set there replaces the environment's number from the next reservation on;
+deleting it hands the number back.
 """
 
 from __future__ import annotations
@@ -36,10 +37,11 @@ from db.models.ai_conversations import AiCap
 from db.models.teams import Team
 from db.models.users import User
 from schemas.ai_spend import (
-    AiCapData, AiCapReq, AiSpendLine, AiSpendReport, AiSpendRow, AiSpendTeam, AiSpendUser, AiUsageRow, AiUserLine,
+    AiCapData, AiCapReq, AiSpendApp, AiSpendLine, AiSpendReport, AiSpendRow, AiSpendTeam, AiSpendUser, AiUsageRow,
+    AiUserLine,
 )
 from services.ai import spend
-from services.ai.spend import ANALYST, AUTOPILOT, DESK, LINES
+from services.ai.spend import ANALYST, APP, AUTOPILOT, DESK, LINES
 
 MAX_DAYS = 90
 
@@ -150,9 +152,9 @@ def _view(row: Optional[AiCap], cap: Optional[int], default: Optional[int]) -> d
 
 
 def _line_defaults(rows: dict[tuple[str, Optional[int]], AiCap]) -> dict[str, tuple[int, int]]:
-    """Each line's cap in force and its default, in micros."""
+    """Each line's cap in force and its default, and the whole app's, in micros."""
     out = {}
-    for line in LINES:
+    for line in (*LINES, APP):
         default = spend._micros(spend.default_line_usd(line))
         row = rows.get((line, None))
         out[line] = (spend._micros(row.monthly_usd) if row is not None else default, default)
@@ -186,6 +188,11 @@ def _report(days: int, now: datetime) -> AiSpendReport:
         cap, default = line_caps[line]
         lines.append(AiSpendLine(line=line, spent_micros=int(settled), open_micros=int(held),
                                  **_view(cap_rows.get((line, None)), cap, default)))
+    app_cap, app_default = line_caps[APP]
+    # Every line's spend, the lines above included, as the whole app's cap counts it
+    app = AiSpendApp(spent_micros=sum(int(settled) for settled, _held in month_lines.values()),
+                     open_micros=sum(int(held) for _settled, held in month_lines.values()),
+                     **_view(cap_rows.get((APP, None)), app_cap, app_default))
 
     rows = [AiSpendRow(day=r[0], line=r[1], feature=r[2], detail=r[3], user_id=r[4], team_id=r[5],
                        cost_micros=int(r[6]), open_micros=int(r[7]), entries=int(r[8]))
@@ -219,7 +226,7 @@ def _report(days: int, now: datetime) -> AiSpendReport:
         as_of=now, month_start=month.date(), since=since, days=days,
         turn_max_micros=spend._micros(settings.ai_agent_turn_max_usd),
         read_max_micros=spend._micros(settings.analyst_read_max_usd),
-        lines=lines, rows=rows, usage=usage, users=users, teams=teams,
+        lines=lines, app=app, rows=rows, usage=usage, users=users, teams=teams,
     )
 
 
@@ -280,6 +287,8 @@ async def set_cap(req: AiCapReq, now: Optional[datetime] = None) -> AiCapData:
     if req.user_id is not None:
         if req.line == ANALYST:
             raise BadRequestError("AI_CAP_NO_USERS", "The analyst's reads belong to no user: its cap is the line's")
+        if req.line == APP:
+            raise BadRequestError("AI_CAP_NO_USERS", "The whole app's cap is everyone's: it takes no user")
         if not await _user_exists(req.user_id):
             raise NotFoundError("AI_CAP_USER_NOT_FOUND", f"No user {req.user_id}")
     author = (req.author or "").strip() or None

@@ -896,8 +896,8 @@ async def teams_of(user_id: int, now: Optional[datetime] = None) -> list[dict[st
 def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot], prefs: Any = None,
               team_pref: Any = None) -> dict[str, Any]:
     """The team's switch, its next check-in and its automations table (`prefs` and `team_pref` are the
-    account's notification preferences and the team's override, which hold lineup's and late scratches'
-    levels below AI)."""
+    account's notification preferences and the team's override, which hold lineup's, late scratches' and
+    daily actions' levels below AI)."""
     return {
         "team_id": team_id,
         "on": row is not None and row.paused_at is None,
@@ -909,7 +909,8 @@ def team_view(team_id: int, row: Optional[Autopilot], upcoming: Optional[Slot], 
                                                "due_at": upcoming.due_at},
         "autopilot": autonomy.switch_on(row),
         "rows": autonomy.table(row, lineup_below_ai=levels.lineup_below_ai(prefs, team_pref),
-                               late_scratch_below_ai=levels.late_scratch_below_ai(prefs, team_pref)),
+                               late_scratch_below_ai=levels.late_scratch_below_ai(prefs, team_pref),
+                               daily_actions_below_ai=levels.daily_actions_below_ai(prefs, team_pref)),
     }
 
 

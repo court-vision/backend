@@ -19,6 +19,9 @@ from pydantic import Field
 from schemas.common import ApiModel, BaseRequest, BaseResponse
 
 Line = Literal["desk", "autopilot", "analyst"]
+# What a cap can be set on: a line, or `app`, the whole app's spend on every line
+# together (migration 0056). `app` is a cap only: no ledger row is on it.
+CapLine = Literal["desk", "autopilot", "analyst", "app"]
 
 # The ledger's rows, by what spent them:
 #   chat           a message to Dime on the AI desk
@@ -47,6 +50,13 @@ class AiSpendLine(AiCapView):
     spent_micros: int = Field(..., description="This month, settled turns and reads")
     open_micros: int = Field(..., description="This month, reservations not settled: running now, or died "
                                               "mid-call (counted at their ceiling)")
+
+
+class AiSpendApp(AiCapView):
+    """The whole app's month so far against its cap: every line together."""
+
+    spent_micros: int = Field(..., description="This month on every line, settled")
+    open_micros: int = Field(..., description="This month on every line, reservations not settled")
 
 
 class AiSpendRow(ApiModel):
@@ -108,6 +118,7 @@ class AiSpendReport(ApiModel):
     turn_max_micros: int = Field(..., description="What one desk turn or check-in reserves before it starts")
     read_max_micros: int = Field(..., description="What one analyst read reserves before it starts")
     lines: list[AiSpendLine]
+    app: AiSpendApp = Field(..., description="The cap on the whole app, over every line")
     rows: list[AiSpendRow]
     usage: list[AiUsageRow]
     users: list[AiSpendUser]
@@ -119,17 +130,18 @@ class AiSpendResp(BaseResponse):
 
 
 class AiCapReq(BaseRequest):
-    """Set a line's monthly cap (no `user_id`) or one user's on a line; `monthly_usd`
-    null deletes the row, so the environment's number applies again."""
+    """Set a line's monthly cap (no `user_id`), the whole app's (`line` app), or one
+    user's on a line; `monthly_usd` null deletes the row, so the environment's number
+    applies again."""
 
-    line: Line
+    line: CapLine
     user_id: Optional[int] = Field(None, ge=1)
     monthly_usd: Optional[Decimal] = Field(None, ge=0, le=1000, max_digits=6, decimal_places=2)
     author: Optional[str] = Field(None, max_length=80)
 
 
 class AiCapData(AiCapView):
-    line: Line
+    line: CapLine
     user_id: Optional[int] = None
 
 

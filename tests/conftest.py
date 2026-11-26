@@ -56,6 +56,22 @@ def empty_category_value_cache():
     clear()
 
 
+@pytest.fixture(autouse=True)
+def empty_draft_live_cache():
+    """The stored boards' facts beside an in-season draft board are cached per process
+    (services.draft_live); one test's seeded days must never answer for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.draft_live")
+        if module is not None:
+            module.clear_cache()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- Dime's holds ----
 
 @pytest.fixture(autouse=True)
@@ -85,6 +101,24 @@ def no_kept_matchups():
 
     def clear():
         module = sys.modules.get("services.matchup_hold")
+        if module is not None:
+            module.clear()
+
+    clear()
+    yield
+    clear()
+
+
+# ---- The teams overview's kept answers ----
+
+@pytest.fixture(autouse=True)
+def no_kept_overviews():
+    """The teams overview keeps its answer, each team's week and each league's projection per
+    process (services/team_overview_service.py); one test's must never answer for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.team_overview_service")
         if module is not None:
             module.clear()
 
