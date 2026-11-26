@@ -728,8 +728,9 @@ class AiConversationSummary(ApiModel):
     id: int
     title: Optional[str] = Field(None, description="The first message, shortened; null until one is sent")
     team_id: Optional[int] = None
-    kind: Literal["chat", "checkin", "draft"] = Field(
-        "chat", description="chat (the user's), a check-in's conversation, or one of Dime's notes in a draft room")
+    kind: Literal["chat", "checkin", "draft", "room"] = Field(
+        "chat", description="chat (the user's), a check-in's conversation, one of Dime's notes in a draft room, "
+                            "or a draft room's Dime chat (room)")
     created_at: datetime
     updated_at: datetime
     turns: int

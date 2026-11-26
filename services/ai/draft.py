@@ -26,6 +26,10 @@ with that board:
 - **recap**: after the draft, Dime reads the recap (`get_draft_recap`, a read the
   AI desk has too) and, in a real draft, saves what the season starts from and
   league-mates' habits to its notes.
+- **chat**: the room's Dime chat (2026-11-26, step 2 of the rework): the AI desk's
+  agent and tools in one conversation per room (kind `room`), where the user asks
+  anything about the draft, a plan included; each message carries the room's state
+  (`chat_line`). The board's Ask Dime puts a question in its box; the user sends it.
 
 Every note is one agent turn in its own conversation (kind `draft`), started from
 the room by the user (the button, the notes switch, or the seat), so it spends on
@@ -761,7 +765,7 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     out: dict[str, Any] = {
         "enabled": enabled(), "available": False, "switched_off": False, "lead": NOTE_LEAD,
         "notes_on": False, "seat": {"state": SEAT_OFF, "reason": None, "live": False}, "can_seat": None,
-        "running": None, "notes": [],
+        "running": None, "notes": [], "chat_id": None,
     }
     if not (out["enabled"] and has_access(user_id)):
         return out
@@ -786,6 +790,7 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
         "seat_blocker": seatable(room),
         "running": running,
         "notes": [note_view(n) for n in notes],
+        "chat_id": row.chat_id_id if row is not None else None,
     })
     return out
 
@@ -957,6 +962,126 @@ async def _run(turn: Any, header_line: str, note_id: int, session_id: int, kind:
             get_logger().exception("ai_draft_note_settle_failed", note_id=note_id)
         get_logger().info("ai_draft_note", note_id=note_id, session_id=session_id, kind=kind, seat=seat,
                           state=state, reason=reason, cost_micros=cost)
+
+
+# ------------------------------- the room's chat ------------------------------- #
+
+# The room's Dime chat (James, 2026-11-26, the Draft lab's Dime rework, step 2): the AI desk's agent
+# and tools in a conversation of kind `room`, one per room (usr.ai_draft_rooms.chat_id, migration
+# 0059), with the room's state read again at every message (`chat_line`). The messages are the
+# user's own, so each one spends on the AI desk's line, as a chat there does. Nothing in it drafts:
+# the draft-only tools are in no list of a chat's.
+
+
+def chat_title(detail: Any) -> str:
+    name = getattr(detail, "name", None) or {"mock": "Mock draft", "live": "Live draft"}.get(
+        _status(getattr(detail, "kind", None)), "Draft")
+    return f"Dime · {name} · chat"
+
+
+@db_operation("ai.draft_chat_set")
+def _set_chat(session_id: int, user_id: int, conversation_id: int, replace: Optional[int]) -> Optional[int]:
+    """Point the room at `conversation_id`, over no chat or over `replace` (the chat the user started
+    over from) only, so two first messages at once keep one chat. Returns the room's chat after.
+    `updated_at` stays as it was: the seat's loop reads it as its heartbeat."""
+    now = _now()
+    AiDraftRoom.insert(session_id=session_id, user_id=user_id, created_at=now,
+                       updated_at=now).on_conflict_ignore().execute()
+    free = AiDraftRoom.chat_id.is_null()
+    if replace is not None:
+        free = free | (AiDraftRoom.chat_id == replace)
+    AiDraftRoom.update(chat_id=conversation_id).where(AiDraftRoom.session_id == session_id, free).execute()
+    return AiDraftRoom.get(AiDraftRoom.session_id == session_id).chat_id_id
+
+
+async def room_chat(user_id: int, room: OwnedDraftSessionContext, *, fresh: bool = False) -> int:
+    """The room's Dime chat, started now when the room has none, or with `fresh` a new one in place of
+    the one it has (a full chat starts over; the old one is kept, unlisted). Its conversation id."""
+    from services.ai import conversations
+    await ensure_on(user_id)
+    row = await _room(room.session_id)
+    current = row.chat_id_id if row is not None else None
+    if current is not None and not fresh:
+        return current
+    detail = await _detail(room.session_id)
+    made = await conversations.create(user_id, room.team_id, kind=conversations.ROOM, title=chat_title(detail))
+    kept = await _set_chat(room.session_id, user_id, made.id, current)
+    if kept != made.id:
+        # Another first message started the room's chat meanwhile: one chat per room
+        await conversations.delete(made.id, user_id)
+    return kept
+
+
+@db_operation("ai.draft_chat_room")
+def _room_of_chat(conversation_id: int, user_id: int) -> Optional[int]:
+    row = AiDraftRoom.get_or_none(AiDraftRoom.chat_id == conversation_id, AiDraftRoom.user_id == user_id)
+    return row.session_id_id if row is not None else None
+
+
+def _next_pick_words(detail: Any) -> str:
+    status = _status(detail.status)
+    if status == "completed":
+        return "The draft is finished: get_draft_recap reads how every seat did."
+    if status != "active":
+        return f"The room is {status}."
+    made = f"{detail.pick_count} pick{'' if detail.pick_count == 1 else 's'} made"
+    if detail.my_next_pick is None:
+        return f"{made}; " + ("the user's seat isn't set." if detail.my_slot is None else "the user has no pick left.")
+    rnd = round_of_pick(detail.my_next_pick, detail.league_size)
+    until = detail.picks_until_my_turn
+    when = ("on the clock now" if until == 0 else f"in {until} pick{'' if until == 1 else 's'}"
+            if until is not None else "")
+    at = f"#{detail.my_next_pick}" + (f" (round {rnd})" if rnd else "")
+    return f"{made}; the user's next pick is {at}" + (f", {when}." if when else ".")
+
+
+def _dime_pick_words(notes: list[AiDraftNote], detail: Any) -> str:
+    """Dime's pick for the user's next pick as the board shows it, or that one is being chosen."""
+    if _status(detail.status) != "active" or detail.my_next_pick is None:
+        return ""
+    mine = [n for n in notes if n.kind == PICK and not n.seat and n.for_pick == detail.my_next_pick]
+    if not mine:
+        return ""
+    note = mine[0]
+    if note.state == RUNNING:
+        return f"You are choosing the user's pick for #{detail.my_next_pick} now, in a note of its own."
+    pick = note.pick or {}
+    drafted = {p.player_id for p in detail.picks if p.player_id is not None}
+    if note.state != DONE or pick.get("player_id") is None or pick["player_id"] in drafted:
+        return ""
+    reason = f': "{pick["reason"]}"' if pick.get("reason") else ""
+    return (f"Your pick for #{detail.my_next_pick}, highlighted on the board: {pick.get('name')} "
+            f"(player_id {pick['player_id']}){reason}.")
+
+
+async def chat_line(user_id: int, conversation_id: int) -> str:
+    """What a message in a room's chat knows of the room, read as it is sent (it follows the AI
+    desk's header): which room, the user's next pick, who they have, the room's punts, Dime's pick
+    on the board and whether Dime holds the seat. The board itself is a lookup (get_draft_board)."""
+    session_id = await _room_of_chat(conversation_id, user_id)
+    room = await run_db("ai.owned_session", _owned_session, session_id, user_id) if session_id is not None else None
+    if room is None:
+        return "[This chat's draft room is gone (deleted). Answer from the conversation so far.]"
+    detail = await _detail(room.session_id)
+    name = f' ("{detail.name}")' if getattr(detail, "name", None) else ""
+    parts = [f"This is the Dime chat of draft room_id {room.session_id}{name}: {_room_words(room, detail)}.",
+             _next_pick_words(detail)]
+    mine = sorted((p for p in detail.picks if p.by_me), key=lambda p: p.overall_pick)
+    if mine:
+        parts.append("The user's picks so far: "
+                     + ", ".join(f"#{p.overall_pick} {p.player_name or 'unknown'}" for p in mine) + ".")
+    elif _status(detail.status) == "active":
+        parts.append("The user hasn't drafted anyone yet.")
+    if room.punts:
+        parts.append(f"The room's punts, which the user set: {', '.join(room.punts)}.")
+    parts.append(_dime_pick_words(await _notes(room.session_id, VIEW_NOTES), detail))
+    row = await _room(room.session_id)
+    if row is not None and row.seat != SEAT_OFF:
+        parts.append("You hold the user's seat in this mock and draft it pick by pick, until the user takes it back.")
+    parts.append(f"The user is writing from the room, beside its board: read it with get_draft_board (room_id "
+                 f"{room.session_id}) before naming players. The user makes the picks and sets the punts, so say "
+                 "what you would do and leave both to them.")
+    return "[" + " ".join(p for p in parts if p) + "]"
 
 
 # ------------------------------- the seat ------------------------------- #

@@ -8,7 +8,8 @@ user's mock seat (recorded `dime`, by the user's seat, at the pick on the clock,
 the seat drafting a whole mock with the autopicker running the other seats, the recap's
 read of it, a room Dime drafted in refusing to follow an ESPN draft, the account's two
 switches (draft rooms off hides Dime and hands the seat back; memory off keeps a real
-draft's plan in the room), the AI desk's list of every room's notes, and the rollback.
+draft's plan in the room), the AI desk's list of every room's notes, the room's Dime
+chat (one per room, the room's state on every message), and the rollbacks.
 
 The agent's turn is stubbed: it makes the tool calls a model would, through the real
 tool registry and the real rows.
@@ -608,6 +609,87 @@ async def test_deleting_the_room_deletes_dime_s_rows(team, pool):
     assert AiDraftRoom.select().count() == 0 and AiDraftNote.select().count() == 0
 
 
+# ------------------------------- the room's chat ------------------------------- #
+
+
+async def test_a_room_has_one_dime_chat_with_the_room_on_every_message(team, pool, monkeypatch):
+    from schemas.draft import DraftPickCreate
+    from services.ai.agent_service import AgentService
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    assert await draft.room_chat(team.user_id_id, room) == chat
+    conv = AiConversation.get_by_id(chat)
+    assert conv.kind == "room" and conv.title == "Dime · Mock draft · chat" and conv.team_id_id == team.team_id
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] == chat
+    # Not among the AI desk's chats, and the seat's heartbeat untouched (a new row, seat off)
+    assert await conversations.list_for(team.user_id_id) == []
+    # Two picks by others, the user's at their seat, and Dime's pick chosen for the next one
+    for overall, player in ((1, pool[0]), (2, pool[1])):
+        await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=player, overall_pick=overall))
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=pool[5], by_me=True, overall_pick=MY_SLOT))
+    detail = (await DraftService.get_session(room.session_id)).data
+    nxt = detail.my_next_pick
+    AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=nxt, state="done",
+                       pick={"player_id": pool[9], "name": "Mock 010", "position": "PF", "team": None,
+                             "reason": "No forward yet"})
+    seen = {}
+
+    def start(turn, header_line):
+        seen.update(turn=turn, header=header_line)
+        return agent.Emitter()
+
+    monkeypatch.setattr(agent, "start", start)
+    await AgentService.start_turn(chat, team.user_id_id, "Plan the rest of my draft")
+    line = seen["header"].split("\n", 1)[1]
+    assert line.startswith(f"[This is the Dime chat of draft room_id {room.session_id}: a mock draft")
+    assert f"3 picks made; the user's next pick is #{nxt}" in line
+    assert "The user's picks so far: #3 Mock 006." in line
+    assert f'Your pick for #{nxt}, highlighted on the board: Mock 010 (player_id {pool[9]}): "No forward yet".' in line
+    assert f"get_draft_board (room_id {room.session_id})" in line
+    # The AI desk's tools: a chat drafts nothing
+    assert seen["turn"].tools is agent.TOOLS and seen["turn"].draft_note_id is None
+    await spend.cancel(seen["turn"].reservation_id)
+    await conversations.release(chat)
+
+
+async def test_a_fresh_chat_replaces_the_room_s_and_a_second_first_message_keeps_one(team, pool):
+    room = await _room(team)
+    first = await draft.room_chat(team.user_id_id, room)
+    second = await draft.room_chat(team.user_id_id, room, fresh=True)
+    assert second != first and (await draft.room_view(team.user_id_id, room))["chat_id"] == second
+    assert AiConversation.get_or_none(AiConversation.id == first) is not None      # kept, unlisted
+    # A conversation made meanwhile doesn't replace the room's chat
+    other = await conversations.create(team.user_id_id, team.team_id, kind=conversations.ROOM)
+    assert await draft._set_chat(room.session_id, team.user_id_id, other.id, None) == second
+    # Deleted (the AI desk can delete any conversation): the room has no chat, and the next message starts one
+    await conversations.delete(second, team.user_id_id)
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] is None
+    third = await draft.room_chat(team.user_id_id, room)
+    assert third not in (first, second)
+
+
+async def test_switched_off_the_room_s_chat_takes_no_message(team, pool):
+    from services.ai.agent_service import AgentService
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    await ai_settings.update(team.user_id_id, draft_rooms=False)
+    with pytest.raises(ConflictError) as err:
+        await draft.room_chat(team.user_id_id, room)
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    with pytest.raises(ConflictError):
+        await AgentService.start_turn(chat, team.user_id_id, "Who should I take?")
+    # Refused before anything was held or spent
+    assert AiConversation.get_by_id(chat).busy_until is None
+    assert AiSpend.select().where(AiSpend.user_id == team.user_id_id).count() == 0
+
+
+async def test_a_deleted_room_s_chat_says_the_room_is_gone(team, pool):
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    await DraftService.delete_session(room.session_id)
+    assert "draft room is gone" in await draft.chat_line(team.user_id_id, chat)
+
+
 # ------------------------------- the migration ------------------------------- #
 
 
@@ -620,8 +702,9 @@ def test_0046_rollback_applies_and_the_forward_file_restores_it(integration_db):
         assert exists is None
     finally:
         db.execute_sql(forward)
-        # 0058's column, which the table carried before the rollback
+        # 0058's and 0059's, which the tables carried before the rollback
         db.execute_sql((Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text())
+        db.execute_sql((Path(MIGRATIONS_DIR) / "0059__dime_room_chat.sql").read_text())
     assert db.execute_sql("SELECT to_regclass('usr.ai_draft_notes')").fetchone()[0] is not None
 
 
@@ -640,3 +723,24 @@ def test_0058_rollback_applies_and_the_forward_file_restores_it(integration_db):
     finally:
         db.execute_sql(forward)
     assert _has_pick_column()
+
+
+def _has_chat_column():
+    return db.execute_sql(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = 'usr' AND table_name = 'ai_draft_rooms' "
+        "AND column_name = 'chat_id'").fetchone() is not None
+
+
+def test_0059_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0059__dime_room_chat.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0059__dime_room_chat.rollback.sql").read_text()
+    user = User.create(email="roomchat@courtvision.dev", clerk_user_id="user_room_chat", created_at=datetime.utcnow())
+    AiConversation.create(user_id=user.user_id, kind="room")
+    try:
+        db.execute_sql(rollback)
+        assert not _has_chat_column()
+        assert AiConversation.select().where(AiConversation.user_id == user.user_id).count() == 0
+    finally:
+        db.execute_sql(forward)
+    assert _has_chat_column()
+    AiConversation.create(user_id=user.user_id, kind="room")

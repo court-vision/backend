@@ -1,9 +1,9 @@
 """
 Dime in the Draft desk (the Dime autopilot plan, step 7; services/ai/draft.py).
 
-`/drafts/{session_id}/dime` is Dime's side of one draft room: its notes (a plan, a
-note at the user's pick, a recap), the switch for a note at every pick, and the
-user's seat in a mock, which Dime can draft to the end. Every note is an agent turn
+`/drafts/{session_id}/dime` is Dime's side of one draft room: its notes (its pick
+for the user's next pick, a recap), the room's Dime chat, and the user's seat in a
+mock, which Dime can draft to the end. Every note is an agent turn
 started here by the user, on the AI desk's spend line. It comes with the AI desk
 (AI_ENABLED and the account's place on its list); the GET never refuses, so the room
 can hide Dime.
@@ -12,11 +12,13 @@ can hide Dime.
 notes view.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from api.deps import OwnedDraftSessionContext, UserContext, get_db_user, get_owned_session
+from schemas.ai import AiConversationResp
 from schemas.common import ApiStatus
 from schemas.dime_draft import (
+    DimeDraftChatReq,
     DimeDraftDesk,
     DimeDraftDeskResp,
     DimeDraftNote,
@@ -28,6 +30,7 @@ from schemas.dime_draft import (
     DimeDraftSeatReq,
 )
 from services.ai import draft as dime
+from services.ai.agent_service import AgentService
 
 router = APIRouter(prefix="/drafts", tags=["Drafts"])
 # The AI desk's side: every room's notes in one list
@@ -43,12 +46,12 @@ _ERRORS = {
 @router.get(
     "/{session_id}/dime",
     response_model=DimeDraftRoomResp,
-    summary="Dime in a draft room: its notes, the notes switch and the mock seat",
+    summary="Dime in a draft room: its notes, its chat and the mock seat",
     description=(
         "What Dime has written in the room, newest first (its pick for each of the user's picks, with the "
         "player in `pick`; a recap; older rooms' plans; each with the board's numbers the server read for it "
         "in `facts`), whether a note is being written now, how near the user's pick is when the room asks "
-        "for Dime's pick (`lead`), and whether Dime holds the user's seat in a mock. Never refuses for a switched-off server or a user "
+        "for Dime's pick (`lead`), the room's Dime chat (`chat_id`, once started), and whether Dime holds the user's seat in a mock. Never refuses for a switched-off server or a user "
         "off the AI desk's list: `available` says whether the room shows Dime at all, and `switched_off` "
         "that the account turned Dime in draft rooms off (Account, AI and automation)."
     ),
@@ -132,6 +135,28 @@ async def set_seat(
     data = await dime.set_seat(session.user_id, session, req.on)
     message = "Dime has your seat" if req.on else "Your seat is yours again"
     return DimeDraftRoomResp(status=ApiStatus.SUCCESS, message=message, data=DimeDraftRoom(**data))
+
+
+@router.post(
+    "/{session_id}/dime/chat",
+    response_model=AiConversationResp,
+    summary="The room's Dime chat: open it, starting it if the room has none",
+    description=(
+        "One conversation per room (kind `room`): the AI desk's agent and tools, with the room's state (the "
+        "user's next pick, their picks, the punts, Dime's pick on the board, the seat) given on every message. "
+        "Returns the conversation with its turns; send messages to `/ai/conversations/{id}/turns`, each a turn "
+        "on the AI desk's budget, as a chat there is. The AI desk does not list it among the chats. `fresh` "
+        "starts a new one in its place (a full chat starts over)."
+    ),
+    responses={**_ERRORS, 409: {"description": "The account's Dime in draft rooms switch is off (AI_DRAFT_SWITCHED_OFF)"}},
+)
+async def open_chat(
+    req: DimeDraftChatReq = Body(default_factory=DimeDraftChatReq),
+    session: OwnedDraftSessionContext = Depends(get_owned_session),
+) -> AiConversationResp:
+    chat_id = await dime.room_chat(session.user_id, session, fresh=req.fresh)
+    data = await AgentService.detail(chat_id, session.user_id)
+    return AiConversationResp(status=ApiStatus.SUCCESS, message="The room's Dime chat", data=data)
 
 
 @desk_router.get(

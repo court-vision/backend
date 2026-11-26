@@ -2,8 +2,8 @@
 Dime in the Draft desk (the Dime autopilot plan, step 7): the numbers a pick note shows
 beside Dime's words, the briefs each note starts from, which rooms Dime can hold the
 user's seat in, the recap tool's read of a graded draft, the tool lists (the draft tools
-only in a draft note's conversation, the recap everywhere, appended last), and the
-switch. The rows, the claims and the seat run against the real schema in
+only in a draft note's conversation, the recap everywhere, appended last), the room
+chat's read of the room, and the switch. The rows, the claims and the seat run against the real schema in
 tests/integration/test_dime_draft_integration.py.
 """
 
@@ -354,6 +354,95 @@ class TestTools:
         assert limits.model_calls == settings.dime_draft_max_model_calls
         assert limits.timeout_seconds == settings.dime_draft_timeout_seconds
         assert limits.model_calls < agent.Limits.chat().model_calls
+
+
+# ------------------------------- the room's chat ------------------------------- #
+
+
+def _note(**kw):
+    base = dict(kind="pick", seat=False, for_pick=11, state="done", pick=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _drafted(player_id, by_me=False, overall=1, name="Someone"):
+    return SimpleNamespace(player_id=player_id, by_me=by_me, overall_pick=overall, player_name=name)
+
+
+class TestRoomChat:
+    def test_the_next_pick_counts_the_pick_on_the_clock(self):
+        assert draft._next_pick_words(_detail()) == "10 picks made; the user's next pick is #11 (round 3), on the clock now."
+        assert draft._next_pick_words(_detail(picks_until_my_turn=1, pick_count=1)) == \
+            "1 pick made; the user's next pick is #11 (round 3), in 1 pick."
+        assert draft._next_pick_words(_detail(picks_until_my_turn=4)).endswith("in 4 picks.")
+        assert draft._next_pick_words(_detail(my_next_pick=None)) == "10 picks made; the user has no pick left."
+        assert draft._next_pick_words(_detail(my_next_pick=None, my_slot=None)).endswith("the user's seat isn't set.")
+        assert draft._next_pick_words(_detail(status="completed")).startswith("The draft is finished")
+
+    def test_dime_s_pick_is_said_while_it_stands(self):
+        chosen = _note(pick={"player_id": 9, "name": "Mock 009", "reason": "No center yet"})
+        line = draft._dime_pick_words([chosen], _detail())
+        assert line == 'Your pick for #11, highlighted on the board: Mock 009 (player_id 9): "No center yet".'
+        # Being chosen now
+        assert "choosing the user's pick for #11 now" in draft._dime_pick_words([_note(state="running")], _detail())
+        # Nothing to say: drafted since, failed, for another pick, the seat's, or the draft is over
+        assert draft._dime_pick_words([chosen], _detail(picks=[_drafted(9)])) == ""
+        assert draft._dime_pick_words([_note(state="failed", pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([_note(for_pick=14, pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([_note(seat=True, pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([chosen], _detail(status="completed")) == ""
+        # The newest note for the pick is the one that counts
+        assert draft._dime_pick_words([_note(state="failed"), chosen], _detail()) == ""
+
+    def test_the_chat_is_titled_by_the_room(self):
+        assert draft.chat_title(_detail()) == "Dime · Atlas mock · chat"
+        assert draft.chat_title(_detail(name=None, kind="live")) == "Dime · Live draft · chat"
+
+    def test_a_room_s_chat_takes_the_ai_desk_s_tools_and_the_room_on_every_message(self, monkeypatch):
+        from services.ai import agent_service, conversations
+
+        seen: dict = {}
+        row = SimpleNamespace(team_id_id=23, kind=conversations.ROOM)
+
+        async def get(conversation_id, user_id):
+            return row
+
+        async def claim(*a):
+            return True
+
+        async def history(*a):
+            return conversations.History()
+
+        async def reserve(user_id):
+            return 99
+
+        async def header(user_id, pinned, conversation_id=None):
+            return "[Today]"
+
+        async def ensure_on(user_id):
+            seen["checked"] = user_id
+
+        async def chat_line(user_id, conversation_id):
+            return f"[room of chat {conversation_id}]"
+
+        def start(turn, header_line):
+            seen.update(turn=turn, header=header_line)
+            return "emitter"
+
+        monkeypatch.setattr(agent_service, "ensure_access", lambda user_id: None)
+        monkeypatch.setattr(conversations, "get", get)
+        monkeypatch.setattr(conversations, "claim", claim)
+        monkeypatch.setattr(conversations, "history", history)
+        monkeypatch.setattr(agent_service.spend, "reserve", reserve)
+        monkeypatch.setattr(agent, "header", header)
+        monkeypatch.setattr(draft, "ensure_on", ensure_on)
+        monkeypatch.setattr(draft, "chat_line", chat_line)
+        monkeypatch.setattr(agent, "start", start)
+        assert run(agent_service.AgentService.start_turn(5, 42, "Plan my draft")) == "emitter"
+        assert seen["checked"] == 42
+        assert seen["header"] == "[Today]\n[room of chat 5]"
+        assert seen["turn"].tools is agent.TOOLS and seen["turn"].allowed is agent.ALLOWED
+        assert seen["turn"].draft_note_id is None
 
 
 # ------------------------------- the switch ------------------------------- #
