@@ -244,3 +244,12 @@ def test_league_activity_regroups_the_ledger_by_team(league):
     recent = run(ai_league.get_league_activity(
         _owned(league.team), ai_league.LeagueActivityInput(team_id=league.team.team_id, days=2), today=_day(5)))
     assert [m["date"] for m in recent["moves"]] == [_day(4).isoformat(), _day(3).isoformat()]
+
+
+def test_an_open_spot_daily_actions_filled_is_court_visions_scheduled_write(league):
+    filled = _write(league.user, league.team, 3, [{"player_id": 201, "action": "add"}], source="daily_actions")
+    day = ml.DayRoster(provider_team_id=1, team_name="Atlas", scoring_period_id=3, nba_date=_day(3),
+                       matchup_period_id=1, players={})
+    writes = {w.roster_move_id: w for w in ml.load_writes({1: league.team.team_id}, [day])}
+    assert (writes[filled.id].source, writes[filled.id].adds, writes[filled.id].drops) == (
+        "scheduled", frozenset({201}), frozenset())

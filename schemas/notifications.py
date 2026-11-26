@@ -13,6 +13,9 @@ from schemas.common import ApiModel, BaseResponse
 # The Late scratches row below AI (migration 0047): off, notify (email the swap a
 # verdict change suggests) or act (make it on ESPN and email it)
 LateScratchLevel = Literal["off", "notify", "act"]
+# The Daily actions row below AI (migration 0057): off, or act (make the Week desk's IR
+# moves and fill open roster spots, never dropping anyone). Its notify isn't built yet
+DailyActionsLevel = Literal["off", "act"]
 
 
 # ------------------------------- Request Models ------------------------------- #
@@ -29,6 +32,7 @@ class NotificationPreferenceReq(ApiModel):
     auto_lineup_enabled: bool = False
     # Left out, the stored level stays: a client that predates it can't reset it
     late_scratch_level: Optional[LateScratchLevel] = None
+    daily_actions_level: Optional[DailyActionsLevel] = None
     email: Optional[str] = None
 
 
@@ -44,6 +48,7 @@ class NotificationPreferenceResp(ApiModel):
     alert_minutes_before: int = Field(default=90, ge=15, le=150)
     auto_lineup_enabled: bool = False
     late_scratch_level: LateScratchLevel = "off"
+    daily_actions_level: DailyActionsLevel = "off"
     email: Optional[str] = None
 
 
@@ -56,6 +61,7 @@ class NotificationTeamPreferenceReq(ApiModel):
     alert_minutes_before: Optional[int] = Field(default=None, ge=15, le=150)
     auto_lineup_enabled: Optional[bool] = None
     late_scratch_level: Optional[LateScratchLevel] = None
+    daily_actions_level: Optional[DailyActionsLevel] = None
     email: Optional[str] = None
 
 
@@ -70,6 +76,7 @@ class NotificationTeamPreferenceResp(ApiModel):
     alert_minutes_before: Optional[int] = None
     auto_lineup_enabled: Optional[bool] = None
     late_scratch_level: Optional[LateScratchLevel] = None
+    daily_actions_level: Optional[DailyActionsLevel] = None
     email: Optional[str] = None
 
 
