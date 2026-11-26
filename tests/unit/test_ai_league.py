@@ -275,9 +275,48 @@ def test_a_board_on_the_live_projection_says_so(room, monkeypatch):
     assert (body["in_season"]["model"], body["in_season"]["live_as_of"]) == ("three-part-1", "2026-11-16")
 
 
+def test_a_board_in_season_carries_each_move_its_reason_and_the_age_of_espns_rank(room, monkeypatch):
+    from schemas.draft import DraftInSeasonResp, DraftLiveRanksResp
+    from services.draft_board_service import DraftBoardService
+
+    board = _board()
+    guard, wing = board.data[1], board.data[2]
+    guard.move_7d, guard.move_1d, guard.rank_reason = 6, 1, "Minutes up: 34.2 lately, 29.5 on the season"
+    guard.espn_rank_since, guard.espn_rank_since_first_stored = date(2026, 11, 17), True
+    wing.move_7d, wing.rank_reason, wing.espn_rank_since = -4, "Out until about Dec 8", date(2026, 11, 20)
+    board.meta.in_season = DraftInSeasonResp(games_from=date(2026, 11, 23), prior_games=10, blended=250,
+                                             season_only=3, injured=40, injured_since_projection=0,
+                                             model="three-part-1", live_as_of=date(2026, 11, 23), live=465)
+    board.meta.live_ranks = DraftLiveRanksResp(board="categories", as_of=date(2026, 11, 23),
+                                               day=date(2026, 11, 22), week=None,
+                                               espn_as_of=date(2026, 11, 23))
+
+    async def get_board(scoring, picked_ids=(), my_ids=(), session=None):
+        return board
+
+    monkeypatch.setattr(DraftBoardService, "get_board", get_board)
+    body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
+
+    assert body["in_season"]["moves"] == {"board": "categories", "as_of": "2026-11-23",
+                                          "move_1d_since": "2026-11-22", "move_7d_since": None}
+    assert body["in_season"]["espn_ranks_as_of"] == "2026-11-23"
+    live = ("move_7d", "move_1d", "rank_reason", "espn_rank_since", "espn_rank_since_or_earlier")
+    rec = body["recommendations"][0]
+    assert {k: rec.get(k) for k in live} == {
+        "move_7d": 6, "move_1d": 1, "rank_reason": "Minutes up: 34.2 lately, 29.5 on the season",
+        "espn_rank_since": "2026-11-17", "espn_rank_since_or_earlier": True}
+    by_name = {r["name"]: r for r in body["best_available"]}
+    assert {k: by_name["Wing One"].get(k) for k in live} == {
+        "move_7d": -4, "move_1d": None, "rank_reason": "Out until about Dec 8",
+        "espn_rank_since": "2026-11-20", "espn_rank_since_or_earlier": None}
+    # Only what is known is carried: a player with none of it has none of the keys
+    assert not set(live) & set(by_name["Big One"])
+
+
 def test_a_preseason_board_carries_neither(room):
     body = json.loads(_run("get_draft_board", {"room_id": 5}).content)
     assert "in_season" not in body and "season_gp" not in body["recommendations"][0]
+    assert "move_7d" not in body["recommendations"][0] and "rank_reason" not in body["best_available"][0]
 
 
 def test_best_available_can_be_one_position(room):
