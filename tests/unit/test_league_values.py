@@ -31,9 +31,9 @@ def full_week(number, start, teams=ALL):
     return week(number, start, [teams] * 7)
 
 
-def player(name, team, value, slots=("UT",), chance=1.0, timeline=(), projected=True, slot=None):
+def player(name, team, value, slots=("UT",), chance=1.0, timeline=(), projected=True, slot=None, unplayed=False):
     return lp.ProjPlayer(name=name, team=team, value=value, slots=frozenset(slots), chance=chance,
-                         timeline=tuple(timeline), projected=projected, slot=slot)
+                         timeline=tuple(timeline), projected=projected, slot=slot, unplayed=unplayed)
 
 
 # ------------------------------- a day's seats ------------------------------- #
@@ -228,24 +228,32 @@ def test_free_agents_are_valued_off_the_live_projection_and_else_off_stored_stat
 
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(
         lambda info: SimpleNamespace(points=SimpleNamespace(score=lambda line: line.pts * 1.0))))
-    monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {201: 1})
+    monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {201: 1, 204: 4, 205: 5})
     timeline = (Run(MON, MON + timedelta(60), 30, 0.8),)
     snapshot = live_projection.LiveSnapshot(as_of=MON, version="v", players={
         1: live_projection.LivePlayer(player_id=1, name="Live", espn_id=201, name_normalized="live", team="DEN",
                                       line=StatLine(pts=24.0), games=27.0, timeline=timeline)})
-    fa = lambda pid, name, team, avg, injury=None: SimpleNamespace(
-        player_id=pid, name=name, team=team, avg_points=avg, injury_status=injury,
+    fa = lambda pid, name, team, avg, injury=None, source="rolling": SimpleNamespace(
+        player_id=pid, name=name, team=team, avg_points=avg, injury_status=injury, value_source=source,
         valid_positions=["PG", "G", "UT1", "UT2"])
     listed = [fa(201, "Live", "DEN", 20.0), fa(202, "Stored", "BOS", 15.0), fa(203, "Hurt", "CHI", 18.0, "OUT"),
-              fa(101, "Rostered", "ATL", 30.0)]
+              fa(101, "Rostered", "ATL", 30.0), fa(204, "Idle", "ORL", 42.1, source="baseline"),
+              fa(205, "Debut", "MIA", 25.0)]
     info = SimpleNamespace(model_copy=lambda update: None)
     out = lvs.value_free_agents(listed, info, snapshot, {101})
-    assert [f.name for f, _ in out] == ["Live", "Stored", "Hurt"]          # ESPN's stale rostered one left out
-    live, stored, hurt = (p for _, p in out)
+    assert [f.name for f, _ in out] == ["Live", "Stored", "Hurt", "Idle", "Debut"]   # ESPN's stale rostered one left out
+    live, stored, hurt, idle, debut = (p for _, p in out)
     assert (live.value, live.team, live.timeline, live.projected, live.player_id) == (24.0, "DEN", timeline, True, 1)
     assert live.slots == {"PG", "G", "UT"} and lv.positions(live.slots) == ["PG"]
-    assert (stored.value, stored.chance, stored.projected) == (15.0, 1.0, False)
-    assert hurt.chance == 0.0
+    assert (stored.value, stored.chance, stored.projected, stored.unplayed) == (15.0, 1.0, False, False)
+    assert (hurt.chance, hurt.unplayed) == (0.0, False)
+    # the projection carries everyone who has played: one it leaves out, valued off last season, hasn't
+    assert (idle.value, idle.chance, idle.projected, idle.unplayed) == (42.1, 0.0, False, True)
+    # ...unless our own games have him playing lately (a debut since the snapshot)
+    assert (debut.chance, debut.unplayed) == (1.0, False)
+    # with no snapshot this morning there is nothing to tell by: stored stats, every game
+    idle = next(p for f, p in lvs.value_free_agents(listed, info, None, {101}) if f.name == "Idle")
+    assert (idle.chance, idle.unplayed) == (1.0, False)
 
 
 def _fake_reads(monkeypatch, listed, today_left=None):
@@ -316,6 +324,30 @@ def test_the_service_prices_the_rosters_and_the_best_free_agents(monkeypatch):
     assert out["tiers"][0]["you"] == a1["value"]
     assert any(n.startswith("The calendar is missing games in week 8") for n in out["notes"])
     assert any(n.startswith("No live projection this morning") for n in out["notes"])
+
+
+def test_a_free_agent_who_hasn_t_played_counts_for_no_games_and_is_named(monkeypatch):
+    listed = [_fa(901, "Streamer", "BOS", 18.0), _fa(902, "Idle", "ORL", 42.1)]
+    _fake_reads(monkeypatch, listed)
+    monkeypatch.setattr(lvs, "value_free_agents", lambda fas, info, snap, rostered: [
+        (f, player(f.name, f.team, f.avg_points, slots=("PG", "UT"), projected=False,
+                   chance=0.0 if f.name == "Idle" else 1.0, unplayed=f.name == "Idle")) for f in fas])
+    out = asyncio.run(lvs.league_values(_league_info(), window="next_4", today=MON + timedelta(1)))
+    idle = next(p for p in out["players"] if p["name"] == "Idle")
+    assert (idle["games"], idle["value"], idle["projected"]) == (0.0, 0.0, False)
+    assert idle["window_rank"] == max(p["window_rank"] for p in out["players"])
+    assert "Idle hasn't played this season, so he counts for no games." in out["notes"]
+
+
+def test_the_notes_count_the_unprojected_apart_from_the_unplayed():
+    result = {"window": {"incomplete_weeks": []}}
+    assert lvs.notes_for(result, MON, 2, 150, 1, ["Kevin Porter Jr."]) == [
+        "2 players had no live projection and are valued off stored stats.",
+        "Kevin Porter Jr. hasn't played this season, so he counts for no games."]
+    assert lvs.notes_for(result, MON, 0, 150, 1, ["A", "B"]) == [
+        "A and B haven't played this season, so they count for no games."]
+    assert lvs.notes_for(result, MON, 0, 150, 1, ["A", "B", "C", "D", "E"])[0].startswith("A, B, C and 2 more haven't")
+    assert lvs.notes_for(result, MON, 0, 150, 1) == []
 
 
 def test_the_service_refuses_a_window_with_its_code_and_prices_rosters_alone_without_free_agents(monkeypatch):

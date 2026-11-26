@@ -417,7 +417,7 @@ def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(mo
         return weights
 
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(scoring_for))
-    monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {101: 1, 102: 2})
+    monkeypatch.setattr(identity, "nba_ids_by_espn_id", lambda ids: {101: 1, 102: 2, 104: 4})
     timeline = (Run(MON, MON + timedelta(60), 30, 0.9),)
     snapshot = live_projection.LiveSnapshot(as_of=MON, version="v", players={
         1: live_projection.LivePlayer(player_id=1, name="Live", espn_id=101, name_normalized="live", team="DEN",
@@ -427,24 +427,30 @@ def test_players_are_valued_off_the_live_projection_and_else_off_stored_stats(mo
 
     def stored(scoring, ids):
         asked.extend(ids)
-        return {102: ValueResult(value=22.0, source="rolling"), 103: ValueResult(value=18.0, source="rolling")}
+        return {102: ValueResult(value=22.0, source="rolling"), 103: ValueResult(value=18.0, source="rolling"),
+                104: ValueResult(value=41.0, source="baseline")}
 
     monkeypatch.setattr(EspnService, "_values_for", staticmethod(stored))
     entries = (
         ParsedEntry(101, "Live", "DEN", 0, (0, 5, 11, 12), False, None, False),
         ParsedEntry(102, "Stored", "BOS", 0, (4, 11, 12), False, None, False),
         ParsedEntry(103, "Hurt", "FA", 13, (2, 6, 11), True, "OUT", False),
+        ParsedEntry(104, "Idle", "ORL", 12, (0, 11, 12), False, None, False),
     )
     shown_as_categories = LeagueInfo(provider="espn", league_id=7, team_name="Atlas", year=2027,
                                      scoring_preview="categories")
     rosters, snap = lps.value_players([(1, "Atlas", entries)], shown_as_categories, MON)
-    live, kept, hurt = rosters[0].players
+    live, kept, hurt, idle = rosters[0].players
     assert previews == [None]                    # the league's own points, not the team's preview
-    assert snap is snapshot and sorted(asked) == [102, 103]
+    assert snap is snapshot and sorted(asked) == [102, 103, 104]
     assert (live.value, live.team, live.timeline, live.projected) == (30.0, "DEN", timeline, True)
     assert live.slots == {"PG", "G", "UT", "BE"}
     assert (kept.value, kept.chance, kept.projected, kept.team) == (22.0, 1.0, False, "BOS")
-    assert (hurt.chance, hurt.team) == (0.0, None)
+    assert (hurt.chance, hurt.team, hurt.unplayed) == (0.0, None, False)
+    # left out of the projection, which carries everyone who has played, and valued off last
+    # season: he hasn't played this season, so he counts for no games
+    assert (idle.value, idle.chance, idle.projected, idle.unplayed) == (41.0, 0.0, False, True)
+    assert not kept.unplayed
 
 
 def test_the_notes_name_the_calendar_s_gaps_and_the_unprojected():
