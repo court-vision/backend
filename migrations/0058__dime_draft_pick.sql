@@ -1,4 +1,4 @@
--- Migration 0057: Dime's pick in a draft room.
+-- Migration 0058: Dime's pick in a draft room.
 --
 -- James (2026-11-26): the Draft lab drops Dime's plan and its pick notes. In their
 -- place the board highlights the player Dime would take at the user's next pick,

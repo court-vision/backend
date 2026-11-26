@@ -160,7 +160,9 @@ async def test_one_note_runs_per_room_and_one_per_pick(team, pool):
     # Another note while it runs: refused at the insert
     assert await draft._claim(room.session_id, team.user_id_id, draft.PLAN, None, False, {}) == (None, None)
     await draft._settle(first, draft.DONE, None, "Take him", None, 0)
-    # The same pick again: the note already written comes back
+    AiDraftNote.update(pick={"player_id": 1, "name": "Mock 001", "reason": "Take him"}).where(
+        AiDraftNote.id == first).execute()
+    # The same pick again: the pick already chosen comes back
     assert await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, False, {}) == (None, first)
     # The seat's pick at the same number is its own note
     seat, _ = await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, True, {})
@@ -268,6 +270,29 @@ async def test_dime_picks_again_once_when_its_player_is_drafted_first(team, pool
     room = await _ctx(room.session_id, team.user_id_id)
     held = await draft.start(team.user_id_id, room, draft.PICK)
     assert held.note_id == second.id and held.task is None and len(calls) == 2
+
+
+async def test_a_pick_note_from_before_dime_chose_players_gives_way_to_dime_s_pick(team, pool, monkeypatch):
+    """A room open across the deploy holds a finished pick note with no `pick` for the user's next pick:
+    asking again retires it (`superseded`) and Dime chooses, once."""
+    room = await _room(team)
+    legacy = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=3,
+                                seat=False, state="done", text="Take the best big left.", facts={})
+
+    async def act(turn):
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not out.is_error, out.content
+        return "Best left."
+
+    calls = _fake_turn(monkeypatch, act)
+    chosen = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert chosen.id != legacy.id and chosen.pick["reason"] == "Best left" and len(calls) == 1
+    retired = AiDraftNote.get_by_id(legacy.id)
+    assert retired.state == "failed" and retired.reason == "superseded"
+    # Dime's pick then holds the pick like any other
+    held = await draft.start(team.user_id_id, await _ctx(room.session_id, team.user_id_id), draft.PICK)
+    assert held.note_id == chosen.id and held.task is None and len(calls) == 1
 
 
 # ------------------------------- the plan ------------------------------- #
@@ -595,8 +620,8 @@ def test_0046_rollback_applies_and_the_forward_file_restores_it(integration_db):
         assert exists is None
     finally:
         db.execute_sql(forward)
-        # 0057's column, which the table carried before the rollback
-        db.execute_sql((Path(MIGRATIONS_DIR) / "0057__dime_draft_pick.sql").read_text())
+        # 0058's column, which the table carried before the rollback
+        db.execute_sql((Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text())
     assert db.execute_sql("SELECT to_regclass('usr.ai_draft_notes')").fetchone()[0] is not None
 
 
@@ -606,9 +631,9 @@ def _has_pick_column():
         "AND column_name = 'pick'").fetchone() is not None
 
 
-def test_0057_rollback_applies_and_the_forward_file_restores_it(integration_db):
-    forward = (Path(MIGRATIONS_DIR) / "0057__dime_draft_pick.sql").read_text()
-    rollback = (Path(MIGRATIONS_DIR) / "0057__dime_draft_pick.rollback.sql").read_text()
+def test_0058_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.rollback.sql").read_text()
     try:
         db.execute_sql(rollback)
         assert not _has_pick_column()

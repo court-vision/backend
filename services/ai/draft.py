@@ -352,7 +352,7 @@ def _claim(session_id: int, user_id: int, kind: str, for_pick: Optional[int], se
                 .where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
                        AiDraftNote.for_pick == for_pick, AiDraftNote.seat == seat, AiDraftNote.state != FAILED)
                 .first())
-        if held is not None and not (not seat and _retake_now(session_id, for_pick, held)):
+        if held is not None and not (not seat and _retire_now(session_id, for_pick, held)):
             return None, held.id
     try:
         with db.atomic():
@@ -368,21 +368,26 @@ def _claim(session_id: int, user_id: int, kind: str, for_pick: Optional[int], se
     return note_id, None
 
 
-def _retake_now(session_id: int, for_pick: Optional[int], held: AiDraftNote) -> bool:
-    """Dime's pick for `for_pick` was drafted by someone else before the user picked: retire that note
-    (failed `taken`, which frees the pick for a new one) and say so, unless Dime already picked again
-    `RETAKES` times for this pick."""
-    chosen = (held.pick or {}).get("player_id") if held.state == DONE else None
+def _retire_now(session_id: int, for_pick: Optional[int], held: AiDraftNote) -> bool:
+    """Whether the finished pick note held for `for_pick` gives way to a new one, retiring it (failed,
+    which frees the pick): a note written before Dime chose players (no `pick`, from before 0058) as
+    `superseded`, and Dime's pick whose player another seat drafted before the user picked as `taken`,
+    unless Dime already picked again `RETAKES` times for this pick. A running note always holds."""
+    if held.state != DONE:
+        return False
+    chosen = (held.pick or {}).get("player_id")
     if chosen is None:
-        return False
-    if not DraftPick.select().where(DraftPick.session == session_id, DraftPick.player == chosen).exists():
-        return False
-    retaken = (AiDraftNote.select().where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
-                                          AiDraftNote.for_pick == for_pick, AiDraftNote.seat == False,  # noqa: E712
-                                          AiDraftNote.reason == "taken").count())
-    if retaken >= RETAKES:
-        return False
-    return bool(AiDraftNote.update(state=FAILED, reason="taken")
+        reason = "superseded"
+    else:
+        if not DraftPick.select().where(DraftPick.session == session_id, DraftPick.player == chosen).exists():
+            return False
+        retaken = (AiDraftNote.select().where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
+                                              AiDraftNote.for_pick == for_pick, AiDraftNote.seat == False,  # noqa: E712
+                                              AiDraftNote.reason == "taken").count())
+        if retaken >= RETAKES:
+            return False
+        reason = "taken"
+    return bool(AiDraftNote.update(state=FAILED, reason=reason)
                 .where(AiDraftNote.id == held.id, AiDraftNote.state == DONE).execute())
 
 

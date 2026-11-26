@@ -87,8 +87,8 @@ async def set_dime(
         "punts, and in a real draft on a team the plan is saved to the team's notes (the Draft lab no longer "
         "asks for one). `pick` is Dime's pick for the user's next pick, the one on the clock included, read "
         "off the room's board: one player and one line on why (`pick`). One per pick, so asking again "
-        "returns the one already chosen, unless another seat drafted that player first: then Dime picks "
-        "again, once. `recap` reads the room's recap and, in a real draft, saves what the season starts "
+        "returns the one already chosen, unless another seat drafted that player first (then Dime picks "
+        "again, once) or the note was written before Dime chose players (then Dime chooses now). `recap` reads the room's recap and, in a real draft, saves what the season starts "
         "from and league-mates' habits to Dime's notes."
     ),
     responses={

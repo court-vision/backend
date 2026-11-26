@@ -23,7 +23,8 @@ class DimeDraftNote(ApiModel):
     state: Literal["running", "done", "failed"]
     reason: Optional[str] = Field(None, description=(
         "Why it failed: an error code, no_pick (the turn chose or made no pick), stale, undone (the seat's pick "
-        "was undone), taken (Dime's pick was drafted by another seat first, and Dime picked again)"))
+        "was undone), taken (Dime's pick was drafted by another seat first, and Dime picked again), superseded "
+        "(a note from before Dime chose players, replaced by Dime's pick)"))
     facts: dict[str, Any] = Field(default_factory=dict, description=(
         "pick: pick, picks_until, on_clock, gone_before (the pick `gone` is about), top (three "
         "recommendations: name, position, score, availability, reason...), gone (who won't last), punts, "
