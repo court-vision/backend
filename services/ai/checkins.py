@@ -709,14 +709,21 @@ async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int
     """The check-in's turn (after its wait for the cached prefix, `_stagger`), then its row settled
     with the turn's outcome and cost, then the team kicked for any event that came in while it ran."""
     result: Optional[agent.TurnResult] = None
+    began = False
     wait = _stagger(monotonic())
     try:
         if wait > 0:
             await asyncio.sleep(wait)
+        began = True
         result = await agent.run_turn(turn, agent.Emitter(), header_line=header_line)
     finally:
+        if not began:
+            # Cancelled in its wait (a shutdown): no call went out, and the turn that would settle the
+            # reservation and free the conversation never ran
+            await _hand_back(turn, checkin_id)
         ok = result is not None and result.outcome == "ok"
-        state, reason = (DONE, None) if ok else (FAILED, result.outcome if result is not None else "crashed")
+        state, reason = ((DONE, None) if ok else
+                         (FAILED, result.outcome if result is not None else "crashed" if began else "start_failed"))
         cost = result.cost if result is not None else turn.cost
         try:
             await _settle(checkin_id, state, reason, result.turn_id if result is not None else None, cost, _now())
@@ -726,6 +733,26 @@ async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int
                           reason=reason, cost_micros=cost, decisions=turn.decisions, proposals=len(turn.proposals),
                           waited_s=round(wait, 1))
         await _after(team_id, turn.user_id)
+
+
+async def _hand_back(turn: agent.Turn, checkin_id: int) -> None:
+    """What a check-in that never made its first call took at its start, as a failed start gives it
+    back: its spend reservation (nothing was spent), its events (for the next check-in) and its
+    conversation."""
+    from services.ai import events
+    try:
+        if turn.reservation_id is not None:
+            await spend.cancel(turn.reservation_id)
+    except Exception:
+        get_logger().exception("ai_checkin_reservation_cancel_failed", checkin_id=checkin_id)
+    try:
+        await events.release(checkin_id)
+    except Exception:
+        get_logger().exception("ai_checkin_events_release_failed", checkin_id=checkin_id)
+    try:
+        await conversations.release(turn.conversation_id)
+    except Exception:
+        get_logger().exception("ai_checkin_conversation_release_failed", checkin_id=checkin_id)
 
 
 async def _after(team_id: int, user_id: int) -> None:

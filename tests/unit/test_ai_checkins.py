@@ -453,6 +453,52 @@ class TestStagger:
         assert events == [("turn", "[a]"), ("sleep", 12.0), ("turn", "[b]")]
         assert [kw["waited_s"] for event, kw in logged if event == "ai_checkin"] == [0.0, 12.0]
 
+    def test_one_cancelled_in_its_wait_hands_back_what_its_start_took(self, monkeypatch):
+        from services.ai import events
+        real_sleep = asyncio.sleep
+        handed, settled, turns = [], [], []
+
+        async def sleep(seconds):
+            if seconds > 0:
+                raise asyncio.CancelledError  # a shutdown, mid-wait
+            await real_sleep(seconds)
+
+        async def run_turn(turn, emit, *, header_line):
+            turns.append(header_line)
+
+        async def cancel(reservation_id):
+            handed.append(("reservation", reservation_id))
+
+        async def release_events(checkin_id):
+            handed.append(("events", checkin_id))
+
+        async def release(conversation_id):
+            handed.append(("conversation", conversation_id))
+
+        async def settle(checkin_id, st, reason, turn_id, cost, now):
+            settled.append((checkin_id, st, reason, turn_id, cost))
+
+        async def after(team_id, user_id):
+            pass
+        clock = iter([1_000.0, 1_003.0])
+        monkeypatch.setattr(checkins, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(checkins.asyncio, "sleep", sleep)
+        monkeypatch.setattr(agent, "run_turn", run_turn)
+        monkeypatch.setattr(spend, "cancel", cancel)
+        monkeypatch.setattr(events, "release", release_events)
+        monkeypatch.setattr(conversations, "release", release)
+        monkeypatch.setattr(checkins, "_settle", settle)
+        monkeypatch.setattr(checkins, "_after", after)
+        leader = SimpleNamespace(cost=0, decisions=0, proposals=[], user_id=42, reservation_id=55, conversation_id=31)
+        follower = SimpleNamespace(cost=0, decisions=0, proposals=[], user_id=42, reservation_id=56, conversation_id=32)
+        run(checkins._run(leader, "[a]", 7, 23, "morning"))
+        with pytest.raises(asyncio.CancelledError):
+            run(checkins._run(follower, "[b]", 8, 24, "morning"))
+        # The leader's turn ran (and settles its own); the follower's never did
+        assert turns == ["[a]"]
+        assert handed == [("reservation", 56), ("events", 8), ("conversation", 32)]
+        assert settled[-1] == (8, "failed", "start_failed", None, 0)
+
     def test_the_conversation_is_held_through_the_wait(self, starting):
         # The turn's deadline (60 s here), its longest wait for the prefix, and the margin
         _start()
