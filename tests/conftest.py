@@ -109,6 +109,24 @@ def no_kept_matchups():
     clear()
 
 
+# ---- The teams overview's kept answers ----
+
+@pytest.fixture(autouse=True)
+def no_kept_overviews():
+    """The teams overview keeps its answer, each team's week and each league's projection per
+    process (services/team_overview_service.py); one test's must never answer for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.team_overview_service")
+        if module is not None:
+            module.clear()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- ESPN's pro schedule (a per-game-day add limit's matchup total) ----
 
 @pytest.fixture(autouse=True)
