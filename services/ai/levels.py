@@ -64,11 +64,6 @@ class Change:
 # ------------------------------- lineup's levels below AI ------------------------------- #
 
 
-def lineup_email(prefs: Any) -> bool:
-    """The account's lineup email is on: without it the pipeline runs no team's lineup."""
-    return prefs is not None and bool(prefs.lineup_alerts_enabled)
-
-
 def lineup_below_ai(prefs: Any, team_pref: Any) -> str:
     """off, notify or act, from the preferences as data-platform reads them."""
     from services.ai.automations import fill_setting
@@ -149,7 +144,7 @@ def _snapshot_lineup(user_id: int, team_id: int) -> dict[str, Any]:
 # ------------------------------- the change ------------------------------- #
 
 
-def check(change: Change, *, email: bool) -> Change:
+def check(change: Change) -> Change:
     """The change, with `levels.checkins` folded into `checkins`; refuses an unknown row or level
     (422) and a level a row doesn't offer (409, with why)."""
     if change.autopilot is not None and change.levels:
@@ -162,8 +157,6 @@ def check(change: Change, *, email: bool) -> Change:
         if level not in autonomy.LEVELS:
             raise AppError("AI_AUTOPILOT_INVALID", "A level is off, notify, act or ai", status_code=422)
         reason = autonomy.offered(row, level)
-        if reason is None and row == autonomy.LINEUP and level != autonomy.OFF and not email:
-            reason = "Your account's lineup email is off, so no team's lineup runs: turn it on in Notifications"
         if reason is not None:
             raise LevelUnavailable(message=f"{autonomy.LABELS[row]} can't be {level}: {reason}")
         if row == autonomy.CHECKINS:

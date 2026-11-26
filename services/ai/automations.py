@@ -91,16 +91,21 @@ class FillSetting:
     minutes_before: int
 
 
-def fill_setting(prefs: Any, team_pref: Any) -> FillSetting:
-    """The data-platform pipeline's rule, read the same way: only a user with an account-level
-    preference row whose alerts are on is processed at all; a team override wins where it is set."""
-    if prefs is None or not prefs.lineup_alerts_enabled:
-        return FillSetting(False, False, 0)
+# The account row's defaults (db/models/notifications.py) for a user who never saved one, except that
+# the email stays off: without a row only a team's own setting runs.
+_UNSAVED = {"lineup_alerts_enabled": False, "auto_lineup_enabled": False, "alert_minutes_before": 90}
 
+
+def fill_setting(prefs: Any, team_pref: Any) -> FillSetting:
+    """The data-platform pipeline's rule, read the same way: a team override wins where it is set,
+    both ways, else the account's setting. So a team that switched its own lineup email on runs while
+    the account's is off, and a user with no account row runs only such a team."""
     def pick(field: str) -> Any:
         value = getattr(team_pref, field, None) if team_pref is not None else None
-        return value if value is not None else getattr(prefs, field)
-    runs = pick("lineup_alerts_enabled") is not False
+        if value is not None:
+            return value
+        return getattr(prefs, field) if prefs is not None else _UNSAVED[field]
+    runs = bool(pick("lineup_alerts_enabled"))
     return FillSetting(runs, runs and bool(pick("auto_lineup_enabled")), int(pick("alert_minutes_before") or 0))
 
 

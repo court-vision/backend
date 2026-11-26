@@ -216,12 +216,11 @@ def level_of(autopilot: Any, row: str, lineup_below_ai: str, late_scratch_below_
     return OFF
 
 
-def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
+def table(autopilot: Any, *, lineup_below_ai: str,
           late_scratch_below_ai: str = OFF, daily_actions_below_ai: str = OFF) -> list[dict[str, Any]]:
     """The team's automations table, as the API returns it: each row's level, each level's
-    availability and why not, and a note when the row does less than its level says.
-    `lineup_email` is whether the account's lineup email is on: without it no team's lineup
-    runs, so lineup's notify, act and AI can't be picked."""
+    availability and why not, and a note when the row does less than its level says. Lineup's
+    levels are the team's own: they run whatever the account's lineup email says."""
     switch = switch_on(autopilot)
     paused = not checkins_on(autopilot)
     out = []
@@ -230,8 +229,6 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
         options = []
         for lv in LEVELS:
             reason = offered(row, lv)
-            if reason is None and row == LINEUP and lv != OFF and not lineup_email:
-                reason = "Your account's lineup email is off, so no team's lineup runs: turn it on in Notifications"
             options.append({"level": lv, "available": reason is None, "reason": reason})
         note = None
         if row != CHECKINS and level == AI:
@@ -241,8 +238,6 @@ def table(autopilot: Any, *, lineup_below_ai: str, lineup_email: bool,
                 note = "Paused: Dime does nothing here until you resume check-ins"
             elif not acting_available():
                 note = "Nothing runs: autopilot is switched off on the server"
-            if row == LINEUP and not lineup_email:
-                note = (f"{note}. " if note else "") + "Auto-lineup doesn't run: your account's lineup email is off"
         if row == CHECKINS and paused and getattr(autopilot, "paused_by", None) == "system":
             note = f"Dime paused itself: {autopilot.paused_reason}" if autopilot.paused_reason else "Dime paused itself"
         out.append({"row": row, "label": LABELS[row], "level": level, "options": options, "note": note})
