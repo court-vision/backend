@@ -1,5 +1,6 @@
-"""The streaming line for one owned team (services/streaming_line.py): each of your players
-against what the last stream lane worth running adds to your lineup, matchup by matchup."""
+"""The streaming line for one owned team (services/streaming_line.py): your players' points per
+game against the free agents optimal streaming picks up, and the spots it streams, matchup by
+matchup."""
 
 from typing import Optional
 
@@ -18,6 +19,11 @@ class LineLane(ApiModel):
     adds: int                                   # adds the plan with k lanes makes
 
 
+class LineSpot(ApiModel):
+    name: str
+    espn_id: int
+
+
 class MatchupStreamingLine(ApiModel):
     matchup: int
     start: Optional[str] = None                 # the first day planned: today, or tomorrow once today's games start
@@ -28,8 +34,10 @@ class MatchupStreamingLine(ApiModel):
     base: float                                 # your total with no lanes
     lanes: list[LineLane]                       # one per lane count tried
     worth_running: int                          # lanes worth running
-    line: Optional[float] = None                # what the last of them adds; None: no lane could add anyone
+    line: Optional[float] = None                # the pickups' points per game; None: no one picked up
     line_low: Optional[float] = None            # the bottom of the band
+    games: float = 0.0                          # the pickups' expected games behind the line
+    streamed: list[LineSpot] = []               # your players whose spots the plan streams
     proven: bool = True                         # every plan proven best
 
 
@@ -43,9 +51,11 @@ class LinePlayerValue(ApiModel):
     injury_status: Optional[str] = None
     protected: bool = False                     # locked: never streamed
     on_ir: bool = False
-    worth: float                                # what he adds to your lineup over the rest of the roster
+    per_game: float                             # his points per game when he plays
+    below_line: Optional[bool] = None           # the wire matches him game for game (None: no line, or on IR)
+    streamed_in: list[int] = []                 # the matchups whose plan streams his spot
+    worth: float                                # what he adds to your lineup over the rest of the roster, in points
     by_matchup: list[float]                     # the same, matchup by matchup
-    under_line: Optional[bool] = None           # a lane would beat him over the window (None: no line)
 
 
 class StreamingLineData(ApiModel):
@@ -56,10 +66,10 @@ class StreamingLineData(ApiModel):
     key: Optional[ValueWindowKey] = None        # None: a first and last matchup were asked for
     first_matchup: int
     last_matchup: int
-    line: Optional[float] = None                # summed over the window's matchups with a line
+    line: Optional[float] = None                # per game, over the window's pickups
     line_low: Optional[float] = None
     matchups: list[MatchupStreamingLine]
-    players: list[LinePlayerValue]              # by worth, most first
+    players: list[LinePlayerValue]              # by points per game, most first
     free_agents_read: Optional[int] = None      # None: ESPN's list didn't load
     notes: list[str] = []
 

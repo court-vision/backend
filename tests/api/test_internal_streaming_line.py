@@ -36,13 +36,15 @@ def _own_team(monkeypatch, team):
 def _line():
     return {
         "league_name": "Test", "today": "2026-11-26", "projection_as_of": "2026-11-26", "current_matchup": 6,
-        "key": "this_week", "first_matchup": 6, "last_matchup": 6, "line": 80.0, "line_low": 64.0,
+        "key": "this_week", "first_matchup": 6, "last_matchup": 6, "line": 20.0, "line_low": 16.0,
         "matchups": [{"matchup": 6, "start": "2026-11-27", "end": "2026-11-29", "days": 3, "adds": 4,
                       "playoffs": False, "base": 600.0,
                       "lanes": [{"lane": 1, "holder": "Bench", "holder_espn_id": 5, "total": 660.0, "gain": 60.0,
                                  "adds": 2}],
-                      "worth_running": 1, "line": 80.0, "line_low": 64.0, "proven": True}],
-        "players": [{"name": "Bench", "espn_id": 5, "worth": 20.0, "by_matchup": [20.0], "under_line": True}],
+                      "worth_running": 1, "line": 20.0, "line_low": 16.0, "games": 4.0,
+                      "streamed": [{"name": "Bench", "espn_id": 5}], "proven": True}],
+        "players": [{"name": "Bench", "espn_id": 5, "per_game": 9.0, "below_line": True, "streamed_in": [6],
+                     "worth": 20.0, "by_matchup": [20.0]}],
         "free_agents_read": 150, "notes": [],
     }
 
