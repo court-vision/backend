@@ -186,6 +186,27 @@ def one_readback(monkeypatch):
     yield
 
 
+# ---- Check-ins waiting on the cached prefix ----
+
+@pytest.fixture(autouse=True)
+def no_checkin_stagger(monkeypatch):
+    """A check-in started soon after another waits for the prompt cache (services/ai/checkins.py
+    `_stagger`). No test waits: the stagger is 0 unless a test sets its own, and no leader carries
+    over from the test before."""
+    import sys
+
+    from core.settings import settings
+
+    monkeypatch.setattr(settings, "autopilot_checkin_stagger_seconds", 0.0)
+    module = sys.modules.get("services.ai.checkins")
+    if module is not None:
+        module.reset_stagger()
+    yield
+    module = sys.modules.get("services.ai.checkins")
+    if module is not None:
+        module.reset_stagger()
+
+
 # ---- The captured draft ----
 
 @pytest.fixture(scope="session")
