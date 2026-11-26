@@ -60,6 +60,7 @@ class AiDraftNote(BaseModel):
     punts = BinaryJSONField(null=True)
     punts_before = BinaryJSONField(null=True)
     took = BinaryJSONField(null=True)
+    pick = BinaryJSONField(null=True)          # a pick note's choice (recommend_pick, 0058)
     conversation_id = ForeignKeyField(AiConversation, column_name="conversation_id", null=True, on_delete="SET NULL")
     turn_id = ForeignKeyField(AiTurn, column_name="turn_id", null=True, on_delete="SET NULL")
     cost_micros = BigIntegerField(default=0)

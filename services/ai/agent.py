@@ -133,6 +133,7 @@ STATUS: dict[str, str] = {
     "get_draft_recap": "Reading the draft recap",
     "set_draft_plan": "Setting the draft plan",
     "draft_pick": "Making the pick",
+    "recommend_pick": "Choosing a pick",
     "steer": "Checking the holds",
     "set_lane": "Checking the lane change",
     "cancel_pickup": "Checking the pickup",

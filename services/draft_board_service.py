@@ -963,6 +963,7 @@ class DraftBoardService:
         fit_ranks = DraftBoardService._fit_ranks(fit_values, removed)
         league_size = DraftBoardService._league_size(scoring, session)
         horizon = DraftBoardService._availability_horizon(session)
+        on_clock = DraftBoardService._on_the_clock(session)
 
         # In season the stored daily boards stand beside this one (services.draft_live):
         # each player's move on the standard board of this format, and ESPN's rank
@@ -1044,7 +1045,8 @@ class DraftBoardService:
                     espn_rank_since_first_stored=since_first,
                     fit_value=fit_values.get(row.id),
                     fit_rank=fit_ranks.get(row.id),
-                    availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
+                    availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type,
+                                                                  on_clock=on_clock),
                     cap_blocked=blocked,
                     categories=entry.cats,
                     category_z=entry.z,
@@ -1115,7 +1117,8 @@ class DraftBoardService:
                 espn_rank_since_first_stored=since_first,
                 fit_value=None,
                 fit_rank=None,
-                availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type),
+                availability=DraftBoardService._availability_of(market, horizon, league_size, rank_type,
+                                                                  on_clock=on_clock),
                 cap_blocked=cap_check(entry.id),
                 categories=None,
                 category_z=None,
@@ -1629,30 +1632,32 @@ class DraftBoardService:
 
     @staticmethod
     def _availability_horizon(session: BoardSession) -> Optional[int]:
-        """The pick to ask "will he still be here?" about.
-
-        My next turn — except while I am on the clock, where every player on
-        the board is available *now* by definition and the only useful question
-        is whether waiting one more turn is safe. None when I have no turn left
-        to wait for, which makes the question meaningless rather than urgent.
+        """The pick to ask "will he still be here?" about: my next turn, the one
+        I am on the clock for included (James, 2026-11-26: everything counts to
+        the next pick, on the clock inclusive). None when I have no turn left to
+        wait for, which makes the question meaningless rather than urgent.
         """
-        if session.my_next_pick is None:
-            return None
-        if session.draft_front is not None and session.my_next_pick <= session.draft_front:
-            return session.my_following_pick
         return session.my_next_pick
+
+    @staticmethod
+    def _on_the_clock(session: BoardSession) -> bool:
+        """My turn is the pick being made now: everyone left on the board is available to me."""
+        return (session.my_next_pick is not None and session.draft_front is not None
+                and session.my_next_pick <= session.draft_front)
 
     @staticmethod
     def _availability_of(
         market: Mapping, horizon: Optional[int], league_size: Optional[int],
-        rank_type: str = "standard",
+        rank_type: str = "standard", *, on_clock: bool = False,
     ) -> Optional[str]:
         """Likely / toss-up / gone, from where the market drafts him vs `horizon`.
 
         Crowd ADP first (it is what other managers actually did), ESPN's
         editorial rank as the fallback. A bucket, never a percentage: one point
         estimate cannot support a probability, and a number that looks
-        calibrated would be read as one.
+        calibrated would be read as one. While I am on the clock everyone on the
+        board is still there for this pick, so every player the market knows is
+        likely, whatever his ADP.
         """
         if horizon is None or not league_size:
             return None
@@ -1661,6 +1666,8 @@ class DraftBoardService:
             expected = market_rank_of(market, rank_type)
         if expected is None:
             return None
+        if on_clock:
+            return "likely"
 
         threshold = max(AVAILABILITY_MIN_THRESHOLD, round(league_size / 2))
         gap = float(expected) - horizon

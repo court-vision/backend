@@ -141,7 +141,7 @@ GET_DRAFT_BOARD: dict[str, Any] = {
         "next pick, best first, each with its score and every term of it in season-value points "
         "(value over replacement, punts, injury, lineup congestion; category_fit is shown but not "
         "summed), its value, CV and ESPN ranks, whether he is likely to last to that pick "
-        "(availability: likely, tossup or gone) and a one-line reason; then the best players still "
+        "(availability: likely, tossup or gone; while the user is on the clock everyone is likely) and a one-line reason; then the best players still "
         "on the board in its own order (optionally one position), the user's drafted roster, the "
         "room's punts and, in a category league, how far the roster trails an average team in each "
         "category. rank_source espn orders the recommendations by ESPN's board instead, with the same "

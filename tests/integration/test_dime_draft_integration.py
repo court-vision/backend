@@ -160,7 +160,9 @@ async def test_one_note_runs_per_room_and_one_per_pick(team, pool):
     # Another note while it runs: refused at the insert
     assert await draft._claim(room.session_id, team.user_id_id, draft.PLAN, None, False, {}) == (None, None)
     await draft._settle(first, draft.DONE, None, "Take him", None, 0)
-    # The same pick again: the note already written comes back
+    AiDraftNote.update(pick={"player_id": 1, "name": "Mock 001", "reason": "Take him"}).where(
+        AiDraftNote.id == first).execute()
+    # The same pick again: the pick already chosen comes back
     assert await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, False, {}) == (None, first)
     # The seat's pick at the same number is its own note
     seat, _ = await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, True, {})
@@ -183,29 +185,114 @@ async def test_a_note_whose_process_died_is_swept(team, pool):
 # ------------------------------- a pick note ------------------------------- #
 
 
-async def test_a_pick_note_reads_the_board_first_and_is_written_once(team, pool, monkeypatch):
+async def test_dime_s_pick_reads_the_board_first_and_is_chosen_once(team, pool, monkeypatch):
     room = await _room(team)
+    outcomes = {}
 
     async def act(turn):
         board = _board_in(turn.message)
-        return f"Take {board['recommendations'][0]['name']}."
+        top = board["recommendations"][0]["player_id"]
+        outcomes["chosen"] = await _tool(turn, "recommend_pick", {
+            "room_id": room.session_id, "player_id": top, "reason": "  Your roster has no\n center yet "})
+        outcomes["twice"] = await _tool(turn, "recommend_pick", {
+            "room_id": room.session_id, "player_id": top + 1, "reason": "Again"})
+        outcomes["seat_tool"] = await _tool(turn, "draft_pick", {
+            "room_id": room.session_id, "player_id": top, "reason": "x"})
+        return "Your roster has no center yet."
 
     calls = _fake_turn(monkeypatch, act)
     note = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
-    assert note.state == "done" and note.for_pick == MY_SLOT and note.text == "Take Mock 001."
+    assert not outcomes["chosen"].is_error, outcomes["chosen"].content
+    assert outcomes["twice"].is_error and "You already chose Mock 001" in outcomes["twice"].content
+    # Choosing is not drafting: the seat's tool is refused, and nothing is picked
+    assert outcomes["seat_tool"].is_error and "only works while you hold the user's seat" in outcomes["seat_tool"].content
+    assert DraftPick.select().where(DraftPick.session == room.session_id).count() == 0
+    assert note.state == "done" and note.for_pick == MY_SLOT and note.text == "Your roster has no center yet."
+    assert note.pick == {"player_id": pool[0], "name": "Mock 001", "position": "PG", "team": None,
+                         "reason": "Your roster has no center yet"}
     assert note.facts["top"][0]["name"] == "Mock 001"
     # Seat 3, two picks away: who won't last is about pick 3 itself
     assert note.facts["on_clock"] is False and note.facts["picks_until"] == 2 and note.facts["gone_before"] == 3
+    # The brief names the user's pick after this one, for whether a player can wait
+    assert "The user's pick after this one is #" in calls[0].message and "recommend_pick once" in calls[0].message
     conv = AiConversation.get_by_id(note.conversation_id_id)
     assert conv.kind == "draft" and conv.title == "Dime · Mock draft · pick 3"
-    assert [t["name"] for t in calls[0].tools][-2:] == ["set_draft_plan", "draft_pick"]
-    # Asked again for the same pick: the one written comes back, with no new turn
+    assert [t["name"] for t in calls[0].tools][-3:] == ["set_draft_plan", "draft_pick", "recommend_pick"]
+    # The room's view carries the choice
+    view = await draft.room_view(team.user_id_id, room)
+    assert view["notes"][0]["pick"]["player_id"] == pool[0]
+    # Asked again for the same pick: the one chosen comes back, with no new turn
     again = await draft.start(team.user_id_id, room, draft.PICK)
     assert again.note_id == note.id and again.task is None and len(calls) == 1
     # The note's turn spent on the AI desk's line
     assert AiSpend.select().where(AiSpend.user_id == team.user_id_id, AiSpend.line == "desk").count() == 1
     # Not in the AI desk's chats
     assert await conversations.list_for(team.user_id_id) == []
+
+
+async def test_a_turn_that_chooses_nobody_fails_its_note(team, pool, monkeypatch):
+    room = await _room(team)
+
+    async def act(turn):
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": 1, "reason": "x"})
+        assert out.is_error and "isn't on the board" in out.content
+        return "Take the best player."
+
+    _fake_turn(monkeypatch, act)
+    note = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert note.state == "failed" and note.reason == "no_pick" and note.pick is None
+
+
+async def test_dime_picks_again_once_when_its_player_is_drafted_first(team, pool, monkeypatch):
+    from schemas.draft import DraftPickCreate
+    room = await _room(team)
+
+    async def act(turn):
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not out.is_error, out.content
+        return "Best left."
+
+    calls = _fake_turn(monkeypatch, act)
+    first = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    # Another seat takes him at pick 1: the room asks again and Dime picks again for pick 3
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=first.pick["player_id"], by_me=False,
+                                                                 overall_pick=1))
+    room = await _ctx(room.session_id, team.user_id_id)
+    second = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert second.id != first.id and second.for_pick == 3 and len(calls) == 2
+    assert second.pick["player_id"] != first.pick["player_id"]
+    retired = AiDraftNote.get_by_id(first.id)
+    assert retired.state == "failed" and retired.reason == "taken"
+    # His second choice goes too: that was the one retake, so the room keeps the note it has
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=second.pick["player_id"], by_me=False,
+                                                                 overall_pick=2))
+    room = await _ctx(room.session_id, team.user_id_id)
+    held = await draft.start(team.user_id_id, room, draft.PICK)
+    assert held.note_id == second.id and held.task is None and len(calls) == 2
+
+
+async def test_a_pick_note_from_before_dime_chose_players_gives_way_to_dime_s_pick(team, pool, monkeypatch):
+    """A room open across the deploy holds a finished pick note with no `pick` for the user's next pick:
+    asking again retires it (`superseded`) and Dime chooses, once."""
+    room = await _room(team)
+    legacy = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=3,
+                                seat=False, state="done", text="Take the best big left.", facts={})
+
+    async def act(turn):
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not out.is_error, out.content
+        return "Best left."
+
+    calls = _fake_turn(monkeypatch, act)
+    chosen = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert chosen.id != legacy.id and chosen.pick["reason"] == "Best left" and len(calls) == 1
+    retired = AiDraftNote.get_by_id(legacy.id)
+    assert retired.state == "failed" and retired.reason == "superseded"
+    # Dime's pick then holds the pick like any other
+    held = await draft.start(team.user_id_id, await _ctx(room.session_id, team.user_id_id), draft.PICK)
+    assert held.note_id == chosen.id and held.task is None and len(calls) == 1
 
 
 # ------------------------------- the plan ------------------------------- #
@@ -229,7 +316,7 @@ async def test_the_plan_sets_a_category_room_s_punts_and_a_mock_s_plan_stays_in_
     assert note.punts == ["ft_pct", "tov"] and note.punts_before == []
     assert (await DraftService.get_session(room.session_id)).data.punts == ["ft_pct", "tov"]
     assert AiMemory.select().count() == 0
-    # A pick note reads the plan in its brief
+    # Dime's pick for the user no longer reads a plan (the room stopped asking for one, 2026-11-26)
     seen = []
 
     async def pick(turn):
@@ -238,7 +325,7 @@ async def test_the_plan_sets_a_category_room_s_punts_and_a_mock_s_plan_stays_in_
 
     _fake_turn(monkeypatch, pick)
     await _settled(await draft.start(team.user_id_id, await _ctx(room.session_id, team.user_id_id), draft.PICK))
-    assert 'The room\'s plan: "Concede FT% and turnovers" (punts: ft_pct, tov).' in seen[0]
+    assert "Concede FT% and turnovers" not in seen[0]
 
 
 async def test_a_real_draft_s_plan_is_saved_to_the_team_s_notes(team, pool, monkeypatch):
@@ -533,4 +620,23 @@ def test_0046_rollback_applies_and_the_forward_file_restores_it(integration_db):
         assert exists is None
     finally:
         db.execute_sql(forward)
+        # 0058's column, which the table carried before the rollback
+        db.execute_sql((Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text())
     assert db.execute_sql("SELECT to_regclass('usr.ai_draft_notes')").fetchone()[0] is not None
+
+
+def _has_pick_column():
+    return db.execute_sql(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = 'usr' AND table_name = 'ai_draft_notes' "
+        "AND column_name = 'pick'").fetchone() is not None
+
+
+def test_0058_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.rollback.sql").read_text()
+    try:
+        db.execute_sql(rollback)
+        assert not _has_pick_column()
+    finally:
+        db.execute_sql(forward)
+    assert _has_pick_column()

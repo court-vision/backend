@@ -21,7 +21,10 @@ class DimeDraftNote(ApiModel):
     for_pick: Optional[int] = Field(None, description="A pick note: the user's overall pick it is about")
     seat: bool = Field(False, description="A pick Dime made itself, holding the user's seat in a mock")
     state: Literal["running", "done", "failed"]
-    reason: Optional[str] = Field(None, description="Why it failed")
+    reason: Optional[str] = Field(None, description=(
+        "Why it failed: an error code, no_pick (the turn chose or made no pick), stale, undone (the seat's pick "
+        "was undone), taken (Dime's pick was drafted by another seat first, and Dime picked again), superseded "
+        "(a note from before Dime chose players, replaced by Dime's pick)"))
     facts: dict[str, Any] = Field(default_factory=dict, description=(
         "pick: pick, picks_until, on_clock, gone_before (the pick `gone` is about), top (three "
         "recommendations: name, position, score, availability, reason...), gone (who won't last), punts, "
@@ -32,6 +35,9 @@ class DimeDraftNote(ApiModel):
     punts_before: Optional[list[str]] = Field(None, description="A plan note: the room's punts before it")
     took: Optional[dict[str, Any]] = Field(None, description=(
         "A seat note: the pick it recorded (overall_pick, round, player_id, name, position, team, reason)"))
+    pick: Optional[dict[str, Any]] = Field(None, description=(
+        "Dime's pick (a pick note that is not the seat's): the player it would take at for_pick, which the "
+        "board highlights (player_id, name, position, team, reason: one line on why for this roster)"))
     conversation_id: Optional[int] = Field(None, description="Opens in the AI desk")
     cost_usd: float = 0.0
     created_at: datetime
@@ -51,8 +57,10 @@ class DimeDraftRoom(ApiModel):
                                         "switch is on: the room shows Dime")
     switched_off: bool = Field(False, description="enabled and on the list, but the account's Dime in draft rooms "
                                                   "switch (Account, AI and automation) is off")
-    lead: int = Field(description="The room asks for a pick note once the user's pick is this many picks away")
-    notes_on: bool = Field(description="A note when each of the user's picks is near")
+    lead: int = Field(description="The room asks for Dime's pick once the user's pick is this many picks away, "
+                                  "the pick on the clock included")
+    notes_on: bool = Field(description="The old notes switch, kept on the room; the Draft lab no longer reads it "
+                                       "(Dime's pick comes whenever Dime in draft rooms is on)")
     seat: DimeDraftSeat
     can_seat: Optional[bool] = Field(None, description="Dime can hold the user's seat here (a mock following nothing)")
     seat_blocker: Optional[str] = Field(None, description="Why it can't, in a line")

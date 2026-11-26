@@ -75,24 +75,24 @@ def _board(**kw):
 
 
 class TestFacts:
-    def test_on_the_clock_gone_is_about_the_turn_after_this_one(self):
-        facts = draft.facts_of(_board(), following=22)
-        assert facts["on_clock"] is True and facts["pick"] == 11 and facts["gone_before"] == 22
+    def test_gone_is_about_the_next_pick_the_one_on_the_clock_included(self):
+        facts = draft.facts_of(_board())
+        assert facts["on_clock"] is True and facts["pick"] == 11 and facts["gone_before"] == 11
         assert [t["name"] for t in facts["top"]] == ["Victor Wembanyama", "Tyrese Haliburton", "Third"]
         assert facts["top"][0]["score"] == 48.2 and facts["top"][0]["availability"] == "gone"
         assert [g["name"] for g in facts["gone"]] == ["Victor Wembanyama", "Mikal Bridges"]
         assert facts["punts"] == ["ft_pct"] and facts["roster"] == 1
 
     def test_before_the_pick_gone_is_about_the_pick_itself(self):
-        facts = draft.facts_of(_board(picks_until_my_turn=2), following=22)
+        facts = draft.facts_of(_board(picks_until_my_turn=2))
         assert facts["on_clock"] is False and facts["gone_before"] == 11 and facts["picks_until"] == 2
 
     def test_needs_are_the_weakest_categories_left_out_of_the_punts(self):
-        facts = draft.facts_of(_board(), following=None)
+        facts = draft.facts_of(_board())
         assert [n["category"] for n in facts["needs"]] == ["blk", "reb"]
 
     def test_an_empty_board_has_nothing_to_show(self):
-        facts = draft.facts_of({"recommendations": [], "best_available": []}, following=None)
+        facts = draft.facts_of({"recommendations": [], "best_available": []})
         assert facts["top"] == [] and facts["gone"] == [] and facts["needs"] == [] and facts["roster"] == 0
 
 
@@ -111,19 +111,24 @@ class TestFollowingPick:
 
 
 class TestBriefs:
-    def test_a_pick_note_carries_the_board_the_plan_and_says_who_picks(self):
+    def test_dime_s_pick_carries_the_board_and_asks_for_one_player_and_one_line(self):
         plan = SimpleNamespace(plan="Punt FT%, bigs early", punts=["ft_pct"])
-        text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), plan=plan, for_pick=11)
-        assert text.startswith('[Pick note for room_id 7 ("Atlas mock"): a mock draft, categories scoring, 4 teams')
+        text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), plan=plan, for_pick=11, following=14)
+        assert text.startswith('[Your pick for room_id 7 ("Atlas mock"): a mock draft, categories scoring, 4 teams')
         assert "pick #11 (round 3) is now: the user is on the clock" in text
-        assert "you don't make the pick" in text
-        assert 'The room\'s plan: "Punt FT%, bigs early" (punts: ft_pct).' in text
+        assert "the user makes the pick" in text and "recommend_pick once" in text
+        assert "The user's pick after this one is #14" in text
+        # The room no longer asks for a plan, so the pick reads none
+        assert "plan" not in text.split("cite these numbers")[0].lower()
         board = json.loads(text.split("cite these numbers):\n", 1)[1].split("\n\n", 1)[0])
         assert board["recommendations"][0]["name"] == "Victor Wembanyama"
         assert board["recommendations"][0]["components"] == [
             {"label": "Value over replacement", "value": 40.1, "in_score": True}]
         assert board["category_need"][0]["category"] == "blk"
         assert "draft_pick" not in text
+        # The user's last pick has no pick after it
+        assert "It is the user's last pick." in draft.brief(draft.PICK, _room(), _detail(), board=_board(),
+                                                            for_pick=11)
 
     def test_a_note_in_season_says_what_the_board_s_numbers_carry(self):
         board = _board(in_season={"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31"})
@@ -164,7 +169,7 @@ class TestBriefs:
         assert first["espn_rank_since_or_earlier"] is True
         # A player with none of it carries none of the keys
         assert "move_7d" not in second and "rank_reason" not in second
-        facts = draft.facts_of(board, following=22)
+        facts = draft.facts_of(board)
         assert facts["top"][0]["rank_reason"] == "Out until about Dec 8" and "move_7d" not in facts["top"][1]
         # With nothing stored the brief says nothing of either
         plain = _board(in_season={"games_from": "2026-11-23", "prior_games": 10, "adp_as_of": "2026-10-31"})
@@ -173,7 +178,7 @@ class TestBriefs:
 
     def test_a_pick_note_ahead_of_the_pick_says_how_far(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(picks_until_my_turn=2), for_pick=11)
-        assert "is in 2 picks" in text and "No plan is set for this room." in text
+        assert "is in 2 picks" in text and "No plan is set for this room." not in text
 
     def test_the_seat_s_brief_hands_it_the_pick(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), seat=True, for_pick=11)
@@ -298,25 +303,31 @@ class TestTools:
     def test_the_recap_is_appended_to_every_tool_list_and_the_draft_tools_to_a_draft_note_s_only(self):
         names = [t["name"] for t in tools.AGENT_TOOLS]
         assert names[names.index("get_draft_recap") + 1:] == ["get_add_limits"]      # appended after it since
-        assert [t["name"] for t in agent.DRAFT_TOOLS[-2:]] == ["set_draft_plan", "draft_pick"]
+        assert [t["name"] for t in agent.DRAFT_TOOLS[-3:]] == ["set_draft_plan", "draft_pick", "recommend_pick"]
         # A draft note's list is the AI desk's (before the asks) with the two appended, so the cached prefix
         # is shared
         assert agent.DRAFT_TOOLS == [*agent._BASE, *draft.DRAFT_ONLY_TOOLS]
         for allowed in (agent.ALLOWED, agent.CHECKIN_ALLOWED):
             assert "get_draft_recap" in allowed
-            assert not ({"set_draft_plan", "draft_pick"} & allowed)
-        assert {"get_draft_recap", "set_draft_plan", "draft_pick"} <= agent.DRAFT_ALLOWED
+            assert not ({"set_draft_plan", "draft_pick", "recommend_pick"} & allowed)
+        assert {"get_draft_recap", "set_draft_plan", "draft_pick", "recommend_pick"} <= agent.DRAFT_ALLOWED
 
     @pytest.mark.parametrize("tool, model", [
         (draft.GET_DRAFT_RECAP, draft.DraftRecapInput),
         (draft.SET_DRAFT_PLAN, draft.SetDraftPlanInput),
         (draft.DRAFT_PICK, draft.DraftPickInput),
+        (draft.RECOMMEND_PICK, draft.RecommendPickInput),
     ])
     def test_the_definitions_match_the_inputs(self, tool, model):
         assert set(tool["input_schema"]["properties"]) == set(model.model_fields)
         assert set(tool["input_schema"]["required"]) == {n for n, f in model.model_fields.items() if f.is_required()}
         assert tool["input_schema"]["additionalProperties"] is False
         assert tool["name"] in agent.STATUS
+
+    def test_dime_s_reason_is_one_line_and_never_empty(self):
+        assert draft.RecommendPickInput(room_id=1, player_id=2, reason=" fills\n  the wing ").reason == "fills the wing"
+        with pytest.raises(ValueError):
+            draft.RecommendPickInput(room_id=1, player_id=2, reason="  ")
 
     def test_the_plan_is_one_line_and_never_empty(self):
         assert draft.SetDraftPlanInput(room_id=1, plan="  punt   FT%\n bigs early ").plan == "punt FT% bigs early"
@@ -330,6 +341,9 @@ class TestTools:
         out = run(tools.run_tool("draft_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
                                  allowed=agent.DRAFT_ALLOWED))
         assert out.is_error and "only works in Dime's pick note" in out.content
+        out = run(tools.run_tool("recommend_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
+                                 allowed=agent.DRAFT_ALLOWED))
+        assert out.is_error and "recommend_pick only works in Dime's pick note" in out.content
         # And the AI desk's own list doesn't have them at all
         out = run(tools.run_tool("draft_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
                                  allowed=agent.ALLOWED))
