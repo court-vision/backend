@@ -107,6 +107,16 @@ def window_rate(rates: list[tuple[Optional[float], float]]) -> Optional[float]:
     return round(sum(r * g for r, g in rates if r is not None) / games, sl.DECIMALS)
 
 
+def window_band(weights: list[tuple[Optional[float], float, Optional[float], float]]
+                ) -> tuple[Optional[float], Optional[float]]:
+    """A window's line and its low end from each matchup's (line, games, low, low games). Each
+    matchup's low is at most its line, but the two averages weigh different games, so they can
+    cross: the low end is held at the line."""
+    line = window_rate([(r, g) for r, g, _, _ in weights])
+    low = window_rate([(r, g) for _, _, r, g in weights])
+    return line, (min(low, line) if low is not None and line is not None else low)
+
+
 def notes_for(snapshot_as_of, listed, acq, season_left, asked_adds, incomplete, unplanned) -> list[str]:
     notes = []
     if incomplete:
@@ -252,8 +262,7 @@ async def streaming_line(team_id: int, league_info: LeagueInfo, *, window: Optio
         weights.append((result.line, result.games, result.line_low, result.low_games))
         streamed_in.update({i: streamed_in.get(i, []) + [m] for i in result.streamed})
 
-    line = window_rate([(r, g) for r, g, _, _ in weights])
-    line_low = window_rate([(r, g) for _, _, r, g in weights])
+    line, line_low = window_band(weights)
     rows = []
     for e, p in zip(entries_mine, players, strict=True):
         worth = round(sum(worth_by[p.espn_id]), sl.DECIMALS)

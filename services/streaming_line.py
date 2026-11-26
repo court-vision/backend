@@ -214,10 +214,11 @@ def matchup_line(players: Sequence[LinePlayer], free_agents: Sequence[LineFreeAg
     totals = [base] + [lane.total for lane in lanes]
     best = max(totals)
     running = next(k for k, t in enumerate(totals) if t >= best - MIN_GAIN)
-    at = max(running, 1)                    # with none worth running, the line is the first lane's pickups
+    at = max(running, 1)
     plan, rest = plans[at - 1]
     fa_by_id = {f.espn_id: f for f in free_agents if f.espn_id not in on_roster}
-    points, games = _pickups(plan, fa_by_id, days)
+    # with no lane worth running nobody is picked up, so there is no line
+    points, games = _pickups(plan, fa_by_id, days) if running else (0.0, 0.0)
     line = _per_game(points, games)
     held = {p.espn_id for p in order[:running]}
     streamed = tuple(sorted({s.drop_id for s in plan.switches} & held))

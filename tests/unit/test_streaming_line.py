@@ -104,6 +104,10 @@ def test_a_protected_player_never_holds_a_lane_and_no_adds_means_no_line():
     assert [ln.holder for ln in out.lanes] == [1]
     # P1 beats F, so no lane is worth running and nobody is picked up
     assert (out.worth_running, out.line, out.lanes[0].adds, out.streamed) == (0, None, 0, ())
+    # a pickup gaining under MIN_GAIN isn't worth an add: no lane, no pickups, no line
+    small = sl.matchup_line([sl.LinePlayer(1, proj("P", "ATL", 10), UT)], [sl.LineFreeAgent(9, proj("F", "DEN", 10.5), UT)],
+                            days(1), {11: 1}, 1)
+    assert (small.lanes[0].adds, small.worth_running, small.line, small.games) == (1, 0, None, 0.0)
     none = sl.matchup_line([p1, p2], [sl.LineFreeAgent(9, proj("F", "DEN", 20), UT)], days(2), {11: 2}, 0)
     assert (none.lanes, none.line, none.line_low, none.base) == ((), None, None, 80.0)
     assert sl.matchup_line([p1, p2], [], [], {11: 2}, 3).line is None
@@ -149,6 +153,8 @@ def _league_info(provider=FantasyProvider.ESPN):
 def test_a_window_s_line_weighs_each_matchup_by_its_pickups_games():
     assert sls.window_rate([(20.0, 6.0), (10.0, 2.0), (None, 0.0)]) == 17.5
     assert sls.window_rate([(None, 0.0)]) is None and sls.window_rate([]) is None
+    # 10 over six games and 30 over two make 15; the low ends alone (none, then 20) would make 20
+    assert sls.window_band([(10.0, 6.0, None, 0.0), (30.0, 2.0, 20.0, 1.0)]) == (15.0, 15.0)
 
 
 GAME_DAY_ADDS = AcquisitionState(per="game_day", per_game_day=1)
