@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from time import monotonic
 from typing import Any, Optional, Sequence
 
 from peewee import fn
@@ -563,6 +564,33 @@ def ask_brief(team_id: int, what: str, due_at: datetime, asked_at: datetime, act
 # Check-ins still running, held so they aren't collected
 _RUNNING: set[asyncio.Task] = set()
 
+# Every check-in's first call sends the same fixed prefix (Dime's instructions and the check-in
+# tools, about 20k tokens), which the prompt cache keeps 5 minutes from its last read. A call can
+# read it only once the call that wrote it has begun to answer, so check-ins started together
+# (every team's slot comes due in the same tick) would each write it: $5 a million tokens where a
+# read is $0.20. The first check-in after a quiet spell leads and starts at once; one that starts
+# soon after waits until the stagger past the leader's start, when the prefix is cached.
+_QUIET_S = 240.0  # this long after the leader's start, the prefix may be gone (the cache keeps 300)
+_leader_at = float("-inf")  # when the current leader started (monotonic seconds)
+
+
+def _stagger(now: float) -> float:
+    """How long a check-in starting at `now` (monotonic seconds) waits before its first call."""
+    global _leader_at
+    stagger = settings.autopilot_checkin_stagger_seconds
+    if stagger <= 0:
+        return 0.0
+    if now - _leader_at > _QUIET_S:
+        _leader_at = now
+        return 0.0
+    return max(_leader_at + stagger - now, 0.0)
+
+
+def reset_stagger() -> None:
+    """Forget the leader (tests)."""
+    global _leader_at
+    _leader_at = float("-inf")
+
 
 @dataclass(frozen=True)
 class Started:
@@ -624,7 +652,9 @@ async def _start(team_id: int, user_id: int, kind: str, nba_date: date, due_at: 
         title = title_of(kind, nba_date) if ask is None else conversations.title_of(f"You asked: {ask.what}")
         conversation = await conversations.create(user_id, team_id, kind=conversations.CHECKIN, title=title)
         conversation_id = conversation.id
-        hold = timedelta(seconds=settings.autopilot_checkin_timeout_seconds + 30)
+        # The turn's own deadline, plus its wait for the cached prefix (`_stagger`), plus a margin
+        hold = timedelta(seconds=settings.autopilot_checkin_timeout_seconds
+                         + settings.autopilot_checkin_stagger_seconds + 30)
         await conversations.claim(conversation_id, user_id, hold)
         await _attach(checkin_id, conversation_id)
         header_line = await agent.header(user_id, team_id, conversation_id=conversation_id)
@@ -676,22 +706,53 @@ async def _seed_protections(team_id: int, user_id: int, autopilot: Optional[Auto
 
 
 async def _run(turn: agent.Turn, header_line: str, checkin_id: int, team_id: int, kind: str) -> None:
-    """The check-in's turn, then its row settled with the turn's outcome and cost, then the team kicked
-    for any event that came in while it ran."""
+    """The check-in's turn (after its wait for the cached prefix, `_stagger`), then its row settled
+    with the turn's outcome and cost, then the team kicked for any event that came in while it ran."""
     result: Optional[agent.TurnResult] = None
+    began = False
+    wait = _stagger(monotonic())
     try:
+        if wait > 0:
+            await asyncio.sleep(wait)
+        began = True
         result = await agent.run_turn(turn, agent.Emitter(), header_line=header_line)
     finally:
+        if not began:
+            # Cancelled in its wait (a shutdown): no call went out, and the turn that would settle the
+            # reservation and free the conversation never ran
+            await _hand_back(turn, checkin_id)
         ok = result is not None and result.outcome == "ok"
-        state, reason = (DONE, None) if ok else (FAILED, result.outcome if result is not None else "crashed")
+        state, reason = ((DONE, None) if ok else
+                         (FAILED, result.outcome if result is not None else "crashed" if began else "start_failed"))
         cost = result.cost if result is not None else turn.cost
         try:
             await _settle(checkin_id, state, reason, result.turn_id if result is not None else None, cost, _now())
         except Exception:
             get_logger().exception("ai_checkin_settle_failed", checkin_id=checkin_id)
         get_logger().info("ai_checkin", checkin_id=checkin_id, team_id=team_id, kind=kind, state=state,
-                          reason=reason, cost_micros=cost, decisions=turn.decisions, proposals=len(turn.proposals))
+                          reason=reason, cost_micros=cost, decisions=turn.decisions, proposals=len(turn.proposals),
+                          waited_s=round(wait, 1))
         await _after(team_id, turn.user_id)
+
+
+async def _hand_back(turn: agent.Turn, checkin_id: int) -> None:
+    """What a check-in that never made its first call took at its start, as a failed start gives it
+    back: its spend reservation (nothing was spent), its events (for the next check-in) and its
+    conversation."""
+    from services.ai import events
+    try:
+        if turn.reservation_id is not None:
+            await spend.cancel(turn.reservation_id)
+    except Exception:
+        get_logger().exception("ai_checkin_reservation_cancel_failed", checkin_id=checkin_id)
+    try:
+        await events.release(checkin_id)
+    except Exception:
+        get_logger().exception("ai_checkin_events_release_failed", checkin_id=checkin_id)
+    try:
+        await conversations.release(turn.conversation_id)
+    except Exception:
+        get_logger().exception("ai_checkin_conversation_release_failed", checkin_id=checkin_id)
 
 
 async def _after(team_id: int, user_id: int) -> None:

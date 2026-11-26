@@ -243,7 +243,7 @@ class TestTick:
 def starting(monkeypatch):
     monkeypatch.setattr(settings, "autopilot_checkin_timeout_seconds", 60.0)
     state = SimpleNamespace(reservation=55, claim=7, cancelled=[], released=[], settled=[], claims=[],
-                            created=[], launched=[], header_error=None, autopilot=None)
+                            created=[], launched=[], header_error=None, autopilot=None, holds=[])
 
     async def autopilot_row(team_id):
         return state.autopilot
@@ -265,6 +265,7 @@ def starting(monkeypatch):
         return SimpleNamespace(id=31)
 
     async def conv_claim(conversation_id, user_id, hold):
+        state.holds.append(hold)
         return True
 
     async def release(conversation_id):
@@ -387,6 +388,121 @@ class TestRun:
     def test_a_failed_turn_settles_it_failed_with_the_outcome(self, monkeypatch):
         assert self._run(monkeypatch, agent.TurnResult(turn_id=81, outcome="AI_TIMEOUT", cost=900_000)) == \
             [(7, "failed", "AI_TIMEOUT", 81, 900_000)]
+
+
+class TestStagger:
+    """Check-ins started together wait for the first one's cached prefix instead of each writing it."""
+
+    @pytest.fixture(autouse=True)
+    def fifteen(self, monkeypatch):
+        monkeypatch.setattr(settings, "autopilot_checkin_stagger_seconds", 15.0)
+
+    def test_the_first_after_a_quiet_spell_starts_at_once(self):
+        assert checkins._stagger(1_000.0) == 0.0
+
+    def test_one_started_with_it_waits_the_stagger_past_the_leader(self):
+        checkins._stagger(1_000.0)
+        assert checkins._stagger(1_000.2) == pytest.approx(14.8)
+        # Every follower waits for the same leader, so the waits never add up past the stagger
+        assert checkins._stagger(1_001.0) == pytest.approx(14.0)
+
+    def test_one_started_after_the_stagger_has_passed_starts_at_once(self):
+        checkins._stagger(1_000.0)
+        assert checkins._stagger(1_030.0) == 0.0
+        # ...and is no new leader: the prefix the leader wrote is still cached
+        assert checkins._stagger(1_030.5) == 0.0
+
+    def test_a_start_past_the_quiet_spell_leads_again(self):
+        checkins._stagger(1_000.0)
+        assert checkins._stagger(1_000.0 + checkins._QUIET_S + 1) == 0.0
+        assert checkins._stagger(1_000.0 + checkins._QUIET_S + 2) == pytest.approx(14.0)
+
+    def test_zero_starts_every_check_in_at_once(self, monkeypatch):
+        monkeypatch.setattr(settings, "autopilot_checkin_stagger_seconds", 0.0)
+        assert checkins._stagger(1_000.0) == 0.0
+        assert checkins._stagger(1_000.1) == 0.0
+
+    def test_a_follower_sleeps_before_its_turn_and_logs_the_wait(self, monkeypatch):
+        events = []
+
+        async def sleep(seconds):
+            events.append(("sleep", seconds))
+
+        async def run_turn(turn, emit, *, header_line):
+            events.append(("turn", header_line))
+            return agent.TurnResult(turn_id=80, outcome="ok", cost=41_000)
+
+        async def settle(*args):
+            pass
+
+        async def after(team_id, user_id):
+            pass
+        clock = iter([1_000.0, 1_003.0])
+        monkeypatch.setattr(checkins, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(checkins.asyncio, "sleep", sleep)
+        monkeypatch.setattr(agent, "run_turn", run_turn)
+        monkeypatch.setattr(checkins, "_settle", settle)
+        monkeypatch.setattr(checkins, "_after", after)
+        logged = []
+        monkeypatch.setattr(checkins, "get_logger",
+                            lambda: SimpleNamespace(info=lambda event, **kw: logged.append((event, kw)),
+                                                    exception=lambda *a, **k: None))
+        turn = SimpleNamespace(cost=0, decisions=0, proposals=[], user_id=42)
+        run(checkins._run(turn, "[a]", 7, 23, "morning"))
+        run(checkins._run(turn, "[b]", 8, 24, "morning"))
+        assert events == [("turn", "[a]"), ("sleep", 12.0), ("turn", "[b]")]
+        assert [kw["waited_s"] for event, kw in logged if event == "ai_checkin"] == [0.0, 12.0]
+
+    def test_one_cancelled_in_its_wait_hands_back_what_its_start_took(self, monkeypatch):
+        from services.ai import events
+        real_sleep = asyncio.sleep
+        handed, settled, turns = [], [], []
+
+        async def sleep(seconds):
+            if seconds > 0:
+                raise asyncio.CancelledError  # a shutdown, mid-wait
+            await real_sleep(seconds)
+
+        async def run_turn(turn, emit, *, header_line):
+            turns.append(header_line)
+
+        async def cancel(reservation_id):
+            handed.append(("reservation", reservation_id))
+
+        async def release_events(checkin_id):
+            handed.append(("events", checkin_id))
+
+        async def release(conversation_id):
+            handed.append(("conversation", conversation_id))
+
+        async def settle(checkin_id, st, reason, turn_id, cost, now):
+            settled.append((checkin_id, st, reason, turn_id, cost))
+
+        async def after(team_id, user_id):
+            pass
+        clock = iter([1_000.0, 1_003.0])
+        monkeypatch.setattr(checkins, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(checkins.asyncio, "sleep", sleep)
+        monkeypatch.setattr(agent, "run_turn", run_turn)
+        monkeypatch.setattr(spend, "cancel", cancel)
+        monkeypatch.setattr(events, "release", release_events)
+        monkeypatch.setattr(conversations, "release", release)
+        monkeypatch.setattr(checkins, "_settle", settle)
+        monkeypatch.setattr(checkins, "_after", after)
+        leader = SimpleNamespace(cost=0, decisions=0, proposals=[], user_id=42, reservation_id=55, conversation_id=31)
+        follower = SimpleNamespace(cost=0, decisions=0, proposals=[], user_id=42, reservation_id=56, conversation_id=32)
+        run(checkins._run(leader, "[a]", 7, 23, "morning"))
+        with pytest.raises(asyncio.CancelledError):
+            run(checkins._run(follower, "[b]", 8, 24, "morning"))
+        # The leader's turn ran (and settles its own); the follower's never did
+        assert turns == ["[a]"]
+        assert handed == [("reservation", 56), ("events", 8), ("conversation", 32)]
+        assert settled[-1] == (8, "failed", "start_failed", None, 0)
+
+    def test_the_conversation_is_held_through_the_wait(self, starting):
+        # The turn's deadline (60 s here), its longest wait for the prefix, and the margin
+        _start()
+        assert starting.holds == [timedelta(seconds=60 + 15 + 30)]
 
 
 class TestRunNow:
