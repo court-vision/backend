@@ -455,6 +455,15 @@ def _quiet_before(now: datetime) -> datetime:
     return now - timedelta(seconds=settings.dime_draft_timeout_seconds) - _SEAT_QUIET
 
 
+def _seat_live(row: Optional[AiDraftRoom], notes: list[AiDraftNote], now: datetime) -> bool:
+    """Dime holds the seat and its loop is still beating: a note being written, or a heartbeat inside
+    the quiet window (a seat whose process died reads as stopped)."""
+    if row is None or row.seat == SEAT_OFF:
+        return False
+    quiet = row.updated_at is not None and row.updated_at < _quiet_before(now)
+    return any(n.state == RUNNING for n in notes) or not quiet
+
+
 # ------------------------------- the room ------------------------------- #
 
 
@@ -779,13 +788,11 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     row = await _room(room.session_id)
     notes = await _notes(room.session_id, VIEW_NOTES)
     seat = row.seat if row is not None else SEAT_OFF
-    quiet = row is not None and row.updated_at is not None and row.updated_at < _quiet_before(now)
     running = next((n.id for n in notes if n.state == RUNNING), None)
     out.update({
         "notes_on": bool(row.notes) if row is not None else False,
         "seat": {"state": seat, "reason": row.seat_reason if row is not None else None,
-                 # Drafting, and its loop still beating (a seat whose process died reads as stopped)
-                 "live": seat != SEAT_OFF and (running is not None or not quiet)},
+                 "live": _seat_live(row, notes, now)},
         "can_seat": seatable(room) is None,
         "seat_blocker": seatable(room),
         "running": running,
@@ -980,9 +987,11 @@ def chat_title(detail: Any) -> str:
 
 
 @db_operation("ai.draft_chat_set")
-def _set_chat(session_id: int, user_id: int, conversation_id: int, replace: Optional[int]) -> Optional[int]:
+def _set_chat(session_id: int, user_id: int, conversation_id: int,
+              replace: Optional[int]) -> tuple[bool, Optional[int]]:
     """Point the room at `conversation_id`, over no chat or over `replace` (the chat the user started
-    over from) only, so two first messages at once keep one chat. Returns the room's chat after.
+    over from) only, so two first messages at once keep one chat. Returns whether this call put it
+    there (from the update itself: a later read could already show a newer chat), and the room's chat.
     `updated_at` stays as it was: the seat's loop reads it as its heartbeat."""
     now = _now()
     AiDraftRoom.insert(session_id=session_id, user_id=user_id, created_at=now,
@@ -990,8 +999,9 @@ def _set_chat(session_id: int, user_id: int, conversation_id: int, replace: Opti
     free = AiDraftRoom.chat_id.is_null()
     if replace is not None:
         free = free | (AiDraftRoom.chat_id == replace)
-    AiDraftRoom.update(chat_id=conversation_id).where(AiDraftRoom.session_id == session_id, free).execute()
-    return AiDraftRoom.get(AiDraftRoom.session_id == session_id).chat_id_id
+    if AiDraftRoom.update(chat_id=conversation_id).where(AiDraftRoom.session_id == session_id, free).execute():
+        return True, conversation_id
+    return False, AiDraftRoom.get(AiDraftRoom.session_id == session_id).chat_id_id
 
 
 async def room_chat(user_id: int, room: OwnedDraftSessionContext, *, fresh: bool = False) -> int:
@@ -1005,9 +1015,10 @@ async def room_chat(user_id: int, room: OwnedDraftSessionContext, *, fresh: bool
         return current
     detail = await _detail(room.session_id)
     made = await conversations.create(user_id, room.team_id, kind=conversations.ROOM, title=chat_title(detail))
-    kept = await _set_chat(room.session_id, user_id, made.id, current)
-    if kept != made.id:
-        # Another first message started the room's chat meanwhile: one chat per room
+    installed, kept = await _set_chat(room.session_id, user_id, made.id, current)
+    if not installed:
+        # Another first message started the room's chat meanwhile: one chat per room. A chat this call
+        # did put there is never deleted, even once a later "start over" has replaced it (kept, unlisted)
         await conversations.delete(made.id, user_id)
     return kept
 
@@ -1074,9 +1085,9 @@ async def chat_line(user_id: int, conversation_id: int) -> str:
         parts.append("The user hasn't drafted anyone yet.")
     if room.punts:
         parts.append(f"The room's punts, which the user set: {', '.join(room.punts)}.")
-    parts.append(_dime_pick_words(await _notes(room.session_id, VIEW_NOTES), detail))
-    row = await _room(room.session_id)
-    if row is not None and row.seat != SEAT_OFF:
+    notes = await _notes(room.session_id, VIEW_NOTES)
+    parts.append(_dime_pick_words(notes, detail))
+    if _seat_live(await _room(room.session_id), notes, _now()):
         parts.append("You hold the user's seat in this mock and draft it pick by pick, until the user takes it back.")
     parts.append(f"The user is writing from the room, beside its board: read it with get_draft_board (room_id "
                  f"{room.session_id}) before naming players. The user makes the picks and sets the punts, so say "

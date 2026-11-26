@@ -660,7 +660,7 @@ async def test_a_fresh_chat_replaces_the_room_s_and_a_second_first_message_keeps
     assert AiConversation.get_or_none(AiConversation.id == first) is not None      # kept, unlisted
     # A conversation made meanwhile doesn't replace the room's chat
     other = await conversations.create(team.user_id_id, team.team_id, kind=conversations.ROOM)
-    assert await draft._set_chat(room.session_id, team.user_id_id, other.id, None) == second
+    assert await draft._set_chat(room.session_id, team.user_id_id, other.id, None) == (False, second)
     # Deleted (the AI desk can delete any conversation): the room has no chat, and the next message starts one
     await conversations.delete(second, team.user_id_id)
     assert (await draft.room_view(team.user_id_id, room))["chat_id"] is None
@@ -676,11 +676,51 @@ async def test_switched_off_the_room_s_chat_takes_no_message(team, pool):
     with pytest.raises(ConflictError) as err:
         await draft.room_chat(team.user_id_id, room)
     assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
-    with pytest.raises(ConflictError):
+    with pytest.raises(ConflictError) as err:
         await AgentService.start_turn(chat, team.user_id_id, "Who should I take?")
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
     # Refused before anything was held or spent
     assert AiConversation.get_by_id(chat).busy_until is None
     assert AiSpend.select().where(AiSpend.user_id == team.user_id_id).count() == 0
+    # Said first, even while the chat is still answering (not "busy" for a chat that is off)
+    assert await conversations.claim(chat, team.user_id_id, timedelta(minutes=2))
+    with pytest.raises(ConflictError) as err:
+        await AgentService.start_turn(chat, team.user_id_id, "Who should I take?")
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    await conversations.release(chat)
+
+
+async def test_a_chat_this_call_put_in_the_room_is_kept_once_a_later_one_replaces_it(team, pool, monkeypatch):
+    room = await _room(team)
+    first = await draft.room_chat(team.user_id_id, room)
+    later = await conversations.create(team.user_id_id, team.team_id, kind=conversations.ROOM)
+    set_chat = draft._set_chat
+
+    async def raced(session_id, user_id, conversation_id, replace):
+        result = await set_chat(session_id, user_id, conversation_id, replace)
+        # Another "start over" replaces this call's chat before it reads the room again
+        AiDraftRoom.update(chat_id=later.id).where(AiDraftRoom.session_id == session_id).execute()
+        return result
+
+    monkeypatch.setattr(draft, "_set_chat", raced)
+    mine = await draft.room_chat(team.user_id_id, room, fresh=True)
+    assert mine not in (first, later.id)
+    assert AiConversation.get_or_none(AiConversation.id == mine) is not None     # kept, unlisted
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] == later.id
+
+
+async def test_the_chat_says_dime_holds_the_seat_only_while_its_loop_beats(team, pool):
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    held = "You hold the user's seat in this mock"
+    AiDraftRoom.update(seat="drafting", updated_at=datetime.now(timezone.utc)).where(
+        AiDraftRoom.session_id == room.session_id).execute()
+    assert held in await draft.chat_line(team.user_id_id, chat)
+    # Its process died: the seat still says drafting, but nothing drafts it
+    AiDraftRoom.update(updated_at=datetime.now(timezone.utc) - timedelta(hours=1)).where(
+        AiDraftRoom.session_id == room.session_id).execute()
+    assert held not in await draft.chat_line(team.user_id_id, chat)
+    assert (await draft.room_view(team.user_id_id, room))["seat"]["live"] is False
 
 
 async def test_a_deleted_room_s_chat_says_the_room_is_gone(team, pool):

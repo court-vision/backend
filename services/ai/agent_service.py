@@ -164,6 +164,10 @@ class AgentService:
         Errors raised here are ordinary HTTP errors: nothing has streamed yet."""
         ensure_access(user_id)
         row = await _conversation(conversation_id, user_id)
+        if _kind(row) == conversations.ROOM:
+            # A room's chat is Dime in draft rooms: the account's switch for it holds here too, and says
+            # so before the chat is claimed or checked (not "busy" or "full" for a chat that is off)
+            await draft.ensure_on(user_id)
         # Held a little past the turn's own deadline; the turn's row releases it sooner
         hold = timedelta(seconds=settings.ai_agent_turn_timeout_seconds + 30)
         if not await conversations.claim(conversation_id, user_id, hold):
@@ -173,9 +177,6 @@ class AgentService:
             history = await conversations.history(conversation_id, user_id)
             if history.full:
                 raise ConflictError("AI_CONVERSATION_FULL", "This conversation is full; start a new one")
-            if _kind(row) == conversations.ROOM:
-                # A room's chat is Dime in draft rooms: the account's switch for it holds here too
-                await draft.ensure_on(user_id)
             reservation_id = await spend.reserve(user_id)
             header_line = await agent.header(user_id, row.team_id_id, conversation_id=conversation_id)
             if _kind(row) == conversations.ROOM:
