@@ -9,11 +9,15 @@ game and his chance to play each game when the morning's snapshot carries him, e
 his stored-stats value with a full chance (none when ESPN lists him OUT), and he is
 counted in `players_unprojected`.
 
-The current matchup starts from ESPN's live score (`totalPointsLive`) when today's
-games can be read (`GamesService`, the same live overlay the schedule shows): each NBA
-team's share of its game still to play goes to the projection as `today_left`, so the
-points scored tonight count as scored. Without it, it starts from the settled score
-(`totalPoints`, through yesterday) and projects today whole.
+The current matchup starts from the live score when today's games can be read
+(`GamesService`, the same live overlay the schedule shows): ESPN's settled score
+(`totalPoints`, through yesterday) plus tonight's points so far off our own box scores
+under the league's weights, the players in a starting slot whose game has started
+(`tonight_scored`, as the Week desk's live score counts them). Each NBA team whose game
+has started goes to the projection with the share of it still to play (`today_left`),
+so tonight counts once. ESPN's own `totalPointsLive` isn't in this read. A started game
+whose box scores are missing or behind (`read_live`) reads whole, as if not started.
+Without today's games it starts from the settled score and projects today whole.
 
 ESPN points leagues only for now: a category league needs per-category projections
 (the plan's step 6), and Yahoo has no standings read yet. Neither is an error of the
@@ -37,7 +41,7 @@ from db.base import run_db
 from schemas.common import FantasyProvider, LeagueInfo
 from services import league_overview, live_projection, schedule_service
 from services import league_projection as lp
-from services.draft_congestion import week_from_calendar
+from services.draft_congestion import NON_STARTING_SLOTS, week_from_calendar
 from utils.espn_helpers import POSITION_MAP
 
 log = get_logger("league_projection")
@@ -50,6 +54,8 @@ REGULATION_SECONDS = 48 * 60
 QUARTER_SECONDS = 12 * 60
 # a game under way with no clock to read is guessed from its tip at this length
 GAME_LENGTH = timedelta(hours=2, minutes=15)
+# box scores of a game under way older than this are behind (the live pipeline writes every few seconds)
+BOX_SCORE_FRESH = timedelta(minutes=10)
 _CLOCK = re.compile(r"^PT(\d+)M(\d+(?:\.\d+)?)S$")
 
 
@@ -101,25 +107,48 @@ def dated_calendar() -> Optional[tuple[lp.DatedWeek, ...]]:
         return None
 
 
-def settled_scores(payload: Mapping[str, Any], key: str = "totalPoints") -> dict[int, float]:
+def settled_scores(payload: Mapping[str, Any]) -> dict[int, float]:
     """Each team's current-matchup score as ESPN settled it overnight (`totalPoints`,
-    through yesterday). `totalPointsLive` also counts today's games, so it is read
-    (`live_scores`) only beside today's games, which then count just what's left."""
+    through yesterday). Tonight's points come from our box scores (`tonight_scored`)."""
     current = _int((payload.get("status") or {}).get("currentMatchupPeriod"))
     out: dict[int, float] = {}
     for m in payload.get("schedule") or []:
         if current is None or _int(m.get("matchupPeriodId")) != current:
             continue
         for side in (m.get("home") or {}, m.get("away") or {}):
-            tid, points = _int(side.get("teamId")), side.get(key)
+            tid, points = _int(side.get("teamId")), side.get("totalPoints")
             if tid is not None and isinstance(points, (int, float)):
                 out[tid] = round(float(points), 1)
     return out
 
 
-def live_scores(payload: Mapping[str, Any]) -> dict[int, float]:
-    """Each team's current-matchup score with today's games so far (`totalPointsLive`)."""
-    return settled_scores(payload, "totalPointsLive")
+def tonight_scored(rosters: list, league_info: LeagueInfo, today: date,
+                   started: frozenset[str]) -> dict[int, float]:
+    """Each league team's points tonight so far, off our live box scores under the
+    league's weights: its players in a starting slot whose game is read live (`started`,
+    NBA teams with fresh box scores, `games_left_today`), as the Week desk's live score
+    counts them (`MatchupService.get_live_matchup_by_team_id`). Sync: runs through run_db."""
+    from db.models.nba.live_player_stats import LivePlayerStats
+    from services.matchup_days import score_stat_row
+    from services.player_value_service import PlayerValueService
+
+    espn_ids = sorted({e.player_id for _, _, entries in rosters for e in entries})
+    if not espn_ids:
+        return {tid: 0.0 for tid, _, _ in rosters}
+    rows = {r.player.espn_id: r for r in LivePlayerStats.get_live_stats_by_espn_ids(espn_ids, today)}
+    scoring = PlayerValueService.scoring_for(league_info.model_copy(update={"scoring_preview": None}))
+    out: dict[int, float] = {}
+    for tid, _name, entries in rosters:
+        total = 0.0
+        for e in entries:
+            row = rows.get(e.player_id)
+            if e.pro_team not in started or row is None or (row.game_status or 1) < 2:
+                continue
+            if POSITION_MAP.get(e.lineup_slot_id) in NON_STARTING_SLOTS:
+                continue
+            total += score_stat_row(row, scoring)
+        out[tid] = round(total, 1)
+    return out
 
 
 def with_live_scores(pairings: list, live: Mapping[int, float], current: int) -> Optional[list]:
@@ -159,10 +188,11 @@ def game_left(status: Optional[str], period: Optional[int], clock: Optional[str]
 
 
 def today_left(games: Iterable[Any], now: datetime) -> Optional[dict[str, float]]:
-    """Each NBA team playing today -> the share of its game still to play (`game_left`),
-    off the day's games as `GamesService.get_games_on_date` reads them (ET tip times);
-    None when any game's state can't be told, so the live score is never read beside a
-    guess that could count tonight twice."""
+    """Each NBA team whose game today has started -> the share of it still to play
+    (`game_left`; 1 at the opening tip), off the day's games as
+    `GamesService.get_games_on_date` reads them (ET tip times). A team still to tip is
+    left out. None when any game's state can't be told, so the live score is never read
+    beside a guess that could count tonight twice."""
     out: dict[str, float] = {}
     for g in games:
         tip = None
@@ -176,14 +206,42 @@ def today_left(games: Iterable[Any], now: datetime) -> Optional[dict[str, float]
         share = game_left(g.status, g.period, g.game_clock, tip, now)
         if share is None:
             return None
+        if g.status not in ("in_progress", "final") and (tip is None or tip > now):
+            continue                        # still to tip: its players can still be moved
         for team in (g.home_team, g.away_team):
             if team:
                 out[team] = min(out.get(team, 1.0), share)
     return out
 
 
+def fresh_game_ids(rows: Iterable[Any], now_utc: datetime) -> set[str]:
+    """The games whose box scores can be read live: final, or under way and written in the
+    last `BOX_SCORE_FRESH` (rows: game_id, its highest status, its newest write, UTC)."""
+    return {r.game_id for r in rows
+            if (r.status or 1) >= 3 or (r.updated is not None and now_utc - r.updated <= BOX_SCORE_FRESH)}
+
+
+def fresh_games(today: date, now_utc: datetime) -> set[str]:
+    """`fresh_game_ids` off the live pipeline's box scores for the day. Sync: runs through run_db."""
+    from peewee import fn
+    from db.models.nba.live_player_stats import LivePlayerStats as L
+
+    rows = (L.select(L.game_id, fn.MAX(L.game_status).alias("status"), fn.MAX(L.last_updated).alias("updated"))
+            .where(L.game_date == today).group_by(L.game_id))
+    return fresh_game_ids(rows, now_utc)
+
+
+def read_live(left: Mapping[str, float], games: Iterable[Any], fresh: set[str]) -> dict[str, float]:
+    """`left` kept to the teams whose game has fresh box scores. A started game without
+    them (the live pipeline stopped, or hasn't reached it) reads whole, as if not started:
+    its points aren't counted and its players are projected for all of it."""
+    live_teams = {t for g in games if g.game_id in fresh for t in (g.home_team, g.away_team) if t}
+    return {t: v for t, v in left.items() if t in live_teams}
+
+
 async def games_left_today(today: date, now: Optional[datetime] = None) -> Optional[dict[str, float]]:
-    """`today_left` for the fantasy day; None when the day's games can't be read."""
+    """`today_left` for the fantasy day, kept to the games with fresh box scores
+    (`read_live`); None when the day's games can't be read."""
     from schemas.common import ApiStatus
     from services.games_service import GamesService
 
@@ -191,10 +249,20 @@ async def games_left_today(today: date, now: Optional[datetime] = None) -> Optio
     if resp.status != ApiStatus.SUCCESS or resp.data is None:
         log.warning("league_projection_no_games_today", day=today.isoformat())
         return None
-    left = today_left(resp.data.games, (now or datetime.now(EASTERN)).astimezone(EASTERN))
+    now = now or datetime.now(EASTERN)
+    left = today_left(resp.data.games, now.astimezone(EASTERN))
     if left is None:
         log.warning("league_projection_games_state_unknown", day=today.isoformat())
-    return left
+        return None
+    if not left:
+        return left
+    fresh = await run_db("league_projection.box_scores", fresh_games, today,
+                         now.astimezone(pytz.utc).replace(tzinfo=None))
+    kept = read_live(left, resp.data.games, fresh)
+    if len(kept) < len(left):
+        log.warning("league_projection_box_scores_behind", day=today.isoformat(),
+                    teams=sorted(set(left) - set(kept)))
+    return kept
 
 
 def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list, list, list]:
@@ -215,7 +283,7 @@ def parse_inputs(payload: Mapping[str, Any], mine: Optional[int]) -> tuple[list,
             continue
         home, away = g.home_score, g.away_score
         if g.matchup == current:
-            # the settled score: `with_live_scores` swaps in the live one beside today's games
+            # the settled score: `with_live_scores` adds tonight's beside today's games
             home, away = settled.get(g.home), settled.get(g.away) if g.away is not None else None
         pairings.append(lp.Pairing(matchup=g.matchup, home=g.home, away=g.away, home_score=home,
                                    away_score=away, winner=g.winner))
@@ -298,23 +366,35 @@ def notes_for(result: Mapping[str, Any], snapshot_as_of: Optional[date], mine: O
     return notes
 
 
+def ensure_espn(league_info: LeagueInfo) -> None:
+    if league_info.provider != FantasyProvider.ESPN:
+        raise LeagueProjectionUnavailable(
+            "LEAGUE_PROJECTION_ESPN_ONLY", "League projections are for ESPN leagues for now")
+
+
+async def read_points_league(league_info: LeagueInfo) -> dict[str, Any]:
+    """The league read with every roster, for an ESPN points league; any other league is
+    refused with the code the desk shows."""
+    from services.espn_service import EspnService
+
+    ensure_espn(league_info)
+    payload = await EspnService.fetch_league(
+        league_info, [*league_overview.LEAGUE_VIEWS, league_overview.ROSTER_VIEW])
+    if league_overview.league_format(payload) != "points":
+        raise LeagueProjectionUnavailable(
+            "LEAGUE_PROJECTION_POINTS_ONLY", "League projections are for points leagues for now; "
+                                             "category leagues come later")
+    return payload
+
+
 async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = None,
                             runs: int = lp.SIMULATIONS) -> dict[str, Any]:
     """The league projected for one of the user's ESPN teams (see the module docstring)."""
     from services.espn_service import EspnService
     from services.matchup_days import fantasy_today
 
-    if league_info.provider != FantasyProvider.ESPN:
-        raise LeagueProjectionUnavailable(
-            "LEAGUE_PROJECTION_ESPN_ONLY", "League projections are for ESPN leagues for now")
+    payload = await read_points_league(league_info)
     today = today or fantasy_today()
-    payload = await EspnService.fetch_league(
-        league_info, [*league_overview.LEAGUE_VIEWS, league_overview.ROSTER_VIEW])
-    fmt = league_overview.league_format(payload)
-    if fmt != "points":
-        raise LeagueProjectionUnavailable(
-            "LEAGUE_PROJECTION_POINTS_ONLY", "League projections are for points leagues for now; "
-                                             "category leagues come later")
 
     me = EspnService.resolve_team(league_info, payload.get("teams") or [])
     mine = _int(me.get("id")) if me else None
@@ -340,7 +420,16 @@ async def league_projection(league_info: LeagueInfo, *, today: Optional[date] = 
     # tonight's points as scored, and today only what's left of each game; else the settled
     # score with today whole
     left = await games_left_today(today)
-    live = with_live_scores(pairings, live_scores(payload), current) if left is not None else None
+    tonight = None
+    if left is not None:
+        tonight = await run_db("league_projection.tonight", tonight_scored, entries, league_info, today,
+                               frozenset(left)) if left else {}
+    live = None
+    if tonight is not None:
+        settled = {s: v for p in pairings if p.matchup == current
+                   for s, v in ((p.home, p.home_score), (p.away, p.away_score)) if s is not None}
+        live = with_live_scores(pairings, {t: round(v + tonight.get(t, 0.0), 1) for t, v in settled.items()
+                                           if v is not None}, current)
     if live is not None:
         pairings = live
     else:

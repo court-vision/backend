@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 from services.team_service import TeamService
 from services.providers import get_provider_adapter
 from services.team_insights_service import TeamInsightsService
@@ -8,9 +10,11 @@ from schemas.team_insights import TeamInsightsResp
 from schemas.common import ApiStatus, FantasyProvider
 from schemas.league import LeagueGetResp, LeagueSyncResp
 from schemas.league_projection import LeagueProjectionResp
+from schemas.league_values import LeagueValuesResp, ValueWindowKey
 from schemas.team_overview import TeamsOverviewResp
 from services.league_service import LeagueService
 from services.league_projection_service import league_projection
+from services.league_values_service import FREE_AGENTS_READ, FREE_AGENTS_SHOWN, league_values
 from services import team_overview_service
 from api.deps import UserContext, OwnedTeamContext, get_db_user, get_owned_team, load_owned_league_info
 from core.responses import respond
@@ -76,6 +80,24 @@ async def get_team_league_projections(team: OwnedTeamContext = Depends(get_owned
     league_info = await load_owned_league_info(team)
     data = await league_projection(league_info)
     return respond(LeagueProjectionResp(status=ApiStatus.SUCCESS, message="League projected", data=data))
+
+
+@router.get('/{team_id}/league/values', response_model=LeagueValuesResp)
+async def get_team_league_values(
+    team: OwnedTeamContext = Depends(get_owned_team),
+    window: Optional[ValueWindowKey] = Query(None, description="A preset window; this_week when no matchups are given"),
+    first_matchup: Optional[int] = Query(None, ge=1, description="The window's first matchup (wins over the preset)"),
+    last_matchup: Optional[int] = Query(None, ge=1, description="The window's last matchup"),
+    free_agents: int = Query(FREE_AGENTS_SHOWN, ge=0, le=FREE_AGENTS_READ, description="Free agents to return"),
+):
+    """Every rostered player in the team's league and its best free agents priced over a
+    window of matchups under the league's scoring: expected games and points, what each
+    adds to his roster's lineup, ranks for the window and the rest of the season, and each
+    roster's tiers against the league's (ESPN points leagues)."""
+    league_info = await load_owned_league_info(team)
+    data = await league_values(league_info, window=window, first_matchup=first_matchup,
+                               last_matchup=last_matchup, free_agents=free_agents)
+    return respond(LeagueValuesResp(status=ApiStatus.SUCCESS, message="League priced", data=data))
 
 
 @router.post('/{team_id}/league/sync', response_model=LeagueSyncResp)

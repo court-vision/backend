@@ -6,9 +6,10 @@ Emails users about today's lineup: either the fill plan the backend suggested
 (`send_auto_lineup_summary`) — what became of a scheduled pickup
 (`send_scheduled_pickup_result`, a stream lane's included), a stream lane
 that paused or missed a day (`send_stream_lane_notice`), and the late-scratch
-swap a verdict change made or suggests (`send_late_scratch_result`). Sends through Resend
-when configured; otherwise logs the email and reports success (the stub path
-for dev and tests).
+swap a verdict change made or suggests (`send_late_scratch_result`), and what
+Daily actions at Act made (`send_daily_actions_result`: IR moves and open-spot
+pickups). Sends through Resend when configured; otherwise logs the email and
+reports success (the stub path for dev and tests).
 
 Mirrored byte-for-byte between backend and data-platform
 (scripts/check_backend_mirror.py) — keep it free of service-specific imports.
@@ -223,6 +224,37 @@ class NotificationService:
 
         return self._send_email(email, subject, body)
 
+    def send_daily_actions_result(
+        self,
+        user,
+        team,
+        result: dict,
+        prefs=None,
+    ) -> NotificationResult:
+        """
+        Email the user what Daily actions at Act made on their ESPN roster before today's games.
+
+        Args:
+            result: The backend's DailyActionsRunData as a dict: `outcome` (applied, or
+                rejected: nothing went), `reason`, `ir_moves` (fill-plan-shaped moves to or
+                off IR), `adds` (each `player` {name, team}, `detail`, `verified`), `held`
+                (why a spot was left open or a later move didn't go), `open_spots`,
+                `first_game_time_et`.
+        """
+        email = self._recipient(user, prefs)
+        subject, body = self._build_daily_actions_email(self._team_name(team), result)
+
+        self.log.info(
+            "sending_daily_actions_result",
+            to=email,
+            outcome=result.get("outcome"),
+            ir_moves=len(result.get("ir_moves") or []),
+            adds=len(result.get("adds") or []),
+            subject=subject,
+        )
+
+        return self._send_email(email, subject, body)
+
     # ---- body rendering ---------------------------------------------------------
 
     def _build_alert_body(
@@ -294,6 +326,7 @@ class NotificationService:
             elif reason == "drop_locked" and drop:
                 lines.append(f"{drop} was locked for the day, so this was an add only.")
             elif reason == "drop_protected" and drop:
+                # The roster lock (backend services/roster_protection.py): protected after scheduling
                 lines.append(f"{drop} is protected, so this was an add only.")
         elif outcome == "skipped":
             subject = f"Pickup skipped: {add} for {team_name}"
@@ -302,7 +335,9 @@ class NotificationService:
                 "already_on_roster": f"{add} is already on your roster.",
                 "drop_missing": f"{drop} is no longer on your roster and there was no open seat.",
                 "drop_locked": f"{drop} was locked for the day and there was no open seat.",
-                "drop_protected": f"{drop} is protected and there was no open seat.",
+                # A lane's switch is skipped whatever the seats (its add alone would leave the spot to no one)
+                "drop_protected": (f"{drop} is protected." if result.get("lane")
+                                   else f"{drop} is protected and there was no open seat."),
                 "roster_full": "your roster is full.",
                 "acquisition_limit": "you had used every add your league allows for it.",
             }.get(reason, (reason or "nothing to do") + ".")
@@ -337,18 +372,20 @@ class NotificationService:
                 "skipped": f"Stream lane skipped {add} for {team_name}",
                 "expired": f"Stream lane missed {add} for {team_name}",
             }.get(outcome, f"Stream lane pickup failed: {add} for {team_name}")
-            lines.extend(NotificationService._lane_pickup_lines(lane, outcome, add, drop))
+            lines.extend(NotificationService._lane_pickup_lines(lane, outcome, add, drop, reason=reason))
 
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)
 
     @staticmethod
-    def _lane_pickup_lines(lane: dict, outcome, add: str, drop) -> list[str]:
+    def _lane_pickup_lines(lane: dict, outcome, add: str, drop, *, reason: str = "") -> list[str]:
         """What a stream lane's pickup adds: that the lane made it (and ends with it, on the matchup's
         last day), and how it compares with the projection shown before it (which can change as the
-        market does)."""
+        market does). A switch skipped because the spot's player is protected ends the lane."""
         ends = "for the matchup's last day: the lane ends with the matchup." if lane.get("last_day") else None
+        if outcome != "executed" and reason == "drop_protected":
+            return ["", "This was your stream lane's pickup. You protected the spot's player, so the lane has ended."]
         if outcome != "executed":
             return ["", f"This was your stream lane's pickup {ends}" if ends
                     else "This was your stream lane's pickup. The lane carries on and re-plans before the next day."]
@@ -441,6 +478,66 @@ class NotificationService:
                 lines.append(why_not)
             lines.append("If it isn't on ESPN, make it in Court Vision's Week desk or on ESPN." if uncertain
                          else "Nothing was changed on ESPN. Make the swap in Court Vision's Week desk or on ESPN.")
+        lines.append("")
+        lines.append(SIGNATURE)
+        return subject, "\n".join(lines)
+
+    @staticmethod
+    def _build_daily_actions_email(team_name: str, result: dict) -> tuple[str, str]:
+        """Subject and body for one team's daily actions at Act: what was made (applied) or why
+        nothing was (rejected)."""
+        ir_moves = result.get("ir_moves") or []
+        adds = result.get("adds") or []
+        did: list[str] = []
+        lines_made: list[str] = []
+        for move in ir_moves:
+            name = move.get("name") or f"player {move.get('player_id', '?')}"
+            note = f" ({move['note']})" if move.get("note") else ""
+            if move.get("to_slot") == "IR":
+                did.append(f"moved {name} to IR")
+                lines_made.append(f"Moved {name} to IR{note}")
+            else:
+                did.append(f"moved {name} off IR")
+                lines_made.append(f"Moved {name} off IR to {move.get('to_slot') or 'the bench'}{note}")
+        for add in adds:
+            player = add.get("player") or {}
+            name = player.get("name") or "a free agent"
+            did.append(f"picked up {name}")
+            team = f" ({player['team']})" if player.get("team") else ""
+            line = f"Picked up {name}{team} for an open roster spot"
+            if add.get("verified") is False:
+                line += UNVERIFIED_SUFFIX
+            lines_made.append(line)
+            if add.get("detail"):
+                lines_made.append(f"   {add['detail']}")
+
+        lines = [f"Team: {team_name}"]
+        tip = result.get("first_game_time_et")
+        if tip:
+            try:
+                from datetime import time as _time
+                tip = _time.fromisoformat(str(tip)).strftime("%-I:%M %p ET")
+            except ValueError:
+                pass
+            lines.append(f"First game today: {tip}")
+        lines.append("")
+        if result.get("outcome") == "applied" and did:
+            what = did[0] if len(did) == 1 else ", ".join(did[:-1]) + " and " + did[-1]
+            subject = f"Court Vision {what} for {team_name}"
+            lines.append("Your Daily actions are at Act, so before today's games Court Vision made these on ESPN:")
+            lines.extend(f"  {line}" if line.startswith("   ") else f"  - {line}" for line in lines_made)
+        else:
+            reason = (result.get("reason") or "").removeprefix("PROVIDER_AUTH_EXPIRED: ")
+            subject = f"Court Vision couldn't make today's daily actions for {team_name}"
+            lines.append("Your Daily actions are at Act, but ESPN didn't take the first move, so nothing was changed"
+                         + (f": {reason}" if reason else "."))
+        if result.get("held"):
+            lines.append("")
+            lines.append(f"Not made: {result['held']}.".replace("..", "."))
+        lines.append("")
+        lines.append("Nobody was dropped: the day's drop-and-add swap is yours to make in Court Vision's Week desk.")
+        if adds:
+            lines.append("A pickup joins your bench; your Lineup automation decides whether he starts tonight.")
         lines.append("")
         lines.append(SIGNATURE)
         return subject, "\n".join(lines)

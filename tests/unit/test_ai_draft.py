@@ -146,6 +146,31 @@ class TestBriefs:
         assert "the games he is expected to play from 2026-11-16 on" in text
         assert "blend this season's games" not in text
 
+    def test_a_note_in_season_carries_the_moves_the_reasons_and_the_age_of_espns_rank(self):
+        board = _board(in_season={"games_from": "2026-11-23", "prior_games": 10, "adp_as_of": "2026-10-31",
+                                  "model": "three-part-1", "live_as_of": "2026-11-23",
+                                  "moves": {"board": "points", "as_of": "2026-11-23",
+                                            "move_1d_since": "2026-11-22", "move_7d_since": "2026-11-16"},
+                                  "espn_ranks_as_of": "2026-11-23"})
+        board["recommendations"][0].update(move_7d=6, rank_reason="Out until about Dec 8",
+                                           espn_rank_since="2026-11-17", espn_rank_since_or_earlier=True)
+        text = draft.brief(draft.PICK, _room(), _detail(), board=board, for_pick=11)
+        assert "places a player gained on Court Vision's standard points board" in text
+        assert "market_rank is ESPN's rank of 2026-11-23" in text and "playbook's draft rules" in text
+        carried = json.loads(text.split("cite these numbers):\n", 1)[1].split("\n\n", 1)[0])
+        first, second = carried["recommendations"][:2]
+        assert (first["move_7d"], first["rank_reason"], first["espn_rank_since"]) == (
+            6, "Out until about Dec 8", "2026-11-17")
+        assert first["espn_rank_since_or_earlier"] is True
+        # A player with none of it carries none of the keys
+        assert "move_7d" not in second and "rank_reason" not in second
+        facts = draft.facts_of(board, following=22)
+        assert facts["top"][0]["rank_reason"] == "Out until about Dec 8" and "move_7d" not in facts["top"][1]
+        # With nothing stored the brief says nothing of either
+        plain = _board(in_season={"games_from": "2026-11-23", "prior_games": 10, "adp_as_of": "2026-10-31"})
+        text = draft.brief(draft.PICK, _room(), _detail(), board=plain, for_pick=11)
+        assert "standard points board" not in text and "espn_rank_since" not in text
+
     def test_a_pick_note_ahead_of_the_pick_says_how_far(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(picks_until_my_turn=2), for_pick=11)
         assert "is in 2 picks" in text and "No plan is set for this room." in text

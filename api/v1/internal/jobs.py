@@ -18,6 +18,7 @@ from schemas.autopilot import (
     CheckinRunResp, CheckinStarted,
 )
 from schemas.common import ApiStatus
+from schemas.daily_actions import DailyActionsRunReq, DailyActionsRunResp
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, LineupReactReq, LineupReactResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
@@ -30,6 +31,7 @@ from schemas.valuation import (
     StandardValuationResp,
 )
 from services.ai import analyst, asks, checkins, events, spend_report
+from services.daily_actions_job import DailyActionsJob
 from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
@@ -68,6 +70,19 @@ async def react_to_verdict(req: LineupReactReq):
     outcome is reported in `data.teams`, never raised.
     """
     return respond(await LateScratchService.react(req))
+
+
+@router.post("/daily-actions/run", response_model=DailyActionsRunResp)
+async def run_daily_actions(req: DailyActionsRunReq):
+    """Make one team's daily actions at Act: the Week desk's IR moves and a free agent for each
+    open roster spot, never a drop.
+
+    Called by data-platform's daily_actions pipeline once a day per team at Act, before the
+    first tip. The outcome is reported in `data.outcome`, never raised: applied (with the IR
+    moves and pickups made, and `held` when something was left), noop, skipped (why), rejected
+    or failed (nothing went).
+    """
+    return respond(await DailyActionsJob.run(req))
 
 
 @router.post("/pickups/execute", response_model=PickupExecuteResp)
@@ -255,8 +270,8 @@ async def analyst_spend():
 async def ai_spend(days: int = Query(30, ge=1, le=spend_report.MAX_DAYS,
                                      description="How many UTC days back, today included")):
     """What AI has spent, for the data platform's AI spend page: this month against
-    each line's cap (the desk, Dime's check-ins, the analyst), the ledger over the
-    window split by day, feature, user and team, what each call's record says it used
+    each line's cap (the desk, Dime's check-ins, the analyst) and against the whole
+    app's, the ledger over the window split by day, feature, user and team, what each call's record says it used
     (model and tokens), and every user with spend or a cap, with their caps."""
     data = await spend_report.report(days)
     return respond(AiSpendResp(status=ApiStatus.SUCCESS, message=f"AI spend over {days} days", data=data))
@@ -264,10 +279,12 @@ async def ai_spend(days: int = Query(30, ge=1, le=spend_report.MAX_DAYS,
 
 @router.put("/ai/caps", response_model=AiCapResp)
 async def ai_cap(req: AiCapReq):
-    """Set a line's monthly cap, or one user's cap on the desk or autopilot line, from
-    the next reservation on. `monthly_usd` null clears it: the environment's number
-    applies again (and a user's desk cap is an equal part of the desk's)."""
+    """Set a line's monthly cap, the whole app's (`line` app), or one user's cap on the
+    desk or autopilot line, from the next reservation on. `monthly_usd` null clears it:
+    the environment's number applies again (and a user's desk cap is an equal part of
+    the desk's)."""
     data = await spend_report.set_cap(req)
-    what = f"{req.line} cap" + (f" for user {req.user_id}" if req.user_id is not None else "")
+    what = ("whole app's cap" if req.line == "app" else f"{req.line} cap") + (
+        f" for user {req.user_id}" if req.user_id is not None else "")
     message = f"Cleared the {what}" if req.monthly_usd is None else f"Set the {what} to ${req.monthly_usd}"
     return respond(AiCapResp(status=ApiStatus.SUCCESS, message=message, data=data))

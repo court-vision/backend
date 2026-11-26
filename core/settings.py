@@ -179,6 +179,11 @@ class Settings(BaseSettings):
     # platform's AI spend page (usr.ai_caps, migration 0054) replaces any of them,
     # and can give one user a cap of their own on the desk or autopilot line.
     ai_monthly_budget_usd: float = 100.0
+    # The whole app's AI spend in a calendar month (UTC): the desk, check-ins and the
+    # analyst together (James, 2026-11-23: his Claude plan's $100 a month). Every
+    # reservation is held to it on top of its own line's cap; a cap set on the AI
+    # spend page (line 'app', migration 0056) replaces it.
+    ai_app_monthly_budget_usd: float = 100.0
     # One turn's bounds. Past the spend ceiling its next model call is its last,
     # made without tools; and a turn is refused while less than the ceiling is
     # left in the month, so no turn can carry spend far past a cap.
@@ -484,6 +489,7 @@ class Settings(BaseSettings):
             "ai_global_daily_limit": self.ai_global_daily_limit,
             "ai_request_timeout_seconds": self.ai_request_timeout_seconds,
             "ai_monthly_budget_usd": self.ai_monthly_budget_usd,
+            "ai_app_monthly_budget_usd": self.ai_app_monthly_budget_usd,
             "ai_agent_turn_max_usd": self.ai_agent_turn_max_usd,
             "ai_agent_max_model_calls": self.ai_agent_max_model_calls,
             "ai_agent_max_tool_calls": self.ai_agent_max_tool_calls,
