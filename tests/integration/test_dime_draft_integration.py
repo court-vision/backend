@@ -726,8 +726,18 @@ async def test_the_chat_says_dime_holds_the_seat_only_while_its_loop_beats(team,
                               for_pick=4, state="running",
                               created_at=datetime.now(timezone.utc) - timedelta(hours=1))
     line = await draft.chat_line(team.user_id_id, chat)
-    assert held not in line and "choosing the user's pick" not in line
+    assert held not in line
     assert AiDraftNote.get_by_id(note.id).state == "failed"
+    # A pick note for the user's next pick says Dime is choosing while it is written, and not once its process died
+    choosing = "choosing the user's pick"
+    nxt = (await DraftService.get_session(room.session_id)).data.my_next_pick
+    pick_note = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=nxt,
+                                   state="running")
+    assert choosing in await draft.chat_line(team.user_id_id, chat)
+    AiDraftNote.update(created_at=datetime.now(timezone.utc) - timedelta(hours=1)).where(
+        AiDraftNote.id == pick_note.id).execute()
+    assert choosing not in await draft.chat_line(team.user_id_id, chat)
+    assert AiDraftNote.get_by_id(pick_note.id).state == "failed"
 
 
 async def test_a_deleted_room_s_chat_says_the_room_is_gone(team, pool):
