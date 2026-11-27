@@ -72,6 +72,22 @@ def empty_draft_live_cache():
     clear()
 
 
+@pytest.fixture(autouse=True)
+def empty_matchup_pairs():
+    """The matchup read remembers each team's last pairing per process (services.espn_trim);
+    one test's pairing must never trim the next test's read."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.espn_trim")
+        if module is not None:
+            module.forget_pairs()
+
+    clear()
+    yield
+    clear()
+
+
 # ---- Dime's holds ----
 
 @pytest.fixture(autouse=True)
@@ -279,3 +295,16 @@ def freeze_post_midnight():
     """3:00 AM ET on March 5, 2026 (08:00 UTC). NBA date = March 4 (before 6 AM ET)."""
     with freeze_time("2026-03-05T08:00:00Z"):
         yield date(2026, 3, 4)
+
+
+# ---- ESPN's roster filter, for fakes of EspnService.fetch_league ----
+
+def espn_roster_filter(payload: dict, roster_for) -> dict:
+    """What ESPN answers to `rosterForTeamId` (services.espn_trim): the named teams keep
+    `roster`, every other team comes back without one."""
+    if not roster_for:
+        return payload
+    wanted = {int(i) for i in roster_for}
+    teams = [t if t.get("id") in wanted else {k: v for k, v in t.items() if k != "roster"}
+             for t in payload.get("teams") or []]
+    return {**payload, "teams": teams}

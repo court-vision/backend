@@ -48,7 +48,7 @@ from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, 
 from services.matchup_days import index_games
 from services.nba_id_resolver import nba_ids_by_espn_id
 from services.player_value_service import PlayerValueService
-from services import schedule_service
+from services import espn_trim, schedule_service
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
@@ -280,7 +280,15 @@ class LineupReadService:
         if league_info.provider != FantasyProvider.ESPN:
             raise ProviderCapabilityMissing(league_info.provider, "lineup_editing")
 
-        payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS, scoring_period_id=scoring_period_id)
+        # Only this team's roster once its ESPN id is known (services.espn_trim): the whole
+        # league's was 1.3 MB for a 10-team league. Asked again in full when the id is no
+        # longer in the league, so the name and SWID matches still find a renamed team.
+        known = [league_info.espn_team_id] if league_info.espn_team_id is not None else None
+        payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS, scoring_period_id=scoring_period_id,
+                                                 roster_for=known)
+        if known and not espn_trim.rosters_included(payload, known):
+            log.info("lineup_roster_filter_missed", team_id=team_id, espn_team_id=known[0])
+            payload = await EspnService.fetch_league(league_info, LINEUP_VIEWS, scoring_period_id=scoring_period_id)
         parsed = parse_espn_lineup(
             payload,
             team_name=league_info.team_name,

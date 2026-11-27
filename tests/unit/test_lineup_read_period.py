@@ -21,6 +21,7 @@ from schemas.common import FantasyProvider, LeagueInfo
 from services import lineup_read_service as svc
 from services.player_value_service import ValueResult
 from utils.espn_helpers import PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
+from tests.conftest import espn_roster_filter
 
 SWID = "{ABCDEF01-2345-6789-ABCD-EF0123456789}"
 LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="Lvl. 3 Goblins", year=2027,
@@ -60,11 +61,12 @@ def _payload(requested, *, latest=TODAY, final=FINAL):
 
 @pytest.fixture
 def espn(monkeypatch):
-    h = SimpleNamespace(calls=[], latest=TODAY, final=FINAL)
+    h = SimpleNamespace(calls=[], roster_for=[], latest=TODAY, final=FINAL)
 
-    async def fake_fetch(league_info, views, *, expect_key="teams", scoring_period_id=None):
+    async def fake_fetch(league_info, views, *, expect_key="teams", scoring_period_id=None, roster_for=None):
         h.calls.append(scoring_period_id)
-        return _payload(scoring_period_id, latest=h.latest, final=h.final)
+        h.roster_for.append(roster_for)
+        return espn_roster_filter(_payload(scoring_period_id, latest=h.latest, final=h.final), roster_for)
 
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -94,6 +96,33 @@ def test_todays_read_asks_espn_for_no_period_and_is_writable(espn):
     assert state.nba_date == "2026-10-31" and state.scoring_period_source == "provider"
     assert state.can_write is True and state.write_blocked_reason is None and state.future is False
     assert state.players[0].game_started is True and state.players[0].locked is True
+
+
+@pytest.mark.unit
+def test_a_team_whose_espn_id_is_known_reads_only_its_own_roster(espn):
+    state = read()
+    assert espn.roster_for == [[4]]                                 # rosterForTeamId=4 (services.espn_trim)
+    assert [p.player_id for p in state.players] == [1] and state.espn_team_id == 4
+
+
+@pytest.mark.unit
+def test_a_team_without_a_known_id_reads_every_roster(espn):
+    league = LEAGUE.model_copy(update={"espn_team_id": None})
+    state = asyncio.run(svc.LineupReadService.read(1, league, now=NOW))
+    assert espn.roster_for == [None] and [p.player_id for p in state.players] == [1]
+
+
+@pytest.mark.unit
+def test_an_id_no_longer_in_the_league_reads_the_league_again_and_finds_the_team_by_name(espn, monkeypatch):
+    """ESPN leaves every roster out for an id it doesn't know (a 200), so the read asks
+    again in full, and the name match finds the team as it did before the filter."""
+    persisted = []
+    monkeypatch.setattr(svc, "_persist_espn_team_id", lambda *args: persisted.append(args) or True)
+    league = LEAGUE.model_copy(update={"espn_team_id": 9})
+    state = asyncio.run(svc.LineupReadService.read(1, league, now=NOW))
+    assert espn.roster_for == [[9], None] and espn.calls == [None, None]
+    assert state.espn_team_id == 4 and [p.player_id for p in state.players] == [1]
+    assert persisted == [(1, 4, "Lvl. 3 Goblins")]                 # the right id is learned for next time
 
 
 @pytest.mark.unit

@@ -33,6 +33,7 @@ from services.fantasy_writer_client import FantasyWriterRejected, WriterResult
 from services.player_value_service import ValueResult
 from services.providers.adapters import EspnAdapter
 from utils.espn_helpers import PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
+from tests.conftest import espn_roster_filter
 
 SWID = "{ABCDEF01-2345-6789-ABCD-EF0123456789}"
 LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=1, team_name="Lvl. 3 Goblins", year=2027,
@@ -71,8 +72,11 @@ class FakeEspn:
     def roster(self, day):
         return self.days.get(day, START)
 
-    async def fetch(self, league_info, views, *, expect_key="teams", scoring_period_id=None):
+    async def fetch(self, league_info, views, *, expect_key="teams", scoring_period_id=None, roster_for=None):
         self.calls.append(scoring_period_id)
+        return espn_roster_filter(self._payload(scoring_period_id), roster_for)
+
+    def _payload(self, scoring_period_id):
         if self.fail_on_call == len(self.calls):
             raise ProviderTimeout("espn")
         day = scoring_period_id or TODAY

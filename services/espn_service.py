@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 import pytz
 
 from core.errors import BadRequestError
 from core.logging import get_logger
 from db.base import run_db
+from services import espn_trim
 from services.espn_team_match import find_espn_team
 from services.nba_id_resolver import nba_ids_by_espn_id
 from services.providers.http import provider_get
@@ -219,6 +220,7 @@ class EspnService:
     async def fetch_league(
         league_info: LeagueInfo, views: list[str], *, expect_key: str = "teams",
         scoring_period_id: Optional[int] = None,
+        roster_for: Optional[Sequence[int]] = None,
     ) -> dict:
         """One authenticated read of the league endpoint with the given ESPN views.
 
@@ -226,10 +228,16 @@ class EspnService:
         come back as set for that day). ESPN echoes it as the top-level
         `scoringPeriodId` and answers 200 for any number, even past the season's
         `status.finalScoringPeriod`; `status.latestScoringPeriod` stays today's.
+
+        `roster_for` limits mRoster to those ESPN team ids (`services.espn_trim`):
+        the other teams come back without `roster`, and so does every team when an
+        id is not in the league, which the caller checks with `rosters_included`.
         """
         params: dict = {'view': list(views)}
         if scoring_period_id:
             params['scoringPeriodId'] = int(scoring_period_id)
+        if roster_for:
+            params.update(espn_trim.roster_params(roster_for))
         return await provider_get(
             "espn",
             ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id),
@@ -389,7 +397,10 @@ class EspnService:
             'view': 'kona_player_info',
             'scoringPeriodId': 0,
         }
-        headers = {'x-fantasy-filter': json.dumps(filters)}
+        # Only the season's totals ride along: the one split `Player` reads for a free agent
+        # (its last-resort average); the other five tripled the payload (services.espn_trim).
+        players_filter = {**filters["players"], **espn_trim.season_totals(league_info.year)}
+        headers = {'x-fantasy-filter': json.dumps({**filters, "players": players_filter})}
 
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
         data = await provider_get("espn", endpoint, params=params, headers=headers,
@@ -504,17 +515,30 @@ class EspnService:
             league; ProviderAuthError / ProviderError / ProviderTimeout from provider_get.
         """
         scoring = scoring or resolve_scoring(None)
-        params = {
-            'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']
-        }
-
         cookies = {
             'espn_s2': league_info.espn_s2,
             'SWID': league_info.swid
         }
-
         endpoint = ESPN_FANTASY_ENDPOINT.format(league_info.year, league_info.league_id)
-        data = await provider_get("espn", endpoint, params=params, cookies=cookies, expect_key="teams")
+
+        async def read(pair: Optional[espn_trim.MatchupPair]) -> dict:
+            # With the matchup this team was last read in: only its two rosters and that
+            # matchup's schedule entry (services.espn_trim), checked below; else the whole league.
+            params: dict = {'view': ['mTeam', 'mRoster', 'mMatchup', 'mSettings', 'mSchedule']}
+            headers = None
+            if pair is not None:
+                params.update(espn_trim.roster_params((pair.ours, pair.opponent)))
+                headers = espn_trim.schedule_filter(pair.matchup_period_id, pair.ours)
+            return await provider_get("espn", endpoint, params=params, headers=headers, cookies=cookies,
+                                      expect_key="teams")
+
+        pair = espn_trim.recall_pair(league_info)
+        data = await read(pair)
+        if pair is not None and not espn_trim.pair_holds(data, pair):
+            get_logger().info("espn_matchup_pair_moved", league_id=league_info.league_id,
+                              matchup_period=pair.matchup_period_id,
+                              current=(data.get('status') or {}).get('currentMatchupPeriod'))
+            data = await read(None)
 
         # Get current matchup period from ESPN
         status = data.get('status', {})
@@ -566,6 +590,7 @@ class EspnService:
 
         if not current_matchup:
             # An empty state, not a failure (bye week / offseason): 200 with data: null
+            espn_trim.forget_pair(league_info, our_team_id)
             return MatchupResp(
                 status=ApiStatus.SUCCESS,
                 message="No current matchup found (possibly bye week)",
@@ -580,11 +605,13 @@ class EspnService:
                 break
 
         if not opponent_team:
+            espn_trim.forget_pair(league_info, our_team_id)
             return MatchupResp(
                 status=ApiStatus.SUCCESS,
                 message="Opponent team not found for this matchup period",
                 data=None
             )
+        espn_trim.remember_pair(league_info, current_matchup_period, our_team_id, opponent_team_id)
 
         # Extract current scores
         home_data = current_matchup.get('home', {})
