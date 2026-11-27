@@ -130,8 +130,8 @@ def test_the_category_projection_overlays_lines_and_recomputes_rates():
 # ---- the drop choice ---------------------------------------------------------------------
 
 
-def cand(pid, name, weighed, *days, projected=False, counts=True):
-    return DropCandidate(side(pid, name, weighed or 0.0, *days, counts=counts), weighed, projected)
+def cand(pid, name, weighed, *days, projected=False, counts=True, season=False):
+    return DropCandidate(side(pid, name, weighed or 0.0, *days, counts=counts), weighed, projected, season)
 
 
 @pytest.mark.unit
@@ -163,3 +163,20 @@ def test_ties_go_to_fewer_games_then_the_lower_value_then_the_name():
     assert choose_drop(same, day=0, last_day=LAST).candidate.player.name == "A"
     projected = choose_drop([cand(5, "P", 12.0, 0, projected=True)], day=0, last_day=LAST)
     assert projected.candidate.projected and projected.cost == 12.0
+
+
+@pytest.mark.unit
+def test_priced_on_the_season_the_drop_is_the_lowest_price_whatever_is_left_of_the_matchup():
+    """A drop cannot be taken back: a good player whose week is over is not the free drop."""
+    done = cand(1, "Star", 41.0, 0, season=True)                  # no game left from day 1
+    scrub = cand(2, "Scrub", 14.0, 1, 3, 5, season=True)
+    assert choose_drop([cand(1, "Star", 41.0, 0), cand(2, "Scrub", 14.0, 1, 3, 5)], day=1, last_day=LAST
+                       ).candidate.player.name == "Star"         # the rule it was: his games left cost nothing
+    choice = choose_drop([done, scrub], day=1, last_day=LAST)
+    assert choice.candidate.player.name == "Scrub" and choice.games_lost == 3 and choice.candidate.season
+    # One the projection does not price stands beside them at his per-game value.
+    assert choose_drop([done, scrub, cand(3, "New", 9.0, 1, 2)], day=1, last_day=LAST).candidate.player.name == "New"
+    assert choose_drop([done, scrub, cand(4, "Unknown", None, 1)], day=1, last_day=LAST).candidate.player.name == "Scrub"
+    # Ties: fewer games lost, then the name.
+    level = [cand(5, "Z", 20.0, 1, season=True), cand(6, "A", 20.0, 1, 3, season=True), cand(7, "B", 20.0, 1, season=True)]
+    assert choose_drop(level, day=1, last_day=LAST).candidate.player.name == "B"

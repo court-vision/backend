@@ -1,7 +1,7 @@
 """find_streamers: mode weights vs league point weights, ET day, pre-season week 1, and Yahoo name keys."""
 
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -11,6 +11,7 @@ from schemas.streamer import StreamerMode
 from services import streamer_service as ss
 from services.player_service import _normalize_name
 from services.player_value_service import ValueResult
+from services.scoring.models import StatLine
 from services.scoring.resolver import ResolvedScoring
 from services.streamer_service import StreamerService
 from services.providers import identity
@@ -196,3 +197,86 @@ def test_yahoo_accented_names_resolve_their_average(stubbed, monkeypatch):
     assert resp.data.streamers[0].avg_points_last_n == 48.5
     _, espn_ids, names, _ = stubbed["value_calls"][0]
     assert espn_ids is None and names == [("Nikola Jokić", "DEN")]   # Yahoo values are looked up by name
+
+
+# ---- the live prices (the Live rankings plan, step 8) ----------------------------------------
+
+
+def _live(pid, espn_id, team, timeline, rates=None):
+    from services import live_projection
+
+    return live_projection.LivePlayer(
+        player_id=pid, name=f"P{pid}", espn_id=espn_id, name_normalized=f"p{pid}", team=team,
+        line=StatLine(pts=10.0, min=20.0, gp=1.0), games=0.0, timeline=live_projection.parse_timeline(timeline),
+        rates=rates or {"pts": 0.5},
+    )
+
+
+def _priced(monkeypatch, live_prices, players, nba_ids):
+    """The morning's projection carries `players`; the pool's ESPN ids resolve through `nba_ids`."""
+    week = [date(2026, 11, 2) + timedelta(days=d) for d in range(7)]
+    live_prices(players, {"DEN": [week[2], week[3], week[5]], "LAL": [week[4]]}, as_of=date(2026, 11, 4))
+    from services.providers.adapters import EspnAdapter
+
+    monkeypatch.setattr(EspnAdapter, "nba_ids", lambda self, rows: {r.player_id: nba_ids[r.player_id]
+                                                                    for r in rows if r.player_id in nba_ids})
+
+
+@pytest.mark.unit
+def test_each_streamer_is_priced_on_his_own_nights_off_the_live_projection(stubbed, monkeypatch, live_prices):
+    """Jokić's backup starts tonight and tomorrow while the starter is out, then goes back to
+    the bench: tonight he is a pickup, by Saturday he is not."""
+    _espn_fas(monkeypatch, [_fa(1, "Backup Big", "DEN", 55.0), _fa(2, "Role Player", "LAL", 12.0),
+                            _fa(3, "Not Carried", "LAL", 12.0)])
+    _priced(monkeypatch, live_prices, [
+        _live(101, 1, "DEN", [["2026-11-04", "2026-11-05", 2, 1.0, 34.0, 1.0], ["2026-11-07", "2026-12-31", 20, 0.9, 12.0, 1.0]]),
+        _live(102, 2, "LAL", [["2026-11-04", "2026-12-31", 20, 0.5, 20.0, 1.0]]),
+    ], {1: 101, 2: 102, 3: 103})
+
+    resp = asyncio.run(StreamerService.find_streamers(ESPN, fa_count=10, mode=StreamerMode.WEEK, avg_days=7))
+
+    by_id = {s.player_id: s for s in resp.data.streamers}
+    assert by_id[1].game_days == [2, 3, 5] and by_id[1].live_values == [17.0, 17.0, 5.4]
+    assert (by_id[1].live_day, by_id[1].live_week) == (17.0, 39.4)
+    assert (by_id[2].live_values, by_id[2].live_day, by_id[2].live_week) == ([5.0], None, 5.0)   # no game today
+    assert (by_id[3].live_values, by_id[3].live_day, by_id[3].live_week) == (None, None, None)   # not carried
+    assert resp.data.live_as_of == date(2026, 11, 4)
+    # the list's own order and score still come off the stored averages
+    w = StreamerService.WEEK_WEIGHTS
+    assert by_id[1].streamer_score == round(w["b2b"] + 3 * w["games_remaining"] + 50.0 * w["avg_points"] + 2 * w["b2b_games"], 1)
+
+
+@pytest.mark.unit
+def test_the_one_day_search_prices_its_own_day(stubbed, monkeypatch, live_prices):
+    _espn_fas(monkeypatch, [_fa(1, "Backup Big", "DEN", 55.0)])
+    _priced(monkeypatch, live_prices, [
+        _live(101, 1, "DEN", [["2026-11-04", "2026-11-05", 2, 1.0, 34.0, 1.0], ["2026-11-07", "2026-12-31", 20, 0.9, 12.0, 1.0]]),
+    ], {1: 101})
+    monkeypatch.setattr(ss, "get_remaining_game_days", lambda team, d: [5])
+
+    resp = asyncio.run(StreamerService.find_streamers(ESPN, mode=StreamerMode.DAILY, target_day=5))
+
+    (s,) = resp.data.streamers
+    assert (s.live_day, s.live_values, s.live_week) == (5.4, [5.4], 5.4)        # Saturday's, not tonight's
+
+
+@pytest.mark.unit
+def test_a_streamer_the_projection_has_on_another_schedule_keeps_his_averages_alone(stubbed, monkeypatch, live_prices):
+    """Traded this morning: ESPN lists him on DEN, the projection still prices LAL's nights."""
+    _espn_fas(monkeypatch, [_fa(1, "Just Traded", "DEN", 55.0)])
+    _priced(monkeypatch, live_prices, [_live(101, 1, "LAL", [["2026-11-04", "2026-12-31", 20, 1.0, 30.0, 1.0]])],
+            {1: 101})
+
+    resp = asyncio.run(StreamerService.find_streamers(ESPN, fa_count=10, mode=StreamerMode.WEEK, avg_days=7))
+
+    (s,) = resp.data.streamers
+    assert (s.live_values, s.live_day, s.live_week) == (None, None, None)
+    assert resp.data.live_as_of is None and s.avg_points_last_n == 50.0
+
+
+@pytest.mark.unit
+def test_without_a_projection_the_list_is_the_one_it_was(stubbed, monkeypatch):
+    _espn_fas(monkeypatch, [_fa(1, "Nikola Jokić", "DEN", 55.0)])
+    resp = asyncio.run(StreamerService.find_streamers(ESPN, fa_count=10, mode=StreamerMode.WEEK, avg_days=7))
+    (s,) = resp.data.streamers
+    assert (s.live_values, s.live_day, s.live_week, resp.data.live_as_of) == (None, None, None, None)

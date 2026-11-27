@@ -141,10 +141,10 @@ def fa(pid, team, *, value=22.0, positions=("SF", "F"), pos=3, available_on=None
 
 
 def plan(pool, *, pending_=(), adds=None, limits=None, rehold=2, day_limits=(None, None, None), roster=ROSTER,
-         holders=(HOLDER,), values=None):
+         holders=(HOLDER,), values=None, day_values=None):
     from services.stream_lane_service import Budget
     return plan_lanes(board(roster, limits=limits), list(holders), pool, DAYS, list(pending_), Budget(adds, day_limits),
-                      rehold, values)
+                      rehold, values, day_values=day_values)
 
 
 @pytest.mark.unit
@@ -160,6 +160,71 @@ def test_a_free_agent_who_plays_the_holders_day_off_takes_it_with_one_add():
     # One add: switching for day 1 gives up the holder's day 2 (15) for the free agent's 22.
     assert p.spots == ((HOLDER, 10, 10),) and p.value == 15 + 22 + 22
     assert p.considered == {10}
+
+
+@pytest.mark.unit
+def test_a_stream_is_priced_on_its_own_night_off_the_live_projection():
+    """FA 10 averages more, but FA 12 starts tomorrow while his team's starter sits: priced on the
+    night, he is the pickup. Without the prices the averages decide, as before."""
+    pool = [fa(10, "LAL", value=22.0), fa(12, "LAL", value=14.0)]
+    assert plan(pool, adds=1).spots == ((HOLDER, 10, 10),)
+    priced = {10: (None, 18.0, 18.0), 12: (None, 31.0, 12.0)}
+    p = plan(pool, adds=1, day_values=priced)
+    assert p.spots == ((HOLDER, 12, 12),) and p.value == 15 + 31 + 12
+    # with the adds for it, each night goes to whoever is worth more that night
+    p = plan(pool, adds=2, day_values=priced)
+    assert p.spots == ((HOLDER, 12, 10),) and p.value == 15 + 31 + 18
+
+
+@pytest.mark.unit
+def test_the_roster_is_priced_by_the_night_too_and_a_day_or_player_left_out_keeps_his_average():
+    # The holder is questionable for day 0 and himself by day 2; the guard has no price at all.
+    p = plan([], day_values={HOLDER: (6.0, None, 17.5)})
+    assert p.marginals == ((6.0, 0.0, 17.5),)
+    # A night the prices leave out (his team plays, the projection has no figure) keeps the average.
+    assert plan([], day_values={HOLDER: (None, None, 17.5)}).marginals == ((15.0, 0.0, 17.5),)
+    # Listed out is still worth nothing, whatever the morning's projection thought.
+    hurt = [player(HOLDER, "Holder", UT, "MIA", eligible=(SF, UT, BE), avg=15, pos=3, injury="OUT"), *ROSTER[1:]]
+    assert plan([], roster=hurt, day_values={HOLDER: (6.0, None, 17.5)}).marginals == ((0.0, 0.0, 0.0),)
+
+
+@pytest.mark.unit
+def test_a_value_function_is_never_overridden_by_the_live_prices():
+    """The agent asks for a category: the plan is in that category's units, whatever the points prices say."""
+    pool = [fa(10, "LAL", value=22.0)]
+    blocks = {HOLDER: 1.0, 10: 2.5, GUARD: 0.5, BIG: 3.0}
+    with_prices = plan(pool, adds=1, values=blocks, day_values={10: (None, 99.0, 99.0), HOLDER: (99.0, None, 99.0)})
+    assert with_prices == plan(pool, adds=1, values=blocks)
+
+
+@pytest.mark.unit
+def test_the_lanes_day_values_are_each_players_expected_points_on_each_plan_day(monkeypatch, live_prices):
+    from services import live_projection
+    from services import stream_lane_service as lanes
+    from services.scoring.models import StatLine
+    from services.scoring.resolver import ResolvedScoring
+
+    def carried(pid, espn_id, team, timeline):
+        return live_projection.LivePlayer(
+            player_id=pid, name=f"P{pid}", espn_id=espn_id, name_normalized=f"p{pid}", team=team,
+            line=StatLine(pts=10.0, gp=1.0), games=0.0, timeline=live_projection.parse_timeline(timeline),
+            rates={"pts": 0.5})
+
+    d0, d1, d2 = (d.nba_date for d in DAYS)
+    monkeypatch.setattr(lanes.EspnService, "_scoring_for",
+                        staticmethod(lambda li: ResolvedScoring("points", None, True, {"pts": 1.0})))
+    monkeypatch.setattr(lanes.live_price_service.schedule_service, "get_nba_today", lambda: d0)
+    assert lanes.lane_day_values(None, [HOLDER, 10], [d0, d1, d2]) == {}          # nothing stored
+    live_prices([carried(501, HOLDER, "MIA", [[d0.isoformat(), d0.isoformat(), 1, 0.4, 30.0, 1.0],
+                                              [d2.isoformat(), "2026-12-31", 20, 1.0, 30.0, 1.0]]),
+                 carried(510, 10, "LAL", [[d0.isoformat(), "2026-12-31", 20, 1.0, 20.0, 1.0]])],
+                {"MIA": [d0, d2], "LAL": [d1, d2]}, as_of=d0)
+
+    found = lanes.lane_day_values(None, [HOLDER, 10, 77], [d0, d1, d2])
+
+    assert found == {HOLDER: (6.0, None, 15.0), 10: (None, 10.0, 10.0)}          # 77 is not carried
+    # and the plan reads them as given
+    assert plan([fa(10, "LAL", value=22.0)], adds=1, day_values=found).marginals == ((6.0, 10.0, 10.0),)
 
 
 @pytest.mark.unit

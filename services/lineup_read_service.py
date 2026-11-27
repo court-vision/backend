@@ -48,7 +48,7 @@ from services.lineup_planner import ACTIVE_SLOT_IDS, BENCH_SLOT_ID, IR_SLOT_ID, 
 from services.matchup_days import index_games
 from services.nba_id_resolver import nba_ids_by_espn_id
 from services.player_value_service import PlayerValueService
-from services import schedule_service
+from services import live_price_service, schedule_service
 from utils.constants import ESPN_FANTASY_ENDPOINT
 from utils.espn_helpers import POSITION_MAP, PRO_TEAM_MAP, TEAM_ABBREV_CORRECTIONS
 
@@ -240,8 +240,26 @@ async def _lookup_values(team_id: int, league_info: LeagueInfo,
         return "fpts", {}, {}
 
 
+def _season_prices(league_info: LeagueInfo, espn_ids: list[int]) -> dict[int, float]:
+    """Each board player's rest-of-season price off the live projection, by ESPN id, under the
+    scoring the board's values are computed under; {} when there are none to read."""
+    if not live_price_service.available():
+        return {}
+    found = live_price_service.prices_soft(EspnService._scoring_for(league_info), espn_ids=espn_ids)
+    return found.season_by_espn_id() if found is not None else {}
+
+
+async def _lookup_season(team_id: int, league_info: LeagueInfo, espn_ids: list[int]) -> dict[int, float]:
+    """`_season_prices` for a board's players; none when the lookup fails."""
+    try:
+        return await run_db("lineup.live_prices", _season_prices, league_info, espn_ids)
+    except Exception as exc:  # the prices sharpen a drop choice, never a reason to fail the read
+        log.warning("lineup_live_prices_lookup_failed", team_id=team_id, error=str(exc))
+        return {}
+
+
 def _value_fields(player_id: int, value_kind: str, values: Mapping[int, Any],
-                  nba_ids: Mapping[int, int]) -> dict[str, Any]:
+                  nba_ids: Mapping[int, int], season: Optional[Mapping[int, float]] = None) -> dict[str, Any]:
     """The LineupPlayer fields that come from our stored stats, not from ESPN."""
     valued = values.get(player_id)
     return {
@@ -249,6 +267,7 @@ def _value_fields(player_id: int, value_kind: str, values: Mapping[int, Any],
         "avg_points": float(valued.value) if valued is not None and valued.value is not None else 0.0,
         "value_kind": value_kind,
         "value_source": valued.source if valued is not None else None,
+        "live_season": (season or {}).get(player_id),
     }
 
 
@@ -309,10 +328,11 @@ class LineupReadService:
             tips = [g.start_time_et for g in games if g.start_time_et]
             first_tip = min(tips) if tips else None
 
-        value_kind, values, nba_ids = "fpts", {}, {}
+        value_kind, values, nba_ids, season = "fpts", {}, {}, {}
         if with_values:
-            value_kind, values, nba_ids = await _lookup_values(team_id, league_info,
-                                                               [e.player_id for e in parsed.entries])
+            espn_ids = [e.player_id for e in parsed.entries]
+            value_kind, values, nba_ids = await _lookup_values(team_id, league_info, espn_ids)
+            season = await _lookup_season(team_id, league_info, espn_ids)
 
         players: list[LineupPlayer] = []
         for e in parsed.entries:
@@ -344,7 +364,7 @@ class LineupReadService:
                 game_started=started,
                 locked=e.lineup_locked or started,
                 playable=game is not None and not is_out,
-                **_value_fields(e.player_id, value_kind, values, nba_ids),
+                **_value_fields(e.player_id, value_kind, values, nba_ids, season),
             ))
 
         can_write, reason = LineupReadService._write_gate(league_info, period, parsed)
@@ -384,8 +404,11 @@ class LineupReadService:
     async def add_values(team_id: int, league_info: LeagueInfo, state: LineupState) -> LineupState:
         """A board read `with_values=False`, with the values a full read gives it: the
         same lookup and the same fields; everything ESPN said is left as it was."""
-        value_kind, values, nba_ids = await _lookup_values(team_id, league_info, [p.player_id for p in state.players])
-        players = [p.model_copy(update=_value_fields(p.player_id, value_kind, values, nba_ids)) for p in state.players]
+        espn_ids = [p.player_id for p in state.players]
+        value_kind, values, nba_ids = await _lookup_values(team_id, league_info, espn_ids)
+        season = await _lookup_season(team_id, league_info, espn_ids)
+        players = [p.model_copy(update=_value_fields(p.player_id, value_kind, values, nba_ids, season))
+                   for p in state.players]
         return state.model_copy(update={"players": players})
 
     @staticmethod

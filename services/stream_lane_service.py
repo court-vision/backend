@@ -102,8 +102,9 @@ from schemas.stream_lane import (
     StreamLaneStartReq,
     StreamLaneUpdateReq,
 )
-from services import roster_protection
+from services import live_price_service, roster_protection
 from services.acquisitions import in_current_matchup, matchup_room, season_room
+from services.espn_service import EspnService
 from services.lineup_editor_service import (
     RosterWriteBlocked,
     RosterWriteDisabled,
@@ -280,9 +281,40 @@ def _value_of(values: Optional[Mapping[int, float]], player_id: int, default: fl
     return default if values is None else float(values.get(player_id, 0.0))
 
 
+DayValues = Mapping[int, Sequence[Optional[float]]]
+
+
+def lane_day_values(league_info: LeagueInfo, espn_ids: Sequence[int], days: Sequence[date]) -> dict[int, tuple]:
+    """Each player's expected points on each of `days` off the live projection, by ESPN id, under
+    the scoring the board's and the pool's values are computed under: his line that night times
+    the chance he plays it (`services.live_prices`). None on a day his team is off; a player the
+    projection does not price is absent. {} when there are no prices to read. Sync: inside `run_db`."""
+    if not live_price_service.available():
+        return {}
+    found = live_price_service.prices_soft(EspnService._scoring_for(league_info), espn_ids=espn_ids)
+    if found is None:
+        return {}
+    out: dict[int, tuple] = {}
+    for espn_id in espn_ids:
+        priced = found.of_espn(espn_id)
+        if priced is not None:
+            out[espn_id] = tuple(priced.on(d) for d in days)
+    return out
+
+
+async def lane_day_values_soft(league_info: LeagueInfo, espn_ids: Sequence[int], days: Sequence[date]) -> dict[int, tuple]:
+    """`lane_day_values`, or {} when the read fails: a plan is never failed by its prices."""
+    try:
+        return await run_db("lane.live_prices", lane_day_values, league_info, list(espn_ids), list(days))
+    except Exception as exc:
+        log.warning("stream_lanes_live_prices_failed", error=f"{type(exc).__name__}: {exc}")
+        return {}
+
+
 def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[PoolPlayer], days: Sequence[LaneDay],
                pending: Sequence[PendingPickup], budget: Budget, rehold_after: int,
-               values: Optional[Mapping[int, float]] = None, steer: LaneSteer = NO_STEER) -> MultiStreamPlan:
+               values: Optional[Mapping[int, float]] = None, steer: LaneSteer = NO_STEER,
+               day_values: Optional[DayValues] = None) -> MultiStreamPlan:
     """The plan for the spots `holder_ids` hold over `days`, together: they share the adds and
     the lineup's seats. The rest of the roster is the board's (IR aside) with the pending pickups
     made on their days; a free agent on the roster or already scheduled is not a candidate. ESPN's
@@ -292,6 +324,11 @@ def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[Poo
     `values` is the value function: each player's worth per game to this plan, in place of the
     board's and the pool's (a player it leaves out is worth nothing). The lanes plan with the
     board's values; the agent's planner asks for a category, or the matchup (`services.stream_value`).
+
+    `day_values` prices a stream on its own night (the Live rankings plan, step 8): each player's
+    expected points on each of `days` off the live projection (`lane_day_values`), read in place
+    of his per-game average on the days it answers for, roster and pool alike. A player or a day
+    it leaves out keeps the average, and a value function (`values`) is never overridden by it.
 
     `steer` is Dime's holds over `days` (services/steering.py): an override scales a player's value
     on its days, roster and pool alike; a block keeps a free agent from being added on its days; a
@@ -304,17 +341,27 @@ def plan_lanes(board: LineupState, holder_ids: Sequence[int], pool: Sequence[Poo
     def plays(team: Optional[str], day: LaneDay) -> bool:
         return bool(team) and normalize_nba_abbrev(team) in day.teams
 
+    def priced(player_id: int, i: int) -> Optional[float]:
+        row = day_values.get(player_id) if day_values and values is None else None
+        return row[i] if row is not None and i < len(row) else None
+
     def roster_value(p: LineupPlayer, i: int) -> float:
         day = days[i]
         if not plays(p.team, day) or _is_out(p.injury_status):
             return 0.0
-        return _value_of(values, p.player_id, p.avg_points) * steer.share(p.player_id, i)
+        live = priced(p.player_id, i)
+        base = live if live is not None else _value_of(values, p.player_id, p.avg_points)
+        return base * steer.share(p.player_id, i)
 
     def roster_slots(p: LineupPlayer) -> frozenset[int]:
         return frozenset(s for s in p.eligible_slot_ids if s in ACTIVE_SLOT_IDS)
 
     def pool_value(f: PoolPlayer, i: int) -> float:
-        return _value_of(values, f.player_id, f.value) * steer.share(f.player_id, i) if plays(f.team, days[i]) else 0.0
+        if not plays(f.team, days[i]):
+            return 0.0
+        live = priced(f.player_id, i)
+        base = live if live is not None else _value_of(values, f.player_id, f.value)
+        return base * steer.share(f.player_id, i)
 
     rest_by_day: list[list[DayPlayer]] = []
     for i, day in enumerate(days):
@@ -797,8 +844,12 @@ class StreamLaneService:
         budget = lane_budget(board.acquisitions, days, pending)
         # Dime's holds on the team (keeps, blocks, overrides) enter the plan as inputs
         steer = lane_steer(await holds_for(team_id, base_date), [d.nba_date for d in days])
+        # Each night priced off the live projection, the roster and the pool alike
+        day_values = await lane_day_values_soft(
+            league_info, [p.player_id for p in board.players] + [f.player_id for f in pool],
+            [d.nba_date for d in days])
         plan = await run_cpu("lane.plan", plan_lanes, board, [h.player_id for h in holders], pool, days, pending,
-                             budget, rehold_after, None, steer)
+                             budget, rehold_after, None, steer, day_values)
         held = {pid for spot in plan.spots for pid in spot} | set(plan.holder_ids)
         nba_ids = await run_db("lane.nba_ids", nba_ids_by_espn_id, sorted(held))
         players = {p.player_id: _lane_player(p.player_id, p.name, p.team, nba_ids) for p in board.players

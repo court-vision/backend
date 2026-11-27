@@ -26,7 +26,7 @@ first day; with none, it keeps the blend it used before
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
@@ -45,6 +45,11 @@ MODEL = "three-part-1"
 # A board row valued by it (`value_source`, and `line_source` on the daily boards)
 SOURCE_LABEL = "live"
 
+# The stats the role part moves with his share of the offense (the data platform's
+# `live_projection_model.USAGE_LINE_KEYS`); the rest move with his minutes alone
+USAGE_KEYS = frozenset(("pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "ast", "tov"))
+_LINE_FIELDS = frozenset(f.name for f in fields(StatLine))
+
 # How old a snapshot may be and still price a board. Yesterday's is what a
 # board opened before this morning's run reads; past two days the job has been
 # failing and the blend, which reads this season's games directly, is nearer.
@@ -59,6 +64,10 @@ class Run:
     last: date
     games: int                              # his team's games in the run
     chance: float                           # that he plays each of them
+    # His minutes in a game of the run and his share of the offense against his
+    # usual one (1.0: as usual). None on a timeline stored without them.
+    minutes: Optional[float] = None
+    usage: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,9 @@ class LivePlayer:
     # and its return date, a note in force, his minutes lately. The reason a
     # board shows beside his rank is read from it (`services.draft_live`).
     parts: Mapping = field(default_factory=dict)
+    # Per minute, at his usual share of the offense (`raw.rates`): with a run's
+    # minutes and usage, his line in a game of that run (`line_on`)
+    rates: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -100,13 +112,30 @@ def parse_timeline(raw: object) -> tuple[Run, ...]:
             continue
         if last < first or games <= 0:
             continue
-        runs.append(Run(first=first, last=last, games=games, chance=min(max(chance, 0.0), 1.0)))
+        runs.append(Run(first=first, last=last, games=games, chance=min(max(chance, 0.0), 1.0),
+                        minutes=_minutes(entry), usage=_usage(entry)))
     runs.sort(key=lambda r: r.first)
     return tuple(runs)
 
 
-def chance_on(timeline: Sequence[Run], day: date) -> float:
-    """The chance he plays a game on `day`: that of the run the day falls in.
+def _minutes(entry: Sequence) -> Optional[float]:
+    try:
+        minutes = float(entry[4])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return minutes if minutes >= 0 else None
+
+
+def _usage(entry: Sequence) -> float:
+    try:
+        usage = float(entry[5])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return 1.0
+    return usage if usage > 0 else 1.0
+
+
+def run_on(timeline: Sequence[Run], day: date) -> Optional[Run]:
+    """The run a game on `day` falls in.
 
     A game on a day no run covers (the schedule moved since the snapshot) takes
     the nearest earlier run, and the first run for a day before any of them:
@@ -119,7 +148,33 @@ def chance_on(timeline: Sequence[Run], day: date) -> float:
         chosen = run
     if chosen is None:
         chosen = timeline[0] if timeline else None
+    return chosen
+
+
+def chance_on(timeline: Sequence[Run], day: date) -> float:
+    """The chance he plays a game on `day`: that of the run the day falls in (`run_on`)."""
+    chosen = run_on(timeline, day)
     return chosen.chance if chosen is not None else 0.0
+
+
+def run_line(player: LivePlayer, run: Optional[Run]) -> StatLine:
+    """His line in a game of `run`, if he plays it: his per-minute rates over the
+    run's minutes, the stats that follow the ball scaled by its share of the
+    offense (the data platform's `LiveProjection.game_line`). His line over the
+    rest of the season stands in where the snapshot carries no rates or the run
+    no minutes: one stored before either was read, or a player with no game left."""
+    if run is None or run.minutes is None or not player.rates:
+        return player.line
+    out = {}
+    for key, rate in player.rates.items():
+        if key in _LINE_FIELDS and key != "min":
+            out[key] = float(rate) * run.minutes * (run.usage if key in USAGE_KEYS else 1.0)
+    return StatLine(min=run.minutes, gp=1.0, **out)
+
+
+def line_on(player: LivePlayer, day: date) -> StatLine:
+    """His line in a game on `day`, if he plays it (`run_line` of the day's run)."""
+    return run_line(player, run_on(player.timeline, day))
 
 
 def games_by_week(timeline: Sequence[Run], days: Sequence[tuple[date, int]]) -> dict[int, float]:
@@ -218,6 +273,17 @@ def apply(
     return out
 
 
+def _rates(raw: object) -> dict[str, float]:
+    """Stored per-minute rates, the ones that read as numbers."""
+    out: dict[str, float] = {}
+    for key, value in (raw.items() if isinstance(raw, Mapping) else ()):
+        try:
+            out[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def load(season: str, day: date, fresh_days: int = FRESH_DAYS, source: str = SOURCE) -> Optional[LiveSnapshot]:
     """The newest live snapshot a board counting from `day` may read, or None.
     `source` is whose: the live projection's unless the shadow one is asked for."""
@@ -256,6 +322,7 @@ def load(season: str, day: date, fresh_days: int = FRESH_DAYS, source: str = SOU
             team=str(raw["team"]) if raw.get("team") else None,
             line=StatLine.from_row(rec), games=games, timeline=parse_timeline(raw.get("timeline")),
             parts=raw["parts"] if isinstance(raw.get("parts"), Mapping) else {},
+            rates=_rates(raw.get("rates")),
         )
     if not players:
         return None

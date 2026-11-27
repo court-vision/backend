@@ -165,6 +165,18 @@ def test_an_add_without_a_drop_on_a_full_roster_gets_the_rules_drop(what_if):
 
 
 @pytest.mark.unit
+def test_the_rules_drop_is_the_lowest_rest_of_season_price_once_the_roster_is_priced(what_if):
+    """A drop is priced on the season: B's three games left here cost less than A's, but A is the
+    lesser player over the season, so A is the one given up."""
+    what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={}, season={101: 12.5, 102: 31.0})
+    out = project([{"add": 2001, "day": 1}], team_=team(slots=3))
+    (move,) = out["moves"]
+    assert move["drop"] == "A"
+    assert move["drop_chosen"] == ("the rule's drop: the roster's lowest rest-of-season price, 12.5 a game "
+                                   "(3 game(s) left this matchup)")
+
+
+@pytest.mark.unit
 def test_the_rules_drop_passes_over_a_protected_player_and_says_so(what_if, protect):
     """The roster lock: B would be the rule's drop; protected, A goes, and the answer says why."""
     what_if.evidence = DropEvidence(games={101: 7, 102: 7, 103: 7}, projected={})
@@ -398,7 +410,8 @@ def fa(pid, nba_team, *, value, positions=("PG", "G"), pos=1):
 def lanes(monkeypatch):
     st = SimpleNamespace(board=BOARD, pool=[fa(10, "LAL", value=22), fa(11, "LAL", value=35)], transactions=True,
                          scoring=POINTS, category_values={}, matchup=None, pending=[], named_pool=[], named_asked=None,
-                         scheduled_pool=([], set()), scheduled_asked=None)
+                         scheduled_pool=([], set()), scheduled_asked=None, season={}, day_values={},
+                         day_values_asked=None)
 
     async def direct(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -410,7 +423,12 @@ def lanes(monkeypatch):
         return st.pool
 
     async def evidence_for(league_info, espn_ids):
-        return DropEvidence(games={i: 7 for i in espn_ids}, projected={})
+        return DropEvidence(games={i: 7 for i in espn_ids}, projected={},
+                            season={i: v for i, v in st.season.items() if i in espn_ids})
+
+    async def day_values(league_info, espn_ids, days):
+        st.day_values_asked = (list(espn_ids), list(days))
+        return st.day_values
 
     async def get_matchup(user_id, team_id, window="season"):
         return st.matchup
@@ -436,6 +454,7 @@ def lanes(monkeypatch):
     monkeypatch.setattr(fantasy, "nba_ids_by_espn_id", lambda ids: {e: 1000 + e for e in ids})
     monkeypatch.setattr(PlayerValueService, "scoring_for", staticmethod(lambda li, team_id=None: st.scoring))
     monkeypatch.setattr(fantasy, "_evidence_for", evidence_for)
+    monkeypatch.setattr(fantasy, "lane_day_values_soft", day_values)
     monkeypatch.setattr(fantasy, "_category_values",
                         lambda key, ids: fantasy._Valued({e: st.category_values.get(e, 0.0) for e in ids}, key, [], []))
     monkeypatch.setattr(fantasy.MatchupService, "get_matchup_by_team_id", staticmethod(get_matchup))
@@ -464,6 +483,37 @@ def test_the_default_holder_is_the_rules_drop_and_the_plan_names_nba_ids(lanes):
     assert (out["projected_value"], out["hold_value"], out["gain"], out["adds"], out["optimal"]) == (70.0, 0.0, 70.0, 1, True)
     assert out["candidates_considered"] == 2 and out["weights"] is None and out["notes"] == []
     assert "espn" not in str(out) and 11 not in {r["player_id"] for r in out["plan"]}
+
+
+@pytest.mark.unit
+def test_the_default_holder_is_the_lowest_rest_of_season_price_once_the_roster_is_priced(lanes):
+    """A lane drops its holder. The big has no game left this matchup, so the rule it was streams
+    his spot; priced on the season he is the roster's best, and the holder's spot is the one."""
+    lanes.season = {HOLDER: 13.5, GUARD: 30.0, BIG: 36.0}
+    out = plan()
+    (holder,) = out["holders"]
+    assert (holder["name"], holder["games_left"]) == ("Holder", 2)
+    assert holder["chosen_by"] == ("the drop rule: the roster's lowest rest-of-season price, 13.5 a game "
+                                   "(2 game(s) left this matchup)")
+    two = plan(spots=2)
+    assert [h["name"] for h in two["holders"]] == ["Holder", "Guard"]
+
+
+@pytest.mark.unit
+def test_the_league_value_prices_each_night_off_the_live_projection_and_a_category_does_not(lanes):
+    """FA 10 averages less than FA 11, but tomorrow he starts: the plan takes him for that night,
+    and FA 11 for the night after."""
+    lanes.day_values = {10: (None, 41.0, 20.0), 11: (None, 30.0, 30.0), BIG: (None, None, None)}
+    out = plan()
+    assert lanes.day_values_asked == ([HOLDER, GUARD, BIG, OUT, 11, 10], [D0, date(2026, 11, 17), date(2026, 11, 18)])
+    assert [(r["day"], r["player_id"], r["value"]) for r in out["plan"]] == [
+        (0, 1003, 0.0), (1, 1010, 41.0), (2, 1011, 30.0)]
+    # A category answers for itself: the points prices are not asked for.
+    lanes.day_values_asked = None
+    lanes.scoring = CATEGORY
+    lanes.category_values = {HOLDER: 20.0, GUARD: 30.0, BIG: 5.0, 10: 28.0, 11: 12.0}
+    plan(value="blk")
+    assert lanes.day_values_asked is None
 
 
 @pytest.mark.unit
@@ -563,7 +613,7 @@ def test_a_scheduled_pickups_player_listed_out_is_worth_nothing_under_any_value(
     lanes.category_values = {HOLDER: 0.5, GUARD: 0.1, BIG: 2.0, 10: 3.0, 11: 0.0, 50: 9.0}
     seen, original = {}, fantasy.plan_lanes
 
-    def plan_lanes(board, holder_ids, pool, days, pending, budget, rehold, values=None, steer=None):
+    def plan_lanes(board, holder_ids, pool, days, pending, budget, rehold, values=None, steer=None, day_values=None):
         seen["pool"] = {f.player_id: f.value for f in pool}
         seen["values"] = values
         return original(board, holder_ids, pool, days, pending, budget, rehold, values)

@@ -18,10 +18,12 @@ So `games_remaining` becomes games per day: each player carries the matchup days
 projection already uses. The caller decides each move's effective day (a move made
 after the day's first tip-off counts from the next day: `services.ai.fantasy`).
 
-The drop choice is the daily swap's rule (`daily_actions_service.weigh_drop`) over
-the rest of the matchup: the player whose loss costs the least, his weighed per-game
-value times the games he would lose, with players short on games weighed at their
-season projection and unknowns never dropped.
+The drop choice is the daily swap's rule (`daily_actions_service.weigh_drop`): where
+the live projection prices the roster, the player with the lowest rest-of-season
+price, because a drop cannot be taken back (the Live rankings plan, step 8). Where
+it does not, the rule it was, over the rest of the matchup: the player whose loss
+costs the least, his weighed per-game value times the games he would lose, with
+players short on games weighed at their season projection. Unknowns are never dropped.
 
 Known simplification (v1): like today's projection, lineup slots are ignored --
 every counting player (off IR, not injured) is assumed to start every game he has.
@@ -153,6 +155,7 @@ class DropCandidate:
     player: SidePlayer
     weighed: Optional[float]           # the per-game value the rule weighs him at; None = unknown, never dropped
     projected: bool = False            # weighed at his season projection rather than his average
+    season: bool = False               # weighed at his rest-of-season price off the live projection
 
 
 @dataclass(frozen=True)
@@ -163,10 +166,17 @@ class DropChoice:
 
 
 def choose_drop(candidates: Sequence[DropCandidate], *, day: int, last_day: int) -> Optional[DropChoice]:
-    """The player whose loss from `day` costs the least: his weighed per-game value times the games he
-    would lose, so a player with no game left is the free drop. An injured player keeps his games (a
-    drop cannot be taken back, and he may be back before they are played). Unknowns are never dropped.
-    Ties: fewer games lost, the lower weighed value, then the name. None when nobody can be dropped."""
+    """The player to give up from `day`. Unknowns are never dropped; None when nobody can be.
+
+    With the roster priced on the rest of the season (any candidate `season`): the lowest
+    weighed value, whatever is left of this matchup, so a good player whose week is over is
+    not the free drop. One the projection does not price stands at his per-game value beside
+    the rest. Ties: fewer games lost, then the name.
+
+    Without: the player whose loss from `day` costs the least, his weighed per-game value
+    times the games he would lose, so a player with no game left is the free drop. An injured
+    player keeps his games (a drop cannot be taken back, and he may be back before they are
+    played). Ties: fewer games lost, the lower weighed value, then the name."""
     choices: list[DropChoice] = []
     for c in candidates:
         if c.weighed is None:
@@ -175,4 +185,6 @@ def choose_drop(candidates: Sequence[DropCandidate], *, day: int, last_day: int)
         choices.append(DropChoice(c, games, round(c.weighed * games, 4)))
     if not choices:
         return None
+    if any(d.candidate.season for d in choices):
+        return min(choices, key=lambda d: (d.candidate.weighed, d.games_lost, d.candidate.player.name))
     return min(choices, key=lambda d: (d.cost, d.games_lost, d.candidate.weighed, d.candidate.player.name))
