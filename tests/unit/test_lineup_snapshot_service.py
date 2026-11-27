@@ -14,6 +14,7 @@ from freezegun import freeze_time
 from core.errors import BadRequestError, NotFoundError
 from services import lineup_snapshot_service as svc
 from services import matchup_days
+from tests.conftest import espn_roster_filter
 
 TODAY = date(2026, 11, 10)
 YESTERDAY = date(2026, 11, 9)
@@ -73,7 +74,7 @@ def espn_payload(latest=PERIOD + 1, teams=((1, "GloatingSoap369"), (5, "Rival"))
 @pytest.fixture
 def world(monkeypatch):
     """A fake table, a fake ESPN, inline run_db, and a fixed calendar."""
-    w = SimpleNamespace(rows={}, espn_calls=[], payload=espn_payload(), persisted=[], hydrated=0)
+    w = SimpleNamespace(rows={}, espn_calls=[], roster_for=[], payload=espn_payload(), persisted=[], hydrated=0)
 
     async def direct_run_db(name, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -85,9 +86,10 @@ def world(monkeypatch):
         newest_first = sorted(w.rows.items(), key=lambda kv: kv[0][1], reverse=True)
         return next((tid for (tid, d), snap in newest_first if d in dates and snap.team_name == team_name), None)
 
-    async def fetch(league_info, views, *, expect_key="teams", scoring_period_id=None):
+    async def fetch(league_info, views, *, expect_key="teams", scoring_period_id=None, roster_for=None):
         w.espn_calls.append((tuple(views), scoring_period_id))
-        return w.payload
+        w.roster_for.append(roster_for)
+        return espn_roster_filter(w.payload, roster_for)
 
     async def hydrate(team):
         w.hydrated += 1
@@ -271,11 +273,12 @@ def test_matchup_rosters_mix_stored_and_history_per_side(world):
     found = asyncio.run(svc.LineupSnapshotService.rosters_for_matchup(league_info, {1: "GloatingSoap369", 5: "Rival"}, YESTERDAY))
     assert found[1].source == "snapshot" and found[5].source == "provider_history"
     assert world.espn_calls == [(("mTeam", "mRoster"), PERIOD)]
+    assert world.roster_for == [[5]]                                  # only the side ESPN is read for
 
 
 @pytest.mark.unit
 def test_matchup_rosters_survive_a_failed_history_read(world, monkeypatch):
-    async def boom(league_info, views, *, expect_key="teams", scoring_period_id=None):
+    async def boom(league_info, views, *, expect_key="teams", scoring_period_id=None, roster_for=None):
         raise RuntimeError("espn down")
 
     monkeypatch.setattr(svc.EspnService, "fetch_league", staticmethod(boom))

@@ -40,7 +40,7 @@ from schemas.lineup_snapshots import (
     LineupSnapshotPlayer,
     LineupSnapshotResp,
 )
-from services import schedule_service
+from services import espn_trim, schedule_service
 from services.espn_service import EspnService
 from services.lineup_read_service import ParsedLineup, _persist_espn_team_id, parse_espn_lineup
 from services.matchup_days import fantasy_today
@@ -229,7 +229,15 @@ async def _history_from_espn(league_info: LeagueInfo, target: date, sides: dict[
     scoring_period_id = schedule_service.season_day(target)
     if scoring_period_id is None or not sides:
         return {}
-    payload = await EspnService.fetch_league(league_info, HISTORY_VIEWS, scoring_period_id=scoring_period_id)
+    # Only the asked-for rosters when every id is known (services.espn_trim); in full otherwise,
+    # or when an id is no longer in the league, so the name match still finds that team.
+    known = [team_id for team_id in sides if team_id is not None]
+    roster_for = known if len(known) == len(sides) else None
+    payload = await EspnService.fetch_league(league_info, HISTORY_VIEWS, scoring_period_id=scoring_period_id,
+                                             roster_for=roster_for)
+    if roster_for and not espn_trim.rosters_included(payload, roster_for):
+        log.info("lineup_history_roster_filter_missed", scoring_period_id=scoring_period_id)
+        payload = await EspnService.fetch_league(league_info, HISTORY_VIEWS, scoring_period_id=scoring_period_id)
     latest = (payload.get("status") or {}).get("latestScoringPeriod")
     if latest and int(latest) <= scoring_period_id:
         log.info("lineup_history_day_not_finished", scoring_period_id=scoring_period_id, latest=latest)

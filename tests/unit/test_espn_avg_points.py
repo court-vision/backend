@@ -18,6 +18,7 @@ from services.player_value_service import PlayerValueService, ValueResult
 from services.scoring.points import DEFAULT_POINTS
 from services.scoring.providers.espn_settings import statline_from_espn_stats
 from services.scoring.resolver import ResolvedScoring, resolve_scoring
+from tests.conftest import espn_roster_filter
 
 YEAR = 2027
 LEAGUE = LeagueInfo(provider=FantasyProvider.ESPN, league_id=555, team_name="My Team", year=YEAR,
@@ -201,7 +202,10 @@ def test_free_agents_by_ids_are_the_pool_read_for_named_players(espn, monkeypatc
     resp = asyncio.run(EspnService.get_free_agents_by_ids(LEAGUE, [3, 1, 2, 1]))
     assert seen["params"] == {"view": "kona_player_info", "scoringPeriodId": 0}
     assert json.loads(seen["headers"]["x-fantasy-filter"]) == {"players": {
-        "filterIds": {"value": [1, 2, 3]}, "limit": 3, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}}}
+        "filterIds": {"value": [1, 2, 3]}, "limit": 3, "sortPercOwned": {"sortPriority": 1, "sortAsc": False},
+        # only the season's totals (services.espn_trim)
+        "filterStatsForExternalIds": {"value": [LEAGUE.year]}, "filterStatsForSourceIds": {"value": [0]},
+        "filterStatsForSplitTypeIds": {"value": [0]}}}
     assert [(p.player_id, p.acquisition_status, p.waivers_until) for p in resp.data] == [
         (1, "free_agent", None), (2, "waivers", date(2025, 10, 25))]
     assert resp.data[0].valid_positions == ["PG", "G", "UT1", "UT2", "UT3"] and resp.data[0].default_position_id == 1
@@ -297,6 +301,78 @@ def matchup(espn, monkeypatch):
     monkeypatch.setattr(espn_service, "get_current_matchup", lambda *a, **k: {"matchup_number": 1})
     monkeypatch.setattr(espn_service, "get_remaining_games", lambda *a, **k: 3)
     return espn
+
+
+@pytest.fixture
+def espn_reads(matchup, monkeypatch):
+    """ESPN as the 2026-11-27 probe saw it: `rosterForTeamId` keeps only those rosters,
+    the schedule filter only that team's matchup in that period. Each read's params and headers are kept."""
+    seen = []
+
+    async def provider_get(provider, url, *, params=None, headers=None, cookies=None, expect_key=None, **_):
+        seen.append((dict(params or {}), headers))
+        payload = espn_roster_filter(matchup["payload"], (params or {}).get("rosterForTeamId"))
+        if headers and "x-fantasy-filter" in headers:
+            schedule = json.loads(headers["x-fantasy-filter"])["schedule"]
+            periods, teams = schedule["filterMatchupPeriodIds"]["value"], set(schedule["filterTeamIds"]["value"])
+            payload = {**payload, "schedule": [
+                m for m in payload["schedule"]
+                if m["matchupPeriodId"] in periods and teams & {m["home"]["teamId"], m["away"]["teamId"]}]}
+        return payload
+
+    monkeypatch.setattr(espn_service, "provider_get", provider_get)
+    return seen
+
+
+@pytest.mark.unit
+def test_a_teams_next_matchup_read_asks_for_its_two_rosters_and_its_week(espn_reads):
+    league = LEAGUE.model_copy(update={"espn_team_id": None})
+    first = asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+    again = asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+
+    (params1, headers1), (params2, headers2) = espn_reads
+    assert "rosterForTeamId" not in params1 and headers1 is None           # nothing known yet: the whole league
+    assert params2["rosterForTeamId"] == [1, 2]
+    assert json.loads(headers2["x-fantasy-filter"]) == {"schedule": {"filterMatchupPeriodIds": {"value": [1]},
+                                                                     "filterTeamIds": {"value": [1]}}}
+    assert again.model_dump() == first.model_dump()                        # the same matchup, read smaller
+
+
+@pytest.mark.unit
+def test_a_new_matchup_period_reads_the_league_again_and_remembers_the_new_opponent(espn_reads, matchup):
+    league = LEAGUE.model_copy(update={"espn_team_id": None})
+    asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))     # week 1: My Team vs Opp
+    matchup["payload"] = {
+        **MATCHUP_PAYLOAD,
+        "status": {"currentMatchupPeriod": 2, "latestScoringPeriod": 8},
+        "settings": {"scheduleSettings": {"matchupPeriods": {"1": [1], "2": [2]}}},
+        "teams": [*MATCHUP_PAYLOAD["teams"],
+                  {"id": 3, "name": "Next", "roster": {"entries": [_roster_entry(_espn_player(5, "Next Guy", 15.0))]}}],
+        "schedule": [*MATCHUP_PAYLOAD["schedule"],
+                     {"matchupPeriodId": 2, "home": {"teamId": 3, "totalPoints": 0.0},
+                      "away": {"teamId": 1, "totalPoints": 0.0}}],
+    }
+
+    resp = asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+    asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+
+    rosters = [params.get("rosterForTeamId") for params, _ in espn_reads]
+    assert rosters == [None, [1, 2], None, [1, 3]]                        # week 2's first read is asked again in full
+    assert resp.data.matchup_period == 2 and resp.data.opponent_team.team_name == "Next"
+    assert [p.player_id for p in resp.data.opponent_team.roster] == [5]
+
+
+@pytest.mark.unit
+def test_a_week_without_a_matchup_forgets_the_pair_so_later_reads_go_straight_to_the_league(espn_reads, matchup):
+    league = LEAGUE.model_copy(update={"espn_team_id": None})
+    asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))     # week 1: My Team vs Opp
+    matchup["payload"] = {**MATCHUP_PAYLOAD, "status": {"currentMatchupPeriod": 2, "latestScoringPeriod": 8}}
+
+    first = asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+    asyncio.run(EspnService.get_matchup_data(league, scoring=POINTS))
+
+    assert first.data is None                                             # a bye: no matchup in period 2
+    assert [params.get("rosterForTeamId") for params, _ in espn_reads] == [None, [1, 2], None, None]
 
 
 @pytest.mark.unit
