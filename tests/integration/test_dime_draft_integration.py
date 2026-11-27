@@ -721,6 +721,13 @@ async def test_the_chat_says_dime_holds_the_seat_only_while_its_loop_beats(team,
         AiDraftRoom.session_id == room.session_id).execute()
     assert held not in await draft.chat_line(team.user_id_id, chat)
     assert (await draft.room_view(team.user_id_id, room))["seat"]["live"] is False
+    # Nor does a note left running by the same dead process: the chat sweeps it, as the room's view does
+    note = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", seat=True,
+                              for_pick=4, state="running",
+                              created_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    line = await draft.chat_line(team.user_id_id, chat)
+    assert held not in line and "choosing the user's pick" not in line
+    assert AiDraftNote.get_by_id(note.id).state == "failed"
 
 
 async def test_a_deleted_room_s_chat_says_the_room_is_gone(team, pool):

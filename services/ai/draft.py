@@ -1085,9 +1085,13 @@ async def chat_line(user_id: int, conversation_id: int) -> str:
         parts.append("The user hasn't drafted anyone yet.")
     if room.punts:
         parts.append(f"The room's punts, which the user set: {', '.join(room.punts)}.")
+    # A note whose process died reads as running until swept, as the room's view sweeps it: it would
+    # say Dime is choosing a pick, and keep a dead seat looking live
+    now = _now()
+    await _sweep(room.session_id, _stale_before(now))
     notes = await _notes(room.session_id, VIEW_NOTES)
     parts.append(_dime_pick_words(notes, detail))
-    if _seat_live(await _room(room.session_id), notes, _now()):
+    if _seat_live(await _room(room.session_id), notes, now):
         parts.append("You hold the user's seat in this mock and draft it pick by pick, until the user takes it back.")
     parts.append(f"The user is writing from the room, beside its board: read it with get_draft_board (room_id "
                  f"{room.session_id}) before naming players. The user makes the picks and sets the punts, so say "
