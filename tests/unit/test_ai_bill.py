@@ -67,7 +67,8 @@ class Anthropic:
             return httpx.Response(200, json={"data": [cost_row("2026-10-30", "apikey_app", "1000.000000"),
                                                       cost_row("2026-10-31", None, "25.500000")],
                                              "has_more": False, "next_page": None,
-                                             "data_refreshed_at": "2026-11-26T08:00:00Z"})
+                                             # A past range answers its own last refresh, weeks old
+                                             "data_refreshed_at": "2026-11-11T12:41:00Z"})
         # This month: two pages
         if page is None:
             return httpx.Response(200, json={"data": [cost_row("2026-11-24", "apikey_app", "300.000000")],
@@ -119,8 +120,8 @@ def test_two_months_by_day_beside_the_ledger(anthropic):
     today = out.days[-1]
     assert (today.billed_micros, today.ours_micros, today.ledger_micros, today.open_micros) == \
         (1_500_000, 1_500_000, 1_200_000, 1_000_000)
-    # The earliest refresh of the three reads: complete up to there
-    assert out.refreshed_at == datetime(2026, 11, 26, 8, tzinfo=timezone.utc)
+    # The newest refresh of the three reads: last month's old one doesn't mark the recent days short
+    assert out.refreshed_at == datetime(2026, 11, 26, 9, tzinfo=timezone.utc)
 
 
 def test_this_month_s_keys_are_named_and_the_app_s_own_is_marked(anthropic):
