@@ -542,6 +542,12 @@ def test_a_back_to_back_counts_both_nights_for_the_choice_and_tonight_alone_for_
     priced = evidence(season={12: 24.0})
     assert suggest(players, [two_nights], day=2, evidence=priced) is None
     assert suggest(players, [two_nights], day=2, evidence=evidence(season={12: 23.5})).pickup.player_id == 92
+    # two nights never carry a first one that is not worth the drop: the one-night pickup that is, is offered
+    assert suggest(players, [two_nights, one_night], day=2, evidence=priced).pickup.player_id == 91
+    assert suggest(players, [two_nights, pick(93, "weak", live=(12.0,), game_days=(2,))], day=2, evidence=priced) is None
+    # with room nobody is dropped, so there is no bar to clear and the two nights win
+    room = [p for p in players if p.player_id != 12]
+    assert suggest(room, [one_night, two_nights], day=2, evidence=priced).pickup.player_id == 92
 
 
 @pytest.mark.unit

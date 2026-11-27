@@ -253,10 +253,11 @@ def suggest_transaction(
     would refuse under `rosterSettings.positionLimits` are skipped — a swap that
     drops a player of the same default position frees that seat and still counts.
 
-    The pickup is the free agent expected to score the most over the nights the add
-    buys (`stream_value`) among those the live projection prices; with none priced,
-    the first the search lists. The swap is offered when his value tonight
-    (`pickup_value`) is at least `ratio` of the drop's."""
+    The swap is offered when the pickup's value tonight (`pickup_value`) is at least
+    `ratio` of the drop's. Among the free agents the live projection prices, the pickup
+    is the one expected to score the most over the nights the add buys (`stream_value`)
+    of those worth the drop tonight: a second night never carries a first one that is
+    not. With none priced, it is the first the search lists."""
     roster_ids = {p.player_id for p in state.players}
     drop: Optional[LineupPlayer] = None
     weighed: Optional[DropValue] = None
@@ -282,14 +283,18 @@ def suggest_transaction(
                 and s.player_id not in roster_ids and not capped(s)]
     if not eligible:
         return None
+    floor = weighed.value * ratio if drop is not None and weighed is not None else None
+    worth = [s for s in eligible if floor is None or pickup_value(s) >= floor]
     priced = [(v, s) for s in eligible if (v := stream_value(s, day)) is not None]
-    # max keeps the first of equals, so the search's own order breaks a tie
-    pickup = max(priced, key=lambda vs: vs[0])[1] if priced else eligible[0]
-    if drop is None or weighed is None:
-        return TransactionSuggestion(pickup, None)
-    if pickup_value(pickup) < weighed.value * ratio:
+    if priced:
+        running = [vs for vs in priced if vs[1] in worth]
+        # max keeps the first of equals, so the search's own order breaks a tie
+        pickup = max(running, key=lambda vs: vs[0])[1] if running else None
+    else:
+        pickup = eligible[0] if eligible[0] in worth else None
+    if pickup is None:
         return None
-    return TransactionSuggestion(pickup, drop, weighed)
+    return TransactionSuggestion(pickup, drop, weighed) if floor is not None else TransactionSuggestion(pickup, None)
 
 
 def _of_roster(p: LineupPlayer) -> DailyActionPlayer:
