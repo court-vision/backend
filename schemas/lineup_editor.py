@@ -67,6 +67,10 @@ class LineupPlayer(ApiModel):
     avg_points: float = 0.0
     value_kind: ValueKind = "fpts"
     value_source: Optional[str] = None
+    # His rest-of-season price off the live projection (services.live_prices): expected
+    # points per game on his team's schedule, a game he is likely to miss counting for
+    # less. What a drop is weighed at. None when he is not priced.
+    live_season: Optional[float] = None
 
 
 class AcquisitionState(ApiModel):

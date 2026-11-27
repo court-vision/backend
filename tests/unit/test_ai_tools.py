@@ -395,9 +395,12 @@ class TestAgentTeamTools:
         seen = []
 
         def fa(espn_id, nba_id):
+            # the first is priced off the live projection, the rest are not
+            live = (18.5, 41.0) if espn_id == 100 else (None, None)
             return SimpleNamespace(player_id=espn_id, nba_player_id=nba_id, name=f"P{nba_id}", team="UTA",
                                    valid_positions=["PF", "C", "F", "UT1", "UT2", "BE", "IR"], avg_points_last_n=2.0, avg_points_season=1.5,
                                    games_remaining=4, game_days=[1, 2], b2b_game_count=1, streamer_score=9.0,
+                                   live_day=live[0], live_week=live[1], live_values=None,
                                    injured=False, injury_status=None, acquisition_status=None, waivers_until=None)
 
         async def find(**kwargs):
@@ -416,6 +419,10 @@ class TestAgentTeamTools:
         assert body["players"][0]["positions"] == "PF/C/F"
         assert seen[0]["target_day"] == 2 and seen[0]["mode"].value == "daily" and seen[0]["team_id"] == 22
         assert "101" not in json.dumps([p["player_id"] for p in body["players"]])
+        # A priced free agent carries what the live projection expects of him; an unpriced row is as it was
+        priced, unpriced = body["players"]
+        assert (priced["expected_on_day"], priced["expected_rest_of_matchup"]) == (18.5, 41.0)
+        assert "expected_on_day" not in unpriced and "expected_rest_of_matchup" not in unpriced
 
     def test_limits_are_validated(self, owns_22):
         assert _agent("get_free_agents", {"team_id": 22, "limit": 500}).is_error

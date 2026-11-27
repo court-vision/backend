@@ -7,7 +7,9 @@ Covers the non-ESPN answer, the fill plan grouped into chains, the IR rows, the
 daily streamer swap and every guard around it (day, value kind, ratio, who may
 be dropped, what a drop candidate is worth when his average rests on no games),
 row order, copy and ids. The drop candidates' samples and projections are a fake
-too (`harness.sample` / `harness.projected`).
+too (`harness.sample` / `harness.projected`), as are their rest-of-season prices
+off the live projection (`harness.season`) and a free agent's price tonight
+(`pick(live=...)`): the drop weighed on the season, the pickup on its own night.
 """
 
 import asyncio
@@ -70,12 +72,16 @@ def state(players, *, nba_date="2026-10-20", can_write=True, reason=None, versio
     )
 
 
-def pick(pid, name="FA", *, status="free_agent", value=20.0, team="LAL", score=50.0, game_days=(0, 3), pos=None):
+def pick(pid, name="FA", *, status="free_agent", value=20.0, team="LAL", score=50.0, game_days=(0, 3), pos=None,
+         live=None):
+    """`live`: what the live projection expects of him on each of `game_days` (the first is tonight)."""
     return StreamerPlayerResp(
         player_id=pid, nba_player_id=pid * 10, name=name, team=team, valid_positions=["PG"],
         avg_points_last_n=value, avg_points_season=value or 0.0, avg_source="rolling", games_remaining=len(game_days),
         has_b2b=False, b2b_game_count=0, game_days=list(game_days), streamer_score=score, injured=False,
         acquisition_status=status, default_position_id=pos,
+        live_day=live[0] if live else None, live_values=list(live) if live else None,
+        live_week=sum(live) if live else None,
     )
 
 
@@ -94,7 +100,7 @@ LAL_HOME = SimpleNamespace(home_team_id="LAL", away_team_id="BOS", start_time_et
 @pytest.fixture
 def harness(monkeypatch):
     h = SimpleNamespace(board=None, pool=NO_POOL, find_calls=[], games=[], game_days={},
-                        sample={}, projected={}, evidence_calls=[], evidence_error=None,
+                        sample={}, projected={}, season={}, evidence_calls=[], evidence_error=None,
                         verdicts=[], verdicts_error=None, verdict_calls=[])
 
     async def fake_today(nba_ids, game_date):
@@ -122,7 +128,8 @@ def harness(monkeypatch):
         if h.evidence_error is not None:
             raise h.evidence_error
         return svc.DropEvidence(games={i: h.sample.get(i, 7) for i in espn_ids},     # a full window unless told
-                                projected={i: v for i, v in h.projected.items() if i in espn_ids})
+                                projected={i: v for i, v in h.projected.items() if i in espn_ids},
+                                season={i: v for i, v in h.season.items() if i in espn_ids})
 
     monkeypatch.setattr(svc.LineupReadService, "read", staticmethod(fake_read))
     monkeypatch.setattr(svc.StreamerService, "find_streamers", staticmethod(fake_find))
@@ -465,6 +472,127 @@ def test_two_games_are_too_few_to_call_a_player_the_weakest(harness):
     assert rows(read()) == [("add_drop", 99, 11)]
 
 
+# ---- the live prices: the drop on the season, the pickup on its night -------------------------------
+
+
+@pytest.mark.unit
+def test_a_slow_fortnight_does_not_make_a_good_player_the_drop(harness):
+    """The Giddey drop: a good player on a cold stretch has the lowest recent average on the
+    bench, and the rule used to give him up. His rest-of-season price says otherwise."""
+    harness.board = state(full_board({11: player(11, "Cold Star", BE, game=False, value=14.0),
+                                      12: player(12, "Bench Guy", BE, game=False, value=19.0, team="MIA")}))
+    harness.pool = pool(pick(99, "Streamer", value=20.0, live=(22.0, 21.0)))
+    harness.game_days = {"MIA": [0, 3]}
+    assert rows(read()) == [("add_drop", 99, 11)]                  # on the averages alone
+    harness.season = {11: 33.5, 12: 18.0}
+    resp = read()
+    assert rows(resp) == [("add_drop", 99, 12)]
+    assert resp.data.actions[0].detail == ("Bench Guy has no game today (next plays Fri) · Streamer plays tonight · "
+                                           "18.0 rest of season vs 22.0 tonight")
+
+
+@pytest.mark.unit
+def test_nobody_is_dropped_for_a_night_that_does_not_measure_up_to_his_season(harness):
+    harness.board = state(full_board({12: player(12, "P12", BE, game=False, value=10.0)}))
+    harness.season = {11: 40.0, 12: 30.0}                          # P11 has a game; P12 is the only candidate
+    harness.pool = pool(pick(99, "Streamer", value=40.0, live=(25.4, 20.0)))
+    assert rows(read()) == []                                      # 25.4 < 0.85 * 30
+    harness.pool = pool(pick(99, "Streamer", value=40.0, live=(25.5, 20.0)))
+    assert rows(read()) == [("add_drop", 99, 12)]
+
+
+@pytest.mark.unit
+def test_weigh_drop_reads_the_season_price_first_and_the_old_rule_without_one():
+    ev = evidence({11: 1, 12: 7}, {11: 35.0}, season={11: 28.4})
+    assert svc.weigh_drop(11, 6.0, "rolling", ev) == svc.DropValue(28.4, False, True)
+    assert svc.weigh_drop(11, 99.0, "baseline", ev).basis == svc.SEASON
+    assert svc.weigh_drop(12, 18.0, "rolling", ev) == svc.DropValue(18.0, False)     # not priced: his average
+    assert svc.weigh_drop(13, 0.0, None, ev) is None
+    assert [svc.DropValue(28.4, False, True).words, svc.DropValue(35.0, True).words, svc.DropValue(18.0, False).words] == [
+        "28.4 rest of season", "35.0 projected", "18.0"]
+    assert [svc.DropValue(35.0, True).basis, svc.DropValue(18.0, False).basis] == [svc.PROJECTION, svc.AVERAGE]
+
+
+@pytest.mark.unit
+def test_the_pickup_is_the_free_agent_expected_to_score_the_most_tonight_not_the_first_listed():
+    players = full_board({12: player(12, "P12", BE, game=False, value=10.0)})
+    streamers = [pick(91, "hot week", value=38.0, live=(19.0,), game_days=(0,)),
+                 pick(92, "starter is out tonight", value=15.0, live=(31.0,), game_days=(0,)),
+                 pick(93, "unpriced", value=45.0, game_days=(0,)),
+                 pick(94, "waivers", status="waivers", value=20.0, live=(50.0,), game_days=(0,))]
+    s = suggest(players, streamers, day=0)
+    assert s.pickup.player_id == 92 and svc.pickup_value(s.pickup) == 31.0
+    assert svc.pickup_words(s.pickup) == "31.0 tonight" and svc.pickup_words(streamers[2]) == "45.0 avg"
+    # nobody priced: the search's own order, as before
+    assert suggest(players, [pick(95, value=20.0), pick(96, value=44.0)], day=0).pickup.player_id == 95
+    # equals: the search's order breaks the tie
+    assert suggest(players, [pick(97, live=(20.0,), game_days=(0,)), pick(98, live=(20.0,), game_days=(0,))],
+                   day=0).pickup.player_id == 97
+
+
+@pytest.mark.unit
+def test_a_back_to_back_counts_both_nights_for_the_choice_and_tonight_alone_for_the_ratio():
+    players = full_board({12: player(12, "P12", BE, game=False, value=10.0)})
+    one_night = pick(91, "one night", live=(26.0, 24.0), game_days=(2, 5))
+    two_nights = pick(92, "back to back", live=(20.0, 19.0, 18.0), game_days=(2, 3, 6))
+    assert svc.stream_value(one_night, 2) == 26.0 and svc.stream_value(two_nights, 2) == 39.0
+    assert svc.stream_value(two_nights, None) == 20.0 and svc.stream_value(pick(93), 2) is None
+    assert suggest(players, [one_night, two_nights], day=2).pickup.player_id == 92
+    # the swap itself is still judged on tonight: 20.0 against 0.85 of the drop's season price
+    priced = evidence(season={12: 24.0})
+    assert suggest(players, [two_nights], day=2, evidence=priced) is None
+    assert suggest(players, [two_nights], day=2, evidence=evidence(season={12: 23.5})).pickup.player_id == 92
+    # two nights never carry a first one that is not worth the drop: the one-night pickup that is, is offered
+    assert suggest(players, [two_nights, one_night], day=2, evidence=priced).pickup.player_id == 91
+    assert suggest(players, [two_nights, pick(93, "weak", live=(12.0,), game_days=(2,))], day=2, evidence=priced) is None
+    # with room nobody is dropped, so there is no bar to clear and the two nights win
+    room = [p for p in players if p.player_id != 12]
+    assert suggest(room, [one_night, two_nights], day=2, evidence=priced).pickup.player_id == 92
+
+
+@pytest.mark.unit
+def test_a_row_says_what_each_figure_is_once_either_side_is_a_live_price(harness):
+    harness.board = state(full_board({12: player(12, "P12", BE, game=False, value=18.0, team="MIA")}))
+    harness.game_days = {"MIA": [0]}
+    harness.pool = pool(pick(99, "Kawhi", value=20.0, live=(21.5,), game_days=(0,)))
+    assert read().data.actions[0].detail.endswith("· 18.0 avg vs 21.5 tonight")      # the drop is not priced
+    harness.season = {12: 17.0}
+    harness.pool = pool(pick(99, "Kawhi", value=20.0))
+    assert read().data.actions[0].detail.endswith("· 17.0 rest of season vs 20.0 avg")   # the pickup is not
+    harness.board = state([p for p in full_board() if p.player_id != 12])
+    harness.pool = pool(pick(99, "Kawhi", value=20.0, live=(21.5,), game_days=(0,)))
+    assert read().data.actions[0].detail == "Open roster seat · Kawhi plays tonight · 21.5 tonight"
+
+
+@pytest.mark.unit
+def test_the_evidence_carries_the_candidates_season_prices(monkeypatch):
+    from services.scoring.resolver import ResolvedScoring
+
+    scoring = ResolvedScoring("points", None, True, {"pts": 1.0})
+    seen = {}
+
+    class Found:
+        def season_by_espn_id(self):
+            return {11: 31.2}
+
+    def prices_soft(scoring_, nba_ids=(), *, espn_ids=(), today=None):
+        seen["asked"] = (scoring_, list(espn_ids))
+        return Found()
+
+    monkeypatch.setattr(svc.live_price_service, "prices_soft", prices_soft)
+    monkeypatch.setattr(svc.EspnService, "_scoring_for", staticmethod(lambda league_info: scoring))
+    monkeypatch.setattr(svc.PlayerValueService, "rolling_games_by_espn_id", staticmethod(lambda ids, days: {11: 5}))
+    monkeypatch.setattr(svc.PlayerValueService, "projected_value_by_espn_id",
+                        staticmethod(lambda scoring_, ids, days: {11: 20.0}))
+
+    ev = svc._drop_evidence(LEAGUE, [11, 12])
+
+    assert ev == svc.DropEvidence(games={11: 5}, projected={11: 20.0}, season={11: 31.2})
+    assert seen["asked"] == (scoring, [11, 12])
+    monkeypatch.setattr(svc.live_price_service, "prices_soft", lambda *a, **k: None)
+    assert svc._drop_evidence(LEAGUE, [11]).season == {}
+
+
 @pytest.mark.unit
 def test_the_days_swap_never_suggests_dropping_a_protected_player(harness, protect):
     harness.board = state(full_board({11: player(11, "P11", BE, game=False, value=8.0),
@@ -483,8 +611,8 @@ def suggest(players, streamers, limits=None, **kw):
     return svc.suggest_transaction(state(players, limits=limits), streamers, ir_eligible=eligible(players), **kw)
 
 
-def evidence(games=None, projected=None):
-    return svc.DropEvidence(games=games or {}, projected=projected or {})
+def evidence(games=None, projected=None, season=None):
+    return svc.DropEvidence(games=games or {}, projected=projected or {}, season=season or {})
 
 
 @pytest.mark.unit

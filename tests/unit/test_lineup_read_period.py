@@ -191,3 +191,58 @@ def test_a_failed_value_lookup_fails_neither_the_read_nor_add_values(espn, monke
     full, bare = read(), bare_read()
     valued = asyncio.run(svc.LineupReadService.add_values(1, LEAGUE, bare))
     assert valued.model_dump() == full.model_dump() == bare.model_dump()
+
+
+# ---- the rest-of-season price (the Live rankings plan, step 8) --------------------------------
+
+
+@pytest.mark.unit
+def test_a_board_row_carries_the_players_rest_of_season_price(espn, monkeypatch):
+    asked = []
+
+    def season(league_info, espn_ids):
+        asked.append(list(espn_ids))
+        return {1: 31.25}
+
+    monkeypatch.setattr(svc, "_season_prices", season)
+    full, bare = read(), bare_read()
+
+    assert asked == [[1]]                                            # a bare read asks for none
+    assert full.players[0].live_season == 31.25 and bare.players[0].live_season is None
+    valued = asyncio.run(svc.LineupReadService.add_values(1, LEAGUE, bare))
+    assert valued.players[0].live_season == 31.25 and valued.model_dump() == full.model_dump()
+
+
+@pytest.mark.unit
+def test_a_board_with_no_prices_to_read_is_the_board_it_was(espn, monkeypatch):
+    assert read().players[0].live_season is None                     # nothing stored: the suite's default
+
+    def down(league_info, espn_ids):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(svc, "_season_prices", down)
+    assert read().players[0].live_season is None                     # a failed lookup never fails the read
+
+
+@pytest.mark.unit
+def test_the_season_prices_are_asked_under_the_boards_scoring_only_when_there_is_a_projection(monkeypatch):
+    from services.scoring.resolver import ResolvedScoring
+
+    scoring = ResolvedScoring("points", None, True, {"pts": 1.0})
+    resolved, asked = [], []
+
+    class Found:
+        def season_by_espn_id(self):
+            return {1: 20.5}
+
+    def prices_soft(scoring_, nba_ids=(), *, espn_ids=(), today=None):
+        asked.append((scoring_, list(espn_ids)))
+        return Found()
+
+    monkeypatch.setattr(svc.EspnService, "_scoring_for", staticmethod(lambda li: resolved.append(li) or scoring))
+    monkeypatch.setattr(svc.live_price_service, "prices_soft", prices_soft)
+
+    assert svc._season_prices(LEAGUE, [1, 2]) == {} and resolved == []     # no projection: nothing resolved
+    monkeypatch.setattr(svc.live_price_service, "available", lambda today=None: True)
+    assert svc._season_prices(LEAGUE, [1, 2]) == {1: 20.5}
+    assert asked == [(scoring, [1, 2])] and resolved == [LEAGUE]

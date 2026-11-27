@@ -32,6 +32,14 @@ class StreamerPlayerResp(ApiModel):
     b2b_game_count: int
     game_days: list[int]
 
+    # The live projection's price under the league's scoring (services.live_prices), in
+    # expected points: his line that night times the chance he plays it. None when he is
+    # not priced (a category league, no fresh projection, a player it does not carry),
+    # and the averages above are then all there is.
+    live_day: Optional[float] = None             # on the day the search is for; None with no game that day
+    live_week: Optional[float] = None            # over `game_days`: his games left in the matchup
+    live_values: Optional[list[float]] = None    # each of `game_days`, in order
+
     # Ranking
     streamer_score: float
 
@@ -62,6 +70,8 @@ class StreamerData(ApiModel):
     streamers: list[StreamerPlayerResp]
     # What the avg_points_* figures measure (fpts, or the category value proxy)
     value_kind: ValueKind = "fpts"
+    # The morning the live prices (`live_*`) were built; None when the list carries none
+    live_as_of: Optional[date] = None
 
 
 class StreamerFindReq(ApiModel):

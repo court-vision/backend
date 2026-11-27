@@ -15,6 +15,8 @@ from services.espn_service import EspnService
 from services.yahoo_service import YahooService
 from services.player_service import PlayerService
 from services.player_value_service import PlayerValueService
+from services import live_price_service
+from services.live_prices import LivePrice
 from db.base import run_db
 from services.schedule_service import (
     get_streaming_matchup,
@@ -56,6 +58,33 @@ class StreamerService:
             scoring, **adapter.player_value_keys(free_agents), days=avg_days
         )
         return value_kind, values
+
+    @staticmethod
+    def _live_prices(league_info, team_id, nba_ids, today):
+        """The pool priced off the live projection from `today` on under the league's scoring,
+        by NBA id (`services.live_price_service`); None when there are no prices to read."""
+        try:
+            if not live_price_service.available(today):
+                return None
+            scoring = PlayerValueService.scoring_for(league_info, team_id)
+        except Exception:
+            return None
+        return live_price_service.prices_soft(scoring, nba_ids, today=today)
+
+    @staticmethod
+    def _price(streamer: StreamerPlayerResp, found: Optional[LivePrice], start_date: date, on_day: date) -> bool:
+        """Set a streamer's `live_*` fields from his price; False when he is left unpriced.
+        He is priced only when every one of his `game_days` is: a player the projection
+        still has on another team's schedule keeps his averages alone."""
+        if found is None or not streamer.game_days:
+            return False
+        values = [found.on(start_date + timedelta(days=d)) for d in streamer.game_days]
+        if any(v is None for v in values):
+            return False
+        streamer.live_values = values
+        streamer.live_week = round(sum(values), 2)
+        streamer.live_day = found.on(on_day)
+        return True
 
     @staticmethod
     def _get_daily_b2b_metrics(game_days: list[int], pickup_day: int) -> tuple[bool, int]:
@@ -287,10 +316,19 @@ class StreamerService:
             ))
 
         # Batch-resolve provider ids -> NBA player ids for terminal navigation
+        live_as_of: Optional[date] = None
         if streamers:
             nba_id_map = await run_db("streamers.nba_ids", adapter.nba_ids, streamers)
             for s in streamers:
                 s.nba_player_id = nba_id_map.get(adapter.player_value_key(s))
+            # Each one priced on his own nights off the live projection (the Live rankings
+            # plan, step 8). The list's own order and score stay on the stored averages.
+            live = await run_db("streamers.live_prices", StreamerService._live_prices, league_info, team_id,
+                                [s.nba_player_id for s in streamers], get_nba_today())
+            if live is not None:
+                priced = [StreamerService._price(s, live.get(s.nba_player_id), start_date, effective_date)
+                          for s in streamers]
+                live_as_of = live.as_of if any(priced) else None
 
         # Week mode: group B2B first, then by score. Daily mode: purely by score.
         if mode == StreamerMode.WEEK:
@@ -314,5 +352,6 @@ class StreamerService:
                 teams_with_b2b=teams_with_b2b,
                 streamers=streamers,
                 value_kind=value_kind,
+                live_as_of=live_as_of,
             )
         )

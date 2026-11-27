@@ -127,6 +127,7 @@ DISPLAY_TOOL_NAMES = frozenset({SHOW_TABLE["name"], SHOW_CHART["name"], SHOW_PLA
 LABELS: dict[str, str] = {
     "name": "Player", "team": "Team", "position": "Pos", "positions": "Pos", "slot": "Slot",
     "avg_value": "Avg", "avg_value_last_7": "Avg L7", "avg_value_season": "Avg season",
+    "expected_on_day": "Exp day", "expected_rest_of_matchup": "Exp matchup",
     "games_left": "Games left", "game_days": "Game days", "back_to_backs": "B2B",
     "stream_score": "Stream score", "injury": "Injury", "acquisition": "Pickup",
     "waivers_until": "Waivers until", "date": "Date", "opponent": "Opp", "home": "Home",

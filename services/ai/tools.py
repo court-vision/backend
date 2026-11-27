@@ -516,6 +516,9 @@ async def _get_free_agents(args: FreeAgentsInput, ctx: ToolContext | None) -> di
                 "positions": "/".join(pos for pos in p.valid_positions if not pos.startswith(_SLOT_PREFIXES)),
                 "avg_value_last_7": p.avg_points_last_n,
                 "avg_value_season": p.avg_points_season,
+                # off the live projection, when it prices him (services.live_prices)
+                **({"expected_on_day": p.live_day, "expected_rest_of_matchup": p.live_week}
+                   if p.live_week is not None else {}),
                 "games_left": p.games_remaining,
                 "game_days": p.game_days,
                 "back_to_backs": p.b2b_game_count,
@@ -898,7 +901,10 @@ AGENT_READ_TOOLS: list[dict[str, Any]] = [
             "value (mode 'week') or one day's (mode 'day', with `day` the 0-based day of the "
             "matchup; today_index says which day is today). Each has games left, the matchup days "
             "they play (game_days, 0-based), back-to-backs, injury, and whether a pickup is "
-            "immediate or a waiver claim. Ranked from the 150 most-owned free agents."
+            "immediate or a waiver claim. Ranked from the 150 most-owned free agents. Where a "
+            "row has them, expected_on_day and expected_rest_of_matchup are the live projection's "
+            "expected value on that day and over his games left in the matchup, his role those "
+            "nights and his chance of playing counted: weigh a pickup on them, not on the averages."
         ),
         "input_schema": {
             "type": "object",

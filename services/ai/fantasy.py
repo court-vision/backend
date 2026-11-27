@@ -40,7 +40,9 @@ from db.models.nba.players import Player
 from schemas.common import ApiStatus, FantasyProvider, LeagueInfo
 from schemas.espn import PlayerResp
 from services import roster_protection, schedule_service
-from services.daily_actions_service import BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, weigh_drop
+from services.daily_actions_service import (
+    BOARD_WINDOW_DAYS, MIN_SAMPLE_GAMES, DropEvidence, DropValue, season_prices, weigh_drop,
+)
 from services.espn_service import EspnService, PoolEntry
 from services.lineup_editor_service import _roster_slots
 from services.lineup_planner import IR_SLOT_ID, OUT_STATUSES
@@ -73,6 +75,7 @@ from services.stream_lane_service import (
     active_slots,
     first_open_period,
     lane_budget,
+    lane_day_values_soft,
     plan_lanes,
 )
 from services.stream_value import (
@@ -280,6 +283,7 @@ def _drop_evidence(league_info: LeagueInfo, espn_ids: list[int]) -> DropEvidence
     return DropEvidence(
         games=PlayerValueService.rolling_games_by_espn_id(espn_ids, BOARD_WINDOW_DAYS),
         projected=PlayerValueService.projected_value_by_espn_id(scoring, espn_ids, days=BOARD_WINDOW_DAYS),
+        season=season_prices(scoring, espn_ids),
     )
 
 
@@ -511,13 +515,17 @@ async def project_matchup(user_id: int, team: Any, league_info: LeagueInfo, args
                         passed_over.add(p.name)
                         continue
                     w = weighed.get(pid)
-                    candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected)))
+                    candidates.append(DropCandidate(p, w.value if w else None, bool(w and w.projected),
+                                                    bool(w and w.season)))
                 choice = choose_drop(candidates, day=day, last_day=last_day)
                 if choice is None:
                     raise AppError("AI_MOVE_INVALID", "The roster is full and nobody on it can be dropped by the rule; name the drop"
                                    + (" (the protected players are never a drop)" if passed_over else ""))
                 drop_id = choice.candidate.player.player_id
                 chosen[len(moves)] = (
+                    f"the rule's drop: the roster's lowest rest-of-season price, "
+                    f"{choice.candidate.weighed:.1f} a game ({choice.games_lost} game(s) left this matchup)"
+                    if choice.candidate.season else
                     f"the rule's drop: {choice.games_lost} game(s) left at "
                     f"{choice.candidate.weighed:.1f} per game"
                     + (" (his season projection)" if choice.candidate.projected else "")
@@ -835,11 +843,18 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
                 continue
             games = games_of(p)
             ranked.append((round(w.value * games, 4), games, w.value, p.name, p, w))
-        ranked.sort(key=lambda r: r[:4])
+        # A lane drops its holder, and a drop is priced on the rest of the season: with the roster
+        # priced by the live projection the holders are its lowest prices, whatever is left of this
+        # matchup. Without, the players whose games left here cost the least.
+        by_season = any(r[5].season for r in ranked)
+        ranked.sort(key=(lambda r: (r[2], r[1], r[3])) if by_season else (lambda r: r[:4]))
         for cost, games, value, _name, p, w in ranked[:args.spots]:
             holders.append(p)
-            chosen_by[p.player_id] = (f"the drop rule: {games} game(s) left at {value:.1f} per game"
-                                      + (" (his season projection)" if w.projected else ""))
+            chosen_by[p.player_id] = (
+                f"the drop rule: the roster's lowest rest-of-season price, {value:.1f} a game "
+                f"({games} game(s) left this matchup)" if w.season else
+                f"the drop rule: {games} game(s) left at {value:.1f} per game"
+                + (" (his season projection)" if w.projected else ""))
         if not holders:
             raise AppError("AI_NO_HOLDER", "Nobody on the roster can be dropped by the rule; name the holders")
         if len(holders) < args.spots:
@@ -865,8 +880,13 @@ async def plan_streams(user_id: int, team: Any, league_info: LeagueInfo, args: P
     ranked_pool = sorted(pool, key=lambda f: (-value_of(f.player_id, f.value), f.player_id))
     kept = ranked_pool[:POOL_CAP] + [f for f in ranked_pool[POOL_CAP:] if f.player_id in keep]
 
+    # The league value prices each night off the live projection, as the lanes do; a value function
+    # (a category, the matchup) answers for itself
+    day_values = (await lane_day_values_soft(
+        league_info, [p.player_id for p in board.players] + [f.player_id for f in kept],
+        [d.nba_date for d in days])) if values is None else {}
     plan = await run_cpu("ai.plan_lanes", plan_lanes, board, holder_ids, kept, days, pending, budget, rehold, values,
-                         steer)
+                         steer, day_values)
 
     def who(eid: int) -> dict[str, Any]:
         p = on_board.get(eid) or in_pool.get(eid)

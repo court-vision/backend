@@ -28,17 +28,26 @@ free agent, and the value comparison only checks that the two are comparable.
 Two clocks say "today" — ESPN's scoring period for the board, the 3 AM ET rule
 for the streamer pool — so the swap is offered only when both agree on the date.
 
-A drop candidate's value is the board's recent average only when that average
-rests on a real sample; a player with no games behind it (back from a lost
-season, a rookie before his debut) or only a couple is weighed at his season
-projection instead (`drop_value`), and one we know nothing about is never the drop.
+Each side is priced on the window its decision is about (the Live rankings plan,
+step 8; `services.live_prices`). A drop cannot be taken back, so the player given up
+is weighed at his rest-of-season price: a slow fortnight or a week on the injury
+report barely moves it. The pickup is here for tonight, so he is weighed at what he
+is expected to score tonight, his role and his chance of playing included.
+
+Where the live projection has no price (a category league, a player it does not
+carry, a morning it did not run) the rule is the one it was. A drop candidate's
+value is then the board's recent average only when that average rests on a real
+sample; a player with no games behind it (back from a lost season, a rookie before
+his debut) or only a couple is weighed at his season projection instead
+(`drop_value`), and one we know nothing about is never the drop. The pickup is the
+first the daily search lists, at his recent average.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Collection, Mapping, NamedTuple, Optional, Sequence
 
@@ -55,7 +64,7 @@ from schemas.daily_actions import (
 from schemas.availability import Verdict
 from schemas.lineup_editor import LineupPlayer, LineupState
 from schemas.streamer import StreamerData, StreamerMode, StreamerPlayerResp
-from services import roster_protection, schedule_service, steering
+from services import live_price_service, roster_protection, schedule_service, steering
 from services.availability_service import SITS, SOURCE_WORDS, AvailabilityService, planner_verdicts
 from services.espn_service import EspnService
 from services.lineup_editor_service import (
@@ -86,16 +95,35 @@ KIND_ORDER = {"scratch": -1, "ir_out": 0, "ir_in": 1, "start": 2, "add_drop": 3,
 ROSTER_FULL_DETAIL = "Roster full — drop a player first"
 
 
+# What a drop candidate's weighed value is (`DropValue.basis`)
+AVERAGE = "average"                       # the board's recent average
+PROJECTION = "projection"                 # his preseason projection (a thin sample)
+SEASON = "season"                         # his rest-of-season price off the live projection
+
+
 @dataclass(frozen=True)
 class DropEvidence:
     """What stands behind the drop candidates' board values, by ESPN id."""
     games: Mapping[int, int]              # games in the board's rolling window (absent = none)
     projected: Mapping[int, float]        # season projection, on the board's value scale
+    # rest-of-season price off the live projection: expected points per game on his team's
+    # schedule (`services.live_prices`); absent = not priced
+    season: Mapping[int, float] = field(default_factory=dict)
 
 
 class DropValue(NamedTuple):
     value: float
     projected: bool                       # the season projection, not the board's average
+    season: bool = False                  # his rest-of-season price off the live projection
+
+    @property
+    def basis(self) -> str:
+        return SEASON if self.season else PROJECTION if self.projected else AVERAGE
+
+    @property
+    def words(self) -> str:
+        """The value as a row says it: "18.2 rest of season", "21.0 projected", "24.5"."""
+        return f"{self.value:.1f}" + {SEASON: " rest of season", PROJECTION: " projected"}.get(self.basis, "")
 
 
 @dataclass(frozen=True)
@@ -103,6 +131,31 @@ class TransactionSuggestion:
     pickup: StreamerPlayerResp
     drop: Optional[LineupPlayer]          # None when a roster seat is open
     drop_value: Optional[DropValue] = None
+
+
+def pickup_value(s: StreamerPlayerResp) -> Optional[float]:
+    """What a pickup for today is weighed at: what he is expected to score tonight off the
+    live projection, else his recent average."""
+    return s.live_day if s.live_day is not None else s.avg_points_last_n
+
+
+def pickup_words(s: StreamerPlayerResp) -> str:
+    """The pickup's value as a row says it: "24.1 tonight", "21.3 avg", "—"."""
+    if s.live_day is not None:
+        return f"{s.live_day:.1f} tonight"
+    return f"{s.avg_points_last_n:.1f} avg" if s.avg_points_last_n is not None else "—"
+
+
+def stream_value(s: StreamerPlayerResp, day: Optional[int]) -> Optional[float]:
+    """What a priced free agent is expected to score over the nights one pickup today buys:
+    tonight, and tomorrow too on a back-to-back (he is still on the roster then, and adds are
+    counted). None when the live projection does not price him tonight."""
+    if s.live_day is None:
+        return None
+    if day is None or not s.live_values or len(s.live_values) != len(s.game_days):
+        return s.live_day
+    by_day = dict(zip(s.game_days, s.live_values))
+    return s.live_day + by_day.get(day + 1, 0.0)
 
 
 # ------------------------------- pure ------------------------------- #
@@ -150,6 +203,10 @@ def weigh_drop(player_id: int, avg_points: float, value_source: Optional[str],
                evidence: Optional[DropEvidence]) -> Optional[DropValue]:
     """What a drop candidate is weighed at; None = unknown, so never the drop.
 
+    His rest-of-season price when the live projection has one (`evidence.season`): a
+    drop is priced on the season whatever the pickup is priced on. The rest is the
+    rule for a player it does not price.
+
     Last season's line (`baseline`) already rests on a real sample. A recent
     average on fewer than MIN_SAMPLE_GAMES games counts at the higher of itself
     and the season projection: a drop is the move that cannot be taken back, so a
@@ -160,6 +217,9 @@ def weigh_drop(player_id: int, avg_points: float, value_source: Optional[str],
 
     The rule the what-if projection's drop choice shares (`services.matchup_projection`);
     `player_id` is the key `evidence` is read by (the ESPN id on a board)."""
+    season = evidence.season.get(player_id) if evidence is not None else None
+    if season is not None:
+        return DropValue(season, False, True)
     if value_source == "baseline":
         return DropValue(avg_points, False)
     if value_source is not None and (evidence is None or evidence.games.get(player_id, 0) >= MIN_SAMPLE_GAMES):
@@ -185,12 +245,19 @@ def suggest_transaction(
     ratio: float = STREAMABLE_RATIO,
     evidence: Optional[DropEvidence] = None,
     protected: Collection[int] = (),
+    day: Optional[int] = None,
 ) -> Optional[TransactionSuggestion]:
     """The day's streamer swap, or None. `streamers` is the daily search in its own
-    order (free agents with a game today, best first). The drop is the candidate
-    with the lowest `drop_value`. Pickups ESPN would refuse under
-    `rosterSettings.positionLimits` are skipped — a swap that drops a player of the
-    same default position frees that seat and still counts."""
+    order (free agents with a game today, best first); `day` is the matchup day it
+    searched. The drop is the candidate with the lowest `drop_value`. Pickups ESPN
+    would refuse under `rosterSettings.positionLimits` are skipped — a swap that
+    drops a player of the same default position frees that seat and still counts.
+
+    The swap is offered when the pickup's value tonight (`pickup_value`) is at least
+    `ratio` of the drop's. Among the free agents the live projection prices, the pickup
+    is the one expected to score the most over the nights the add buys (`stream_value`)
+    of those worth the drop tonight: a second night never carries a first one that is
+    not. With none priced, it is the first the search lists."""
     roster_ids = {p.player_id for p in state.players}
     drop: Optional[LineupPlayer] = None
     weighed: Optional[DropValue] = None
@@ -211,16 +278,23 @@ def suggest_transaction(
         freed = 1 if drop is not None and drop.default_position_id == pos else 0
         return held[pos] - freed >= limits[pos]
 
-    pickup = next((s for s in streamers
-                   if s.acquisition_status == "free_agent" and s.avg_points_last_n is not None
-                   and s.player_id not in roster_ids and not capped(s)), None)
+    eligible = [s for s in streamers
+                if s.acquisition_status == "free_agent" and pickup_value(s) is not None
+                and s.player_id not in roster_ids and not capped(s)]
+    if not eligible:
+        return None
+    floor = weighed.value * ratio if drop is not None and weighed is not None else None
+    worth = [s for s in eligible if floor is None or pickup_value(s) >= floor]
+    priced = [(v, s) for s in eligible if (v := stream_value(s, day)) is not None]
+    if priced:
+        running = [vs for vs in priced if vs[1] in worth]
+        # max keeps the first of equals, so the search's own order breaks a tie
+        pickup = max(running, key=lambda vs: vs[0])[1] if running else None
+    else:
+        pickup = eligible[0] if eligible[0] in worth else None
     if pickup is None:
         return None
-    if drop is None or weighed is None:
-        return TransactionSuggestion(pickup, None)
-    if pickup.avg_points_last_n < weighed.value * ratio:
-        return None
-    return TransactionSuggestion(pickup, drop, weighed)
+    return TransactionSuggestion(pickup, drop, weighed) if floor is not None else TransactionSuggestion(pickup, None)
 
 
 def _of_roster(p: LineupPlayer) -> DailyActionPlayer:
@@ -306,18 +380,23 @@ def build_actions(
         pick = suggestion.pickup
         label, tip = pickup_game or (None, None)
         plays = f"{pick.name} plays tonight" + (f" {label}" if label else "")
-        value = f"{pick.avg_points_last_n:.1f}" if pick.avg_points_last_n is not None else "—"
         if suggestion.drop is None:
             out.append(DailyAction(
                 id=f"add:{pick.player_id}", kind="add", title=f"Pick up {pick.name}",
-                detail=f"Open roster seat · {plays} · {value} avg", player=_of_pickup(pick),
+                detail=f"Open roster seat · {plays} · {pickup_words(pick)}", player=_of_pickup(pick),
                 transaction=DailyActionTransaction(pickup=pick, drop_player_id=None), game_time_et=tip,
             ))
         else:
             drop = suggestion.drop
             idle = f"{drop.name} has no game today" + (f" ({drop_next})" if drop_next else "")
             weighed = suggestion.drop_value or DropValue(drop.avg_points, False)
-            dropped = f"{weighed.value:.1f}" + (" projected" if weighed.projected else "")
+            if pick.live_day is not None or weighed.season:
+                # a live price on either side: say what each figure is
+                dropped = weighed.words if weighed.basis != AVERAGE else f"{weighed.value:.1f} avg"
+                value = pickup_words(pick)
+            else:
+                dropped = weighed.words
+                value = f"{pick.avg_points_last_n:.1f}" if pick.avg_points_last_n is not None else "—"
             out.append(DailyAction(
                 id=f"add_drop:{pick.player_id}:{drop.player_id}", kind="add_drop",
                 title=f"Drop {drop.name}, pick up {pick.name}",
@@ -348,12 +427,20 @@ async def _verdicts_for(team_id: int, state: LineupState, today: Optional[date])
 
 
 
+def season_prices(scoring, espn_ids: Sequence[int]) -> dict[int, float]:
+    """Each player's rest-of-season price off the live projection, by ESPN id (`DropEvidence.season`);
+    {} when there are none to read. Sync: inside `run_db`."""
+    found = live_price_service.prices_soft(scoring, espn_ids=espn_ids)
+    return found.season_by_espn_id() if found is not None else {}
+
+
 def _drop_evidence(league_info: LeagueInfo, espn_ids: list[int]) -> DropEvidence:
     # The scoring the board's values were computed under (`lineup_read_service._values_for`).
     scoring = EspnService._scoring_for(league_info)
     return DropEvidence(
         games=PlayerValueService.rolling_games_by_espn_id(espn_ids, BOARD_WINDOW_DAYS),
         projected=PlayerValueService.projected_value_by_espn_id(scoring, espn_ids, days=BOARD_WINDOW_DAYS),
+        season=season_prices(scoring, espn_ids),
     )
 
 
@@ -465,7 +552,7 @@ class DailyActionsService:
                 evidence = await _drop_evidence_for(league_info, candidates) if candidates else None
                 suggestion = suggest_transaction(
                     state, pool_data.streamers, ir_eligible=ir_eligible, ratio=ratio, evidence=evidence,
-                    protected=protected,
+                    protected=protected, day=pool_data.target_day,
                 )
             if suggestion is not None and board_day is not None:
                 pickup_game = await _pickup_game(suggestion.pickup, board_day)

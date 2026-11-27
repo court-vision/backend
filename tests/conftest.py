@@ -72,6 +72,50 @@ def empty_draft_live_cache():
     clear()
 
 
+# ---- The live prices ----
+
+@pytest.fixture(autouse=True)
+def no_live_prices(request, monkeypatch):
+    """Every free-agent list, board and drop choice asks for the players' live prices
+    (services/live_price_service.py), which are kept per process. Outside the database-backed
+    suite a test sees none unless it stubs its own (`live_prices` below), so no unit test
+    reaches for a database through them; and one test's kept read never answers for the next."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("services.live_price_service")
+        if module is not None:
+            module.clear_cache()
+
+    clear()
+    if not request.node.get_closest_marker("integration"):
+        from services import live_price_service
+
+        monkeypatch.setattr(live_price_service, "_load", lambda today: live_price_service._Inputs(None, {}))
+    yield
+    clear()
+
+
+@pytest.fixture
+def live_prices(monkeypatch):
+    """`live_prices(players, game_days, as_of=...)` makes those the morning's projection for the
+    reads above: `players` are `live_projection.LivePlayer`s, `game_days` each NBA team's game
+    days ({"DEN": [date, ...]})."""
+    from services import live_price_service, live_projection
+
+    def apply(players, game_days, as_of=None):
+        snapshot = live_projection.LiveSnapshot(
+            as_of=as_of or date(2026, 11, 4), version="test", players={p.player_id: p for p in players})
+        nba_of = {p.espn_id: p.player_id for p in players if p.espn_id is not None}
+        days = {team: tuple(sorted(ds)) for team, ds in game_days.items()}
+        live_price_service.clear_cache()
+        monkeypatch.setattr(live_price_service, "_load",
+                            lambda today: live_price_service._Inputs(snapshot, {
+                                t: tuple(d for d in ds if d >= today) for t, ds in days.items()}, nba_of))
+
+    return apply
+
+
 # ---- Dime's holds ----
 
 @pytest.fixture(autouse=True)
