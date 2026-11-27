@@ -1384,9 +1384,10 @@ def test_availability_is_asked_about_my_next_pick(monkeypatch):
 
 
 @pytest.mark.unit
-def test_on_the_clock_the_question_becomes_whether_waiting_is_safe(monkeypatch):
-    """While I am picking, everything on the board is available *now* — the
-    only useful horizon is the turn after this one."""
+def test_on_the_clock_everyone_left_is_available(monkeypatch):
+    """While I am picking, everything on the board is available *now*: the
+    pick on the clock is my next pick (James, 2026-11-26), so nobody is at
+    risk, whatever his ADP."""
     market = _espn_market(**{"6": {"adp": 12.0}})
     monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(
         lambda my_ids, session_id=None: _inputs(used_picks=(1, 2, 3, 4, 5), market=market)))
@@ -1395,10 +1396,12 @@ def test_on_the_clock_the_question_becomes_whether_waiting_is_safe(monkeypatch):
         session=BoardSession(session_id=77, my_slot=3, league_size=4, rounds=13),
     ))
 
-    # Front is 6 and so is my turn; the next one after it is 11.
+    # Front is 6 and so is my turn: everyone the market knows is there for it
     by_id = {r.player_id: r for r in resp.data}
-    assert by_id[6].availability == "tossup"      # adp 12 against pick 11
-    assert by_id[2].availability == "gone"        # adp 5.5, long gone by 11
+    assert by_id[6].availability == "likely"      # adp 12, after this pick
+    assert by_id[2].availability == "likely"      # adp 5.5, still on the board at 6
+    assert by_id[5].availability is None          # no market row at all
+    assert not any(r.availability == "gone" for r in resp.data)
 
 
 @pytest.mark.unit
@@ -2104,3 +2107,147 @@ def test_a_preseason_board_has_no_in_season_meta(stub_inputs):
     resp = _board(resolve_scoring(_league()))
     assert resp.meta.in_season is None
     assert all(r.season_gp is None for r in resp.data)
+
+
+# ---- the stored daily boards beside it (services/draft_live.py) ----
+
+def _stored_ranks(**overrides):
+    """Boards stored on the 15th, the 14th and the 8th. On the points board the
+    star rose three places over the week and ESPN moved him to second on the
+    12th; ESPN has held the forward first since its ranks were first stored and
+    no longer ranks the guard."""
+    from services import draft_live as live
+
+    points = live.BoardRanks(
+        moves={1: (0, 3), 2: (-1, -6), 3: (1, None), 6: (None, None)},
+        espn_as_of=date(2026, 11, 15),
+        espn={1: live.EspnNow(rank=2, value=58.0, since=date(2026, 11, 12), since_first_stored=False),
+              3: live.EspnNow(rank=1, value=60.0, since=date(2026, 11, 3), since_first_stored=True),
+              6: live.EspnNow(rank=40, value=None, since=date(2026, 11, 15), since_first_stored=False)},
+    )
+    categories = live.BoardRanks(moves={1: (2, 9)}, espn_as_of=None, espn={})
+    base = dict(as_of=date(2026, 11, 15), day=date(2026, 11, 14), week=date(2026, 11, 8),
+                boards={"points": points, "categories": categories})
+    base.update(overrides)
+    return live.StoredRanks(**base)
+
+
+def _in_season_inputs(**overrides):
+    from services import draft_in_season as ins
+
+    found = ins.InSeason(games_from=date(2026, 11, 15), season_gp={1: 12}, season_fpts={1: 61.5},
+                         season_as_of=date(2026, 11, 14), blended=1,
+                         live_as_of=date(2026, 11, 15), live_version="live-test", live=6)
+    games = {1: 50.0, 2: 45.0, 3: 20.0, 4: 46.0, 5: 40.0, 6: 44.0}
+    fields = dict(in_season=found, games_left=games, live_injury={3: "OUT"},
+                  live_games={pid: {} for pid in games}, source={pid: "live" for pid in games},
+                  stored_ranks=_stored_ranks(),
+                  live_parts={3: {"known": {"return_date": "2026-12-08"}},
+                              2: {"recent_minutes": 24.0, "season_minutes": 30.5}},
+                  names={pid: (f"Player {pid}", None) for pid in games})
+    fields.update(overrides)
+    return _inputs(**fields)
+
+
+@pytest.mark.unit
+def test_a_board_in_season_carries_each_players_move_and_the_reason_beside_it(monkeypatch):
+    inputs = _in_season_inputs()
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()))
+
+    rows = {r.player_id: r for r in resp.data}
+    assert (rows[1].move_1d, rows[1].move_7d) == (0, 3)
+    assert (rows[2].move_1d, rows[2].move_7d) == (-1, -6)
+    # Ranked for the first time this week: the day's move is known, the week's is not
+    assert (rows[3].move_1d, rows[3].move_7d) == (1, None)
+    assert (rows[4].move_1d, rows[4].move_7d) == (None, None)
+    # What the projection read: an absence with its return date, and minutes that fell with the rank
+    assert rows[3].rank_reason == "Out until about Dec 8"
+    assert rows[2].rank_reason == "Minutes down: 24.0 lately, 30.5 on the season"
+    assert rows[1].rank_reason is None
+    assert resp.meta.live_ranks.model_dump() == {
+        "board": "points", "as_of": date(2026, 11, 15), "day": date(2026, 11, 14), "week": date(2026, 11, 8),
+        "espn_as_of": date(2026, 11, 15),
+    }
+
+
+@pytest.mark.unit
+def test_espns_rank_in_season_is_the_mornings_with_the_day_it_last_changed(monkeypatch):
+    inputs = _in_season_inputs()
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_league()))
+
+    rows = {r.player_id: r for r in resp.data}
+    # The October snapshot had the star first and the forward second; this morning ESPN has them the other way
+    assert (rows[1].market_rank, rows[3].market_rank) == (2, 1)
+    assert (rows[1].espn_rank_since, rows[1].espn_rank_since_first_stored) == (date(2026, 11, 12), False)
+    assert (rows[3].espn_rank_since, rows[3].espn_rank_since_first_stored) == (date(2026, 11, 3), True)
+    assert (rows[1].auction_value, rows[3].auction_value) == (58.0, 60.0)
+    # A player the snapshot ranked and ESPN no longer does has no rank of ESPN's, and one it has ranked since does
+    assert (rows[2].market_rank, rows[2].espn_rank_since, rows[2].auction_value) == (None, None, None)
+    assert (rows[6].market_rank, rows[6].espn_rank_since) == (40, date(2026, 11, 15))
+    # Everything read off ESPN's rank follows it: the gap to Court Vision's, and the board's own order
+    assert rows[1].market_delta == 2 - rows[1].cv_rank
+    assert resp.meta.rank_basis == "espn"
+    assert [r.player_id for r in resp.data][:3] == [3, 1, 6]
+    assert (rows[3].board_rank, rows[1].board_rank, rows[2].board_rank) == (1, 2, None)
+    # ADP has no daily read: it stays the snapshot's
+    assert rows[1].adp == 1.4 and resp.meta.market_as_of == date(2026, 9, 1)
+
+
+@pytest.mark.unit
+def test_a_board_reads_the_stored_board_of_its_own_format(monkeypatch):
+    # No morning of ESPN's category ranks is near enough: the snapshot's stand, with no age
+    inputs = _in_season_inputs()
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+
+    resp = _board(resolve_scoring(_cat_league()))
+
+    rows = {r.player_id: r for r in resp.data}
+    assert (rows[1].move_1d, rows[1].move_7d) == (2, 9)
+    assert rows[2].move_7d is None
+    assert (rows[1].market_rank, rows[3].market_rank) == (1, 2)
+    assert all(r.espn_rank_since is None and not r.espn_rank_since_first_stored for r in resp.data)
+    assert (resp.meta.live_ranks.board, resp.meta.live_ranks.espn_as_of) == ("categories", None)
+    # With no move over the week to explain, minutes are not offered as a reason
+    assert rows[2].rank_reason is None
+
+
+@pytest.mark.unit
+def test_a_board_with_nothing_stored_keeps_the_snapshots_ranks(monkeypatch, stub_inputs):
+    preseason = _board(resolve_scoring(_league()))
+    assert preseason.meta.live_ranks is None
+    assert all(r.move_7d is None and r.rank_reason is None and r.espn_rank_since is None for r in preseason.data)
+
+    inputs = _in_season_inputs(stored_ranks=None)
+    monkeypatch.setattr(DraftBoardService, "_fetch_inputs", staticmethod(lambda my_ids, session_id=None: inputs))
+    resp = _board(resolve_scoring(_league()))
+
+    rows = {r.player_id: r for r in resp.data}
+    assert resp.meta.live_ranks is None
+    assert (rows[1].market_rank, rows[3].market_rank, rows[2].market_rank) == (1, 2, 6)
+    assert rows[1].move_7d is None and rows[1].espn_rank_since is None
+    # The reason needs no stored board: it is read off this morning's projection
+    assert rows[3].rank_reason == "Out until about Dec 8"
+
+
+@pytest.mark.unit
+def test_fetch_in_season_carries_the_stored_ranks_and_what_the_projection_read(fake_tables):
+    from dataclasses import replace as _replace
+
+    snapshot = _live_snapshot()
+    snapshot.players[1] = _replace(snapshot.players[1], parts={"known": {"return_date": "2026-11-16"}})
+    ranks = _stored_ranks()
+    fake_tables["season_reads"] = _season_reads(live=snapshot, ranks=ranks)
+
+    inputs = DraftBoardService._fetch_inputs(frozenset(), None)
+
+    assert inputs.stored_ranks is ranks
+    # Only players the projection recorded something about
+    assert inputs.live_parts == {1: {"known": {"return_date": "2026-11-16"}}}
+
+    fake_tables["season_reads"] = _season_reads(ranks=ranks)
+    blend = DraftBoardService._fetch_inputs(frozenset(), None)
+    assert blend.stored_ranks is ranks and blend.live_parts == {}

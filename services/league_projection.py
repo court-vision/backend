@@ -85,6 +85,7 @@ class ProjPlayer:
     player_id: Optional[int] = None         # NBA id
     projected: bool = True                  # False: valued off stored stats, no live projection
     slot: Optional[str] = None              # the ESPN lineup slot he's in now; None when not known
+    unplayed: bool = False                  # True: hasn't played this season, so plays no games
 
     def chance_on(self, day: date) -> float:
         return chance_on(self.timeline, day) if self.timeline else self.chance

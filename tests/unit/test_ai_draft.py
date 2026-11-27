@@ -2,8 +2,8 @@
 Dime in the Draft desk (the Dime autopilot plan, step 7): the numbers a pick note shows
 beside Dime's words, the briefs each note starts from, which rooms Dime can hold the
 user's seat in, the recap tool's read of a graded draft, the tool lists (the draft tools
-only in a draft note's conversation, the recap everywhere, appended last), and the
-switch. The rows, the claims and the seat run against the real schema in
+only in a draft note's conversation, the recap everywhere, appended last), the room
+chat's read of the room, and the switch. The rows, the claims and the seat run against the real schema in
 tests/integration/test_dime_draft_integration.py.
 """
 
@@ -75,24 +75,24 @@ def _board(**kw):
 
 
 class TestFacts:
-    def test_on_the_clock_gone_is_about_the_turn_after_this_one(self):
-        facts = draft.facts_of(_board(), following=22)
-        assert facts["on_clock"] is True and facts["pick"] == 11 and facts["gone_before"] == 22
+    def test_gone_is_about_the_next_pick_the_one_on_the_clock_included(self):
+        facts = draft.facts_of(_board())
+        assert facts["on_clock"] is True and facts["pick"] == 11 and facts["gone_before"] == 11
         assert [t["name"] for t in facts["top"]] == ["Victor Wembanyama", "Tyrese Haliburton", "Third"]
         assert facts["top"][0]["score"] == 48.2 and facts["top"][0]["availability"] == "gone"
         assert [g["name"] for g in facts["gone"]] == ["Victor Wembanyama", "Mikal Bridges"]
         assert facts["punts"] == ["ft_pct"] and facts["roster"] == 1
 
     def test_before_the_pick_gone_is_about_the_pick_itself(self):
-        facts = draft.facts_of(_board(picks_until_my_turn=2), following=22)
+        facts = draft.facts_of(_board(picks_until_my_turn=2))
         assert facts["on_clock"] is False and facts["gone_before"] == 11 and facts["picks_until"] == 2
 
     def test_needs_are_the_weakest_categories_left_out_of_the_punts(self):
-        facts = draft.facts_of(_board(), following=None)
+        facts = draft.facts_of(_board())
         assert [n["category"] for n in facts["needs"]] == ["blk", "reb"]
 
     def test_an_empty_board_has_nothing_to_show(self):
-        facts = draft.facts_of({"recommendations": [], "best_available": []}, following=None)
+        facts = draft.facts_of({"recommendations": [], "best_available": []})
         assert facts["top"] == [] and facts["gone"] == [] and facts["needs"] == [] and facts["roster"] == 0
 
 
@@ -111,19 +111,24 @@ class TestFollowingPick:
 
 
 class TestBriefs:
-    def test_a_pick_note_carries_the_board_the_plan_and_says_who_picks(self):
+    def test_dime_s_pick_carries_the_board_and_asks_for_one_player_and_one_line(self):
         plan = SimpleNamespace(plan="Punt FT%, bigs early", punts=["ft_pct"])
-        text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), plan=plan, for_pick=11)
-        assert text.startswith('[Pick note for room_id 7 ("Atlas mock"): a mock draft, categories scoring, 4 teams')
+        text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), plan=plan, for_pick=11, following=14)
+        assert text.startswith('[Your pick for room_id 7 ("Atlas mock"): a mock draft, categories scoring, 4 teams')
         assert "pick #11 (round 3) is now: the user is on the clock" in text
-        assert "you don't make the pick" in text
-        assert 'The room\'s plan: "Punt FT%, bigs early" (punts: ft_pct).' in text
+        assert "the user makes the pick" in text and "recommend_pick once" in text
+        assert "The user's pick after this one is #14" in text
+        # The room no longer asks for a plan, so the pick reads none
+        assert "plan" not in text.split("cite these numbers")[0].lower()
         board = json.loads(text.split("cite these numbers):\n", 1)[1].split("\n\n", 1)[0])
         assert board["recommendations"][0]["name"] == "Victor Wembanyama"
         assert board["recommendations"][0]["components"] == [
             {"label": "Value over replacement", "value": 40.1, "in_score": True}]
         assert board["category_need"][0]["category"] == "blk"
         assert "draft_pick" not in text
+        # The user's last pick has no pick after it
+        assert "It is the user's last pick." in draft.brief(draft.PICK, _room(), _detail(), board=_board(),
+                                                            for_pick=11)
 
     def test_a_note_in_season_says_what_the_board_s_numbers_carry(self):
         board = _board(in_season={"games_from": "2026-11-15", "prior_games": 10, "adp_as_of": "2026-10-31"})
@@ -146,9 +151,34 @@ class TestBriefs:
         assert "the games he is expected to play from 2026-11-16 on" in text
         assert "blend this season's games" not in text
 
+    def test_a_note_in_season_carries_the_moves_the_reasons_and_the_age_of_espns_rank(self):
+        board = _board(in_season={"games_from": "2026-11-23", "prior_games": 10, "adp_as_of": "2026-10-31",
+                                  "model": "three-part-1", "live_as_of": "2026-11-23",
+                                  "moves": {"board": "points", "as_of": "2026-11-23",
+                                            "move_1d_since": "2026-11-22", "move_7d_since": "2026-11-16"},
+                                  "espn_ranks_as_of": "2026-11-23"})
+        board["recommendations"][0].update(move_7d=6, rank_reason="Out until about Dec 8",
+                                           espn_rank_since="2026-11-17", espn_rank_since_or_earlier=True)
+        text = draft.brief(draft.PICK, _room(), _detail(), board=board, for_pick=11)
+        assert "places a player gained on Court Vision's standard points board" in text
+        assert "market_rank is ESPN's rank of 2026-11-23" in text and "playbook's draft rules" in text
+        carried = json.loads(text.split("cite these numbers):\n", 1)[1].split("\n\n", 1)[0])
+        first, second = carried["recommendations"][:2]
+        assert (first["move_7d"], first["rank_reason"], first["espn_rank_since"]) == (
+            6, "Out until about Dec 8", "2026-11-17")
+        assert first["espn_rank_since_or_earlier"] is True
+        # A player with none of it carries none of the keys
+        assert "move_7d" not in second and "rank_reason" not in second
+        facts = draft.facts_of(board)
+        assert facts["top"][0]["rank_reason"] == "Out until about Dec 8" and "move_7d" not in facts["top"][1]
+        # With nothing stored the brief says nothing of either
+        plain = _board(in_season={"games_from": "2026-11-23", "prior_games": 10, "adp_as_of": "2026-10-31"})
+        text = draft.brief(draft.PICK, _room(), _detail(), board=plain, for_pick=11)
+        assert "standard points board" not in text and "espn_rank_since" not in text
+
     def test_a_pick_note_ahead_of_the_pick_says_how_far(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(picks_until_my_turn=2), for_pick=11)
-        assert "is in 2 picks" in text and "No plan is set for this room." in text
+        assert "is in 2 picks" in text and "No plan is set for this room." not in text
 
     def test_the_seat_s_brief_hands_it_the_pick(self):
         text = draft.brief(draft.PICK, _room(), _detail(), board=_board(), seat=True, for_pick=11)
@@ -273,25 +303,31 @@ class TestTools:
     def test_the_recap_is_appended_to_every_tool_list_and_the_draft_tools_to_a_draft_note_s_only(self):
         names = [t["name"] for t in tools.AGENT_TOOLS]
         assert names[names.index("get_draft_recap") + 1:] == ["get_add_limits"]      # appended after it since
-        assert [t["name"] for t in agent.DRAFT_TOOLS[-2:]] == ["set_draft_plan", "draft_pick"]
+        assert [t["name"] for t in agent.DRAFT_TOOLS[-3:]] == ["set_draft_plan", "draft_pick", "recommend_pick"]
         # A draft note's list is the AI desk's (before the asks) with the two appended, so the cached prefix
         # is shared
         assert agent.DRAFT_TOOLS == [*agent._BASE, *draft.DRAFT_ONLY_TOOLS]
         for allowed in (agent.ALLOWED, agent.CHECKIN_ALLOWED):
             assert "get_draft_recap" in allowed
-            assert not ({"set_draft_plan", "draft_pick"} & allowed)
-        assert {"get_draft_recap", "set_draft_plan", "draft_pick"} <= agent.DRAFT_ALLOWED
+            assert not ({"set_draft_plan", "draft_pick", "recommend_pick"} & allowed)
+        assert {"get_draft_recap", "set_draft_plan", "draft_pick", "recommend_pick"} <= agent.DRAFT_ALLOWED
 
     @pytest.mark.parametrize("tool, model", [
         (draft.GET_DRAFT_RECAP, draft.DraftRecapInput),
         (draft.SET_DRAFT_PLAN, draft.SetDraftPlanInput),
         (draft.DRAFT_PICK, draft.DraftPickInput),
+        (draft.RECOMMEND_PICK, draft.RecommendPickInput),
     ])
     def test_the_definitions_match_the_inputs(self, tool, model):
         assert set(tool["input_schema"]["properties"]) == set(model.model_fields)
         assert set(tool["input_schema"]["required"]) == {n for n, f in model.model_fields.items() if f.is_required()}
         assert tool["input_schema"]["additionalProperties"] is False
         assert tool["name"] in agent.STATUS
+
+    def test_dime_s_reason_is_one_line_and_never_empty(self):
+        assert draft.RecommendPickInput(room_id=1, player_id=2, reason=" fills\n  the wing ").reason == "fills the wing"
+        with pytest.raises(ValueError):
+            draft.RecommendPickInput(room_id=1, player_id=2, reason="  ")
 
     def test_the_plan_is_one_line_and_never_empty(self):
         assert draft.SetDraftPlanInput(room_id=1, plan="  punt   FT%\n bigs early ").plan == "punt FT% bigs early"
@@ -305,6 +341,9 @@ class TestTools:
         out = run(tools.run_tool("draft_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
                                  allowed=agent.DRAFT_ALLOWED))
         assert out.is_error and "only works in Dime's pick note" in out.content
+        out = run(tools.run_tool("recommend_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
+                                 allowed=agent.DRAFT_ALLOWED))
+        assert out.is_error and "recommend_pick only works in Dime's pick note" in out.content
         # And the AI desk's own list doesn't have them at all
         out = run(tools.run_tool("draft_pick", {"room_id": 7, "player_id": 1, "reason": "x"}, ctx=ctx,
                                  allowed=agent.ALLOWED))
@@ -315,6 +354,95 @@ class TestTools:
         assert limits.model_calls == settings.dime_draft_max_model_calls
         assert limits.timeout_seconds == settings.dime_draft_timeout_seconds
         assert limits.model_calls < agent.Limits.chat().model_calls
+
+
+# ------------------------------- the room's chat ------------------------------- #
+
+
+def _note(**kw):
+    base = dict(kind="pick", seat=False, for_pick=11, state="done", pick=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _drafted(player_id, by_me=False, overall=1, name="Someone"):
+    return SimpleNamespace(player_id=player_id, by_me=by_me, overall_pick=overall, player_name=name)
+
+
+class TestRoomChat:
+    def test_the_next_pick_counts_the_pick_on_the_clock(self):
+        assert draft._next_pick_words(_detail()) == "10 picks made; the user's next pick is #11 (round 3), on the clock now."
+        assert draft._next_pick_words(_detail(picks_until_my_turn=1, pick_count=1)) == \
+            "1 pick made; the user's next pick is #11 (round 3), in 1 pick."
+        assert draft._next_pick_words(_detail(picks_until_my_turn=4)).endswith("in 4 picks.")
+        assert draft._next_pick_words(_detail(my_next_pick=None)) == "10 picks made; the user has no pick left."
+        assert draft._next_pick_words(_detail(my_next_pick=None, my_slot=None)).endswith("the user's seat isn't set.")
+        assert draft._next_pick_words(_detail(status="completed")).startswith("The draft is finished")
+
+    def test_dime_s_pick_is_said_while_it_stands(self):
+        chosen = _note(pick={"player_id": 9, "name": "Mock 009", "reason": "No center yet"})
+        line = draft._dime_pick_words([chosen], _detail())
+        assert line == 'Your pick for #11, highlighted on the board: Mock 009 (player_id 9): "No center yet".'
+        # Being chosen now
+        assert "choosing the user's pick for #11 now" in draft._dime_pick_words([_note(state="running")], _detail())
+        # Nothing to say: drafted since, failed, for another pick, the seat's, or the draft is over
+        assert draft._dime_pick_words([chosen], _detail(picks=[_drafted(9)])) == ""
+        assert draft._dime_pick_words([_note(state="failed", pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([_note(for_pick=14, pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([_note(seat=True, pick=chosen.pick)], _detail()) == ""
+        assert draft._dime_pick_words([chosen], _detail(status="completed")) == ""
+        # The newest note for the pick is the one that counts
+        assert draft._dime_pick_words([_note(state="failed"), chosen], _detail()) == ""
+
+    def test_the_chat_is_titled_by_the_room(self):
+        assert draft.chat_title(_detail()) == "Dime · Atlas mock · chat"
+        assert draft.chat_title(_detail(name=None, kind="live")) == "Dime · Live draft · chat"
+
+    def test_a_room_s_chat_takes_the_ai_desk_s_tools_and_the_room_on_every_message(self, monkeypatch):
+        from services.ai import agent_service, conversations
+
+        seen: dict = {}
+        row = SimpleNamespace(team_id_id=23, kind=conversations.ROOM)
+
+        async def get(conversation_id, user_id):
+            return row
+
+        async def claim(*a):
+            return True
+
+        async def history(*a):
+            return conversations.History()
+
+        async def reserve(user_id):
+            return 99
+
+        async def header(user_id, pinned, conversation_id=None):
+            return "[Today]"
+
+        async def ensure_on(user_id):
+            seen["checked"] = user_id
+
+        async def chat_line(user_id, conversation_id):
+            return f"[room of chat {conversation_id}]"
+
+        def start(turn, header_line):
+            seen.update(turn=turn, header=header_line)
+            return "emitter"
+
+        monkeypatch.setattr(agent_service, "ensure_access", lambda user_id: None)
+        monkeypatch.setattr(conversations, "get", get)
+        monkeypatch.setattr(conversations, "claim", claim)
+        monkeypatch.setattr(conversations, "history", history)
+        monkeypatch.setattr(agent_service.spend, "reserve", reserve)
+        monkeypatch.setattr(agent, "header", header)
+        monkeypatch.setattr(draft, "ensure_on", ensure_on)
+        monkeypatch.setattr(draft, "chat_line", chat_line)
+        monkeypatch.setattr(agent, "start", start)
+        assert run(agent_service.AgentService.start_turn(5, 42, "Plan my draft")) == "emitter"
+        assert seen["checked"] == 42
+        assert seen["header"] == "[Today]\n[room of chat 5]"
+        assert seen["turn"].tools is agent.TOOLS and seen["turn"].allowed is agent.ALLOWED
+        assert seen["turn"].draft_note_id is None
 
 
 # ------------------------------- the switch ------------------------------- #

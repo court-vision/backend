@@ -7,15 +7,17 @@ league's scoring, scores each recommendation with its parts, and says who is lik
 gone before the user's next pick. Dime sits beside it and does what a drafter does
 with that board:
 
-- **plan**: before (or during) the draft, a plan the draft is played to: which
-  categories to concede and when to take which positions. `set_draft_plan` sets
-  the concessions as the room's punts, which the board scores with, and in a real
-  draft saves the plan to the team's notes (a mock's stays in its room).
-- **pick**: when the user's pick is near (the room asks once a pick is
-  `NOTE_LEAD` picks away, with notes switched on, or on demand), a short note: who
-  to take and why, the runner-up, and who won't last. The board's numbers are
-  read by the server first and put in the brief, so the note costs one model call
-  in the usual case, and the same numbers are shown beside Dime's words (`facts`).
+- **pick**: Dime's pick for the user's next pick, the one on the clock included.
+  The room asks once that pick is `NOTE_LEAD` picks away or nearer (James,
+  2026-11-26: no switch in the room, and no plan or note to read), and once more
+  when the player Dime chose is drafted before the user picks (`RETAKES`). Dime
+  records one player and one line on why for this roster with `recommend_pick`
+  (the note's `pick`), and the board highlights him with that line. The board's
+  numbers are read by the server first and put in the brief, so it costs one
+  model call in the usual case (`facts` keeps them).
+- **plan**: a plan the draft is played to, with `set_draft_plan` setting the
+  room's punts. The Draft lab no longer asks for one (2026-11-26); a room that
+  has one keeps it, and the seat still drafts to it.
 - **seat**: in a mock room Dime can hold the user's seat. The seat loop runs the
   other seats to the user's turn with the autopicker, then Dime makes the pick
   with `draft_pick`, through the room's own pick path (recorded `dime`), and so
@@ -24,6 +26,10 @@ with that board:
 - **recap**: after the draft, Dime reads the recap (`get_draft_recap`, a read the
   AI desk has too) and, in a real draft, saves what the season starts from and
   league-mates' habits to its notes.
+- **chat**: the room's Dime chat (2026-11-26, step 2 of the rework): the AI desk's
+  agent and tools in one conversation per room (kind `room`), where the user asks
+  anything about the draft, a plan included; each message carries the room's state
+  (`chat_line`). The board's Ask Dime puts a question in its box; the user sends it.
 
 Every note is one agent turn in its own conversation (kind `draft`), started from
 the room by the user (the button, the notes switch, or the seat), so it spends on
@@ -65,8 +71,10 @@ KINDS = (PLAN, PICK, RECAP)
 RUNNING, DONE, FAILED = "running", "done", "failed"
 SEAT_OFF, SEAT_DRAFTING, SEAT_STOPPING = "off", "drafting", "stopping"
 
-# The room asks for a pick note once the user's pick is this many picks away (or nearer)
+# The room asks for Dime's pick once the user's pick is this many picks away (or nearer)
 NOTE_LEAD = 2
+# How many times Dime picks again for one pick after the player it chose was drafted first
+RETAKES = 1
 # Notes shown in the room, newest first
 VIEW_NOTES = 40
 # The AI desk's Draft notes view: the newest notes across the user's rooms, by room
@@ -89,7 +97,10 @@ MAX_PUNTS = 4
 GET_DRAFT_RECAP_NAME = "get_draft_recap"
 SET_DRAFT_PLAN_NAME = "set_draft_plan"
 DRAFT_PICK_NAME = "draft_pick"
-DRAFT_ONLY_TOOL_NAMES = frozenset({SET_DRAFT_PLAN_NAME, DRAFT_PICK_NAME})
+RECOMMEND_PICK_NAME = "recommend_pick"
+DRAFT_ONLY_TOOL_NAMES = frozenset({SET_DRAFT_PLAN_NAME, DRAFT_PICK_NAME, RECOMMEND_PICK_NAME})
+# Dime's one line on why its pick suits this roster: the board shows it under his row
+MAX_PICK_REASON = 240
 
 
 def _now() -> datetime:
@@ -155,6 +166,20 @@ class DraftPickInput(_Input):
     reason: str = Field(..., min_length=1, max_length=MAX_REASON)
 
 
+class RecommendPickInput(_Input):
+    room_id: int = Field(..., gt=0, lt=2**31)
+    player_id: int = Field(..., gt=0, lt=2**31)
+    reason: str = Field(..., min_length=1, max_length=MAX_PICK_REASON)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not v:
+            raise ValueError("the reason is empty")
+        return v
+
+
 GET_DRAFT_RECAP: dict[str, Any] = {
     "name": GET_DRAFT_RECAP_NAME,
     "description": (
@@ -217,8 +242,29 @@ DRAFT_PICK: dict[str, Any] = {
     },
 }
 
-# What only a draft note's conversation offers, after everything else in its tool list
-DRAFT_ONLY_TOOLS: list[dict[str, Any]] = [SET_DRAFT_PLAN, DRAFT_PICK]
+RECOMMEND_PICK: dict[str, Any] = {
+    "name": RECOMMEND_PICK_NAME,
+    "description": (
+        "Only in your pick for a draft room (not while you hold the seat): the player you would take at the "
+        "user's next pick (an NBA player_id still on the board, within the user's position caps), with one "
+        "line on why for this user's roster that they read under his row on the board. Once per pick."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "room_id": {"type": "integer", "description": "The room this pick is for"},
+            "player_id": {"type": "integer", "description": "The NBA player_id you would take"},
+            "reason": {"type": "string", "maxLength": MAX_PICK_REASON,
+                       "description": "Why him for this roster, in one line"},
+        },
+        "required": ["room_id", "player_id", "reason"],
+        "additionalProperties": False,
+    },
+}
+
+# What only a draft note's conversation offers, after everything else in its tool list (append only:
+# recommend_pick came last, 2026-11-26)
+DRAFT_ONLY_TOOLS: list[dict[str, Any]] = [SET_DRAFT_PLAN, DRAFT_PICK, RECOMMEND_PICK]
 
 
 # ------------------------------- the rows ------------------------------- #
@@ -306,11 +352,11 @@ def _claim(session_id: int, user_id: int, kind: str, for_pick: Optional[int], se
     if kind == PICK and seat:
         _drop_undone_now(session_id)
     if kind == PICK:
-        held = (AiDraftNote.select(AiDraftNote.id)
+        held = (AiDraftNote.select(AiDraftNote.id, AiDraftNote.state, AiDraftNote.pick)
                 .where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
                        AiDraftNote.for_pick == for_pick, AiDraftNote.seat == seat, AiDraftNote.state != FAILED)
                 .first())
-        if held is not None:
+        if held is not None and not (not seat and _retire_now(session_id, for_pick, held)):
             return None, held.id
     try:
         with db.atomic():
@@ -324,6 +370,29 @@ def _claim(session_id: int, user_id: int, kind: str, for_pick: Optional[int], se
                 .first()) if kind == PICK else None
         return None, held.id if held is not None else None
     return note_id, None
+
+
+def _retire_now(session_id: int, for_pick: Optional[int], held: AiDraftNote) -> bool:
+    """Whether the finished pick note held for `for_pick` gives way to a new one, retiring it (failed,
+    which frees the pick): a note written before Dime chose players (no `pick`, from before 0058) as
+    `superseded`, and Dime's pick whose player another seat drafted before the user picked as `taken`,
+    unless Dime already picked again `RETAKES` times for this pick. A running note always holds."""
+    if held.state != DONE:
+        return False
+    chosen = (held.pick or {}).get("player_id")
+    if chosen is None:
+        reason = "superseded"
+    else:
+        if not DraftPick.select().where(DraftPick.session == session_id, DraftPick.player == chosen).exists():
+            return False
+        retaken = (AiDraftNote.select().where(AiDraftNote.session_id == session_id, AiDraftNote.kind == PICK,
+                                              AiDraftNote.for_pick == for_pick, AiDraftNote.seat == False,  # noqa: E712
+                                              AiDraftNote.reason == "taken").count())
+        if retaken >= RETAKES:
+            return False
+        reason = "taken"
+    return bool(AiDraftNote.update(state=FAILED, reason=reason)
+                .where(AiDraftNote.id == held.id, AiDraftNote.state == DONE).execute())
 
 
 @db_operation("ai.draft_note_attach")
@@ -386,6 +455,15 @@ def _quiet_before(now: datetime) -> datetime:
     return now - timedelta(seconds=settings.dime_draft_timeout_seconds) - _SEAT_QUIET
 
 
+def _seat_live(row: Optional[AiDraftRoom], notes: list[AiDraftNote], now: datetime) -> bool:
+    """Dime holds the seat and its loop is still beating: a note being written, or a heartbeat inside
+    the quiet window (a seat whose process died reads as stopped)."""
+    if row is None or row.seat == SEAT_OFF:
+        return False
+    quiet = row.updated_at is not None and row.updated_at < _quiet_before(now)
+    return any(n.state == RUNNING for n in notes) or not quiet
+
+
 # ------------------------------- the room ------------------------------- #
 
 
@@ -412,8 +490,8 @@ def seatable(room: OwnedDraftSessionContext) -> Optional[str]:
 
 
 def following_pick(detail: Any) -> Optional[int]:
-    """The user's turn after `my_next_pick` (the board's availability looks there while the user is
-    on the clock)."""
+    """The user's turn after `my_next_pick`: whether a player lasts to it is what makes taking him now
+    or later the question (the board's availability counts only to `my_next_pick`)."""
     from services.draft_service import next_pick_for_slot
     if detail.my_next_pick is None or detail.my_slot is None:
         return None
@@ -428,13 +506,18 @@ def round_of_pick(pick: Optional[int], league_size: Optional[int]) -> Optional[i
     return (pick - 1) // league_size + 1
 
 
-def facts_of(board: dict[str, Any], *, following: Optional[int]) -> dict[str, Any]:
-    """The numbers a pick note shows beside Dime's words, read off get_draft_board's result: the top
-    three recommendations, who the market says won't last, the punts, and the weakest categories."""
+# What an in-season board adds to a player, where known (league._live_of): carried only when present
+LIVE_KEYS = ("move_7d", "move_1d", "rank_reason", "espn_rank_since", "espn_rank_since_or_earlier")
+
+
+def facts_of(board: dict[str, Any]) -> dict[str, Any]:
+    """The numbers a pick note read, off get_draft_board's result: the top three recommendations, who
+    the market says won't last to the user's next pick, the punts, and the weakest categories."""
     on_clock = board.get("picks_until_my_turn") == 0
     top = [
-        {k: r.get(k) for k in ("player_id", "name", "position", "team", "score", "availability", "injury",
-                               "adp", "cv_rank", "market_rank", "reason")}
+        {**{k: r.get(k) for k in ("player_id", "name", "position", "team", "score", "availability", "injury",
+                                  "adp", "cv_rank", "market_rank", "reason")},
+         **{k: r[k] for k in LIVE_KEYS if k in r}}
         for r in (board.get("recommendations") or [])[:3]
     ]
     gone = [
@@ -448,8 +531,8 @@ def facts_of(board: dict[str, Any], *, following: Optional[int]) -> dict[str, An
         "pick": board.get("my_next_pick"),
         "picks_until": board.get("picks_until_my_turn"),
         "on_clock": on_clock,
-        # Who "gone" is about: the user's coming pick, or while on the clock the turn after it
-        "gone_before": following if on_clock else board.get("my_next_pick"),
+        # Who "gone" is about: the user's next pick, the one on the clock included (nobody, then)
+        "gone_before": board.get("my_next_pick"),
         "top": top,
         "gone": gone,
         "punts": list(board.get("punts") or []),
@@ -469,6 +552,7 @@ def _board_block(board: dict[str, Any]) -> str:
         "punts": board.get("punts"),
         "recommendations": [
             {**{k: r.get(k) for k in keep_rec},
+             **{k: r[k] for k in LIVE_KEYS if k in r},
              "components": [{"label": c.get("label"), "value": c.get("value"), "in_score": c.get("in_score")}
                             for c in (r.get("components") or [])]}
             for r in (board.get("recommendations") or [])
@@ -495,14 +579,33 @@ def _season_words(board: Optional[dict[str, Any]]) -> str:
             "his minutes for who is out on his team, and the games he is expected to play from "
             f"{found.get('games_from')} on), a game he misses costs the gap to a replacement, and its injury "
             "flags are today's. season_gp and season_fpts_avg are what he has done so far. ADP is the "
-            "preseason crowd's. Weigh a hot or cold start by your playbook's draft rules.\n\n"
+            "preseason crowd's." + _live_words(found) + " Weigh a hot or cold start by your playbook's draft "
+            "rules.\n\n"
         )
     return (
         "This draft is held during the season: the board's values blend this season's games (season_gp, "
         f"season_fpts_avg) with the projection, count only the games from {found.get('games_from')} on, and "
-        "its injury flags are today's. ADP is the preseason crowd's. Weigh a hot or cold start by your "
-        "playbook's draft rules.\n\n"
+        "its injury flags are today's. ADP is the preseason crowd's." + _live_words(found) + " Weigh a hot or "
+        "cold start by your playbook's draft rules.\n\n"
     )
+
+
+def _live_words(found: dict[str, Any]) -> str:
+    """What the stored daily boards add to an in-season board, when they are there."""
+    words = ""
+    moves = found.get("moves")
+    if moves:
+        words += (
+            f" move_7d and move_1d are the places a player gained on Court Vision's standard {moves.get('board')} "
+            "board (negative is a fall), and rank_reason is what the projection read about him: say it when it "
+            "explains a pick."
+        )
+    if found.get("espn_ranks_as_of"):
+        words += (
+            f" market_rank is ESPN's rank of {found.get('espn_ranks_as_of')}, and espn_rank_since the day ESPN "
+            "last changed it: a rank ESPN has left alone through a player's rise or fall is a stale one."
+        )
+    return words
 
 
 def _room_words(room: OwnedDraftSessionContext, detail: Any) -> str:
@@ -532,9 +635,16 @@ def _real(room: OwnedDraftSessionContext) -> bool:
     return room.kind != "mock" and room.team_id is not None
 
 
+def _following_line(following: Optional[int]) -> str:
+    if following is None:
+        return "It is the user's last pick.\n\n"
+    return (f"The user's pick after this one is #{following}: a player whose adp is well after #{following} "
+            "will likely still be there then, so taking him now needs a reason.\n\n")
+
+
 def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Optional[dict[str, Any]] = None,
           plan: Optional[AiDraftNote] = None, seat: bool = False, for_pick: Optional[int] = None,
-          memory: bool = True) -> str:
+          memory: bool = True, following: Optional[int] = None) -> str:
     """The note's message. With the account's memory off, it asks for no recall or remember (the
     tools would only answer that memory is off) and a real draft's plan stays in the room."""
     name = f' ("{detail.name}")' if getattr(detail, "name", None) else ""
@@ -571,9 +681,10 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
             + _season_words(board) +
             "The room's board, read just now (get_draft_board's result; cite these numbers):\n"
             f"{_board_block(board or {})}\n\n"
+            + _following_line(following) +
             "Make the pick:\n"
             "- Take who the plan and the board say. Going past the top recommendations needs a reason the board "
-            "shows (a position run, a punt, a cap), and so does taking a player the market says will last.\n"
+            "shows (a position run, a punt, a cap), and so does taking a player who will likely last.\n"
             "- get_player_status first only if the player you'd take has an injury listed.\n"
             "- draft_pick once, with his player_id and a one-line reason.\n\n"
             "End with one line for the user: who you took and why."
@@ -582,16 +693,20 @@ def brief(kind: str, room: OwnedDraftSessionContext, detail: Any, *, board: Opti
         when = "now: the user is on the clock" if (board or {}).get("picks_until_my_turn") == 0 else \
             f"in {(board or {}).get('picks_until_my_turn')} picks"
         return (
-            f"[Pick note for {where}. The user's {at} is {when}. They read this beside the board while they "
-            "pick; you don't make the pick.]\n\n"
-            f"{_plan_line(plan)}\n\n"
+            f"[Your pick for {where}. The user's {at} is {when}. The board highlights the player you choose, "
+            "with your reason under his row; the user makes the pick.]\n\n"
             + _season_words(board) +
             "The room's board, read just now (get_draft_board's result; cite these numbers):\n"
             f"{_board_block(board or {})}\n\n"
-            "Write the note: who you'd take and why in a sentence or two, the runner-up, and whether anyone "
-            "they want can wait (availability says who won't last). Hold to the plan unless the board gives a "
-            "reason not to, and say so when you break from it. get_player_status only for an injured name you'd "
-            "back. Under 60 words, no lists, no headings."
+            + _following_line(following) +
+            "Choose one player for this pick:\n"
+            "- Weigh the user's roster so far (roster, and category_need in a category league) against the "
+            "recommendations: who fills what this team lacks, at a value the board backs. availability says "
+            f"who won't last to pick #{for_pick}.\n"
+            "- get_player_status only for an injured player you'd take.\n"
+            "- recommend_pick once, with his player_id and one line on why for this roster (under 30 words, "
+            "naming what the team has or lacks, not the board's numbers alone).\n\n"
+            "End with that same line and nothing else."
         )
     # RECAP
     real = _real(room)
@@ -644,6 +759,7 @@ def note_view(row: AiDraftNote) -> dict[str, Any]:
         "punts": row.punts,
         "punts_before": row.punts_before,
         "took": row.took,
+        "pick": row.pick,
         "conversation_id": row.conversation_id_id,
         "cost_usd": (row.cost_micros or 0) / 1e6,
         "created_at": row.created_at,
@@ -658,7 +774,7 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     out: dict[str, Any] = {
         "enabled": enabled(), "available": False, "switched_off": False, "lead": NOTE_LEAD,
         "notes_on": False, "seat": {"state": SEAT_OFF, "reason": None, "live": False}, "can_seat": None,
-        "running": None, "notes": [],
+        "running": None, "notes": [], "chat_id": None,
     }
     if not (out["enabled"] and has_access(user_id)):
         return out
@@ -672,17 +788,16 @@ async def room_view(user_id: int, room: OwnedDraftSessionContext) -> dict[str, A
     row = await _room(room.session_id)
     notes = await _notes(room.session_id, VIEW_NOTES)
     seat = row.seat if row is not None else SEAT_OFF
-    quiet = row is not None and row.updated_at is not None and row.updated_at < _quiet_before(now)
     running = next((n.id for n in notes if n.state == RUNNING), None)
     out.update({
         "notes_on": bool(row.notes) if row is not None else False,
         "seat": {"state": seat, "reason": row.seat_reason if row is not None else None,
-                 # Drafting, and its loop still beating (a seat whose process died reads as stopped)
-                 "live": seat != SEAT_OFF and (running is not None or not quiet)},
+                 "live": _seat_live(row, notes, now)},
         "can_seat": seatable(room) is None,
         "seat_blocker": seatable(room),
         "running": running,
         "notes": [note_view(n) for n in notes],
+        "chat_id": row.chat_id_id if row is not None else None,
     })
     return out
 
@@ -788,7 +903,7 @@ async def start(user_id: int, room: OwnedDraftSessionContext, kind: str, *, seat
             raise ConflictError("AI_DRAFT_NOT_YOUR_TURN", "Dime picks only when your seat is on the clock")
         for_pick = detail.my_next_pick
         board = await _board(room)
-        facts = facts_of(board, following=following_pick(detail))
+        facts = facts_of(board)
     elif kind == RECAP:
         if not detail.pick_count:
             raise ConflictError("AI_DRAFT_NO_PICKS", "Nothing has been drafted yet")
@@ -811,10 +926,11 @@ async def start(user_id: int, room: OwnedDraftSessionContext, kind: str, *, seat
                                   timedelta(seconds=settings.dime_draft_timeout_seconds + 30))
         await _attach(note_id, conversation_id)
         header_line = await agent.header(user_id, room.team_id, conversation_id=conversation_id)
-        plan = await _plan_of(room.session_id) if kind == PICK else None
+        plan = await _plan_of(room.session_id) if kind == PICK and seat else None
         turn = agent.Turn(conversation_id=conversation_id, user_id=user_id,
                           message=brief(kind, room, detail, board=board, plan=plan, seat=seat, for_pick=for_pick,
-                                        memory=switches.memory),
+                                        memory=switches.memory,
+                                        following=following_pick(detail) if kind == PICK else None),
                           history=conversations.History(), reservation_id=reservation_id,
                           tools=agent.DRAFT_TOOLS, allowed=agent.DRAFT_ALLOWED, draft_note_id=note_id,
                           limits=agent.Limits.draft())
@@ -841,9 +957,10 @@ async def _run(turn: Any, header_line: str, note_id: int, session_id: int, kind:
         ok = result is not None and result.outcome == "ok"
         text = turn.answer_text().strip() or None
         state, reason = (DONE, None) if ok else (FAILED, result.outcome if result is not None else "crashed")
-        if ok and seat:
+        if ok and kind == PICK:
+            # The seat's turn ends in a pick it made, and the room's in the one it chose
             note = await _note(note_id)
-            if note is None or not note.took:
+            if note is None or not (note.took if seat else note.pick):
                 state, reason = FAILED, "no_pick"
         cost = result.cost if result is not None else turn.cost
         try:
@@ -852,6 +969,134 @@ async def _run(turn: Any, header_line: str, note_id: int, session_id: int, kind:
             get_logger().exception("ai_draft_note_settle_failed", note_id=note_id)
         get_logger().info("ai_draft_note", note_id=note_id, session_id=session_id, kind=kind, seat=seat,
                           state=state, reason=reason, cost_micros=cost)
+
+
+# ------------------------------- the room's chat ------------------------------- #
+
+# The room's Dime chat (James, 2026-11-26, the Draft lab's Dime rework, step 2): the AI desk's agent
+# and tools in a conversation of kind `room`, one per room (usr.ai_draft_rooms.chat_id, migration
+# 0059), with the room's state read again at every message (`chat_line`). The messages are the
+# user's own, so each one spends on the AI desk's line, as a chat there does. Nothing in it drafts:
+# the draft-only tools are in no list of a chat's.
+
+
+def chat_title(detail: Any) -> str:
+    name = getattr(detail, "name", None) or {"mock": "Mock draft", "live": "Live draft"}.get(
+        _status(getattr(detail, "kind", None)), "Draft")
+    return f"Dime · {name} · chat"
+
+
+@db_operation("ai.draft_chat_set")
+def _set_chat(session_id: int, user_id: int, conversation_id: int,
+              replace: Optional[int]) -> tuple[bool, Optional[int]]:
+    """Point the room at `conversation_id`, over no chat or over `replace` (the chat the user started
+    over from) only, so two first messages at once keep one chat. Returns whether this call put it
+    there (from the update itself: a later read could already show a newer chat), and the room's chat.
+    `updated_at` stays as it was: the seat's loop reads it as its heartbeat."""
+    now = _now()
+    AiDraftRoom.insert(session_id=session_id, user_id=user_id, created_at=now,
+                       updated_at=now).on_conflict_ignore().execute()
+    free = AiDraftRoom.chat_id.is_null()
+    if replace is not None:
+        free = free | (AiDraftRoom.chat_id == replace)
+    if AiDraftRoom.update(chat_id=conversation_id).where(AiDraftRoom.session_id == session_id, free).execute():
+        return True, conversation_id
+    return False, AiDraftRoom.get(AiDraftRoom.session_id == session_id).chat_id_id
+
+
+async def room_chat(user_id: int, room: OwnedDraftSessionContext, *, fresh: bool = False) -> int:
+    """The room's Dime chat, started now when the room has none, or with `fresh` a new one in place of
+    the one it has (a full chat starts over; the old one is kept, unlisted). Its conversation id."""
+    from services.ai import conversations
+    await ensure_on(user_id)
+    row = await _room(room.session_id)
+    current = row.chat_id_id if row is not None else None
+    if current is not None and not fresh:
+        return current
+    detail = await _detail(room.session_id)
+    made = await conversations.create(user_id, room.team_id, kind=conversations.ROOM, title=chat_title(detail))
+    installed, kept = await _set_chat(room.session_id, user_id, made.id, current)
+    if not installed:
+        # Another first message started the room's chat meanwhile: one chat per room. A chat this call
+        # did put there is never deleted, even once a later "start over" has replaced it (kept, unlisted)
+        await conversations.delete(made.id, user_id)
+    return kept
+
+
+@db_operation("ai.draft_chat_room")
+def _room_of_chat(conversation_id: int, user_id: int) -> Optional[int]:
+    row = AiDraftRoom.get_or_none(AiDraftRoom.chat_id == conversation_id, AiDraftRoom.user_id == user_id)
+    return row.session_id_id if row is not None else None
+
+
+def _next_pick_words(detail: Any) -> str:
+    status = _status(detail.status)
+    if status == "completed":
+        return "The draft is finished: get_draft_recap reads how every seat did."
+    if status != "active":
+        return f"The room is {status}."
+    made = f"{detail.pick_count} pick{'' if detail.pick_count == 1 else 's'} made"
+    if detail.my_next_pick is None:
+        return f"{made}; " + ("the user's seat isn't set." if detail.my_slot is None else "the user has no pick left.")
+    rnd = round_of_pick(detail.my_next_pick, detail.league_size)
+    until = detail.picks_until_my_turn
+    when = ("on the clock now" if until == 0 else f"in {until} pick{'' if until == 1 else 's'}"
+            if until is not None else "")
+    at = f"#{detail.my_next_pick}" + (f" (round {rnd})" if rnd else "")
+    return f"{made}; the user's next pick is {at}" + (f", {when}." if when else ".")
+
+
+def _dime_pick_words(notes: list[AiDraftNote], detail: Any) -> str:
+    """Dime's pick for the user's next pick as the board shows it, or that one is being chosen."""
+    if _status(detail.status) != "active" or detail.my_next_pick is None:
+        return ""
+    mine = [n for n in notes if n.kind == PICK and not n.seat and n.for_pick == detail.my_next_pick]
+    if not mine:
+        return ""
+    note = mine[0]
+    if note.state == RUNNING:
+        return f"You are choosing the user's pick for #{detail.my_next_pick} now, in a note of its own."
+    pick = note.pick or {}
+    drafted = {p.player_id for p in detail.picks if p.player_id is not None}
+    if note.state != DONE or pick.get("player_id") is None or pick["player_id"] in drafted:
+        return ""
+    reason = f': "{pick["reason"]}"' if pick.get("reason") else ""
+    return (f"Your pick for #{detail.my_next_pick}, highlighted on the board: {pick.get('name')} "
+            f"(player_id {pick['player_id']}){reason}.")
+
+
+async def chat_line(user_id: int, conversation_id: int) -> str:
+    """What a message in a room's chat knows of the room, read as it is sent (it follows the AI
+    desk's header): which room, the user's next pick, who they have, the room's punts, Dime's pick
+    on the board and whether Dime holds the seat. The board itself is a lookup (get_draft_board)."""
+    session_id = await _room_of_chat(conversation_id, user_id)
+    room = await run_db("ai.owned_session", _owned_session, session_id, user_id) if session_id is not None else None
+    if room is None:
+        return "[This chat's draft room is gone (deleted). Answer from the conversation so far.]"
+    detail = await _detail(room.session_id)
+    name = f' ("{detail.name}")' if getattr(detail, "name", None) else ""
+    parts = [f"This is the Dime chat of draft room_id {room.session_id}{name}: {_room_words(room, detail)}.",
+             _next_pick_words(detail)]
+    mine = sorted((p for p in detail.picks if p.by_me), key=lambda p: p.overall_pick)
+    if mine:
+        parts.append("The user's picks so far: "
+                     + ", ".join(f"#{p.overall_pick} {p.player_name or 'unknown'}" for p in mine) + ".")
+    elif _status(detail.status) == "active":
+        parts.append("The user hasn't drafted anyone yet.")
+    if room.punts:
+        parts.append(f"The room's punts, which the user set: {', '.join(room.punts)}.")
+    # A note whose process died reads as running until swept, as the room's view sweeps it: it would
+    # say Dime is choosing a pick, and keep a dead seat looking live
+    now = _now()
+    await _sweep(room.session_id, _stale_before(now))
+    notes = await _notes(room.session_id, VIEW_NOTES)
+    parts.append(_dime_pick_words(notes, detail))
+    if _seat_live(await _room(room.session_id), notes, now):
+        parts.append("You hold the user's seat in this mock and draft it pick by pick, until the user takes it back.")
+    parts.append(f"The user is writing from the room, beside its board: read it with get_draft_board (room_id "
+                 f"{room.session_id}) before naming players. The user makes the picks and sets the punts, so say "
+                 "what you would do and leave both to them.")
+    return "[" + " ".join(p for p in parts if p) + "]"
 
 
 # ------------------------------- the seat ------------------------------- #
@@ -1045,6 +1290,32 @@ async def draft_pick(user_id: int, note_id: Optional[int], args: DraftPickInput)
     await _update_note(note.id, took=took)
     return {"room_id": room.session_id, "pick": made.overall_pick, "round": made.round,
             "player_id": args.player_id, "name": took["name"]}
+
+
+async def recommend_pick(user_id: int, note_id: Optional[int], args: RecommendPickInput) -> dict[str, Any]:
+    """Record Dime's choice for the user's next pick on its pick note: the room's board highlights him
+    with the reason. Nothing is drafted."""
+    from services.draft_board_service import BoardSession, DraftBoardService
+    from services.scoring.resolver import resolve_scoring_for_room
+
+    note = await _running_note(note_id, args.room_id, PICK, "recommend_pick")
+    if note.seat:
+        raise AppError("AI_DRAFT_TOOL_REFUSED", "You hold the seat in this room: make the pick with draft_pick")
+    if note.pick:
+        raise AppError("AI_DRAFT_ALREADY_PICKED", f"You already chose {note.pick.get('name')} for this pick")
+    room = await _owned_room(user_id, args.room_id)
+    scoring = resolve_scoring_for_room(room.league, room.scoring_format)
+    board = await DraftBoardService.get_board(scoring, session=BoardSession.of(room))
+    row = next((r for r in (board.data or []) if r.player_id == args.player_id), None)
+    if row is None:
+        raise AppError("AI_DRAFT_NOT_ON_BOARD", f"Player {args.player_id} isn't on the board: drafted already, "
+                                                "or not draftable")
+    if row.cap_blocked:
+        raise AppError("AI_DRAFT_CAP_BLOCKED", f"{row.name} would break the user's {row.primary_position} cap")
+    pick = {"player_id": args.player_id, "name": row.name, "position": row.primary_position, "team": row.team,
+            "reason": args.reason}
+    await _update_note(note.id, pick=pick)
+    return {"room_id": room.session_id, "for_pick": note.for_pick, "player_id": args.player_id, "name": row.name}
 
 
 # ------------------------------- get_draft_recap ------------------------------- #

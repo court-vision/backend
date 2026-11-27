@@ -45,6 +45,7 @@ from services.ai import (
     checkins,
     conversations,
     decisions,
+    draft,
     guards,
     levels,
     memory,
@@ -163,6 +164,10 @@ class AgentService:
         Errors raised here are ordinary HTTP errors: nothing has streamed yet."""
         ensure_access(user_id)
         row = await _conversation(conversation_id, user_id)
+        if _kind(row) == conversations.ROOM:
+            # A room's chat is Dime in draft rooms: the account's switch for it holds here too, and says
+            # so before the chat is claimed or checked (not "busy" or "full" for a chat that is off)
+            await draft.ensure_on(user_id)
         # Held a little past the turn's own deadline; the turn's row releases it sooner
         hold = timedelta(seconds=settings.ai_agent_turn_timeout_seconds + 30)
         if not await conversations.claim(conversation_id, user_id, hold):
@@ -174,6 +179,8 @@ class AgentService:
                 raise ConflictError("AI_CONVERSATION_FULL", "This conversation is full; start a new one")
             reservation_id = await spend.reserve(user_id)
             header_line = await agent.header(user_id, row.team_id_id, conversation_id=conversation_id)
+            if _kind(row) == conversations.ROOM:
+                header_line = f"{header_line}\n{await draft.chat_line(user_id, conversation_id)}"
         except BaseException:
             # Nothing has been spent: hand back the reservation and the claim
             if reservation_id is not None:
@@ -182,7 +189,7 @@ class AgentService:
             raise
         # A follow-up in a check-in's (or a draft note's) conversation keeps that conversation's tool list,
         # so its replayed history matches; it is the user's own turn, so it logs no decisions, sets no plan
-        # and makes no pick, and its chips can be sent
+        # and makes no pick, and its chips can be sent. A room's chat is the AI desk's list (TOOLS)
         kind = _kind(row)
         checkin = kind == conversations.CHECKIN
         tools = agent.CHECKIN_TOOLS if checkin else agent.DRAFT_TOOLS if kind == conversations.DRAFT else agent.TOOLS

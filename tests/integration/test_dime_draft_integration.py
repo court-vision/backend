@@ -8,7 +8,8 @@ user's mock seat (recorded `dime`, by the user's seat, at the pick on the clock,
 the seat drafting a whole mock with the autopicker running the other seats, the recap's
 read of it, a room Dime drafted in refusing to follow an ESPN draft, the account's two
 switches (draft rooms off hides Dime and hands the seat back; memory off keeps a real
-draft's plan in the room), the AI desk's list of every room's notes, and the rollback.
+draft's plan in the room), the AI desk's list of every room's notes, the room's Dime
+chat (one per room, the room's state on every message), and the rollbacks.
 
 The agent's turn is stubbed: it makes the tool calls a model would, through the real
 tool registry and the real rows.
@@ -160,7 +161,9 @@ async def test_one_note_runs_per_room_and_one_per_pick(team, pool):
     # Another note while it runs: refused at the insert
     assert await draft._claim(room.session_id, team.user_id_id, draft.PLAN, None, False, {}) == (None, None)
     await draft._settle(first, draft.DONE, None, "Take him", None, 0)
-    # The same pick again: the note already written comes back
+    AiDraftNote.update(pick={"player_id": 1, "name": "Mock 001", "reason": "Take him"}).where(
+        AiDraftNote.id == first).execute()
+    # The same pick again: the pick already chosen comes back
     assert await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, False, {}) == (None, first)
     # The seat's pick at the same number is its own note
     seat, _ = await draft._claim(room.session_id, team.user_id_id, draft.PICK, 3, True, {})
@@ -183,29 +186,114 @@ async def test_a_note_whose_process_died_is_swept(team, pool):
 # ------------------------------- a pick note ------------------------------- #
 
 
-async def test_a_pick_note_reads_the_board_first_and_is_written_once(team, pool, monkeypatch):
+async def test_dime_s_pick_reads_the_board_first_and_is_chosen_once(team, pool, monkeypatch):
     room = await _room(team)
+    outcomes = {}
 
     async def act(turn):
         board = _board_in(turn.message)
-        return f"Take {board['recommendations'][0]['name']}."
+        top = board["recommendations"][0]["player_id"]
+        outcomes["chosen"] = await _tool(turn, "recommend_pick", {
+            "room_id": room.session_id, "player_id": top, "reason": "  Your roster has no\n center yet "})
+        outcomes["twice"] = await _tool(turn, "recommend_pick", {
+            "room_id": room.session_id, "player_id": top + 1, "reason": "Again"})
+        outcomes["seat_tool"] = await _tool(turn, "draft_pick", {
+            "room_id": room.session_id, "player_id": top, "reason": "x"})
+        return "Your roster has no center yet."
 
     calls = _fake_turn(monkeypatch, act)
     note = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
-    assert note.state == "done" and note.for_pick == MY_SLOT and note.text == "Take Mock 001."
+    assert not outcomes["chosen"].is_error, outcomes["chosen"].content
+    assert outcomes["twice"].is_error and "You already chose Mock 001" in outcomes["twice"].content
+    # Choosing is not drafting: the seat's tool is refused, and nothing is picked
+    assert outcomes["seat_tool"].is_error and "only works while you hold the user's seat" in outcomes["seat_tool"].content
+    assert DraftPick.select().where(DraftPick.session == room.session_id).count() == 0
+    assert note.state == "done" and note.for_pick == MY_SLOT and note.text == "Your roster has no center yet."
+    assert note.pick == {"player_id": pool[0], "name": "Mock 001", "position": "PG", "team": None,
+                         "reason": "Your roster has no center yet"}
     assert note.facts["top"][0]["name"] == "Mock 001"
     # Seat 3, two picks away: who won't last is about pick 3 itself
     assert note.facts["on_clock"] is False and note.facts["picks_until"] == 2 and note.facts["gone_before"] == 3
+    # The brief names the user's pick after this one, for whether a player can wait
+    assert "The user's pick after this one is #" in calls[0].message and "recommend_pick once" in calls[0].message
     conv = AiConversation.get_by_id(note.conversation_id_id)
     assert conv.kind == "draft" and conv.title == "Dime · Mock draft · pick 3"
-    assert [t["name"] for t in calls[0].tools][-2:] == ["set_draft_plan", "draft_pick"]
-    # Asked again for the same pick: the one written comes back, with no new turn
+    assert [t["name"] for t in calls[0].tools][-3:] == ["set_draft_plan", "draft_pick", "recommend_pick"]
+    # The room's view carries the choice
+    view = await draft.room_view(team.user_id_id, room)
+    assert view["notes"][0]["pick"]["player_id"] == pool[0]
+    # Asked again for the same pick: the one chosen comes back, with no new turn
     again = await draft.start(team.user_id_id, room, draft.PICK)
     assert again.note_id == note.id and again.task is None and len(calls) == 1
     # The note's turn spent on the AI desk's line
     assert AiSpend.select().where(AiSpend.user_id == team.user_id_id, AiSpend.line == "desk").count() == 1
     # Not in the AI desk's chats
     assert await conversations.list_for(team.user_id_id) == []
+
+
+async def test_a_turn_that_chooses_nobody_fails_its_note(team, pool, monkeypatch):
+    room = await _room(team)
+
+    async def act(turn):
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": 1, "reason": "x"})
+        assert out.is_error and "isn't on the board" in out.content
+        return "Take the best player."
+
+    _fake_turn(monkeypatch, act)
+    note = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert note.state == "failed" and note.reason == "no_pick" and note.pick is None
+
+
+async def test_dime_picks_again_once_when_its_player_is_drafted_first(team, pool, monkeypatch):
+    from schemas.draft import DraftPickCreate
+    room = await _room(team)
+
+    async def act(turn):
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not out.is_error, out.content
+        return "Best left."
+
+    calls = _fake_turn(monkeypatch, act)
+    first = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    # Another seat takes him at pick 1: the room asks again and Dime picks again for pick 3
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=first.pick["player_id"], by_me=False,
+                                                                 overall_pick=1))
+    room = await _ctx(room.session_id, team.user_id_id)
+    second = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert second.id != first.id and second.for_pick == 3 and len(calls) == 2
+    assert second.pick["player_id"] != first.pick["player_id"]
+    retired = AiDraftNote.get_by_id(first.id)
+    assert retired.state == "failed" and retired.reason == "taken"
+    # His second choice goes too: that was the one retake, so the room keeps the note it has
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=second.pick["player_id"], by_me=False,
+                                                                 overall_pick=2))
+    room = await _ctx(room.session_id, team.user_id_id)
+    held = await draft.start(team.user_id_id, room, draft.PICK)
+    assert held.note_id == second.id and held.task is None and len(calls) == 2
+
+
+async def test_a_pick_note_from_before_dime_chose_players_gives_way_to_dime_s_pick(team, pool, monkeypatch):
+    """A room open across the deploy holds a finished pick note with no `pick` for the user's next pick:
+    asking again retires it (`superseded`) and Dime chooses, once."""
+    room = await _room(team)
+    legacy = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=3,
+                                seat=False, state="done", text="Take the best big left.", facts={})
+
+    async def act(turn):
+        top = _board_in(turn.message)["recommendations"][0]["player_id"]
+        out = await _tool(turn, "recommend_pick", {"room_id": room.session_id, "player_id": top, "reason": "Best left"})
+        assert not out.is_error, out.content
+        return "Best left."
+
+    calls = _fake_turn(monkeypatch, act)
+    chosen = await _settled(await draft.start(team.user_id_id, room, draft.PICK))
+    assert chosen.id != legacy.id and chosen.pick["reason"] == "Best left" and len(calls) == 1
+    retired = AiDraftNote.get_by_id(legacy.id)
+    assert retired.state == "failed" and retired.reason == "superseded"
+    # Dime's pick then holds the pick like any other
+    held = await draft.start(team.user_id_id, await _ctx(room.session_id, team.user_id_id), draft.PICK)
+    assert held.note_id == chosen.id and held.task is None and len(calls) == 1
 
 
 # ------------------------------- the plan ------------------------------- #
@@ -229,7 +317,7 @@ async def test_the_plan_sets_a_category_room_s_punts_and_a_mock_s_plan_stays_in_
     assert note.punts == ["ft_pct", "tov"] and note.punts_before == []
     assert (await DraftService.get_session(room.session_id)).data.punts == ["ft_pct", "tov"]
     assert AiMemory.select().count() == 0
-    # A pick note reads the plan in its brief
+    # Dime's pick for the user no longer reads a plan (the room stopped asking for one, 2026-11-26)
     seen = []
 
     async def pick(turn):
@@ -238,7 +326,7 @@ async def test_the_plan_sets_a_category_room_s_punts_and_a_mock_s_plan_stays_in_
 
     _fake_turn(monkeypatch, pick)
     await _settled(await draft.start(team.user_id_id, await _ctx(room.session_id, team.user_id_id), draft.PICK))
-    assert 'The room\'s plan: "Concede FT% and turnovers" (punts: ft_pct, tov).' in seen[0]
+    assert "Concede FT% and turnovers" not in seen[0]
 
 
 async def test_a_real_draft_s_plan_is_saved_to_the_team_s_notes(team, pool, monkeypatch):
@@ -521,6 +609,144 @@ async def test_deleting_the_room_deletes_dime_s_rows(team, pool):
     assert AiDraftRoom.select().count() == 0 and AiDraftNote.select().count() == 0
 
 
+# ------------------------------- the room's chat ------------------------------- #
+
+
+async def test_a_room_has_one_dime_chat_with_the_room_on_every_message(team, pool, monkeypatch):
+    from schemas.draft import DraftPickCreate
+    from services.ai.agent_service import AgentService
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    assert await draft.room_chat(team.user_id_id, room) == chat
+    conv = AiConversation.get_by_id(chat)
+    assert conv.kind == "room" and conv.title == "Dime · Mock draft · chat" and conv.team_id_id == team.team_id
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] == chat
+    # Not among the AI desk's chats, and the seat's heartbeat untouched (a new row, seat off)
+    assert await conversations.list_for(team.user_id_id) == []
+    # Two picks by others, the user's at their seat, and Dime's pick chosen for the next one
+    for overall, player in ((1, pool[0]), (2, pool[1])):
+        await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=player, overall_pick=overall))
+    await DraftService.add_pick(room.session_id, DraftPickCreate(player_id=pool[5], by_me=True, overall_pick=MY_SLOT))
+    detail = (await DraftService.get_session(room.session_id)).data
+    nxt = detail.my_next_pick
+    AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=nxt, state="done",
+                       pick={"player_id": pool[9], "name": "Mock 010", "position": "PF", "team": None,
+                             "reason": "No forward yet"})
+    seen = {}
+
+    def start(turn, header_line):
+        seen.update(turn=turn, header=header_line)
+        return agent.Emitter()
+
+    monkeypatch.setattr(agent, "start", start)
+    await AgentService.start_turn(chat, team.user_id_id, "Plan the rest of my draft")
+    line = seen["header"].split("\n", 1)[1]
+    assert line.startswith(f"[This is the Dime chat of draft room_id {room.session_id}: a mock draft")
+    assert f"3 picks made; the user's next pick is #{nxt}" in line
+    assert "The user's picks so far: #3 Mock 006." in line
+    assert f'Your pick for #{nxt}, highlighted on the board: Mock 010 (player_id {pool[9]}): "No forward yet".' in line
+    assert f"get_draft_board (room_id {room.session_id})" in line
+    # The AI desk's tools: a chat drafts nothing
+    assert seen["turn"].tools is agent.TOOLS and seen["turn"].draft_note_id is None
+    await spend.cancel(seen["turn"].reservation_id)
+    await conversations.release(chat)
+
+
+async def test_a_fresh_chat_replaces_the_room_s_and_a_second_first_message_keeps_one(team, pool):
+    room = await _room(team)
+    first = await draft.room_chat(team.user_id_id, room)
+    second = await draft.room_chat(team.user_id_id, room, fresh=True)
+    assert second != first and (await draft.room_view(team.user_id_id, room))["chat_id"] == second
+    assert AiConversation.get_or_none(AiConversation.id == first) is not None      # kept, unlisted
+    # A conversation made meanwhile doesn't replace the room's chat
+    other = await conversations.create(team.user_id_id, team.team_id, kind=conversations.ROOM)
+    assert await draft._set_chat(room.session_id, team.user_id_id, other.id, None) == (False, second)
+    # Deleted (the AI desk can delete any conversation): the room has no chat, and the next message starts one
+    await conversations.delete(second, team.user_id_id)
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] is None
+    third = await draft.room_chat(team.user_id_id, room)
+    assert third not in (first, second)
+
+
+async def test_switched_off_the_room_s_chat_takes_no_message(team, pool):
+    from services.ai.agent_service import AgentService
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    await ai_settings.update(team.user_id_id, draft_rooms=False)
+    with pytest.raises(ConflictError) as err:
+        await draft.room_chat(team.user_id_id, room)
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    with pytest.raises(ConflictError) as err:
+        await AgentService.start_turn(chat, team.user_id_id, "Who should I take?")
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    # Refused before anything was held or spent
+    assert AiConversation.get_by_id(chat).busy_until is None
+    assert AiSpend.select().where(AiSpend.user_id == team.user_id_id).count() == 0
+    # Said first, even while the chat is still answering (not "busy" for a chat that is off)
+    assert await conversations.claim(chat, team.user_id_id, timedelta(minutes=2))
+    with pytest.raises(ConflictError) as err:
+        await AgentService.start_turn(chat, team.user_id_id, "Who should I take?")
+    assert err.value.error_code == "AI_DRAFT_SWITCHED_OFF"
+    await conversations.release(chat)
+
+
+async def test_a_chat_this_call_put_in_the_room_is_kept_once_a_later_one_replaces_it(team, pool, monkeypatch):
+    room = await _room(team)
+    first = await draft.room_chat(team.user_id_id, room)
+    later = await conversations.create(team.user_id_id, team.team_id, kind=conversations.ROOM)
+    set_chat = draft._set_chat
+
+    async def raced(session_id, user_id, conversation_id, replace):
+        result = await set_chat(session_id, user_id, conversation_id, replace)
+        # Another "start over" replaces this call's chat before it reads the room again
+        AiDraftRoom.update(chat_id=later.id).where(AiDraftRoom.session_id == session_id).execute()
+        return result
+
+    monkeypatch.setattr(draft, "_set_chat", raced)
+    mine = await draft.room_chat(team.user_id_id, room, fresh=True)
+    assert mine not in (first, later.id)
+    assert AiConversation.get_or_none(AiConversation.id == mine) is not None     # kept, unlisted
+    assert (await draft.room_view(team.user_id_id, room))["chat_id"] == later.id
+
+
+async def test_the_chat_says_dime_holds_the_seat_only_while_its_loop_beats(team, pool):
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    held = "You hold the user's seat in this mock"
+    AiDraftRoom.update(seat="drafting", updated_at=datetime.now(timezone.utc)).where(
+        AiDraftRoom.session_id == room.session_id).execute()
+    assert held in await draft.chat_line(team.user_id_id, chat)
+    # Its process died: the seat still says drafting, but nothing drafts it
+    AiDraftRoom.update(updated_at=datetime.now(timezone.utc) - timedelta(hours=1)).where(
+        AiDraftRoom.session_id == room.session_id).execute()
+    assert held not in await draft.chat_line(team.user_id_id, chat)
+    assert (await draft.room_view(team.user_id_id, room))["seat"]["live"] is False
+    # Nor does a note left running by the same dead process: the chat sweeps it, as the room's view does
+    note = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", seat=True,
+                              for_pick=4, state="running",
+                              created_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    line = await draft.chat_line(team.user_id_id, chat)
+    assert held not in line
+    assert AiDraftNote.get_by_id(note.id).state == "failed"
+    # A pick note for the user's next pick says Dime is choosing while it is written, and not once its process died
+    choosing = "choosing the user's pick"
+    nxt = (await DraftService.get_session(room.session_id)).data.my_next_pick
+    pick_note = AiDraftNote.create(session_id=room.session_id, user_id=team.user_id_id, kind="pick", for_pick=nxt,
+                                   state="running")
+    assert choosing in await draft.chat_line(team.user_id_id, chat)
+    AiDraftNote.update(created_at=datetime.now(timezone.utc) - timedelta(hours=1)).where(
+        AiDraftNote.id == pick_note.id).execute()
+    assert choosing not in await draft.chat_line(team.user_id_id, chat)
+    assert AiDraftNote.get_by_id(pick_note.id).state == "failed"
+
+
+async def test_a_deleted_room_s_chat_says_the_room_is_gone(team, pool):
+    room = await _room(team)
+    chat = await draft.room_chat(team.user_id_id, room)
+    await DraftService.delete_session(room.session_id)
+    assert "draft room is gone" in await draft.chat_line(team.user_id_id, chat)
+
+
 # ------------------------------- the migration ------------------------------- #
 
 
@@ -533,4 +759,45 @@ def test_0046_rollback_applies_and_the_forward_file_restores_it(integration_db):
         assert exists is None
     finally:
         db.execute_sql(forward)
+        # 0058's and 0059's, which the tables carried before the rollback
+        db.execute_sql((Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text())
+        db.execute_sql((Path(MIGRATIONS_DIR) / "0059__dime_room_chat.sql").read_text())
     assert db.execute_sql("SELECT to_regclass('usr.ai_draft_notes')").fetchone()[0] is not None
+
+
+def _has_pick_column():
+    return db.execute_sql(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = 'usr' AND table_name = 'ai_draft_notes' "
+        "AND column_name = 'pick'").fetchone() is not None
+
+
+def test_0058_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0058__dime_draft_pick.rollback.sql").read_text()
+    try:
+        db.execute_sql(rollback)
+        assert not _has_pick_column()
+    finally:
+        db.execute_sql(forward)
+    assert _has_pick_column()
+
+
+def _has_chat_column():
+    return db.execute_sql(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = 'usr' AND table_name = 'ai_draft_rooms' "
+        "AND column_name = 'chat_id'").fetchone() is not None
+
+
+def test_0059_rollback_applies_and_the_forward_file_restores_it(integration_db):
+    forward = (Path(MIGRATIONS_DIR) / "0059__dime_room_chat.sql").read_text()
+    rollback = (Path(MIGRATIONS_DIR) / "0059__dime_room_chat.rollback.sql").read_text()
+    user = User.create(email="roomchat@courtvision.dev", clerk_user_id="user_room_chat", created_at=datetime.utcnow())
+    AiConversation.create(user_id=user.user_id, kind="room")
+    try:
+        db.execute_sql(rollback)
+        assert not _has_chat_column()
+        assert AiConversation.select().where(AiConversation.user_id == user.user_id).count() == 0
+    finally:
+        db.execute_sql(forward)
+    assert _has_chat_column()
+    AiConversation.create(user_id=user.user_id, kind="room")

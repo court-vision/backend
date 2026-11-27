@@ -73,6 +73,10 @@ class LivePlayer:
     line: StatLine                          # per game, in a game he plays
     games: float                            # games expected from the snapshot's own morning
     timeline: tuple[Run, ...]
+    # What each part of the projection read about him (`raw.parts`): an absence
+    # and its return date, a note in force, his minutes lately. The reason a
+    # board shows beside his rank is read from it (`services.draft_live`).
+    parts: Mapping = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -251,6 +255,7 @@ def load(season: str, day: date, fresh_days: int = FRESH_DAYS, source: str = SOU
             name_normalized=rec.player.name_normalized,
             team=str(raw["team"]) if raw.get("team") else None,
             line=StatLine.from_row(rec), games=games, timeline=parse_timeline(raw.get("timeline")),
+            parts=raw["parts"] if isinstance(raw.get("parts"), Mapping) else {},
         )
     if not players:
         return None

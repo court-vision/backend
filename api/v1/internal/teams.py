@@ -11,9 +11,13 @@ from schemas.common import ApiStatus, FantasyProvider
 from schemas.league import LeagueGetResp, LeagueSyncResp
 from schemas.league_projection import LeagueProjectionResp
 from schemas.league_values import LeagueValuesResp, ValueWindowKey
+from schemas.streaming_line import StreamingLineResp
+from schemas.team_overview import TeamsOverviewResp
 from services.league_service import LeagueService
 from services.league_projection_service import league_projection
 from services.league_values_service import FREE_AGENTS_READ, FREE_AGENTS_SHOWN, league_values
+from services.streaming_line_service import streaming_line
+from services import team_overview_service
 from api.deps import UserContext, OwnedTeamContext, get_db_user, get_owned_team, load_owned_league_info
 from core.responses import respond
 
@@ -24,6 +28,16 @@ router = APIRouter(prefix="/teams", tags=["team management"])
 @router.get('/', response_model=TeamGetResp)
 async def get_teams(user: UserContext = Depends(get_db_user)):
     return respond(await TeamService.get_teams(user.user_id))
+
+@router.get('/overview', response_model=TeamsOverviewResp)
+async def get_teams_overview(user: UserContext = Depends(get_db_user)):
+    """Every team of the account at a glance: each one's state (needs you, your call, set,
+    autopilot, can't read) with the day's actions behind it, tonight's lineup, the matchup and
+    its week, the season line, and what is scheduled next. One team that can't be read never
+    fails the others. Never writes."""
+    data = await team_overview_service.overview(user.user_id)
+    return respond(TeamsOverviewResp(status=ApiStatus.SUCCESS, message=f"{len(data.teams)} team(s)", data=data))
+
 
 @router.post('/add', response_model=TeamAddResp)
 async def add_team(team_add_req: TeamAddReq, user: UserContext = Depends(get_db_user)):
@@ -86,6 +100,22 @@ async def get_team_league_values(
     data = await league_values(league_info, window=window, first_matchup=first_matchup,
                                last_matchup=last_matchup, free_agents=free_agents)
     return respond(LeagueValuesResp(status=ApiStatus.SUCCESS, message="League priced", data=data))
+
+
+@router.get('/{team_id}/league/streaming-line', response_model=StreamingLineResp)
+async def get_team_streaming_line(
+    team: OwnedTeamContext = Depends(get_owned_team),
+    window: Optional[ValueWindowKey] = Query(None, description="A preset window; this_week when no matchups are given"),
+    first_matchup: Optional[int] = Query(None, ge=1, description="The window's first matchup (wins over the preset)"),
+    last_matchup: Optional[int] = Query(None, ge=1, description="The window's last matchup"),
+):
+    """Each of the team's players against the streaming line: what the last stream lane worth
+    running adds to the lineup with the league's adds, matchup by matchup over a window of up
+    to four matchups (ESPN points leagues)."""
+    league_info = await load_owned_league_info(team)
+    data = await streaming_line(team.team_id, league_info, window=window, first_matchup=first_matchup,
+                                last_matchup=last_matchup)
+    return respond(StreamingLineResp(status=ApiStatus.SUCCESS, message="Streaming line worked out", data=data))
 
 
 @router.post('/{team_id}/league/sync', response_model=LeagueSyncResp)

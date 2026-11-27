@@ -310,6 +310,7 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
     # after it to leave the chain's state.
     availability_forward = (Path(MIGRATIONS_DIR) / "0035__news_and_availability.sql").read_text()
     acting_forward = (Path(MIGRATIONS_DIR) / "0044__dime_acting.sql").read_text()
+    daily_forward = (Path(MIGRATIONS_DIR) / "0057__daily_actions_level.sql").read_text()   # and 0057 ('daily_actions')
 
     def table_exists():
         return db.execute_sql("SELECT to_regclass('usr.scheduled_pickups')").fetchone()[0] is not None
@@ -328,5 +329,6 @@ def test_0028_rollback_keeps_the_scheduled_audit_rows_and_the_forward_file_resto
     with db.atomic():
         db.execute_sql(availability_forward)
         db.execute_sql(acting_forward)
+        db.execute_sql(daily_forward)
     assert table_exists() and "'scheduled'" in _source_check_values()
     assert "NOT VALID" not in _source_check_values()

@@ -5,11 +5,18 @@ own `LineupMoveResult` shape (start a bench player, move someone to or off IR),
 or a pickup plus the player to drop for the add/drop dialog. The board the rows
 were computed against travels with them, so staging always targets that board.
 `GET /teams/{id}/actions` never writes.
+
+The pipeline route at the end is the Daily actions row's Act level
+(services/daily_actions_job.py): the list's IR moves and open-spot pickups made
+on ESPN, once a day before the first tip.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal, Optional
+
+from pydantic import Field
 
 from schemas.common import ApiModel, BaseResponse
 from schemas.espn import ValueKind
@@ -73,3 +80,46 @@ class DailyActionsData(ApiModel):
 
 class DailyActionsResp(BaseResponse):
     data: Optional[DailyActionsData] = None
+
+
+# ------------------------------- Pipeline route (Daily actions at Act) ------------------------------- #
+
+class DailyActionsRunReq(ApiModel):
+    """One team's pass, from data-platform's daily_actions pipeline (once a day before the first tip)."""
+
+    team_id: int = Field(gt=0)
+    user_id: int = Field(gt=0)
+    nba_date: date
+
+
+class DailyActionsAdd(ApiModel):
+    """A free agent the pass picked up for an open roster spot."""
+
+    player: DailyActionPlayer
+    detail: Optional[str] = None                 # the list row's: "Open roster seat · ... plays tonight vs LAL · 7:30 PM"
+    verified: bool = False                       # ESPN's board showed him after the write
+    audit_id: Optional[int] = None
+
+
+# applied: at least one write went; noop: the list had no IR move or open-spot pickup; skipped:
+# the pass can't run on this team today (why in `reason`); rejected / failed: the first write
+# was refused by ESPN / couldn't reach the writer, so nothing went.
+DailyActionsOutcome = Literal["applied", "noop", "skipped", "rejected", "failed"]
+
+
+class DailyActionsRunData(ApiModel):
+    outcome: DailyActionsOutcome
+    reason: Optional[str] = None
+    ir_moves: list[LineupMoveResult] = []        # the IR moves made, in order
+    adds: list[DailyActionsAdd] = []             # the pickups made, in order
+    # Why a roster spot was left open, or a later write didn't go (the league's adds used up, a
+    # scheduled pickup needs the spot, ESPN's refusal): the email says it
+    held: Optional[str] = None
+    open_spots: int = 0                          # roster spots still open after the pass
+    nba_date: Optional[str] = None
+    first_game_time_et: Optional[str] = None
+    team_name: str = ""
+
+
+class DailyActionsRunResp(BaseResponse):
+    data: Optional[DailyActionsRunData] = None

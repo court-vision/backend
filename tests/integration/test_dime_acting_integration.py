@@ -324,6 +324,7 @@ def _columns(table):
 def test_0044_rollback_applies_and_the_forward_file_restores_it(team):
     forward = (Path(MIGRATIONS_DIR) / "0044__dime_acting.sql").read_text()
     rollback = (Path(MIGRATIONS_DIR) / "0044__dime_acting.rollback.sql").read_text()
+    daily_forward = (Path(MIGRATIONS_DIR) / "0057__daily_actions_level.sql").read_text()
     RosterMove.create(user=team.user_id_id, team=team.team_id, nba_date=DAY, source="autopilot", kind="lineup",
                       status="applied", moves=[])
     try:
@@ -334,7 +335,9 @@ def test_0044_rollback_applies_and_the_forward_file_restores_it(team):
         assert RosterMove.get().source == "manual"                     # kept, as the old CHECK allows
     finally:
         db.execute_sql(forward)
+        db.execute_sql(daily_forward)          # 0057 widened the source CHECK after it ('daily_actions')
     assert {"ai_rows", "autopilot", "restore"} <= _columns("autopilot")
     assert {"memory", "draft_rooms"} <= _columns("ai_settings")
     assert "outcome" in _columns("autopilot_actions") and "made_by_autopilot" in _columns("scheduled_pickups")
     db.execute_sql(forward)                                            # idempotent
+    db.execute_sql(daily_forward)

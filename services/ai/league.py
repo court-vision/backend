@@ -141,14 +141,19 @@ GET_DRAFT_BOARD: dict[str, Any] = {
         "next pick, best first, each with its score and every term of it in season-value points "
         "(value over replacement, punts, injury, lineup congestion; category_fit is shown but not "
         "summed), its value, CV and ESPN ranks, whether he is likely to last to that pick "
-        "(availability: likely, tossup or gone) and a one-line reason; then the best players still "
+        "(availability: likely, tossup or gone; while the user is on the clock everyone is likely) and a one-line reason; then the best players still "
         "on the board in its own order (optionally one position), the user's drafted roster, the "
         "room's punts and, in a category league, how far the roster trails an average team in each "
         "category. rank_source espn orders the recommendations by ESPN's board instead, with the same "
         "numbers on each. In a draft held during the season (in_season), values blend this season's "
         "games (season_gp, season_fpts_avg: this season's fantasy points per game) with the projection, "
         "count only the games from games_from on, and injury flags are today's; ADP stays the preseason "
-        "crowd's (adp_as_of). Cite these numbers when advising a pick."
+        "crowd's (adp_as_of). In season a player also carries, where known, move_7d and move_1d (places "
+        "gained on Court Vision's standard board for the format since the boards named in "
+        "in_season.moves; negative is a fall), rank_reason (what the projection read about him: an "
+        "absence and its return date, a note in force, his minutes lately) and espn_rank_since (the day "
+        "ESPN last changed market_rank, which is then ESPN's rank this morning, espn_ranks_as_of). Cite "
+        "these numbers when advising a pick."
     ),
     "input_schema": {
         "type": "object",
@@ -233,6 +238,26 @@ def _season_of(row: Any) -> dict[str, Any]:
     return {"season_gp": row.season_gp, "season_fpts_avg": row.season_fpts_avg}
 
 
+def _live_of(row: Any) -> dict[str, Any]:
+    """In season: his move on the stored standard board, the reason beside his rank, and how long
+    ESPN has held its own. Only what is known, so a preseason board carries none of it."""
+    if row is None:
+        return {}
+    out: dict[str, Any] = {}
+    if row.move_7d is not None:
+        out["move_7d"] = row.move_7d
+    if row.move_1d is not None:
+        out["move_1d"] = row.move_1d
+    if row.rank_reason:
+        out["rank_reason"] = row.rank_reason
+    if row.espn_rank_since is not None:
+        out["espn_rank_since"] = row.espn_rank_since.isoformat()
+        if row.espn_rank_since_first_stored:
+            # Its ranks were first stored that day: the rank may be older
+            out["espn_rank_since_or_earlier"] = True
+    return out
+
+
 async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput) -> dict[str, Any]:
     from services.draft_board_service import BoardSession, DraftBoardService
     from services.draft_service import DraftService
@@ -267,6 +292,7 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             "availability": row.availability if row else None,
             "injury": row.injury_status if row else None,
             **_season_of(row),
+            **_live_of(row),
             "components": [_component(c) for c in rec.components],
             "reason": rec.reason,
         })
@@ -295,6 +321,7 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             "injury": row.injury_status,
             "cap_blocked": row.cap_blocked,
             **_season_of(row),
+            **_live_of(row),
         }
         if row.fit_rank is not None:
             entry["fit_rank"] = row.fit_rank
@@ -328,6 +355,16 @@ async def get_draft_board(room: OwnedDraftSessionContext, args: DraftBoardInput)
             "live_as_of": meta.in_season.live_as_of.isoformat() if meta.in_season.live_as_of else None,
             "adp_as_of": meta.market_as_of.isoformat() if meta.market_as_of else None,
         }
+        ranks = meta.live_ranks
+        if ranks is not None:
+            if ranks.as_of is not None:
+                out["in_season"]["moves"] = {
+                    "board": ranks.board, "as_of": ranks.as_of.isoformat(),
+                    "move_1d_since": ranks.day.isoformat() if ranks.day else None,
+                    "move_7d_since": ranks.week.isoformat() if ranks.week else None,
+                }
+            if ranks.espn_as_of is not None:
+                out["in_season"]["espn_ranks_as_of"] = ranks.espn_as_of.isoformat()
     if meta.category_need:
         out["category_need"] = [
             {"category": n.key, "label": n.label, "need": round(n.need, 2), "punted": n.punted,

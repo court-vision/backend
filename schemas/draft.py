@@ -561,7 +561,10 @@ class DraftBoardRow(ApiModel):
         description=(
             "ESPN editorial draft rank from the latest snapshot, taken from the board that "
             "matches the league's format — see `meta.market_rank_type`. Falls back to the "
-            "points board on snapshots written before the category board was captured."
+            "points board on snapshots written before the category board was captured. In a "
+            "draft held in season with ESPN's ranks stored that morning "
+            "(`meta.live_ranks.espn_as_of`), it is that morning's rank instead: the one ESPN's "
+            "own room shows today, null for a player ESPN no longer ranks."
         ),
     )
     adp: Optional[float] = Field(
@@ -580,6 +583,44 @@ class DraftBoardRow(ApiModel):
     market_delta: Optional[int] = Field(
         default=None,
         description="market_rank − cv_rank; positive means the market ranks the player worse than CV does (a bargain)",
+    )
+    move_1d: Optional[int] = Field(
+        default=None,
+        description=(
+            "In season: places he gained on Court Vision's stored standard board for this "
+            "format (`meta.live_ranks.board`) since the previous stored morning "
+            "(`meta.live_ranks.day`); negative is a fall. Null when he was not ranked then, when "
+            "no board is near enough, and before opening night. A room with scoring of its own "
+            "ranks players a little differently: the move is the standard board's."
+        ),
+    )
+    move_7d: Optional[int] = Field(
+        default=None,
+        description="The same since the stored board about a week back (`meta.live_ranks.week`)",
+    )
+    rank_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "In season, on the live projection: one line on why he is ranked where he is this "
+            "morning, from what the projection read about him. An absence and when he is "
+            "expected back, a note in force, or, for a player who moved at least five places, "
+            "the minutes he has been playing lately when they moved the same way. Null when "
+            "none of those applies."
+        ),
+    )
+    espn_rank_since: Optional[date] = Field(
+        default=None,
+        description=(
+            "In season: the stored morning ESPN's rank became `market_rank`, so how long ESPN "
+            "has left it alone. Null when `market_rank` is the preseason snapshot's."
+        ),
+    )
+    espn_rank_since_first_stored: bool = Field(
+        default=False,
+        description=(
+            "True when ESPN has held the rank since the first morning its ranks were stored: "
+            "the rank is at least as old as `espn_rank_since`, and may be older."
+        ),
     )
     fit_value: Optional[float] = Field(
         default=None,
@@ -791,6 +832,38 @@ class DraftInSeasonResp(ApiModel):
     )
 
 
+class DraftLiveRanksResp(ApiModel):
+    """The stored daily boards an in-season board's moves and ESPN ranks were read from."""
+
+    board: Literal["points", "categories"] = Field(
+        description=(
+            "Which of Court Vision's two standard boards the rows' moves are measured on: the "
+            "one for this room's format"
+        ),
+    )
+    as_of: Optional[date] = Field(
+        default=None,
+        description=(
+            "The stored board the moves are measured to: this morning's, or the newest within "
+            "three days. Null when none is that near, and every move is then null."
+        ),
+    )
+    day: Optional[date] = Field(
+        default=None, description="The earlier board `move_1d` is measured from; null when none is near enough"
+    )
+    week: Optional[date] = Field(
+        default=None, description="The earlier board `move_7d` is measured from; null when none is near enough"
+    )
+    espn_as_of: Optional[date] = Field(
+        default=None,
+        description=(
+            "The morning of ESPN's ranks on the rows (`market_rank`, `auction_value`, "
+            "`espn_rank_since`). Null when none is stored within three days: the rows then carry "
+            "the preseason snapshot's ranks (`market_as_of`)."
+        ),
+    )
+
+
 class DraftBoardMeta(ApiModel):
     season: str                                 # season the board is for, e.g. "2026-27"
     format: str                                 # points | categories
@@ -919,9 +992,17 @@ class DraftBoardMeta(ApiModel):
         default=None,
         description=(
             "Set for a draft held after opening night: values blend this season's games with the "
-            "projection, count only the games left, and injury flags are today's. ADP and ESPN's "
-            "ranks stay the last preseason snapshot (`market_as_of`). None for a draft before "
+            "projection, count only the games left, and injury flags are today's. ADP stays the "
+            "last preseason snapshot (`market_as_of`), and so do ESPN's ranks unless that "
+            "morning's are stored (`live_ranks.espn_as_of`). None for a draft before "
             "opening night, an imported draft, and a room whose draft started before it."
+        ),
+    )
+    live_ranks: Optional[DraftLiveRanksResp] = Field(
+        default=None,
+        description=(
+            "In season: the stored daily boards behind every row's `move_1d`, `move_7d` and "
+            "ESPN rank. None before opening night, and while nothing near enough is stored."
         ),
     )
 

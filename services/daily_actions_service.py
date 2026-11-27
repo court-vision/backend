@@ -120,15 +120,21 @@ def chains_of(moves: Sequence[Move]) -> list[list[Move]]:
     return chains
 
 
-def has_open_seat(state: LineupState) -> bool:
-    """ESPN's roster limit as the add/drop needs it: the players off IR must number fewer
-    than the non-IR seats. An empty IR seat is not a seat for a healthy player, and the
-    bench absorbs an add even when its own slot count is full (ESPN parks the pickup
-    there rather than in an open active slot he is not eligible for)."""
+def open_spots(state: LineupState) -> int:
+    """Roster spots a pickup can take without a drop: the non-IR seats less the players off IR.
+    An empty IR seat is not a seat for a healthy player, and the bench absorbs an add even when
+    its own slot count is full (ESPN parks the pickup there rather than in an open active slot
+    he is not eligible for)."""
     counts = slot_counts_of(state)
     seats = sum(v for k, v in counts.items() if k != IR_SLOT_ID)
     off_ir = sum(1 for p in state.players if p.lineup_slot_id != IR_SLOT_ID)
-    return off_ir < seats
+    return max(0, seats - off_ir)
+
+
+def has_open_seat(state: LineupState) -> bool:
+    """ESPN's roster limit as the add/drop needs it: the players off IR must number fewer
+    than the non-IR seats (`open_spots`)."""
+    return open_spots(state) > 0
 
 
 def drop_candidates(state: LineupState, ir_eligible: Mapping[int, bool],

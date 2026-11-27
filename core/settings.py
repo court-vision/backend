@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     # below are the per-request and per-day bounds that sit under it.
     ai_enabled: bool = False
     anthropic_api_key: Optional[SecretStr] = None
+    # An Admin API key, only to read what Anthropic bills the organization (the Usage
+    # and Cost Analytics API, services/ai/bill.py) for the AI spend page's bill check.
+    # It can't send a message; unset, the check says so and nothing else changes.
+    anthropic_admin_key: Optional[SecretStr] = None
     # Chosen on the routing eval (evals/ai_route, 2026-10-02): Opus 5.5 at low effort
     # routed 90 of 92 with no wasted lookups, at half the cost per question of
     # Opus 5 at medium. Re-run the eval before changing either. Both are app-wide,
@@ -212,6 +216,12 @@ class Settings(BaseSettings):
     autopilot_checkin_max_model_calls: int = 12
     autopilot_checkin_max_tool_calls: int = 32
     autopilot_checkin_timeout_seconds: float = 360.0
+    # Check-ins started together (every team's slot comes due in the same tick) would each
+    # write Dime's fixed prefix to the prompt cache, since a call can read it only once the
+    # call that wrote it has begun to answer. The first of them starts at once and the
+    # rest wait this long after it, then read the prefix (services/ai/checkins.py
+    # `_stagger`). 0 starts every check-in at once; at most 60.
+    autopilot_checkin_stagger_seconds: float = 15.0
     # Steering, acting, event check-ins and the draft (the plan's steps 4 to 7) have no
     # switch of their own. Steering (services/ai/steering.py: the steer, set_lane and
     # cancel_pickup tools, their chips, and the pins a sent lineup chip leaves) and Dime in
@@ -513,6 +523,8 @@ class Settings(BaseSettings):
         invalid = [name for name, value in bounds.items() if value <= 0]
         if invalid:
             raise ValueError(f"AI bounds must be positive: {', '.join(invalid)}")
+        if not 0 <= self.autopilot_checkin_stagger_seconds <= 60:
+            raise ValueError("AUTOPILOT_CHECKIN_STAGGER_SECONDS must be between 0 and 60")
         return self
 
     @model_validator(mode="after")

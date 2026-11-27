@@ -11,13 +11,14 @@ from fastapi import APIRouter, Query, Security
 from core.compute import run_cpu
 from core.pipeline_auth import verify_pipeline_token
 from core.responses import respond
-from schemas.ai_spend import AiCapReq, AiCapResp, AiSpendResp
+from schemas.ai_spend import AiBillResp, AiCapReq, AiCapResp, AiSpendResp
 from schemas.analyst import AnalystReadReq, AnalystReadResp, AnalystSpendResp
 from schemas.autopilot import (
     AskRunData, AskRunResp, AskStarted, CheckinEventsData, CheckinEventsReq, CheckinEventsResp, CheckinRunData,
     CheckinRunResp, CheckinStarted,
 )
 from schemas.common import ApiStatus
+from schemas.daily_actions import DailyActionsRunReq, DailyActionsRunResp
 from schemas.lineup_editor import LineupEvaluateReq, LineupEvaluationResp, LineupReactReq, LineupReactResp
 from schemas.move_outcomes import LedgerRunReq, LedgerRunResp
 from schemas.scheduled_pickup import PickupExecuteReq, PickupExecuteResp
@@ -29,7 +30,8 @@ from schemas.valuation import (
     StandardValuationReq,
     StandardValuationResp,
 )
-from services.ai import analyst, asks, checkins, events, spend_report
+from services.ai import analyst, asks, bill, checkins, events, spend_report
+from services.daily_actions_job import DailyActionsJob
 from services.late_scratch_service import LateScratchService
 from services.lineup_editor_service import LineupEditorService
 from services.move_ledger_service import MoveLedgerService
@@ -68,6 +70,19 @@ async def react_to_verdict(req: LineupReactReq):
     outcome is reported in `data.teams`, never raised.
     """
     return respond(await LateScratchService.react(req))
+
+
+@router.post("/daily-actions/run", response_model=DailyActionsRunResp)
+async def run_daily_actions(req: DailyActionsRunReq):
+    """Make one team's daily actions at Act: the Week desk's IR moves and a free agent for each
+    open roster spot, never a drop.
+
+    Called by data-platform's daily_actions pipeline once a day per team at Act, before the
+    first tip. The outcome is reported in `data.outcome`, never raised: applied (with the IR
+    moves and pickups made, and `held` when something was left), noop, skipped (why), rejected
+    or failed (nothing went).
+    """
+    return respond(await DailyActionsJob.run(req))
 
 
 @router.post("/pickups/execute", response_model=PickupExecuteResp)
@@ -260,6 +275,16 @@ async def ai_spend(days: int = Query(30, ge=1, le=spend_report.MAX_DAYS,
     (model and tokens), and every user with spend or a cap, with their caps."""
     data = await spend_report.report(days)
     return respond(AiSpendResp(status=ApiStatus.SUCCESS, message=f"AI spend over {days} days", data=data))
+
+
+@router.get("/ai/bill", response_model=AiBillResp)
+async def ai_bill():
+    """The bill check, for the data platform's AI spend page: what Anthropic bills the
+    organization, last month and this one by UTC day and by API key, beside the ledger.
+    Read with ANTHROPIC_ADMIN_KEY and kept 5 minutes; `state` says why when it couldn't be
+    read (no key, a refused key). No model call: it spends nothing."""
+    data = await bill.read()
+    return respond(AiBillResp(status=ApiStatus.SUCCESS, message=f"Bill check: {data.state}", data=data))
 
 
 @router.put("/ai/caps", response_model=AiCapResp)

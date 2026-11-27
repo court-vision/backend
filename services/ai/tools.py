@@ -1432,6 +1432,12 @@ async def _draft_pick(args: ai_draft.DraftPickInput, ctx: ToolContext | None) ->
     return await ai_draft.draft_pick(ctx.user_id, ctx.draft_note_id, args)
 
 
+async def _recommend_pick(args: ai_draft.RecommendPickInput, ctx: ToolContext | None) -> dict[str, Any]:
+    if ctx is None:
+        raise AppError("AI_NO_CALLER", "This lookup needs a signed-in user")
+    return await ai_draft.recommend_pick(ctx.user_id, ctx.draft_note_id, args)
+
+
 # The league's add limit and the team's adds this matchup, read from ESPN (James, 2026-11-15)
 
 async def _get_add_limits(args: adds.GetAddLimitsInput, ctx: ToolContext | None) -> dict[str, Any]:
@@ -1531,6 +1537,7 @@ _REGISTRY: dict[str, _Tool] = {
     ai_draft.GET_DRAFT_RECAP_NAME: _Tool(ai_draft.DraftRecapInput, _get_draft_recap),
     ai_draft.SET_DRAFT_PLAN_NAME: _Tool(ai_draft.SetDraftPlanInput, _set_draft_plan),
     ai_draft.DRAFT_PICK_NAME: _Tool(ai_draft.DraftPickInput, _draft_pick),
+    ai_draft.RECOMMEND_PICK_NAME: _Tool(ai_draft.RecommendPickInput, _recommend_pick),
     adds.GET_ADD_LIMITS_NAME: _Tool(adds.GetAddLimitsInput, _get_add_limits),
     asks.SCHEDULE_ASK_NAME: _Tool(asks.ScheduleAskInput, _schedule_ask),
     asks.CANCEL_ASK_NAME: _Tool(asks.CancelAskInput, _cancel_ask),

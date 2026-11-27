@@ -238,8 +238,12 @@ class MatchupHistoryService:
         matchup = await cls.get_matchup_by_team_id(user_id, team_id, avg_window="season")
         if matchup.status != ApiStatus.SUCCESS or not matchup.data:
             return WeeklyMatchupResp(status=matchup.status, message=matchup.message, data=None)
+        return await cls.weekly_of(team_id, matchup.data)
 
-        md = matchup.data
+    @classmethod
+    async def weekly_of(cls, team_id: int, md) -> WeeklyMatchupResp:
+        """Every day of the matchup a provider read (`md`) is on, with no provider read of its
+        own: the teams overview builds its week from the matchup it already holds."""
         if not md.matchup_period_start or not md.matchup_period_end:
             return WeeklyMatchupResp(
                 status=ApiStatus.NOT_FOUND,
