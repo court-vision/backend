@@ -4,7 +4,8 @@ the Dime autopilot plan, step 7; services/ai/draft.py).
 
 An `AiDraftRoom` is Dime's state in one draft room: whether it writes a note when
 each of the user's picks is near (`notes`), and whether it holds the user's seat in
-a mock (`seat`: off, drafting, stopping). An `AiDraftNote` is one note Dime wrote in
+a mock (`seat`: off, drafting, stopping), and its Dime chat (`chat_id`, migration 0059: the
+conversation the room's chat panel shows). An `AiDraftNote` is one note Dime wrote in
 a room (a plan, a pick, a recap), one agent turn each: claimed by its insert,
 settled with the turn's answer, its cost, and what it set (a plan's punts) or made
 (the pick a seat note recorded). Backend-only.
@@ -34,6 +35,8 @@ class AiDraftRoom(BaseModel):
     notes = BooleanField(default=False)
     seat = TextField(default="off")           # off | drafting | stopping
     seat_reason = TextField(null=True)
+    # The room's Dime chat (a conversation of kind room, migration 0059)
+    chat_id = ForeignKeyField(AiConversation, column_name="chat_id", null=True, on_delete="SET NULL")
     created_at = DateTimeField(default=_now)
     updated_at = DateTimeField(default=_now)
 

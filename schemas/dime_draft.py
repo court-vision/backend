@@ -66,6 +66,9 @@ class DimeDraftRoom(ApiModel):
     seat_blocker: Optional[str] = Field(None, description="Why it can't, in a line")
     running: Optional[int] = Field(None, description="The note being written now")
     notes: list[DimeDraftNote] = Field(default_factory=list, description="Newest first")
+    chat_id: Optional[int] = Field(None, description="The room's Dime chat (a conversation of kind room), once "
+                                                     "the user has started one: GET /ai/conversations/{id} reads it "
+                                                     "and its turns go to /ai/conversations/{id}/turns")
 
 
 class DimeDraftRoomResp(BaseResponse):
@@ -108,3 +111,8 @@ class DimeDraftNoteResp(BaseResponse):
 
 class DimeDraftSeatReq(ApiModel):
     on: bool = Field(description="true: Dime drafts the user's seat to the end; false: hand it back after this pick")
+
+
+class DimeDraftChatReq(ApiModel):
+    fresh: bool = Field(False, description="Start a new chat in place of the room's current one (a full chat "
+                                           "starts over; the old one is kept)")
