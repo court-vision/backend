@@ -61,23 +61,27 @@ def _pair():
     return sl.LinePlayer(1, proj("P1", "ATL", 30), UT), sl.LinePlayer(2, proj("P2", "BOS", 10), UT)
 
 
-def test_the_line_is_what_the_last_lane_worth_running_adds():
+def test_the_line_is_the_pickups_points_per_game():
     p1, p2 = _pair()
     streamer = sl.LineFreeAgent(9, proj("F", "DEN", 20), UT)
     out = sl.matchup_line([p1, p2], [streamer], days(2), {11: 2}, 1)
-    # one add, so one lane: P2 (the weakest) holds it and F streams in for both days
-    assert (out.base, out.worth_running, out.line) == (80.0, 1, 40.0)
+    # one add, so one lane: P2 (the weakest) holds it and F streams in for both days at 20 a game
+    assert (out.base, out.worth_running, out.line, out.games, out.streamed) == (80.0, 1, 20.0, 2.0, (2,))
     assert [(ln.lane, ln.holder, ln.total, ln.gain, ln.adds) for ln in out.lanes] == [(1, 2, 100.0, 20.0, 1)]
     assert out.worth == {1: 60.0, 2: 20.0}
-    # the band: one add fewer and F taken, the lane keeps P2
-    assert out.line_low == 20.0
+    # the band: one add fewer and F taken, nobody is picked up
+    assert (out.line_low, out.low_games) == (None, 0.0)
+    # a 30-a-game streamer at half a chance to play: 15 expected a day, one expected game over two
+    hurt = sl.LineFreeAgent(9, proj("F", "DEN", 30, timeline=[Run(TUE, TUE + timedelta(6), 3, 0.5)]), UT)
+    half = sl.matchup_line([p1, p2], [hurt], days(2), {11: 2}, 1)
+    assert (half.line, half.games) == (30.0, 1.0)
 
 
 def test_a_waiver_claim_holds_a_spot_once_his_waivers_clear():
     p1, p2 = _pair()
     claim = sl.LineFreeAgent(9, proj("F", "DEN", 20), UT, available_on=TUE + timedelta(1))
     out = sl.matchup_line([p1, p2], [claim], days(2), {11: 2}, 1)
-    assert (out.lanes[0].total, out.line) == (90.0, 30.0)          # P2 day 1, F day 2
+    assert (out.lanes[0].total, out.line, out.games) == (90.0, 20.0, 1.0)     # P2 day 1, F day 2
 
 
 def test_every_lane_count_up_to_the_adds_is_tried_and_the_fewest_at_the_best_total_kept():
@@ -87,10 +91,10 @@ def test_every_lane_count_up_to_the_adds_is_tried_and_the_fewest_at_the_best_tot
     # three lanes tried; the third replaces nobody worth replacing, so two are worth running
     assert [ln.holder for ln in out.lanes] == [3, 2, 1]
     assert out.lanes[1].total == 69.0 and out.lanes[2].gain == 0.0
-    assert out.worth_running == 2 and out.line == 14.0           # the second lane: F8's 14
-    assert sorted(p for p, w in out.worth.items() if w < out.line) == [2, 3]
-    # the band: one add and F9 gone, F8 takes one lane and P2 keeps the other (14 and 12)
-    assert out.line_low == 12.0
+    # two lanes worth running: F9's 25 and F8's 14 a game, one game each
+    assert out.worth_running == 2 and (out.line, out.games) == (19.5, 2.0) and out.streamed == (2, 3)
+    # the band: one add and F9 gone, F8 alone is picked up
+    assert out.line_low == 14.0
 
 
 def test_a_protected_player_never_holds_a_lane_and_no_adds_means_no_line():
@@ -98,8 +102,12 @@ def test_a_protected_player_never_holds_a_lane_and_no_adds_means_no_line():
     locked = sl.LinePlayer(2, p2.proj, UT, protected=True)
     out = sl.matchup_line([p1, locked], [sl.LineFreeAgent(9, proj("F", "DEN", 20), UT)], days(2), {11: 2}, 1)
     assert [ln.holder for ln in out.lanes] == [1]
-    # P1 beats F, so no lane is worth running and the line sits at P1
-    assert (out.worth_running, out.line, out.lanes[0].adds) == (0, 60.0, 0)
+    # P1 beats F, so no lane is worth running and nobody is picked up
+    assert (out.worth_running, out.line, out.lanes[0].adds, out.streamed) == (0, None, 0, ())
+    # a pickup gaining under MIN_GAIN isn't worth an add: no lane, no pickups, no line
+    small = sl.matchup_line([sl.LinePlayer(1, proj("P", "ATL", 10), UT)], [sl.LineFreeAgent(9, proj("F", "DEN", 10.5), UT)],
+                            days(1), {11: 1}, 1)
+    assert (small.lanes[0].adds, small.worth_running, small.line, small.games) == (1, 0, None, 0.0)
     none = sl.matchup_line([p1, p2], [sl.LineFreeAgent(9, proj("F", "DEN", 20), UT)], days(2), {11: 2}, 0)
     assert (none.lanes, none.line, none.line_low, none.base) == ((), None, None, 80.0)
     assert sl.matchup_line([p1, p2], [], [], {11: 2}, 3).line is None
@@ -140,6 +148,13 @@ def test_the_pool_leaves_out_the_out_and_dates_a_waiver_claim():
 
 def _league_info(provider=FantasyProvider.ESPN):
     return SimpleNamespace(provider=provider, league_id=7, year=2027)
+
+
+def test_a_window_s_line_weighs_each_matchup_by_its_pickups_games():
+    assert sls.window_rate([(20.0, 6.0), (10.0, 2.0), (None, 0.0)]) == 17.5
+    assert sls.window_rate([(None, 0.0)]) is None and sls.window_rate([]) is None
+    # 10 over six games and 30 over two make 15; the low ends alone (none, then 20) would make 20
+    assert sls.window_band([(10.0, 6.0, None, 0.0), (30.0, 2.0, 20.0, 1.0)]) == (15.0, 15.0)
 
 
 GAME_DAY_ADDS = AcquisitionState(per="game_day", per_game_day=1)
@@ -217,13 +232,15 @@ def test_the_service_works_out_the_line_matchup_by_matchup(monkeypatch):
     # 7 game days, one add scheduled; Star is protected, Hurt is on IR: Depth alone can hold a lane
     assert (m6["adds"], m7["adds"]) == (6, 7)
     assert [ln["holder"] for ln in m6["lanes"]] == ["Depth"]
-    assert m6["worth_running"] == 1 and m6["line"] == 100.0       # the streamer's 20 a day
+    assert m6["worth_running"] == 1 and (m6["line"], m6["games"]) == (20.0, 5.0)     # the streamer's 20 a game
+    assert m6["streamed"] == [{"name": "Depth", "espn_id": 102}]
     assert not any(m["playoffs"] for m in out["matchups"])
     rows = {r["name"]: r for r in out["players"]}
-    assert rows["Star"]["protected"] and rows["Hurt"]["on_ir"] and rows["Hurt"]["under_line"] is None
-    assert rows["Depth"]["under_line"] is True and rows["Star"]["under_line"] is False
+    assert rows["Star"]["protected"] and rows["Hurt"]["on_ir"] and rows["Hurt"]["below_line"] is None
+    assert (rows["Depth"]["per_game"], rows["Depth"]["below_line"], rows["Star"]["below_line"]) == (8.0, True, False)
+    assert rows["Depth"]["streamed_in"] == [6, 7, 8, 9] and rows["Star"]["streamed_in"] == []
     assert rows["Depth"]["injury_status"] == "DAY_TO_DAY" and rows["Star"]["injury_status"] is None
-    assert len(rows["Star"]["by_matchup"]) == 4 and out["line"] == sum(m["line"] for m in out["matchups"])
+    assert len(rows["Star"]["by_matchup"]) == 4 and out["line"] == 20.0
     assert out["players"][0]["name"] == "Star"
     assert out["free_agents_read"] == 1 and out["notes"][-1].startswith("The line assumes")
     final = asyncio.run(sls.streaming_line(5, _league_info(), window="playoffs", today=TUE, now=now))
@@ -247,7 +264,7 @@ def test_without_free_agents_there_is_no_line_and_the_notes_say_so(monkeypatch):
     _fake(monkeypatch, None, acq=None)
     now = datetime(2026, 11, 30, 12, 0, tzinfo=timezone.utc)
     out = asyncio.run(sls.streaming_line(5, _league_info(), today=TUE, now=now))
-    assert out["line"] is None and all(r["under_line"] is None for r in out["players"])
+    assert out["line"] is None and all(r["below_line"] is None for r in out["players"])
     assert out["matchups"][0]["start"] == "2026-12-01"               # before today's first tip: today counts
     assert any(n.startswith("ESPN's free agent list didn't load") for n in out["notes"])
     assert any(n.startswith("Court Vision couldn't read this league's add limits") for n in out["notes"])

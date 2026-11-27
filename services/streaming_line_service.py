@@ -1,7 +1,7 @@
 """
-The streaming line for one owned team (the Analysis desk plan, step 3): each of your
-players against what the last stream lane worth running adds to your lineup, matchup by
-matchup over a window (`services.streaming_line`).
+The streaming line for one owned team (the Analysis desk plan, step 3): your players'
+points per game against the free agents optimal streaming picks up, and the spots it
+streams, matchup by matchup over a window (`services.streaming_line`).
 
 The reads are value over a window's (`services.league_values_service`): one ESPN league
 read with every roster, ESPN's 150 most-owned free agents and waiver claims, the
@@ -97,6 +97,24 @@ def free_agents_for(pool: list) -> list[sl.LineFreeAgent]:
             available_on = f.waivers_until + timedelta(days=1)
         out.append(sl.LineFreeAgent(f.player_id, p, active_slots(f.valid_positions), available_on))
     return out
+
+
+def window_rate(rates: list[tuple[Optional[float], float]]) -> Optional[float]:
+    """Per-game lines over a window: each matchup's weighted by its pickups' games."""
+    games = sum(g for r, g in rates if r is not None)
+    if games <= 0:
+        return None
+    return round(sum(r * g for r, g in rates if r is not None) / games, sl.DECIMALS)
+
+
+def window_band(weights: list[tuple[Optional[float], float, Optional[float], float]]
+                ) -> tuple[Optional[float], Optional[float]]:
+    """A window's line and its low end from each matchup's (line, games, low, low games). Each
+    matchup's low is at most its line, but the two averages weigh different games, so they can
+    cross: the low end is held at the line."""
+    line = window_rate([(r, g) for r, g, _, _ in weights])
+    low = window_rate([(r, g) for _, _, r, g in weights])
+    return line, (min(low, line) if low is not None and line is not None else low)
 
 
 def notes_for(snapshot_as_of, listed, acq, season_left, asked_adds, incomplete, unplanned) -> list[str]:
@@ -204,6 +222,8 @@ async def streaming_line(team_id: int, league_info: LeagueInfo, *, window: Optio
 
     matchups, unplanned, asked_adds = [], [], 0
     worth_by: dict[int, list[float]] = {p.espn_id: [] for p in players}
+    weights: list[tuple[Optional[float], float, Optional[float], float]] = []
+    streamed_in: dict[int, list[int]] = {}
     for m in range(first, last + 1):
         span = spans.get(m)
         days = [] if span is None else [
@@ -235,23 +255,28 @@ async def streaming_line(team_id: int, league_info: LeagueInfo, *, window: Optio
             "worth_running": result.worth_running,
             "line": result.line,
             "line_low": result.line_low,
+            "games": round(result.games, sl.DECIMALS),
+            "streamed": [{"name": by_id.get(i, str(i)), "espn_id": i} for i in result.streamed],
             "proven": all(ln.optimal for ln in result.lanes),
         })
+        weights.append((result.line, result.games, result.line_low, result.low_games))
+        streamed_in.update({i: streamed_in.get(i, []) + [m] for i in result.streamed})
 
-    lined = [x for x in matchups if x["line"] is not None]
-    line = round(sum(x["line"] for x in lined), sl.DECIMALS) if lined else None
-    line_low = round(sum(x["line_low"] for x in lined), sl.DECIMALS) if lined else None
+    line, line_low = window_band(weights)
     rows = []
     for e, p in zip(entries_mine, players, strict=True):
         worth = round(sum(worth_by[p.espn_id]), sl.DECIMALS)
+        per_game = round(max(p.proj.value, 0.0), sl.DECIMALS)
         rows.append({
             "name": p.proj.name, "espn_id": p.espn_id, "player_id": p.proj.player_id, "nba_team": p.proj.team,
             "positions": lv.positions(p.proj.slots), "slot": p.proj.slot,
             "injury_status": e.injury_status if e.injury_status != "ACTIVE" else None,
-            "protected": p.protected, "on_ir": p.on_ir, "worth": worth, "by_matchup": worth_by[p.espn_id],
-            "under_line": (worth < line) if line is not None and not p.on_ir else None,
+            "protected": p.protected, "on_ir": p.on_ir, "per_game": per_game,
+            "below_line": (per_game < line) if line is not None and not p.on_ir else None,
+            "streamed_in": streamed_in.get(p.espn_id, []),
+            "worth": worth, "by_matchup": worth_by[p.espn_id],
         })
-    rows.sort(key=lambda r: (-r["worth"], r["name"]))
+    rows.sort(key=lambda r: (-r["per_game"], r["name"]))
 
     incomplete = sorted({w for m in range(first, last + 1) for w in lp.matchup_weeks(periods, m)}
                         & set(lp.incomplete_weeks(weeks)))

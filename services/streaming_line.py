@@ -1,9 +1,9 @@
 """
-The streaming line (the Analysis desk plan, step 3): each of your players against what
-the last stream lane worth running adds to your lineup, with your league's adds.
+The streaming line (the Analysis desk plan, step 3): your players against the free agents
+optimal streaming would pick up, with your league's adds.
 
 A lane streams one roster spot for a matchup (`services.multi_stream_planner`, the
-planner the stream lanes run on). For one matchup the line is found lane by lane:
+planner the stream lanes run on). For one matchup:
 
 - With no lanes your team scores its best lineup each day, every player kept.
 - With k lanes, your k weakest players hold them (weakest by what each adds to your
@@ -12,20 +12,25 @@ planner the stream lanes run on). For one matchup the line is found lane by lane
   spot's player, so a lane never costs points.
 - The team's total with k lanes is the rest of the roster's best lineup each day plus
   what the lanes' players add to it. The best total sets how many lanes are worth
-  running (the fewest within `MIN_GAIN` of the most), and the line is what the least of
-  them adds to the lineup with the others in place: the last lane worth running.
+  running: the fewest within `MIN_GAIN` of the most. Every lane count up to the adds is
+  tried (up to `MAX_LANES`): the gains don't always shrink lane by lane, because two
+  streamers can compete for the same seats.
 
-Every lane count up to the adds is tried (up to `MAX_LANES`): the gains don't always
-shrink lane by lane, because two streamers can compete for the same seats. A player
-whose own worth to the lineup is under the line is one a lane would beat.
+The line is a per-game number: the fantasy points per game of the free agents the plan
+with the lanes worth running picks up, averaged over the games they're on your roster
+for. It's the replacement level: a player whose own points per game are under it is one
+the wire matches game for game. Whether to stream him is a separate answer, because the
+adds run out: `streamed` is the spots the plan actually streams, and each lane's `gain` is
+what it adds in points over the matchup (more games through the spot, not only better
+ones).
 
-Adds reset every matchup, so the line is worked out matchup by matchup and summed over
-a window, as each player's worth is.
+Adds reset every matchup, so the line is worked out matchup by matchup and averaged over
+a window by the pickups' games.
 
 What it can't see: it assumes today's free agents stay free and play as projected,
 while other managers pick some up and some adds go to injuries. So the line runs a
-little high, and `line_low` is the weakest lane of the plan re-made with one add fewer and
-the free agent the plan gains most from gone: the bottom of its band.
+little high, and `line_low` is the same average for the plan re-made with one add fewer
+and the free agent it gains most from gone: the bottom of its band.
 
 Values are expected points: a player's points per game under the league's scoring at
 his chance to play each game (the live projection's timeline, `league_projection`).
@@ -43,7 +48,7 @@ from typing import Mapping, Optional, Sequence
 
 from services import league_projection as lp
 from services.multi_stream_planner import MultiStreamPlan, Streamer, plan_streams
-from services.stream_planner import DayPlayer, best_lineup_value
+from services.stream_planner import EPS, DayPlayer, best_lineup_value
 
 # The most lanes tried for one matchup (the stream lanes allow four open at once)
 MAX_LANES = 6
@@ -92,8 +97,11 @@ class MatchupLine:
     base: float                     # the team's total with no lanes
     lanes: tuple[Lane, ...]         # one per lane count tried, from 1
     worth_running: int              # lanes worth running
-    line: Optional[float]           # what the last of them adds; None: no adds, or no one to add
-    line_low: Optional[float]       # the bottom of the band (None: no line)
+    line: Optional[float]           # the pickups' points per game; None: no adds, or no one picked up
+    line_low: Optional[float]       # the bottom of the band (None: no pickup left there)
+    games: float                    # the pickups' expected games behind the line
+    low_games: float                # the same for line_low
+    streamed: tuple[int, ...]       # ESPN ids of your players whose spots the plan streams
     worth: Mapping[int, float]      # ESPN id -> what he adds to your lineup over the rest of the roster
 
 
@@ -146,19 +154,24 @@ def _total(plan: MultiStreamPlan, rest: Sequence[LinePlayer], days, slots: Mappi
     return base + plan.value
 
 
-def _weakest_lane(plan: MultiStreamPlan, rest: Sequence[LinePlayer], streamers: Mapping[int, Streamer],
-                  days, slots: Mapping[int, int]) -> float:
-    """What the plan's weakest spot adds to each day's lineup with the rest and the other spots in
-    place: the lane worth least. (Which spot a player holds is the planner's labelling, so the
-    last spot by number need not be the last one worth running.)"""
-    worth = [0.0] * len(plan.spots)
-    for d, (day, teams) in enumerate(days):
-        row = [DayPlayer(p.espn_id, day_value(p.proj, day, teams), p.slots) for p in rest]
-        held = [DayPlayer(s[d], streamers[s[d]].values[d], streamers[s[d]].eligible) for s in plan.spots]
-        whole = _lineup(row + held, slots)
-        for k in range(len(held)):
-            worth[k] += whole - _lineup(row + held[:k] + held[k + 1:], slots)
-    return min(worth)
+def _pickups(plan: MultiStreamPlan, free_agents: Mapping[int, LineFreeAgent], days) -> tuple[float, float]:
+    """The points and expected games of the free agents the plan picks up, over the days each
+    holds his spot."""
+    points = games = 0.0
+    for spot in plan.stretches:
+        for run in spot:
+            fa = free_agents.get(run.player_id)
+            if fa is None:
+                continue
+            for day, teams in days[run.start:run.end]:
+                if fa.proj.team is not None and fa.proj.team in teams:
+                    points += day_value(fa.proj, day, teams)
+                    games += fa.proj.chance_on(day)
+    return points, games
+
+
+def _per_game(points: float, games: float) -> Optional[float]:
+    return points / games if games > EPS else None
 
 
 def matchup_line(players: Sequence[LinePlayer], free_agents: Sequence[LineFreeAgent],
@@ -173,13 +186,15 @@ def matchup_line(players: Sequence[LinePlayer], free_agents: Sequence[LineFreeAg
     order = sorted((p for p in active if not p.protected), key=lambda p: (worth[p.espn_id], p.proj.value, p.espn_id))
     count = min(len(order), max_lanes, adds if adds is not None else max_lanes)
     if not days or count <= 0:
-        return MatchupLine(len(days), adds, _r(base), (), 0, None, None, {k: _r(v) for k, v in worth.items()})
+        return MatchupLine(len(days), adds, _r(base), (), 0, None, None, 0.0, 0.0, (),
+                           {k: _r(v) for k, v in worth.items()})
 
     first_day = days[0][0]
     on_roster = {p.espn_id for p in players}
     pool = _streamers([f for f in free_agents if f.espn_id not in on_roster], days, first_day, holders=False)
     if not pool:
-        return MatchupLine(len(days), adds, _r(base), (), 0, None, None, {k: _r(v) for k, v in worth.items()})
+        return MatchupLine(len(days), adds, _r(base), (), 0, None, None, 0.0, 0.0, (),
+                           {k: _r(v) for k, v in worth.items()})
     kw = {"time_limit": time_limit} if time_limit is not None else {}
 
     lanes: list[Lane] = []
@@ -199,26 +214,30 @@ def matchup_line(players: Sequence[LinePlayer], free_agents: Sequence[LineFreeAg
     totals = [base] + [lane.total for lane in lanes]
     best = max(totals)
     running = next(k for k, t in enumerate(totals) if t >= best - MIN_GAIN)
-    at = max(running, 1)                    # with none worth running, the line is the first lane's worth
+    at = max(running, 1)
     plan, rest = plans[at - 1]
-    streamers = {s.player_id: s for s in [*_streamers(order[:at], days, first_day, holders=True), *pool]}
-    line = _weakest_lane(plan, rest, streamers, days, slots)
+    fa_by_id = {f.espn_id: f for f in free_agents if f.espn_id not in on_roster}
+    # with no lane worth running nobody is picked up, so there is no line
+    points, games = _pickups(plan, fa_by_id, days) if running else (0.0, 0.0)
+    line = _per_game(points, games)
+    held = {p.espn_id for p in order[:running]}
+    streamed = tuple(sorted({s.drop_id for s in plan.switches} & held))
 
-    line_low = line
-    if plan.adds:
+    line_low, low_games = None, 0.0
+    if line is not None:
         # one add fewer, and the free agent the plan gains most from taken by someone else
         gains: dict[int, float] = {}
         for spot in plan.stretches:
             for s in spot:
-                if s.player_id in {f.player_id for f in pool}:
+                if s.player_id in fa_by_id:
                     gains[s.player_id] = gains.get(s.player_id, 0.0) + s.value
         taken = max(gains, key=gains.get) if gains else None
         thinner = [s for s in pool if s.player_id != taken]
         low = plan_streams(_streamers(order[:at], days, first_day, holders=True), thinner,
                            [[DayPlayer(p.espn_id, day_value(p.proj, d, t), p.slots) for p in rest] for d, t in days],
                            slots, adds=max(plan.adds - 1, 0), rehold_after=rehold_after, **kw)
-        # the low plan's own weakest lane: charging the whole plan's loss to the weakest lane would
-        # count a stronger lane's loss against it
-        line_low = min(line, _weakest_lane(low, rest, streamers, days, slots))
-    return MatchupLine(len(days), adds, _r(base), tuple(lanes), running, _r(line), _r(line_low),
-                       {k: _r(v) for k, v in worth.items()})
+        low_points, low_games = _pickups(low, fa_by_id, days)
+        low_line = _per_game(low_points, low_games)
+        line_low = min(line, low_line) if low_line is not None else None
+    return MatchupLine(len(days), adds, _r(base), tuple(lanes), running, _r(line), _r(line_low), games, low_games,
+                       streamed, {k: _r(v) for k, v in worth.items()})
