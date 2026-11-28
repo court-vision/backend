@@ -321,6 +321,39 @@ def test_the_matchup_line_carries_the_live_score_and_the_projections_win_chance(
     assert (cats.categories.wins, cats.categories.losses, cats.categories.ties, cats.win_chance) == (3, 5, 1, None)
 
 
+def _cat(key, you, opp, *, higher=True, rate=False):
+    return SimpleNamespace(key=key, you=you, opp=opp, higher_is_better=higher, is_rate=rate)
+
+
+def test_a_matchup_the_projection_has_no_chance_for_gets_a_guess_from_its_own_numbers():
+    # points: ahead 412.5 to 399 and projected to end 980 to 955
+    guess = svc.matchup_of(_live(), None).win_chance
+    assert 0.5 < guess < 0.75
+    # nothing scored or projected: nothing to guess from
+    blank = _live()
+    for side in (blank.your_team, blank.opponent_team):
+        side.current_score = side.projected_score = 0.0
+    assert svc.matchup_of(blank, None).win_chance is None
+    # categories: the live totals beside the projected finals, a rate with its attempts so far
+    now = SimpleNamespace(wins=2, losses=1, ties=0, items=[
+        _cat("pts", 300.0, 280.0), _cat("tov", 40.0, 30.0, higher=False), _cat("fg_pct", 0.48, 0.45, rate=True)])
+    projected = SimpleNamespace(items=[
+        _cat("pts", 640.0, 600.0), _cat("tov", 85.0, 70.0, higher=False), _cat("fg_pct", 0.47, 0.455, rate=True),
+        _cat("blk", 30.0, 20.0)])                                      # a category the live read doesn't have is left out
+    live = _live("categories", now)
+    live.your_team.categories = SimpleNamespace(raw={"fgm": 96.0, "fga": 200.0})
+    races = svc.category_races(live, projected)
+    assert [(r.key, r.now, r.final, r.attempts) for r in races] == [
+        ("pts", (300.0, 280.0), (640.0, 600.0), (None, None)),
+        ("tov", (40.0, 30.0), (85.0, 70.0), (None, None)),
+        ("fg_pct", (0.48, 0.45), (0.47, 0.455), (200.0, None)),
+    ]
+    cats = svc.matchup_of(live, None, projected)
+    assert 0.5 < cats.win_chance < 0.9 and cats.categories.wins == 2
+    # the league projection's chance stands where there is one
+    assert svc.matchup_of(live, 0.31, projected).win_chance == 0.31
+
+
 def test_the_week_counts_who_started_who_starts_and_who_could():
     days = [
         # a day with both lineups on file: starters with a game, bench and IR left out
@@ -639,6 +672,46 @@ def test_one_team_that_cannot_be_read_never_fails_the_others(monkeypatch):
     assert broken.matchup.your_score == 412.5                          # what could be read still shows
     assert by_id[23].state == "needs_you" and by_id[23].items[0].deadline_et == "19:30"
     assert data.next_deadline_at == TIP and by_id[24].state == "set"
+
+
+def _team(team_id, state, chance=0.5, *, due=None, matchup=True):
+    items = [svc.OverviewItem(standing=state, deadline_at=due, action=START)] if state in ("needs_you", "your_call") else []
+    line = svc.OverviewMatchup(matchup_period=5, start="2026-11-16", end="2026-11-22", opponent_name="Rival",
+                               your_score=400.0, opponent_score=390.0, your_projected=980.0, opponent_projected=960.0,
+                               win_chance=chance) if matchup else None
+    return svc.TeamOverview(team_id=team_id, team_name=f"T{team_id}", provider=FantasyProvider.ESPN, state=state,
+                            items=items, matchup=line)
+
+
+def test_a_team_is_as_pressing_as_what_can_be_done_on_it_and_how_close_its_week_is():
+    attention = lambda *a, **k: svc.attention_of(_team(1, *a, **k), NOW)   # noqa: E731
+    assert attention("needs_you", 0.5) == 1.0                          # only the user will do it, in a coin flip
+    assert attention("needs_you", 0.5, due=NOW + timedelta(minutes=40)) == 1.25
+    assert attention("needs_you", 0.5, due=NOW + timedelta(hours=3)) == 1.0
+    assert attention("your_call", 0.5) == 0.5                          # an optional move weighs half
+    assert attention("needs_you", 0.9) == 0.4                          # a lopsided week weighs less...
+    assert attention("needs_you", 0.1) == 0.4                          # ...either way
+    assert attention("needs_you", None) == attention("needs_you", matchup=False) == 0.625   # unknown: half in play
+    assert attention("set", 0.5) == attention("autopilot", 0.5) == attention("cant_read", 0.5) == 0.0
+
+
+def test_the_teams_come_most_pressing_first_and_the_settled_and_the_idle_last():
+    teams = [
+        _team(1, "set", 0.55),                                         # nothing to do, a close week
+        _team(2, "needs_you", 0.99),                                   # something to do, a week already won
+        _team(3, "your_call", 0.5),                                    # an optional move in a coin flip
+        _team(4, "needs_you", 0.88),                                   # a fix in a lopsided week
+        _team(5, "cant_read", None),
+        _team(6, "autopilot", 0.2),                                    # nothing to do, a week going badly
+        _team(7, "needs_you", 0.6),                                    # a fix in a close week
+        _team(8, "set", 0.01),                                         # nothing to do, a week already lost
+        _team(9, "needs_you", 0.88, due=NOW + timedelta(minutes=30)),  # the same fix, due inside the hour
+    ]
+    order = [t.team_id for t in svc.summarize(teams, NOW).teams]
+    assert order == [7, 9, 3, 4, 5, 1, 6, 2, 8]
+    # level on everything else, the sooner deadline first, then the team's id
+    a, b = _team(1, "needs_you", 0.5, due=NOW + timedelta(hours=5)), _team(2, "needs_you", 0.5, due=NOW + timedelta(hours=2))
+    assert [t.team_id for t in svc.summarize([a, b, _team(3, "needs_you", 0.5)], NOW).teams] == [2, 1, 3]
 
 
 def test_a_team_carries_its_board_for_staging_and_names_what_could_not_be_read(monkeypatch):

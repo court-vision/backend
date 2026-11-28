@@ -116,7 +116,8 @@ class OverviewMatchup(ApiModel):
     opponent_projected: float
     scoring_format: ScoringFormat = "points"
     categories: Optional[OverviewCategories] = None   # categories leagues only
-    # From the league projection (`season`): None until it is ready, and in a league that has none.
+    # The chance the week is won: the league projection's (`season`) where it has one, else a best
+    # guess from the matchup's own numbers (services/matchup_odds.py). None with nothing to guess from.
     win_chance: Optional[float] = None
 
 
@@ -181,7 +182,8 @@ class TeamsOverviewData(ApiModel):
     as_of: datetime
     counts: dict[TeamState, int] = {}            # teams by state, every state present
     next_deadline_at: Optional[datetime] = None  # the soonest needs_you deadline across the teams
-    # needs_you first (soonest deadline), then cant_read, your_call, set, autopilot
+    # Most pressing first: what the user could do on a team, weighed by how close its week is.
+    # Then a team that can't be read, teams with nothing to do, and last the weeks all but settled.
     teams: list[TeamOverview] = []
 
 

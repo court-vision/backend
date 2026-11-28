@@ -12,9 +12,15 @@ For each of the user's teams, side by side:
   (`MatchupService.get_live_matchup_by_team_id`, through services/matchup_hold.py) and
   the week's days (`MatchupService.weekly_of`);
 - the league's projection for the record, standing, playoff odds and this matchup's win
-  chance (`league_projection`), kept SEASON_TTL and never waited on for long;
+  chance (`league_projection`), kept SEASON_TTL and never waited on for long; where it has
+  no win chance (a categories league, another provider, a league still being projected) the
+  matchup's own numbers give a best guess (`services.matchup_odds`);
 - what is scheduled next: the day's auto-lineup, a pending pickup, a lane's next
   decision, Dime's next check-in.
+
+The teams come most pressing first (`order_of`): what the user could do on a team, weighed
+by how much its week is still in play. A team with nothing to do, or whose week is all but
+settled, goes to the bottom.
 
 What keeps it honest and cheap:
 
@@ -88,9 +94,11 @@ from services.daily_actions_service import DailyActionsService
 from services.league_projection_service import LeagueProjectionUnavailable, league_projection
 from services.lineup_planner import IR_SLOT_ID, OUT_STATUSES
 from services.matchup_days import BENCH_SLOT_ID, counts_for_the_day, matchup_today
+from services.matchup_odds import CategoryRace, categories_chance, closeness, decided, points_chance
 from services.matchup_service import MatchupService
 from services.providers import unavailable_message
 from services.scheduled_pickup_service import et_at
+from services.scoring.vocab import STATS
 from services.stream_lane_service import StreamLaneService
 
 log = get_logger("team_overview")
@@ -129,6 +137,12 @@ MAY_SIT = frozenset({"QUESTIONABLE", "DOUBTFUL", "DAY_TO_DAY", "GTD", "DTD"})
 MARKS = ("live", "later", "final", "questionable", "out", "idle", "empty")
 STATES = ("needs_you", "your_call", "set", "autopilot", "cant_read")
 _STATE_ORDER = {"needs_you": 0, "cant_read": 1, "your_call": 2, "set": 3, "autopilot": 4}
+# The order of the teams (`attention_of`): an optional move weighs half of one only the user will
+# make, a move due inside SOON a quarter more, and a lopsided week down to STAKES_FLOOR of a coin flip
+YOUR_CALL = 0.5
+NEEDS_SOON = 1.25
+SOON = timedelta(hours=1)
+STAKES_FLOOR = 0.25
 _STANDING_ORDER = {"needs_you": 0, "your_call": 1, "covered": 2}
 _FAR = datetime.max.replace(tzinfo=timezone.utc)
 
@@ -334,8 +348,43 @@ def points_today(roster: Iterable[Any]) -> float:
                      if _starts(p) and getattr(p, "live", None) is not None and p.live.game_status >= 2), 1)
 
 
-def matchup_of(live: Any, win_chance: Optional[float]) -> OverviewMatchup:
+def category_races(live: Any, projected: Any) -> list[CategoryRace]:
+    """A categories matchup as `matchup_odds` reads it: each category's totals so far (the live
+    comparison) beside its projected finals, with a rate's attempts so far when the read has them."""
+    now = {i.key: i for i in getattr(live.category_comparison, "items", None) or []}
+    raws = [getattr(getattr(side, "categories", None), "raw", None) or {}
+            for side in (live.your_team, live.opponent_team)]
+    races: list[CategoryRace] = []
+    for item in getattr(projected, "items", None) or []:
+        cur = now.get(item.key)
+        if cur is None:
+            continue
+        parts = STATS.get(item.key)
+        den = parts.denominator if parts is not None and parts.is_rate else None
+        races.append(CategoryRace(
+            key=item.key, higher_is_better=item.higher_is_better, is_rate=item.is_rate,
+            now=(float(cur.you), float(cur.opp)), final=(float(item.you), float(item.opp)),
+            attempts=(raws[0].get(den), raws[1].get(den)) if den else (None, None),
+        ))
+    return races
+
+
+def guessed_chance(live: Any, projected: Any = None) -> Optional[float]:
+    """The matchup's win chance from its own numbers, for a matchup the league projection has
+    none for. None when there is nothing to guess from."""
+    if live.scoring_format == "categories":
+        chance = categories_chance(category_races(live, projected))
+    else:
+        chance = points_chance(live.your_team.current_score, live.opponent_team.current_score,
+                               live.your_team.projected_score, live.opponent_team.projected_score)
+    return round(chance, 3) if chance is not None else None
+
+
+def matchup_of(live: Any, win_chance: Optional[float], projected: Any = None) -> OverviewMatchup:
+    """`win_chance` is the league projection's; without one the matchup's own numbers guess it."""
     cats = live.category_comparison
+    if win_chance is None:
+        win_chance = guessed_chance(live, projected)
     return OverviewMatchup(
         matchup_period=live.matchup_period, start=live.matchup_period_start, end=live.matchup_period_end,
         opponent_name=live.opponent_team.team_name, your_score=live.your_team.current_score,
@@ -670,6 +719,7 @@ def _fill_at(acct: Account, rules: Rules, team_id: int) -> Optional[datetime]:
 class _MatchupRead:
     live: Any                                    # LiveMatchupData
     days: Optional[Sequence[Any]]                # the weekly matchup's days; None when they couldn't be built
+    projected: Any = None                        # the matchup's projected category comparison (categories leagues)
 
 
 async def _matchup(team: OwnedTeamContext) -> Optional[_MatchupRead]:
@@ -689,6 +739,7 @@ async def _matchup(team: OwnedTeamContext) -> Optional[_MatchupRead]:
         # a write dropped the read just kept and the live score read the provider again, into the
         # next matchup period: the days of the one before aren't this score's
         return _MatchupRead(live=live.data, days=None)
+    projected = getattr(matchup.data, "projected_category_comparison", None)
     # kept for the matchup period and the day the week calls today, so ESPN's day turning ends it
     key = (live.data.matchup_period, matchup_today(matchup.data))
     held = _weeks.get(team_id)
@@ -702,7 +753,7 @@ async def _matchup(team: OwnedTeamContext) -> Optional[_MatchupRead]:
                 _weeks.put(team_id, (key, days), WEEK_TTL, epoch)
         except Exception as exc:       # the score still shows; the strip is what's missing
             log.warning("teams_overview_week_failed", team_id=team_id, error=f"{type(exc).__name__}: {exc}")
-    return _MatchupRead(live=live.data, days=days)
+    return _MatchupRead(live=live.data, days=days, projected=projected)
 
 
 async def _project(team_id: int, league_info: LeagueInfo) -> None:
@@ -856,7 +907,7 @@ async def team_overview(team: OwnedTeamContext, acct: Account) -> TeamOverview:
 
     out: dict[str, Any] = dict(
         **_names(team), automation=automation,
-        matchup=matchup_of(live, win_chance) if live is not None else None, week=week,
+        matchup=matchup_of(live, win_chance, matchup.projected) if live is not None else None, week=week,
         season=season_row, season_state=season_state, missing=missing,
     )
     if live is not None:
@@ -896,10 +947,38 @@ async def team_overview(team: OwnedTeamContext, acct: Account) -> TeamOverview:
 # ------------------------------- every team ------------------------------- #
 
 
-def order_of(team: TeamOverview) -> tuple[int, datetime, int]:
-    """Needs you first, soonest deadline first; then can't read, your call, set, autopilot."""
+def attention_of(team: TeamOverview, now: datetime) -> float:
+    """How pressing a team is, 0 to 1.25: what the user could do on it, weighed by how much its
+    week is still in play. Something only the user will do counts in full (a quarter more with
+    its deadline inside SOON), an optional move half, nothing to do nothing; a coin-flip week
+    counts in full and a lopsided one down to a quarter (`matchup_odds.closeness`)."""
+    if team.state == "needs_you":
+        deadlines = [i.deadline_at for i in team.items if i.standing == "needs_you" and i.deadline_at is not None]
+        act = NEEDS_SOON if deadlines and min(deadlines) - now <= SOON else 1.0
+    elif team.state == "your_call":
+        act = YOUR_CALL
+    else:
+        return 0.0
+    chance = team.matchup.win_chance if team.matchup is not None else None
+    return round(act * (STAKES_FLOOR + (1 - STAKES_FLOOR) * closeness(chance)), 4)
+
+
+def order_of(team: TeamOverview, now: datetime) -> tuple[int, float, datetime, int, int]:
+    """Most pressing first. Teams with something to do and a week still in play, by
+    `attention_of` (then the soonest deadline); a team that can't be read; teams with nothing
+    to do, the closest week first; last, the weeks all but settled either way."""
+    chance = team.matchup.win_chance if team.matchup is not None else None
     deadlines = [i.deadline_at for i in team.items if i.standing == "needs_you" and i.deadline_at is not None]
-    return _STATE_ORDER[team.state], min(deadlines) if deadlines else _FAR, team.team_id
+    soonest = min(deadlines) if deadlines else _FAR
+    tail = (soonest, _STATE_ORDER[team.state], team.team_id)
+    if team.state == "cant_read":
+        return (1, 0.0, *tail)
+    if decided(chance):
+        return (3, 0.0, *tail)
+    attention = attention_of(team, now)
+    if attention > 0:
+        return (0, -attention, *tail)
+    return (2, -closeness(chance), *tail)
 
 
 def summarize(teams: list[TeamOverview], now: datetime) -> TeamsOverviewData:
@@ -909,7 +988,7 @@ def summarize(teams: list[TeamOverview], now: datetime) -> TeamsOverviewData:
     deadlines = [i.deadline_at for t in teams for i in t.items
                  if i.standing == "needs_you" and i.deadline_at is not None]
     return TeamsOverviewData(as_of=now, counts=counts, next_deadline_at=min(deadlines) if deadlines else None,
-                             teams=sorted(teams, key=order_of))
+                             teams=sorted(teams, key=lambda t: order_of(t, now)))
 
 
 async def _build(user_id: int, now: datetime) -> TeamsOverviewData:
